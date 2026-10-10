@@ -1986,6 +1986,18 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
             : photara::splat::VisualizationMode::splat;
     options.point_size_px = app.view_options.point_size;
     options.ring_scale = app.view_options.ring_scale;
+    if (app.workspace == ViewportWorkspace::scene_3d && app.view_mode == VisualizationMode::splat) {
+        options.channel = app.display_channel == DisplayChannel::depth
+            ? photara::splat::VisualizationChannel::depth
+            : app.display_channel == DisplayChannel::normal
+                ? photara::splat::VisualizationChannel::normal
+                : photara::splat::VisualizationChannel::color;
+    }
+    options.automatic_depth = app.display_options.automatic_depth;
+    options.grayscale_depth = app.display_options.grayscale_depth;
+    options.world_normals = app.display_options.world_normals;
+    options.depth_near = app.display_options.depth_near;
+    options.depth_far = app.display_options.depth_far;
     return options;
 }
 

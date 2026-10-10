@@ -1089,7 +1089,7 @@ constexpr Entry k_entries[] = {
      "MVS の密な点群からメッシュを生成。\nアライメント済みカメラで PatchMatch 後に三角形を融合。",
      "MVS 밀집 포인트 클라우드에서 메시를 만듭니다.\n정렬된 카메라로 PatchMatch 후 삼각형을 융합합니다."},
     {"Rasterized Gaussian footprint normals", "显示光栅化高斯足迹法线", "ラスタライズされたガウシアンの法線", "래스터화된 가우시안 법선"},
-    {"Available in 3DGS after training finishes", "训练完成后在 3DGS 模式下可用", "学習完了後の3DGSで利用可能", "학습 완료 후 3DGS에서 사용 가능"},
+    {"Available in 3DGS mode", "在 3DGS 模式下可用", "3DGSで利用可能", "3DGS에서 사용 가능"},
     {"Depth uses scene units", "深度以场景单位显示", "深度はシーン単位で表示", "깊이는 장면 단위로 표시"},
     {"Scene units", "场景单位", "シーン単位", "장면 단위"},
     {"Show legend", "显示图例", "凡例を表示", "범례 표시"},

@@ -22,7 +22,8 @@ namespace editor {
 using i18n::tr;
 
 constexpr float k_view_rail_pad = 10.F;
-constexpr float k_view_rail_top = 12.F;
+// The status badge occupies y=14..44; leave 10px before the tool rail.
+constexpr float k_view_rail_top = 54.F;
 constexpr float k_view_rail_width = 44.F;
 constexpr float k_edit_rail_height = 44.F;
 constexpr float k_scene_toggle_gap = 8.F;
@@ -94,8 +95,8 @@ bool rail_icon_button(
 }
 
 bool diagnostic_channels_available(const App& app) {
-    return app.view_mode == VisualizationMode::splat && app.has_model &&
-           !live_preview_active(app);
+    return app.view_mode == VisualizationMode::splat &&
+           (app.has_model || (app.job.running() && app.active_job == JobKind::train));
 }
 
 const char* display_channel_label(const DisplayChannel channel) {
@@ -107,6 +108,8 @@ const char* display_channel_label(const DisplayChannel channel) {
 }
 
 float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
+    const auto previous_channel = app.display_channel;
+    const auto previous_options = app.display_options;
     // Share the existing workspace header; no extra row above the canvas.
     const bool compact = width < 390.F;
     ImGui::SetCursorScreenPos({origin.x + 140.F, origin.y + 5.F});
@@ -146,7 +149,7 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
                     app.display_channel = channel;
                 if (!enabled) ImGui::EndDisabled();
                 if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("%s", tr("Available in 3DGS after training finishes"));
+                    ImGui::SetTooltip("%s", tr("Available in 3DGS mode"));
             }
         }
         ImGui::EndCombo();
@@ -165,7 +168,7 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
                     app.display_channel = channel;
                 if (!enabled) ImGui::EndDisabled();
                 if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("%s", tr("Available in 3DGS after training finishes"));
+                    ImGui::SetTooltip("%s", tr("Available in 3DGS mode"));
             }
             ImGui::EndCombo();
         }
@@ -184,7 +187,9 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
         auto& options = app.display_options;
         if (app.display_channel == DisplayChannel::depth) {
             if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
-                const auto range = app.splat_renderer.depth_range();
+                const auto range = live_preview_active(app)
+                    ? std::array{options.depth_near, options.depth_far}
+                    : app.splat_renderer.depth_range();
                 options.depth_near = range[0]; options.depth_far = range[1];
             }
             if (!options.automatic_depth) {
@@ -218,6 +223,8 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar(2);
+    if (previous_channel != app.display_channel || previous_options != app.display_options)
+        publish_preview_vis(app);
     return controls_right;
 }
 
@@ -227,10 +234,16 @@ void draw_display_legend(const App& app, const ImVec2 min, const ImVec2 max) {
         return;
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const bool depth = app.display_channel == DisplayChannel::depth;
-    const auto range = app.splat_renderer.depth_range();
+    const bool live = live_preview_active(app);
+    const auto range = live ? std::array{app.display_options.depth_near, app.display_options.depth_far}
+                            : app.splat_renderer.depth_range();
     char left[48], right[48];
     std::snprintf(left, sizeof(left), "%.3g", range[0]);
     std::snprintf(right, sizeof(right), "%.3g", range[1]);
+    if (live && app.display_options.automatic_depth) {
+        std::snprintf(left, sizeof(left), "%s", tr("Automatic range"));
+        right[0] = '\0';
+    }
     const std::string title = depth
         ? std::string(tr("Depth")) + " / " + tr("Scene units")
         : std::string(tr("Normal")) + " / " + tr(app.display_options.world_normals ? "World space" : "Camera space");

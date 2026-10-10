@@ -3,6 +3,7 @@
 #include "core/camera_projection.hpp"
 #include "cuda_ops.hpp"
 #include "splat/rasterizer.hpp"
+#include "visualize_diagnostics.hpp"
 
 #include <cuda_runtime.h>
 
@@ -425,26 +426,150 @@ tinytensor::Tensor render_debug_overlay(
     return color;
 }
 
-}  // namespace
+} // namespace
 
-tinytensor::Tensor visualize(
-    const GaussianModel& model, const Camera& camera,
-    const VisualizeOptions& options) {
+namespace {
+__global__ void diagnostic_kernel(const float *depth, const float *alpha, const float *normal,
+                                  float *color, unsigned *stats, detail::DiagnosticPush pc) {
+    const unsigned p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pc.stage == 3) {
+        if (p != 0)
+            return;
+        unsigned count = 0;
+        for (unsigned b = 0; b < 256; ++b)
+            count += stats[4 + b];
+        float lo = 0, hi = 1;
+        if (count) {
+            const float minimum = __uint_as_float(stats[1]),
+                        span = __uint_as_float(stats[0]) - minimum;
+            const unsigned low = (count - 1) / 100, high = (count - 1) * 99 / 100;
+            unsigned cumulative = 0;
+            bool found = false;
+            for (unsigned b = 0; b < 256; ++b) {
+                cumulative += stats[4 + b];
+                if (!found && cumulative > low) {
+                    lo = minimum + span * b / 256;
+                    found = true;
+                }
+                if (cumulative > high) {
+                    hi = minimum + span * (b + 1) / 256;
+                    break;
+                }
+            }
+            hi = fmaxf(hi, lo + fmaxf(.0001F, lo * .0001F));
+        }
+        stats[2] = __float_as_uint(lo);
+        stats[3] = __float_as_uint(hi);
+        return;
+    }
+    if (p >= pc.pixels)
+        return;
+    const float d = depth[p];
+    const bool valid = isfinite(d) && d > 0 && isfinite(alpha[p]) && alpha[p] > .05F;
+    if (pc.stage == 1) {
+        if (valid) {
+            atomicMax(stats, __float_as_uint(d));
+            atomicMin(stats + 1, __float_as_uint(d));
+        }
+        return;
+    }
+    if (pc.stage == 2) {
+        if (valid) {
+            const float minimum = __uint_as_float(stats[1]),
+                        span = fmaxf(__uint_as_float(stats[0]) - minimum, 1e-8F);
+            const unsigned bin =
+                min(255u, (unsigned)(fminf(1.F, fmaxf(0.F, (d - minimum) / span)) * 256));
+            atomicAdd(stats + 4 + bin, 1);
+        }
+        return;
+    }
+    float rgb[3] = {0, 0, 0};
+    if (valid) {
+        if (pc.channel == 1) {
+            const float t = fminf(
+                1.F, fmaxf(0.F, (d - __uint_as_float(stats[2])) /
+                                    fmaxf(__uint_as_float(stats[3]) - __uint_as_float(stats[2]),
+                                          1e-8F)));
+            const float near_depth[3] = {.90F, .80F, .53F}, middle[3] = {.51F, .73F, .65F},
+                        far_depth[3] = {.16F, .24F, .40F};
+            for (int c = 0; c < 3; ++c)
+                rgb[c] = pc.grayscale ? 1 - t
+                         : t < .5F    ? near_depth[c] + (middle[c] - near_depth[c]) * t * 2
+                                      : middle[c] + (far_depth[c] - middle[c]) * (t - .5F) * 2;
+        } else {
+            float n[3] = {normal[p], normal[pc.pixels + p], normal[2 * pc.pixels + p]};
+            if (pc.world) {
+                float world[3];
+                for (int c = 0; c < 3; ++c)
+                    world[c] = pc.rotation[c * 3] * n[0] + pc.rotation[c * 3 + 1] * n[1] +
+                               pc.rotation[c * 3 + 2] * n[2];
+                for (int c = 0; c < 3; ++c)
+                    n[c] = world[c];
+            }
+            const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (isfinite(len) && len > 1e-8F)
+                for (int c = 0; c < 3; ++c)
+                    rgb[c] = fminf(1.F, fmaxf(0.F, n[c] / len * .5F + .5F));
+        }
+    }
+    for (int c = 0; c < 3; ++c)
+        color[c * pc.pixels + p] = rgb[c];
+}
+
+tinytensor::Tensor diagnostic_color(const RenderResult &rendered, const Camera &camera,
+                                    const VisualizeOptions &options) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (rendered.color.device() == tinytensor::Device::Vulkan)
+        return detail::visualize_diagnostics_vulkan(rendered, camera, options);
+#endif
+    auto color =
+        tinytensor::Tensor::empty({3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    std::vector<float> initial(260, 0.F);
+    initial[1] = std::numeric_limits<float>::max();
+    initial[2] = options.depth_near;
+    initial[3] = options.depth_far;
+    auto stats = tinytensor::Tensor::from_vector(initial, {260}, tinytensor::Device::CUDA);
+    auto pc = detail::diagnostic_push(camera, options);
+    const unsigned groups = (pc.pixels + 255) / 256;
+    if (options.channel == VisualizationChannel::depth && options.automatic_depth) {
+        for (unsigned stage : {1u, 2u, 3u}) {
+            pc.stage = stage;
+            diagnostic_kernel<<<stage == 3 ? 1 : groups, 256>>>(
+                rendered.median_depth.ptr<float>(), rendered.alpha.ptr<float>(),
+                rendered.normal.ptr<float>(), color.ptr<float>(), stats.ptr<unsigned>(), pc);
+        }
+    }
+    pc.stage = 4;
+    diagnostic_kernel<<<groups, 256>>>(rendered.median_depth.ptr<float>(),
+                                       rendered.alpha.ptr<float>(), rendered.normal.ptr<float>(),
+                                       color.ptr<float>(), stats.ptr<unsigned>(), pc);
+    check_cuda(cudaGetLastError(), "launch diagnostic preview");
+    check_cuda(cudaDeviceSynchronize(), "synchronize diagnostic preview");
+    return color;
+}
+} // namespace
+
+tinytensor::Tensor visualize(const GaussianModel &model, const Camera &camera,
+                             const VisualizeOptions &options) {
+    const bool diagnostics =
+        options.mode == VisualizationMode::splat && options.channel != VisualizationChannel::color;
     if (options.mode == VisualizationMode::splat ||
-        (model.means.device() == tinytensor::Device::Vulkan && options.mode == VisualizationMode::rings)) {
+        (model.means.device() == tinytensor::Device::Vulkan &&
+         options.mode == VisualizationMode::rings)) {
         Rasterizer rasterizer;
         RasterizeOptions raster;
         raster.active_sh_degree = options.active_sh_degree;
         raster.background = options.background;
         raster.kernel_size = options.kernel_size;
         raster.scale_modifier = options.scale_modifier;
-        raster.require_depth = false;
+        raster.require_depth = diagnostics;
         raster.record_backward_state = false;
         raster.preview_rings = options.mode == VisualizationMode::rings;
         raster.preview_ring_scale = options.ring_scale;
-        return rasterizer.forward(model, camera, raster).color;
+        const auto rendered = rasterizer.forward(model, camera, raster);
+        return diagnostics ? diagnostic_color(rendered, camera, options) : rendered.color;
     }
     return render_debug_overlay(model, camera, options);
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

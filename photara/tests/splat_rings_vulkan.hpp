@@ -17,6 +17,56 @@ void test_vulkan_rings_preview() {
     camera.fx = camera.fy = 64; camera.cx = camera.cy = 48;
     const auto means_before = model.means.to_vector();
     const auto rgb = visualize(model, camera).to_vector();
+    VisualizeOptions diagnostic;
+    diagnostic.channel=VisualizationChannel::depth;
+    diagnostic.automatic_depth=false; diagnostic.grayscale_depth=true;
+    diagnostic.depth_near=0; diagnostic.depth_far=6;
+    const auto depth_image=visualize(model,camera,diagnostic).to_vector();
+    const auto center=48*96+48;
+    require(std::abs(depth_image[center]-.5F)<.01F && depth_image[0]==0,
+            "Live depth must map actual median depth and keep empty pixels black");
+    diagnostic.automatic_depth=true; diagnostic.grayscale_depth=false;
+    const auto automatic_depth=visualize(model,camera,diagnostic).to_vector();
+    require(automatic_depth[center]>.85F && automatic_depth[center+2*96*96]>.5F,
+            "Automatic depth must handle a constant-depth surface");
+    diagnostic.channel=VisualizationChannel::normal;
+    const auto normals=visualize(model,camera,diagnostic).to_vector();
+    require(std::abs(normals[center]-.5F)<.01F && std::abs(normals[center+96*96]-.5F)<.01F &&
+            (normals[center+2*96*96]<.01F || normals[center+2*96*96]>.99F),
+            "Live normal must encode the Gaussian footprint direction");
+    for(const auto& frame : {depth_image,automatic_depth,normals})
+        for(float value : frame) require(std::isfinite(value)&&value>=0&&value<=1,"Diagnostic range");
+    Camera tilted=camera;
+    const float c=std::sqrt(.5F),s=c;
+    tilted.world_to_camera={c,0,-s,0, 0,1,0,0, s,0,c,0, -3*s,0,3-3*c,1};
+    tilted.position={3*s,0,3-3*c};
+    diagnostic.world_normals=false;
+    const auto camera_normal=visualize(model,tilted,diagnostic).to_vector();
+    diagnostic.world_normals=true;
+    const auto world_normal=visualize(model,tilted,diagnostic).to_vector();
+    require(std::abs(world_normal[center]-.5F)<.02F &&
+            std::abs(camera_normal[center]-world_normal[center])>.2F,
+            "Live world normals must apply the inverse camera rotation");
+    int cuda_devices=0;
+    if(cudaGetDeviceCount(&cuda_devices)==cudaSuccess && cuda_devices>0) {
+        GaussianModel cuda_model=model;
+        cuda_model.means=model.means.to(Device::CUDA);
+        cuda_model.log_scales=model.log_scales.to(Device::CUDA);
+        cuda_model.quaternions=model.quaternions.to(Device::CUDA);
+        cuda_model.opacity_logits=model.opacity_logits.to(Device::CUDA);
+        cuda_model.sh=model.sh.to(Device::CUDA);
+        const auto cuda_normal=visualize(cuda_model,tilted,diagnostic).to_vector();
+        for(unsigned channel=0;channel<3;++channel)
+            require(std::abs(cuda_normal[center+channel*96*96]-world_normal[center+channel*96*96])<.02F,
+                    "CUDA/Vulkan normal previews must agree");
+        diagnostic.channel=VisualizationChannel::depth;
+        diagnostic.automatic_depth=false;diagnostic.grayscale_depth=true;
+        const auto cuda_depth=visualize(cuda_model,camera,diagnostic).to_vector();
+        require(std::abs(cuda_depth[center]-.5F)<.01F,"CUDA diagnostic depth conversion");
+        diagnostic.automatic_depth=true;
+        const auto cuda_auto=visualize(cuda_model,camera,diagnostic).to_vector();
+        require(cuda_auto[center]>.99F && cuda_auto[0]==0,"CUDA automatic depth conversion");
+    }
     VisualizeOptions vis; vis.mode = VisualizationMode::rings;
     vis.ring_scale = 1;
     const auto small = visualize(model, camera, vis).to_vector();
@@ -54,7 +104,7 @@ void test_vulkan_rings_preview() {
         scene.dense_cloud.points.push_back(p);
     }
     TrainingOptions options;
-    options.backend=TrainingBackend::vulkan; options.iterations=3; options.sh_degree=0;
+    options.backend=TrainingBackend::vulkan; options.iterations=5; options.sh_degree=0;
     options.initial_opacity=.8F; options.initialize_scale_from_knn=true;
     options.initial_scale=.3F; options.max_image_dimension=32;
     options.constrain_scale_range=false;
@@ -67,7 +117,9 @@ void test_vulkan_rings_preview() {
     std::vector<std::vector<float>> frames;
     const auto trained = Trainer(options).train(scene,[&](const TrainingProgress& p) {
         require(std::isfinite(p.loss), "Training with Rings preview produced invalid loss");
-        vis.mode=p.iteration==1 ? VisualizationMode::splat : VisualizationMode::rings;
+        vis.mode=p.iteration==4 ? VisualizationMode::rings : VisualizationMode::splat;
+        vis.channel=p.iteration==2 ? VisualizationChannel::depth
+            : p.iteration==3 ? VisualizationChannel::normal : VisualizationChannel::color;
         require(write_visualization_sidecar(options.preview_vis_file,vis,p.iteration+1), "Switch live visualization");
         return true;
     }, {}, {}, [&](unsigned, std::size_t, const Camera& c, const tinytensor::Tensor& color) {
@@ -77,7 +129,20 @@ void test_vulkan_rings_preview() {
         std::cout << "preview callback=" << callbacks << " size=" << color.numel()
                   << " max=" << *std::max_element(frames.back().begin(),frames.back().end()) << '\n';
     });
-    require(trained.size()==4 && callbacks==3, "Vulkan training must deliver every preview frame");
-    require(frames[0]!=frames[1] && frames[1]!=frames[2], "Live Rings/Splat switching must update frames");
-    std::cout << "Vulkan Rings rendering, ring scale and live training mode switches passed\n";
+    require(trained.size()==4 && callbacks==5, "Vulkan training must deliver every preview frame");
+    for(std::size_t i=1;i<frames.size();++i)
+        require(frames[i]!=frames[i-1], "Live Rings/Color/Depth/Normal switching must update frames");
+    VisualizeOptions loaded; std::uint64_t revision{};
+    diagnostic.depth_near=.2F;diagnostic.depth_far=9;diagnostic.world_normals=false;
+    require(write_visualization_sidecar(options.preview_vis_file,diagnostic,23)&&
+            load_visualization_sidecar(options.preview_vis_file,loaded,revision)&&revision==23&&
+            loaded.channel==diagnostic.channel&&loaded.depth_near==.2F&&loaded.depth_far==9&&
+            !loaded.world_normals,"Diagnostic sidecar must preserve channel and display settings");
+    std::ofstream(options.preview_vis_file)<<"24\nsplat\n2.5\n2.828427\n1 1";
+    require(!load_visualization_sidecar(options.preview_vis_file,loaded,revision)&&revision==23&&
+            loaded.channel==diagnostic.channel,"Partial sidecar must preserve the last request");
+    std::ofstream(options.preview_vis_file)<<"24\nsplat\n2.5\n2.828427\n";
+    require(load_visualization_sidecar(options.preview_vis_file,loaded,revision)&&
+            loaded.channel==VisualizationChannel::color,"Legacy sidecar must restore color");
+    std::cout << "Vulkan Rings, Depth, Normal and live training channel switches passed\n";
 }

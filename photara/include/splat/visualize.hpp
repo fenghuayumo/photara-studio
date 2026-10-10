@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,7 @@ namespace photara::splat {
 // Forward-only preview shading. Training still uses Rasterizer::forward /
 // backward; this path never builds a gradient tape.
 enum class VisualizationMode : unsigned { splat = 0, points = 1, rings = 2 };
+enum class VisualizationChannel : unsigned { color = 0, depth = 1, normal = 2 };
 
 struct VisualizeOptions {
     VisualizationMode mode{VisualizationMode::splat};
@@ -26,6 +28,12 @@ struct VisualizeOptions {
     float point_size_px{2.5F};
     // Projected-sigma contour. 2*sqrt(2) is SuperSplat's exp(-4) ellipse edge.
     float ring_scale{2.828427F};
+    VisualizationChannel channel{VisualizationChannel::color};
+    bool automatic_depth{true};
+    bool grayscale_depth{false};
+    bool world_normals{true};
+    float depth_near{0.1F};
+    float depth_far{10.F};
 };
 
 [[nodiscard]] inline const char* visualization_mode_name(
@@ -61,10 +69,15 @@ inline bool write_visualization_sidecar(
     if (path.empty()) return false;
     std::ofstream output(path, std::ios::trunc);
     if (!output) return false;
+    output << std::setprecision(9);
     output << revision << '\n'
            << visualization_mode_name(options.mode) << '\n'
            << options.point_size_px << '\n'
-           << options.ring_scale << '\n';
+           << options.ring_scale << '\n'
+           << static_cast<unsigned>(options.channel) << ' '
+           << options.automatic_depth << ' ' << options.grayscale_depth << ' '
+           << options.world_normals << ' ' << options.depth_near << ' '
+           << options.depth_far << '\n';
     return static_cast<bool>(output);
 }
 
@@ -81,10 +94,31 @@ inline bool load_visualization_sidecar(
     input >> parsed_revision >> mode_text >> point_size >> ring_scale;
     VisualizationMode mode = options.mode;
     if (!input || !parse_visualization_mode(mode_text, mode)) return false;
+    VisualizeOptions parsed = options;
+    parsed.mode = mode;
+    parsed.point_size_px = std::max(0.5F, point_size);
+    parsed.ring_scale = std::clamp(ring_scale, 0.5F, 8.F);
+    // Older sidecars have no diagnostic fields and request ordinary color.
+    parsed.channel = VisualizationChannel::color;
+    unsigned channel{};
+    bool automatic{}, grayscale{}, world{};
+    float near_depth{}, far_depth{};
+    input >> std::ws;
+    if (input.peek() != std::char_traits<char>::eof()) {
+        if (!(input >> channel >> automatic >> grayscale >> world >> near_depth >> far_depth))
+            return false;
+        if (channel > 2 || !std::isfinite(near_depth) || !std::isfinite(far_depth) ||
+            near_depth < 0 || far_depth <= near_depth)
+            return false;
+        parsed.channel = static_cast<VisualizationChannel>(channel);
+        parsed.automatic_depth = automatic;
+        parsed.grayscale_depth = grayscale;
+        parsed.world_normals = world;
+        parsed.depth_near = near_depth;
+        parsed.depth_far = far_depth;
+    }
     revision = parsed_revision;
-    options.mode = mode;
-    options.point_size_px = std::max(0.5F, point_size);
-    options.ring_scale = std::clamp(ring_scale, 0.5F, 8.F);
+    options = parsed;
     return true;
 }
 
@@ -217,6 +251,8 @@ inline bool load_preview_camera_sidecar(
 // Planar float RGB [3,H,W] on the model device. Splat mode reuses the training
 // rasterizer forward pass. Vulkan rings uses a forward-only tile shader;
 // CUDA points/rings use a dedicated non-differentiable kernel.
+// Splat Depth/Normal converts geometry attachments on the model device;
+// automatic depth uses a 256-bin approximation of the 1st/99th percentiles.
 [[nodiscard]] tinytensor::Tensor visualize(
     const GaussianModel& model, const Camera& camera,
     const VisualizeOptions& options = {});

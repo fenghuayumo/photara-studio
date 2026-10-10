@@ -640,6 +640,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
                 src/splat/geometry_vulkan.cpp
+                src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)
@@ -650,6 +651,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 photara_vk_embed_hlsl(
                     TARGET photara_splat_cuda
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                     PROFILE cs_6_0
                     ENV vulkan1.2
