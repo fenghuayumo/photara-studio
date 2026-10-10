@@ -1977,7 +1977,7 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
     photara::splat::VisualizeOptions options;
     const bool vulkan_training = live_preview_active(app) &&
                                  app.settings.training_backend == 1;
-    options.mode = vulkan_training
+    options.mode = vulkan_training && app.view_mode == VisualizationMode::points
         ? photara::splat::VisualizationMode::splat
         : app.view_mode == VisualizationMode::points
         ? photara::splat::VisualizationMode::points

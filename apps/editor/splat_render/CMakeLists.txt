@@ -56,3 +56,9 @@ if(MSVC)
 endif()
 source_group("shaders" FILES ${_splat_render_shaders}
     "${_splat_render_shader_dir}/ring_math.hlsl")
+
+if(BUILD_TESTING AND TARGET splat_drender::vulkan)
+    add_executable(splat_display_test tests/display_test.cpp)
+    target_link_libraries(splat_display_test PRIVATE photara::splat_render)
+    add_test(NAME splat_display_test COMMAND splat_display_test)
+endif()

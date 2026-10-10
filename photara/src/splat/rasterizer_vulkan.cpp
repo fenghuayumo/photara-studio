@@ -208,6 +208,8 @@ splat_drender::vulkan::SplatSettings raster_settings(const RasterizeOptions& req
     settings.scale_modifier = requested_options.scale_modifier;
     settings.need_depth = requested_options.require_depth;
     settings.pixel_snapshots = requested_options.record_backward_state;
+    settings.preview_rings = requested_options.preview_rings;
+    settings.preview_ring_scale = requested_options.preview_ring_scale;
     settings.point_depth_bracket = requested_options.point_depth_bracket;
     settings.point_depth_tolerance = requested_options.point_depth_tolerance;
     return settings;

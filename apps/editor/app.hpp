@@ -46,6 +46,7 @@ inline constexpr const char* k_busy_change_capture_tooltip =
     "Stop the running job first to choose a different image folder or video.";
 
 enum class VisualizationMode { points, splat, rings, mesh };
+enum class DisplayChannel { color, depth, normal };
 enum class ViewportWorkspace { scene_3d, image_2d };
 enum class StepState { pending, active, done, skipped, failed };
 enum class ClearResultsAction { none, clear_view, delete_generated };
@@ -131,6 +132,9 @@ struct App {
     // it. Sizes come from file metadata only.
     CacheUsage cache_usage;
     VisualizationMode view_mode{VisualizationMode::points};
+    DisplayChannel display_channel{DisplayChannel::color};
+    splat_render::DisplayOptions display_options;
+    bool show_display_legend{true};
     ViewportWorkspace workspace{ViewportWorkspace::scene_3d};
     ImageQaState image_qa;
     ImageQaSession image_qa_session;

@@ -137,6 +137,7 @@ public:
           ranges_indirect_(context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
+          blend_rings_(context.create_pipeline("splat_blend_rings.hlsl.spv", 7, sizeof(Push))),
           blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
           pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
           median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
@@ -461,6 +462,10 @@ public:
         const SplatDeviceFrame* destination = nullptr) {
         sample_live_ = false;
         require(model_ready_, "no Gaussian model is loaded");
+        require(!settings.preview_rings || (!settings.need_depth && !settings.pixel_snapshots),
+                "Rings is a forward-only preview and cannot record training geometry or snapshots");
+        require(!settings.preview_rings || std::isfinite(settings.preview_ring_scale),
+                "Rings preview scale must be finite");
         require(camera.width > 0 && camera.height > 0, "camera width and height must be positive");
         require(camera.mode == 0 || camera.mode == 1 || camera.mode == 3 || camera.mode == 4,
                 "camera mode must be pinhole, fisheye, equirectangular, or orthographic");
@@ -514,6 +519,9 @@ public:
                     (has_scales ? k_flag_scales : 0) |
                     (settings.need_depth ? k_flag_geometry : 0) |
                     (device_model_bound_ ? k_flag_raw_parameters : 0);
+        const float ring_sigma = std::round(std::clamp(settings.preview_ring_scale, 0.5F, 8.F) * 256.F) / 256.F;
+        if (settings.preview_rings)
+            prep.u[3] |= 64u | (static_cast<std::uint32_t>(ring_sigma * 256.F) << 16u);
         prep.u[4] = camera.width;
         prep.u[5] = camera.height;
         prep.u[6] = grid_x;
@@ -795,7 +803,8 @@ public:
         blend_push.u[17] = count;
         blend_push.u[18] = pixels;
         blend_push.u[19] = snap_buckets;
-        const ComputePipeline& blend_pipeline = settings.need_depth
+        if (settings.preview_rings) set_float(blend_push, 19, ring_sigma);
+        const ComputePipeline& blend_pipeline = settings.preview_rings ? blend_rings_ : settings.need_depth
             ? blend_
             : (settings.pixel_snapshots && !pack_rgba ? blend_training_ : blend_no_geometry_);
         dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, &out_f, out_u, bucket_offsets, &snap},
@@ -2901,6 +2910,7 @@ private:
     ComputePipeline ranges_indirect_;
     ComputePipeline blend_;
     ComputePipeline blend_no_geometry_;
+    ComputePipeline blend_rings_;
     ComputePipeline blend_training_;
     ComputePipeline pruning_scores_;
     ComputePipeline pruning_scores_subgroup_;

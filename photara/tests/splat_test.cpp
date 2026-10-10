@@ -7628,9 +7628,14 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 }
 
 #include "splat_geometry_vulkan.hpp"
+#include "splat_rings_vulkan.hpp"
 
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--vulkan-rings-only") {
+            test_vulkan_rings_preview();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--vulkan-geometry-only") {
             std::cout << "Vulkan depth-normal oracle\n";
             test_gggs_depth_normal_consistency(tinytensor::Device::Vulkan);

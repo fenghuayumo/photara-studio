@@ -16,6 +16,9 @@ groupshared uint sid[256];
 groupshared float2 sxy[256];
 groupshared float4 sconic[256];
 groupshared float3 srgb[256];
+#ifdef SPLAT_BLEND_RINGS
+groupshared float sopacity[256];
+#endif
 groupshared float4 splane[256];
 groupshared float3 snormal[256];
 groupshared uint alive_count;
@@ -102,6 +105,9 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
             sxy[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS].xy;
             sconic[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 1u];
             srgb[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 2u].xyz;
+#ifdef SPLAT_BLEND_RINGS
+            sopacity[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 2u].w;
+#endif
             if (geometry) {
                 splane[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 3u];
                 snormal[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 4u].xyz;
@@ -125,7 +131,15 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                 float4 conic = sconic[j];
                 float power = gaussian_power(conic, delta.x, delta.y);
                 if (power > 0.0f) continue;
+#ifdef SPLAT_BLEND_RINGS
+                float sigma = max(0.5f, asfloat(pc.u19));
+                float radius = -2.0f * power / (sigma * sigma);
+                if (radius > 1.0f) continue;
+                float norm = (exp(-4.0f * radius) - exp(-4.0f)) / (1.0f - exp(-4.0f));
+                float alpha = radius >= 0.96f ? 0.6f : max(0.05f, norm * sopacity[j]);
+#else
                 float alpha = min(kAlphaClip, conic.w * exp(power));
+#endif
                 if (alpha < kAlphaFloor) continue;
                 float test_t = transmittance * (1.0f - alpha);
                 if (test_t < kTransmittanceFloor) {

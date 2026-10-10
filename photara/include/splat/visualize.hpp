@@ -214,8 +214,9 @@ inline bool load_preview_camera_sidecar(
     return true;
 }
 
-// Planar float RGB [3,H,W] on CUDA. Splat mode reuses the training rasterizer
-// forward pass; points and rings use a dedicated non-differentiable kernel.
+// Planar float RGB [3,H,W] on the model device. Splat mode reuses the training
+// rasterizer forward pass. Vulkan rings uses a forward-only tile shader;
+// CUDA points/rings use a dedicated non-differentiable kernel.
 [[nodiscard]] tinytensor::Tensor visualize(
     const GaussianModel& model, const Camera& camera,
     const VisualizeOptions& options = {});

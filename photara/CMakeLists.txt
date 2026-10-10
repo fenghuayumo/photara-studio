@@ -1129,6 +1129,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)
+            add_test(NAME photara.splat.vulkan_rings_preview
+                COMMAND photara_splat_test --vulkan-rings-only)
         endif()
         if(TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.

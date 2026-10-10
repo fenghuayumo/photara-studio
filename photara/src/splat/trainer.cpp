@@ -198,9 +198,8 @@ tinytensor::Tensor render_preview_color(
     vis.kernel_size = options.kernel_size;
     vis.scale_modifier = options.scale_modifier;
     load_visualization_sidecar(options.preview_vis_file, vis, vis_revision);
-    // The points/rings overlay in visualize() is a CUDA kernel. Vulkan
-    // training can still render the requested camera through its rasterizer.
-    if (model.means.device() == tinytensor::Device::Vulkan)
+    // Points still uses the CUDA overlay. Rings has a forward-only Vulkan path.
+    if (model.means.device() == tinytensor::Device::Vulkan && vis.mode == VisualizationMode::points)
         vis.mode = VisualizationMode::splat;
     return visualize(model, camera, vis);
 }

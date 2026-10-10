@@ -22,26 +22,16 @@ namespace editor {
 using i18n::tr;
 
 constexpr float k_view_rail_pad = 10.F;
-constexpr float k_view_rail_top = 52.F;
+constexpr float k_view_rail_top = 12.F;
 constexpr float k_view_rail_width = 44.F;
-constexpr float k_view_rail_height = 156.F;
-constexpr float k_edit_rail_gap = 8.F;
 constexpr float k_edit_rail_height = 44.F;
 constexpr float k_scene_toggle_gap = 8.F;
 constexpr float k_scene_toggle_height = 116.F;
 
-ImRect view_mode_rail_rect(const ImVec2 view_min) {
-    const ImVec2 origin{
-        view_min.x + k_view_rail_pad, view_min.y + k_view_rail_top};
-    return {
-        origin.x, origin.y, origin.x + k_view_rail_width,
-        origin.y + k_view_rail_height};
-}
-
 ImRect edit_rail_rect(const ImVec2 view_min) {
     const ImVec2 origin{
         view_min.x + k_view_rail_pad,
-        view_min.y + k_view_rail_top + k_view_rail_height + k_edit_rail_gap};
+        view_min.y + k_view_rail_top};
     return {
         origin.x, origin.y, origin.x + k_view_rail_width,
         origin.y + k_edit_rail_height};
@@ -50,7 +40,7 @@ ImRect edit_rail_rect(const ImVec2 view_min) {
 ImRect scene_toggle_rail_rect(const ImVec2 view_min) {
     const ImVec2 origin{
         view_min.x + k_view_rail_pad,
-        view_min.y + k_view_rail_top + k_view_rail_height + k_edit_rail_gap +
+        view_min.y + k_view_rail_top +
             k_edit_rail_height + k_scene_toggle_gap};
     return {
         origin.x, origin.y, origin.x + k_view_rail_width,
@@ -58,8 +48,7 @@ ImRect scene_toggle_rail_rect(const ImVec2 view_min) {
 }
 
 bool view_mode_rail_contains(const ImVec2 view_min, const ImVec2 mouse) {
-    return view_mode_rail_rect(view_min).Contains(mouse) ||
-           edit_rail_rect(view_min).Contains(mouse) ||
+    return edit_rail_rect(view_min).Contains(mouse) ||
            scene_toggle_rail_rect(view_min).Contains(mouse);
 }
 
@@ -95,71 +84,174 @@ bool rail_icon_button(
         ? theme::text_faint
         : (active ? theme::accent
                   : (hovered ? theme::text_bright : theme::text_muted));
-    const float pad = std::max(7.F, std::min(size.x, size.y) * 0.22F);
+    // A 20px icon box inside the 32px target keeps the actual strokes legible.
+    const float pad = std::max(5.F, std::min(size.x, size.y) * 0.1875F);
     icons::draw(
         draw, icon, {min.x + pad, min.y + pad}, {max.x - pad, max.y - pad},
-        theme::u32(icon_colour), 1.8F);
+        theme::u32(icon_colour), 1.5F);
     if (hovered && tooltip) ImGui::SetTooltip("%s", tooltip);
     return pressed;
 }
 
-bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
-    const ImRect rail = view_mode_rail_rect(view_min);
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(
-        rail.Min, rail.Max, IM_COL32(16, 18, 23, 214), 8.F);
-    draw->AddRect(
-        rail.Min, rail.Max, theme::u32(theme::border, 0.7F), 8.F);
+bool diagnostic_channels_available(const App& app) {
+    return app.view_mode == VisualizationMode::splat && app.has_model &&
+           !live_preview_active(app);
+}
 
-    constexpr float k_btn = 32.F;
-    constexpr float k_inner = 6.F;
-    constexpr float k_gap = 4.F;
-    const ImVec2 button_size{k_btn, k_btn};
-    bool hovered = false;
-
-    const bool training =
-        app.job.running() && app.active_job == JobKind::train;
-    const bool vulkan_training = training && app.settings.training_backend == 1;
-    const bool splat_ok = app.has_model || training;
-    const bool rings_ok = !vulkan_training && (app.has_model || training);
-
-    struct RailItem {
-        const char* id;
-        icons::Icon icon;
-        VisualizationMode mode;
-        bool enabled;
-        const char* tooltip;
-    };
-    const bool mesh_ok = app.has_mesh || app.mesh.has();
-    const RailItem items[] = {
-        {"##viz_points", icons::Icon::points, VisualizationMode::points, true,
-         tr("Point Cloud")},
-        {"##viz_splat", icons::Icon::splat, VisualizationMode::splat, splat_ok,
-         splat_ok ? tr("Splat") : tr("Train 3DGS to view the splat")},
-        {"##viz_rings", icons::Icon::rings, VisualizationMode::rings, rings_ok,
-         rings_ok ? tr("Rings")
-                  : vulkan_training
-                      ? tr("Available after Vulkan training finishes")
-                      : tr("Available while training or after a Gaussian model exists")},
-        {"##viz_mesh", icons::Icon::cube, VisualizationMode::mesh, mesh_ok,
-         mesh_ok ? tr("Mesh")
-                 : tr("Build a mesh to inspect the reconstructed surface")},
-    };
-
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.F, k_gap});
-    for (int i = 0; i < 4; ++i) {
-        const ImVec2 button_min{
-            rail.Min.x + k_inner,
-            rail.Min.y + k_inner + static_cast<float>(i) * (k_btn + k_gap)};
-        if (rail_icon_button(
-                items[i].id, items[i].icon, button_min, button_size,
-                app.view_mode == items[i].mode, items[i].enabled,
-                items[i].tooltip))
-            set_visualization_mode(app, items[i].mode);
-        hovered = hovered || ImGui::IsItemHovered();
+const char* display_channel_label(const DisplayChannel channel) {
+    switch (channel) {
+    case DisplayChannel::depth: return tr("Depth");
+    case DisplayChannel::normal: return tr("Normal");
+    default: return tr("Color");
     }
-    ImGui::PopStyleVar();
-    return hovered;
+}
+
+float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
+    // Share the existing workspace header; no extra row above the canvas.
+    const bool compact = width < 390.F;
+    ImGui::SetCursorScreenPos({origin.x + 140.F, origin.y + 5.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8.F, 4.F});
+    const bool training = app.job.running() && app.active_job == JobKind::train;
+    struct Item { VisualizationMode mode; const char* label; bool enabled; const char* reason; };
+    const Item items[] = {
+        {VisualizationMode::points, tr("Point Cloud"), true, nullptr},
+        {VisualizationMode::splat, "3DGS", app.has_model || training, tr("Train 3DGS to view the splat")},
+        {VisualizationMode::rings, tr("Rings"), app.has_model || training,
+         tr("Train 3DGS to view the splat")},
+        {VisualizationMode::mesh, tr("Mesh"), app.has_mesh || app.mesh.has(),
+         tr("Build a mesh to inspect the reconstructed surface")},
+    };
+    const char* current = "3DGS";
+    for (const Item& item : items) if (item.mode == app.view_mode) current = item.label;
+    if (!diagnostic_channels_available(app)) app.display_channel = DisplayChannel::color;
+    const std::string combined = std::string(current) + " / " + display_channel_label(app.display_channel);
+    ImGui::SetNextItemWidth(compact ? std::max(76.F, std::min(150.F, width - 188.F)) : 104.F);
+    if (ImGui::BeginCombo("##display_mode", compact ? combined.c_str() : current)) {
+        for (const Item& item : items) {
+            if (!item.enabled) ImGui::BeginDisabled();
+            if (ImGui::Selectable(item.label, item.mode == app.view_mode))
+                set_visualization_mode(app, item.mode);
+            if (!item.enabled) ImGui::EndDisabled();
+            if (!item.enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", item.reason);
+        }
+        if (compact) {
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", tr("Channel"));
+            for (DisplayChannel channel : {DisplayChannel::color, DisplayChannel::depth, DisplayChannel::normal}) {
+                const bool enabled = channel == DisplayChannel::color || diagnostic_channels_available(app);
+                if (!enabled) ImGui::BeginDisabled();
+                if (ImGui::Selectable(display_channel_label(channel), channel == app.display_channel))
+                    app.display_channel = channel;
+                if (!enabled) ImGui::EndDisabled();
+                if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", tr("Available in 3DGS after training finishes"));
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Display mode"));
+    const bool diagnostics = diagnostic_channels_available(app);
+    if (!diagnostics) app.display_channel = DisplayChannel::color;
+    if (!compact) {
+        ImGui::SameLine(0.F, 8.F);
+        ImGui::SetNextItemWidth(86.F);
+        if (ImGui::BeginCombo("##display_channel", display_channel_label(app.display_channel))) {
+            for (DisplayChannel channel : {DisplayChannel::color, DisplayChannel::depth, DisplayChannel::normal}) {
+                const bool enabled = channel == DisplayChannel::color || diagnostics;
+                if (!enabled) ImGui::BeginDisabled();
+                if (ImGui::Selectable(display_channel_label(channel), channel == app.display_channel))
+                    app.display_channel = channel;
+                if (!enabled) ImGui::EndDisabled();
+                if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", tr("Available in 3DGS after training finishes"));
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Channel"));
+    }
+    ImGui::SameLine(0.F, 8.F);
+    if (icons::ghost_button("##display_settings", icons::Icon::sliders, {28.F, 28.F},
+                           ImGui::IsPopupOpen("##display_settings_popup"), true,
+                           tr("Display settings")))
+        ImGui::OpenPopup("##display_settings_popup");
+    const float controls_right = ImGui::GetItemRectMax().x - origin.x;
+    ImGui::SetNextWindowSize({280.F, 0.F}, ImGuiCond_Always);
+    if (ImGui::BeginPopup("##display_settings_popup")) {
+        ImGui::TextUnformatted(tr("Display settings"));
+        ImGui::Separator();
+        auto& options = app.display_options;
+        if (app.display_channel == DisplayChannel::depth) {
+            if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
+                const auto range = app.splat_renderer.depth_range();
+                options.depth_near = range[0]; options.depth_far = range[1];
+            }
+            if (!options.automatic_depth) {
+                ImGui::SetNextItemWidth(115.F);
+                ImGui::DragFloat(tr("Near"), &options.depth_near, 0.01F, 0.F,
+                                 std::max(0.F, options.depth_far - 0.001F), "%.3f");
+                ImGui::SetNextItemWidth(115.F);
+                ImGui::DragFloat(tr("Far"), &options.depth_far, 0.05F,
+                                 options.depth_near + 0.001F, 1e8F, "%.3f");
+                options.depth_near = std::max(0.F, options.depth_near);
+                options.depth_far = std::max(options.depth_near + 0.001F, options.depth_far);
+            }
+            ImGui::Checkbox(tr("Grayscale"), &options.grayscale_depth);
+            ImGui::TextDisabled("%s", tr("Depth uses scene units"));
+        } else if (app.display_channel == DisplayChannel::normal) {
+            ImGui::SetNextItemWidth(140.F);
+            if (ImGui::BeginCombo("##normal_space", options.world_normals ? tr("World space") : tr("Camera space"))) {
+                if (ImGui::Selectable(tr("World space"), options.world_normals)) options.world_normals = true;
+                if (ImGui::Selectable(tr("Camera space"), !options.world_normals)) options.world_normals = false;
+                ImGui::EndCombo();
+            }
+            ImGui::TextWrapped("%s", tr("Rasterized Gaussian footprint normals"));
+        } else {
+            ImGui::Checkbox(tr("Show ground grid"), &app.view_options.show_grid);
+            bool cameras = app.view_options.show_views;
+            if (ImGui::Checkbox(tr("Show camera frustums"), &cameras))
+                set_camera_overlays(app.view_options, cameras);
+        }
+        if (app.display_channel != DisplayChannel::color)
+            ImGui::Checkbox(tr("Show legend"), &app.show_display_legend);
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+    return controls_right;
+}
+
+void draw_display_legend(const App& app, const ImVec2 min, const ImVec2 max) {
+    if (!app.show_display_legend || app.display_channel == DisplayChannel::color ||
+        !diagnostic_channels_available(app) || max.x - min.x < 280.F || max.y - min.y < 160.F)
+        return;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const bool depth = app.display_channel == DisplayChannel::depth;
+    const auto range = app.splat_renderer.depth_range();
+    char left[48], right[48];
+    std::snprintf(left, sizeof(left), "%.3g", range[0]);
+    std::snprintf(right, sizeof(right), "%.3g", range[1]);
+    const std::string title = depth
+        ? std::string(tr("Depth")) + " / " + tr("Scene units")
+        : std::string(tr("Normal")) + " / " + tr(app.display_options.world_normals ? "World space" : "Camera space");
+    const float width = std::max(170.F, ImGui::CalcTextSize(title.c_str()).x + 24.F);
+    if (width + 28.F > max.x - min.x) return;
+    const ImVec2 a{max.x - width - 14.F, max.y - 125.F}, b{max.x - 14.F, max.y - 55.F};
+    draw->AddRectFilled(a, b, theme::u32(theme::surface_2), 6.F);
+    draw->AddText({a.x + 12.F, a.y + 9.F}, theme::u32(theme::text_bright), title.c_str());
+    if (depth) {
+        const auto color = [&](float t) {
+            const auto c = splat_render::depth_color(t, app.display_options.grayscale_depth);
+            return ImGui::ColorConvertFloat4ToU32({c[0], c[1], c[2], 1.F});
+        };
+        const float x = a.x + 12.F, end = b.x - 12.F, mid = (x + end) * 0.5F;
+        draw->AddRectFilledMultiColor({x, a.y + 32.F}, {mid, a.y + 38.F}, color(0.F), color(0.5F), color(0.5F), color(0.F));
+        draw->AddRectFilledMultiColor({mid, a.y + 32.F}, {end, a.y + 38.F}, color(0.5F), color(1.F), color(1.F), color(0.5F));
+        draw->AddText({x, a.y + 45.F}, theme::u32(theme::text_muted), left);
+        draw->AddText({end - ImGui::CalcTextSize(right).x, a.y + 45.F}, theme::u32(theme::text_muted), right);
+    } else {
+        draw->AddText({a.x + 12.F, a.y + 37.F}, theme::u32(theme::text_muted), "RGB = XYZ / [-1, +1]");
+    }
 }
 
 bool draw_edit_rail(App& app, const ImVec2 view_min) {
@@ -209,7 +301,7 @@ bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
 
     const ImVec2 cameras_min{rail.Min.x + k_inner, rail.Min.y + k_inner};
     if (rail_icon_button(
-            "##tog_cameras", icons::Icon::frustum, cameras_min, button_size,
+            "##tog_cameras", icons::Icon::camera, cameras_min, button_size,
             app.view_options.show_views, true,
             app.view_options.show_views
                 ? tr("Hide camera frustums")
@@ -1240,9 +1332,13 @@ bool draw_splat_image(
         app.splat_frames_epoch = app.splat_renderer.frames_epoch();
     }
     splat_render::FrameTarget target;
-    if (!app.splat_renderer.draw(
-            camera, target,
-            rings ? splat_render::Shading::rings : splat_render::Shading::gaussian))
+    splat_render::Shading shading = rings ? splat_render::Shading::rings : splat_render::Shading::gaussian;
+    // 2D image QA always requests RGB. Diagnostic channels belong to the 3D orbit view.
+    if (orbit && !rings && diagnostic_channels_available(app)) {
+        if (app.display_channel == DisplayChannel::depth) shading = splat_render::Shading::depth;
+        if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
+    }
+    if (!app.splat_renderer.draw(camera, target, shading, app.display_options))
         return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);
     if (!set) return false;
@@ -1300,8 +1396,10 @@ void draw_splat_render_tab(
     const splat_render::Camera preview_camera = preview_camera_for_orbit(preview, app.camera);
     ImTextureID texture{};
     const bool shown = draw_splat_image(app, preview, texture, &app.camera, rings);
-    if (shown) draw->AddImage(texture, min, max);
-    else {
+    if (shown) {
+        draw->AddImage(texture, min, max);
+        draw_display_legend(app, min, max);
+    } else {
         const std::string& failure = app.splat_renderer.failure();
         draw_empty_viewport(
             draw, min, max, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
@@ -1424,6 +1522,9 @@ void draw_viewport_panel(App& app) {
             theme::u32(theme::border));
 
     draw_workspace_toggle(app, header_origin);
+    float controls_right = 128.F;
+    if (app.workspace == ViewportWorkspace::scene_3d)
+        controls_right = draw_display_toolbar(app, header_origin, header_width);
 
     const char* state = job_state_caption(app);
     if (app.workspace == ViewportWorkspace::image_2d) {
@@ -1446,10 +1547,13 @@ void draw_viewport_panel(App& app) {
             state = tr("IMAGE QA");
     }
     const float state_width = ImGui::CalcTextSize(state).x;
-    ImGui::SetCursorPos({
-        content_start.x + std::max(8.F, header_width - state_width - 14.F),
-        content_start.y + 10.F});
-    theme::caption(state);
+    // Status text yields to interactive controls when the dock is narrow.
+    if (header_width - state_width - 14.F >= controls_right + 12.F) {
+        ImGui::SetCursorPos({
+            content_start.x + header_width - state_width - 14.F,
+            content_start.y + 10.F});
+        theme::caption(state);
+    }
     if (align_steps)
         draw_align_step_bar(
             app, {header_origin.x, header_origin.y + k_header_height},
@@ -1518,7 +1622,6 @@ void draw_viewport_panel(App& app) {
         ensure_qa_preview(app);
     } else if (app.view_mode == VisualizationMode::mesh) {
         draw_sparse_tab(app, view_min, view_max);
-        draw_view_mode_rail(app, view_min);
         draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if ((app.view_mode == VisualizationMode::splat ||
@@ -1527,19 +1630,16 @@ void draw_viewport_panel(App& app) {
                !live_preview_active(app)) {
         draw_splat_render_tab(
             app, view_min, view_max, app.view_mode == VisualizationMode::rings);
-        draw_view_mode_rail(app, view_min);
         draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) &&
                app.settings.training_backend == 1 &&
                app.view_mode == VisualizationMode::points) {
         draw_sparse_tab(app, view_min, view_max);
-        draw_view_mode_rail(app, view_min);
         draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {
         draw_training_tab(app, view_min, view_max);
-        draw_view_mode_rail(app, view_min);
         draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else {
@@ -1547,7 +1647,6 @@ void draw_viewport_panel(App& app) {
         const bool align_waiting =
             alignment_job_running(app) && !app.scene.has_points();
         if (!align_waiting) {
-            draw_view_mode_rail(app, view_min);
             draw_edit_rail(app, view_min);
             draw_scene_toggle_rail(app, view_min);
         }

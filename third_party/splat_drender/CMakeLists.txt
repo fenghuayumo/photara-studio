@@ -80,7 +80,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
             shaders/splat_project_backward_sh_adam.hlsl
-            shaders/splat_pack_rgba.hlsl)
+            shaders/splat_pack_rgba.hlsl
+            shaders/splat_blend_rings.hlsl)
         # Photometric training shaders belong to Photara's splat backend, not
         # the reusable rasterizer source tree. They are still embedded in the
         # Vulkan library because its command recorder owns these pipelines.

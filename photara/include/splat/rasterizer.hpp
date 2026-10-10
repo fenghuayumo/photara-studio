@@ -12,6 +12,9 @@ struct RasterizeOptions {
     float kernel_size{0.F};
     float scale_modifier{1.F};
     bool require_depth{true};
+    // Forward-only Vulkan preview. Never enabled on a training render.
+    bool preview_rings{false};
+    float preview_ring_scale{2.828427F};
     // Vulkan keeps its live render frame in the backend context. Training can
     // skip color/alpha materialization unless a host preview needs the copies.
     bool copy_attachments{true};

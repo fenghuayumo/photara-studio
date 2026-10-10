@@ -771,7 +771,8 @@ bool Renderer::ensure_frames(const std::uint32_t width, const std::uint32_t heig
     return true;
 }
 
-bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading shading) {
+bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading shading,
+                    const DisplayOptions& display) {
     target = {};
     if (!ensure_device()) return false;
     static_assert(sizeof(FrameData) == 144);
@@ -803,7 +804,8 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     frame.reserved = static_cast<std::uint32_t>(shading);
     if (cache_valid_ && display_ >= 0 && cached_generation_ == generation_ &&
         frames_[display_].width == width && frames_[display_].height == height &&
-        std::memcmp(&cached_, &frame, sizeof(frame)) == 0) {
+        std::memcmp(&cached_, &frame, sizeof(frame)) == 0 &&
+        cached_display_ == display) {
         const Frame& shown = frames_[display_];
         target.slot = display_;
         target.view = shown.view.handle();
@@ -813,7 +815,8 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
         return true;
     }
     if (!ensure_frames(width, height)) return false;
-    if (shading == Shading::gaussian) return draw_ewa(camera, frame, target);
+    display_options_ = display;
+    if (shading != Shading::rings) return draw_ewa(camera, frame, target);
 
     wait_gpu();
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
@@ -897,6 +900,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     image.sampled = true;
     cached_ = frame;
     cached_generation_ = generation_;
+    cached_display_ = display_options_;
     cache_valid_ = true;
     target.slot = display_;
     target.view = image.view.handle();
@@ -980,6 +984,9 @@ void Renderer::sync_ewa(const GaussianCloud& cloud) {
 }
 
 bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarget& target) {
+    // The CPU diagnostic conversion reuses rgba_staging_. Its previous copy
+    // must finish before mapping and overwriting that buffer.
+    wait_gpu();
     const auto width = static_cast<std::uint32_t>(frame.viewport[0]);
     const auto height = static_cast<std::uint32_t>(frame.viewport[1]);
     std::vector<std::uint8_t> rgba;
@@ -1008,9 +1015,70 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         default: trained.mode = 0; break;
         }
         splat_drender::vulkan::SplatSettings settings;
-        settings.need_depth = false;
+        const bool geometry = frame.reserved == static_cast<std::uint32_t>(Shading::depth) ||
+                              frame.reserved == static_cast<std::uint32_t>(Shading::normal);
+        settings.need_depth = geometry;
         try {
-            if (ewa_->shared_device) {
+            if (geometry) {
+                // Use the same median-depth and alpha-normalized footprint
+                // normals as training, rather than coloring Gaussian centers.
+                const auto output = ewa_->rasterizer.render(trained, settings);
+                const std::size_t pixels = static_cast<std::size_t>(width) * height;
+                if (output.alpha.size() != pixels || output.median_depth.size() != pixels ||
+                    output.normal.size() != pixels * 3U)
+                    throw std::runtime_error("The rasterizer did not produce depth and normals");
+                const auto valid = [&](std::size_t p) {
+                    return std::isfinite(output.alpha[p]) && output.alpha[p] > 0.05F &&
+                           std::isfinite(output.median_depth[p]) && output.median_depth[p] > 0.F;
+                };
+                float near = display_options_.depth_near;
+                float far = display_options_.depth_far;
+                if (display_options_.automatic_depth) {
+                    std::vector<float> depths;
+                    depths.reserve(pixels);
+                    for (std::size_t p = 0; p < pixels; ++p)
+                        if (valid(p)) depths.push_back(output.median_depth[p]);
+                    near = 0.F; far = 1.F;
+                    if (!depths.empty()) {
+                        const std::size_t low = (depths.size() - 1U) / 100U;
+                        const std::size_t high = (depths.size() - 1U) * 99U / 100U;
+                        std::nth_element(depths.begin(), depths.begin() + low, depths.end());
+                        near = depths[low];
+                        std::nth_element(depths.begin(), depths.begin() + high, depths.end());
+                        far = std::max(depths[high], near + std::max(1e-4F, near * 1e-4F));
+                    }
+                }
+                if (!std::isfinite(near)) near = 0.F;
+                if (!std::isfinite(far) || far <= near) far = near + 1.F;
+                depth_range_ = {near, far};
+                rgba.assign(pixels * 4U, 0);
+                for (std::size_t p = 0; p < pixels; ++p) {
+                    rgba[p * 4U + 3U] = 255;
+                    if (!valid(p)) continue;
+                    std::array<float, 3> rgb;
+                    if (frame.reserved == static_cast<std::uint32_t>(Shading::depth)) {
+                        rgb = depth_color((output.median_depth[p] - near) / (far - near),
+                                          display_options_.grayscale_depth);
+                    } else {
+                        float x = output.normal[p], y = output.normal[p + pixels],
+                              z = output.normal[p + pixels * 2U];
+                        if (display_options_.world_normals) {
+                            const auto& m = camera.world_to_camera;
+                            const float wx = m[0] * x + m[1] * y + m[2] * z;
+                            const float wy = m[4] * x + m[5] * y + m[6] * z;
+                            const float wz = m[8] * x + m[9] * y + m[10] * z;
+                            x = wx; y = wy; z = wz;
+                        }
+                        const float length = std::sqrt(x * x + y * y + z * z);
+                        if (!std::isfinite(length) || length < 1e-6F) continue;
+                        rgb = {0.5F + 0.5F * x / length, 0.5F + 0.5F * y / length,
+                               0.5F + 0.5F * z / length};
+                    }
+                    for (std::size_t c = 0; c < 3; ++c)
+                        rgba[p * 4U + c] = static_cast<std::uint8_t>(
+                            std::lround(std::clamp(rgb[c], 0.F, 1.F) * 255.F));
+                }
+            } else if (ewa_->shared_device) {
                 // The preview runs on this device, so the frame stays in VRAM
                 // and the image copy below reads it directly.
                 const splat_drender::vulkan::SplatRgbaImage frame_image =
@@ -1052,7 +1120,6 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         source = rgba_staging_.buffer;
     }
 
-    wait_gpu();
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
     check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1110,6 +1177,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
     write_ = (write_ + 1) % k_frames;
     cached_ = frame;
     cached_generation_ = generation_;
+    cached_display_ = display_options_;
     cache_valid_ = true;
     target.slot = display_;
     target.view = image.view.handle();

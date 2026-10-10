@@ -67,6 +67,10 @@ struct SplatSettings {
     // forward-only caller (the editor preview) leaves it off: at a million
     // instances the buffer is hundreds of megabytes of unused writes.
     bool pixel_snapshots = false;
+    // Preview-only shaded covariance ellipses; incompatible with geometry
+    // attachments and backward snapshots.
+    bool preview_rings = false;
+    float preview_ring_scale = 2.828427F;
     float point_depth_bracket = 0.0F;
     float point_depth_tolerance = 0.0F;
 };
