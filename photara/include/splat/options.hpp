@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace photara::splat {
@@ -238,6 +239,10 @@ struct TrainingOptions {
     // the rasterized Gaussian normal and the normal differentiated from the
     // rendered median-depth map.
     bool use_depth_normal_loss{false};
+    // nullopt enables filtering for DN, multi-view, or normal-field objectives. Unfiltered thin
+    // splats can make implicit median-depth gradients ill-conditioned.
+    // Explicit on/off separates filtering from losses for controlled runs.
+    std::optional<bool> use_3d_filter;
     float depth_normal_weight{0.05F};
     unsigned depth_normal_from_iter{7'000};
     // GaussianWrapping normal field. Four features per Gaussian encode
@@ -260,9 +265,11 @@ struct TrainingOptions {
     float multi_view_geo_weight{0.F};
     float multi_view_ncc_weight{0.F};
     // Multi-view point-query median-depth search. > 0 overrides the
-    // scene-derived default, 0 derives it from the scene extent, < 0 keeps the
+    // scene-derived bracket, 0 derives it from the scene extent, < 0 keeps the
     // wide default search (+/-200 window, eight refinements).
     float multi_view_depth_bracket{0.F};
+    // <= 0 uses all eight refinements. Positive values explicitly opt into
+    // approximate query depths and may invalidate implicit geometry gradients.
     float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
     // Subsample the expensive multi-view objective after ADC growth stops.

@@ -10,6 +10,18 @@ endif()
 
 find_package(CUDAToolkit 12.0 REQUIRED)
 
+option(SPLAT_DRENDER_BUILD_TESTS "Build CUDA geometry gradient checks" OFF)
+if(SPLAT_DRENDER_BUILD_TESTS)
+    enable_testing()
+    add_executable(splat_geometry_gradient_test tests/geometry_gradient_test.cu)
+    target_include_directories(splat_geometry_gradient_test PRIVATE include src)
+    target_link_libraries(splat_geometry_gradient_test PRIVATE CUDA::cudart)
+    set_target_properties(splat_geometry_gradient_test PROPERTIES
+        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    add_test(NAME splat_drender.geometry_gradient COMMAND splat_geometry_gradient_test)
+endif()
+
 add_library(splat_drender STATIC
     src/pipeline.cu
     src/render_forward.cu

@@ -1066,7 +1066,8 @@ GaussianModel Trainer::train(
         if (options_.densify_revised_noise)
             throw std::invalid_argument(
                 "Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_depth_normal_loss || options_.use_normal_field ||
+        if (options_.use_3d_filter.value_or(false) ||
+            options_.use_depth_normal_loss || options_.use_normal_field ||
             options_.use_mvs_depth || options_.use_mvs_normals ||
             options_.multi_view_geo_weight > 0.F ||
             options_.multi_view_ncc_weight > 0.F ||
@@ -1084,9 +1085,11 @@ GaussianModel Trainer::train(
         tinytensor::VramScope scope("model.initialize");
         return initialize_from_dense_cloud(scene, options_);
     }();
-    const bool use_3d_filter =
-        options_.use_depth_normal_loss &&
-        options_.depth_normal_weight > 0.F;
+    const bool use_3d_filter = options_.use_3d_filter.value_or(
+        (options_.use_depth_normal_loss && options_.depth_normal_weight > 0.F) ||
+        (options_.use_normal_field && options_.normal_field_weight > 0.F) ||
+        options_.multi_view_geo_weight > 0.F ||
+        options_.multi_view_ncc_weight > 0.F);
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1252,6 +1255,7 @@ GaussianModel Trainer::train(
         " groups=dc,rest bytes_per_gaussian=", sh_quant.stride * 3 + 16);
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
+    unsigned normal_features_updates = 0;
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state, &normal_features_state, &sh_quant};
@@ -1433,9 +1437,12 @@ GaussianModel Trainer::train(
         const float point_query_tolerance =
             options_.multi_view_depth_tolerance > 0.F
                 ? options_.multi_view_depth_tolerance
-                : options_.multi_view_depth_tolerance == 0.F
-                      ? 2.0e-3F * point_query_extent
-                      : 0.F;
+                : 0.F;
+        // The implicit median-depth backward assumes a root of T(t)=0.5.
+        // A scene-sized early-stop interval can straddle a very thin Gaussian
+        // and interpolate a "surface" in empty space, where dT/dt vanishes.
+        // Dividing by that slope creates enormous opacity gradients. Default
+        // to the reference's full eight refinements, regardless of scene size.
         raster_options.point_depth_bracket = point_query_bracket;
         raster_options.point_depth_tolerance = point_query_tolerance;
         const bool depth_normal_active = !native_non_pinhole &&
@@ -1730,6 +1737,7 @@ GaussianModel Trainer::train(
                 normal_features_from_smallest_axis(model);
             normal_features_state =
                 detail::make_adam_state(model.normal_features);
+            normal_features_updates = 0;
         }
         if (normal_field_active) {
             RasterizeOptions normal_options = raster_options;
@@ -2059,12 +2067,16 @@ GaussianModel Trainer::train(
                 1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
                 options_.adam_epsilon, vulkan_sh_regularization);
         }
-        if (normal_field_active)
+        if (normal_field_active) {
+            // This optimizer starts late; its bias correction counts actual
+            // normal-feature updates rather than earlier RGB-only iterations.
+            ++normal_features_updates;
             detail::adam_step(
                 model.normal_features,
                 normal_field_gradients.normal_features,
                 normal_features_state, options_.normal_features_lr,
-                iteration, options_);
+                normal_features_updates, options_);
+        }
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&

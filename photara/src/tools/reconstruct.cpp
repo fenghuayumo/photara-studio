@@ -194,6 +194,7 @@ struct ReconstructCli {
     float splat_opacity_reg{0.F};
     float splat_log_scale_reg{0.F};
     float splat_depth_normal_weight{0.05F};
+    std::string splat_filter_3d{"auto"};
     bool splat_normal_field{false};
     float splat_normal_field_weight{0.05F};
     float splat_normal_field_depth_ratio{0.6F};
@@ -435,6 +436,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
               << "  --splat-log-scale-reg W  per-Gaussian log-scale prior (default 0)\n"
               << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
+              << "  --splat-filter-3d MODE  independent 3D filter: auto, on, off (default auto)\n"
               << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
               << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
               << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
@@ -836,6 +838,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-depth-normal-weight",
          "Splat median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
+        ("splat-filter-3d", "3D filter independently of geometry losses: auto/on/off",
+         cxxopts::value<std::string>()->default_value("auto"))
         ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -854,7 +858,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-mv-depth-tolerance",
          "Multi-view point-query depth precision in world units "
-         "(0 = derive from the scene extent, < 0 = reference 8 refinements)",
+         "(<= 0 = reference 8 refinements; > 0 = approximate early stop)",
          cxxopts::value<float>()->default_value("0"))
         ("splat-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
          cxxopts::value<float>()->default_value("0.6"))
@@ -1415,6 +1419,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
     cli.splat_depth_normal_weight =
         result["splat-depth-normal-weight"].as<float>();
+    cli.splat_filter_3d = result["splat-filter-3d"].as<std::string>();
+    if (cli.splat_filter_3d != "auto" && cli.splat_filter_3d != "on" &&
+        cli.splat_filter_3d != "off")
+        throw std::invalid_argument("--splat-filter-3d must be auto, on or off");
     cli.splat_multi_view_depth_bracket =
         result["splat-mv-depth-bracket"].as<float>();
     cli.splat_multi_view_depth_tolerance =
@@ -3362,6 +3370,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.use_depth_normal_loss = cli.mesh &&
         cli.splat_depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.splat_depth_normal_weight;
+    if (cli.splat_filter_3d != "auto")
+        options.use_3d_filter = cli.splat_filter_3d == "on";
     options.multi_view_geo_weight = cli.mesh
         ? cli.splat_multi_view_geo_weight
         : 0.F;
@@ -3483,7 +3493,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " normal_field_weight=", options.normal_field_weight,
         " normal_field_depth_ratio=", options.normal_field_depth_ratio,
         " normal_field_from_iter=", options.normal_field_from_iter,
-        " filter_3d=", options.use_depth_normal_loss,
+        " filter_3d=", options.use_3d_filter.value_or(
+            (options.use_depth_normal_loss && options.depth_normal_weight > 0.F) ||
+            (options.use_normal_field && options.normal_field_weight > 0.F) ||
+            options.multi_view_geo_weight > 0.F || options.multi_view_ncc_weight > 0.F),
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_depth_bracket=", options.multi_view_depth_bracket,

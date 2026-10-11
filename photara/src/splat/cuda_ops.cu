@@ -372,10 +372,12 @@ __global__ void compute_3d_filter_distance_kernel(
             const float height = camera[19];
             const float fx = camera[16];
             const float fy = camera[17];
-            const float boundary_x = width / fx * 0.575F;
-            const float boundary_y = height / fy * 0.575F;
-            if (fabsf(camera_x / camera_z) > boundary_x ||
-                fabsf(camera_y / camera_z) > boundary_y) continue;
+            // GW admits a 15% image-width/height margin on each side.
+            // Use the calibrated principal point rather than assuming center.
+            const float px = fx * camera_x / camera_z + camera[21];
+            const float py = fy * camera_y / camera_z + camera[22];
+            if (px < -0.15F * width || px > 1.15F * width ||
+                py < -0.15F * height || py > 1.15F * height) continue;
             minimum_distance = fminf(minimum_distance, camera_z);
         }
     }

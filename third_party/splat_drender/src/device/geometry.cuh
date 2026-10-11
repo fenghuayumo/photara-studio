@@ -558,7 +558,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     const float u2 = u * u, v2 = v * v, uv = u * v;
 
     Mat3 dL_dVrk{};
-    float3 dL_dr(0.f, 0.f, 0.f);
+    float3 dL_dr = make_float3(0.f, 0.f, 0.f);
     float dL_du = 0.f, dL_dv = 0.f, dL_dz = 0.f;
     // An unused depth/normal branch is exactly zero. Evaluating its inverse
     // covariance algebra anyway can produce 0 * NaN for very thin splats,
@@ -583,10 +583,9 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         const float inv = rnorm3df(cam_normal.x, cam_normal.y, cam_normal.z);
         const float3 nrm = make_float3(cam_normal.x * inv, cam_normal.y * inv,
                                        cam_normal.z * inv);
-        // The reference evaluates the normalization-Jacobian factor on the
-        // already-normalized vector (so it is 1, not 1/|cam_normal|).
-        // Replicate that exactly: training dynamics were tuned with it.
-        const float rlv = rnorm3df(nrm.x, nrm.y, nrm.z);
+        // Differentiate the pre-normalized vector. Measuring the length of
+        // nrm instead drops 1/|cam_normal| and amplifies normal-loss gradients.
+        const float rlv = inv;
         const float ndl = mat::dot3(nrm, io.d_normal);
         const float3 dL_dcam_normal = make_float3(
             (io.d_normal.x - nrm.x * ndl) * rlv,
@@ -620,8 +619,12 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
 
         const float rsigmat = sqrtf(vb / ray_len2);
         const float dL_dlen2_x2 = -dL_drsigma * rsigmat / ray_len2;
-        const float dL_du_sigma = dL_dlen2_x2 * u;
-        const float dL_dv_sigma = dL_dlen2_x2 * v;
+        // rsigma = sqrt((uvh^T C^-1 uvh) / ray_len2): both numerator
+        // and denominator depend on the projected mean u,v.
+        const float dL_du_sigma = dL_dlen2_x2 * u +
+            dL_drsigma * rsigmat * uvh_m_vb.x;
+        const float dL_dv_sigma = dL_dlen2_x2 * v +
+            dL_drsigma * rsigmat * uvh_m_vb.y;
 
         const float aux_nJ = (-dL_dnJ.at(2, 0) * u - dL_dnJ.at(2, 1) * v -
                               dL_dnJ.at(2, 2)) / ray_len2 * ray_len_inv;

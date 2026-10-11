@@ -146,6 +146,7 @@ void test_gggs_3d_filter() {
     camera.world_to_camera[15] = 1.F;
     camera.fx = camera.fy = 50.F;
     camera.width = camera.height = 100;
+    camera.cx = camera.cy = 50.F;
     const auto means = tinytensor::Tensor::from_vector(
         std::vector<float>{0.F, 0.F, 2.F, 0.F, 0.F, 4.F,
                            100.F, 0.F, 1.F},
@@ -162,6 +163,23 @@ void test_gggs_3d_filter() {
     require(std::abs(detail::compute_3d_filter(invisible, {camera}).to_vector()[0] -
                      unit) < 1e-6F,
             "GPU filter maximum lost the all-invisible fallback");
+
+    // The outer 15% margin is admitted, including off-center intrinsics.
+    Camera edge_camera = camera;
+    edge_camera.fx = edge_camera.fy = 100.F;
+    const auto edge_means = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.2F,0.F,2.F, 0.F,0.F,4.F},
+        {2,3}, tinytensor::Device::CUDA);
+    const auto edge_filter = detail::compute_3d_filter(edge_means,{edge_camera}).to_vector();
+    require(std::abs(edge_filter[0]-2.F*std::sqrt(.2F)/100.F)<1e-6F,
+            "3D filter rejected the 15% screen margin");
+    edge_camera.cx = 20.F;
+    const auto offset_means = tinytensor::Tensor::from_vector(
+        std::vector<float>{-.8F,0.F,2.F, 0.F,0.F,4.F},
+        {2,3}, tinytensor::Device::CUDA);
+    const auto offset_filter = detail::compute_3d_filter(offset_means,{edge_camera}).to_vector();
+    require(std::abs(offset_filter[0]-4.F*std::sqrt(.2F)/100.F)<1e-6F,
+            "3D filter ignored the calibrated principal point");
 
     GaussianModel model;
     model.means = means;
@@ -6517,8 +6535,64 @@ void test_densification_strategies_and_dense_bypass() {
 
 }  // namespace
 
+void test_thin_gaussian_sample_depth_precision() {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model;
+    model.means = Tensor::from_vector(std::vector<float>{0.F,0.F,2.F},{1,3},gpu);
+    model.log_scales = Tensor::from_vector(
+        std::vector<float>{std::log(.1F),std::log(.1F),std::log(.00005F)},{1,3},gpu);
+    model.quaternions = Tensor::from_vector(std::vector<float>{1.F,0.F,0.F,0.F},{1,4},gpu);
+    model.opacity_logits = Tensor::from_vector(std::vector<float>{2.F},{1,1},gpu);
+    model.sh = Tensor::zeros({1,1,3},gpu);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0]=camera.world_to_camera[5]=camera.world_to_camera[10]=camera.world_to_camera[15]=1.F;
+    camera.fx=camera.fy=40.F; camera.cx=camera.cy=15.5F;
+    camera.width=camera.height=32;
+    const auto query = Tensor::from_vector(std::vector<float>{0.F,0.F,2.F},{1,3},gpu);
+    const auto upstream = Tensor::from_vector(std::vector<float>{0.F,0.F,1.F},{1,3},gpu);
+    Rasterizer rasterizer;
+    RasterizeOptions options;
+    options.require_depth=true;
+    options.point_depth_bracket=40.F;
+    options.point_depth_tolerance=.02F;
+    const auto coarse=rasterizer.sample_depth(model,query,camera,options);
+    const auto coarse_gradient=rasterizer.sample_depth_backward(model,coarse,upstream);
+    options.point_depth_tolerance=0.F;
+    const auto precise=rasterizer.sample_depth(model,query,camera,options);
+    const auto gradient=rasterizer.sample_depth_backward(model,precise,upstream);
+    const float coarse_z=coarse.camera_points.to_vector()[2];
+    const float precise_z=precise.camera_points.to_vector()[2];
+    const float coarse_opacity=coarse_gradient.model.opacity_logits.to_vector()[0];
+    const float analytic=gradient.model.opacity_logits.to_vector()[0];
+    std::cout<<"thin sample: coarse_z="<<coarse_z<<" precise_z="<<precise_z
+             <<" coarse_opacity_grad="<<coarse_opacity<<" precise_opacity_grad="<<analytic<<'\n';
+    require(std::abs(precise_z-2.F)<.0002F,"Thin Gaussian precise depth missed the surface");
+    require(std::isfinite(analytic) && std::abs(analytic)<.001F,
+            "Thin Gaussian exact-query opacity gradient is unstable");
+    const auto objective=[&](float opacity) {
+        GaussianModel perturbed=model;
+        perturbed.opacity_logits=Tensor::from_vector(std::vector<float>{opacity},{1,1},gpu);
+        return rasterizer.sample_depth(perturbed,query,camera,options).camera_points.to_vector()[2];
+    };
+    const float numerical=(objective(2.01F)-objective(1.99F))/.02F;
+    require(std::abs(analytic-numerical)<.00005F,
+            "Thin Gaussian exact-query opacity gradient differs from finite difference");
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc>1 && std::string(argv[1])=="--geometry-audit") {
+            test_gggs_3d_filter();
+            test_gggs_multi_view_geometry_and_ncc();
+            test_gggs_depth_normal_consistency();
+            test_gggs_depth_normal_parameter_gradients();
+            test_thin_gaussian_sample_depth_precision();
+            std::cout<<"CUDA geometry audit tests passed\n";
+            return 0;
+        }
         int device_count = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             std::cout << "SKIP: no CUDA device\n";
@@ -6620,6 +6694,7 @@ int main(int argc, char** argv) {
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
+        test_thin_gaussian_sample_depth_precision();
         test_adc_plus_split_preserves_covariance();
         test_adc_recycled_capacity_repairs_oversize();
         test_revised_noise_scales_with_scene_units();

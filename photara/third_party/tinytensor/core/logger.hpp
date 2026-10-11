@@ -6,6 +6,8 @@
 #include <format>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <stdexcept>
 #include <utility>
 
 // TinyTensor Logger - Minimal logging for the standalone library
@@ -70,9 +72,28 @@ inline void log_write(std::ostream& os, T&& value) {
 // Two or more arguments: treat the first as a std::format format string.
 template <typename... Args>
 requires (sizeof...(Args) >= 1)
+#if defined(__CUDACC__) && defined(_MSC_VER)
+// MSVC's format-argument aggregate initialization triggers an nvcc 12.8
+// host-codegen ICE. CUDA logging call sites use plain {} placeholders; stream
+// those values without instantiating the MSVC format machinery in a .cu file.
+inline void log_write(std::ostream& os, std::string_view fmt, Args&&... args) {
+    const auto append = [&](const auto& value) {
+        const auto placeholder = fmt.find("{}");
+        if (placeholder == std::string_view::npos)
+            throw std::invalid_argument("CUDA log format requires {} placeholders");
+        os << fmt.substr(0, placeholder) << value;
+        fmt.remove_prefix(placeholder + 2);
+    };
+    (append(args), ...);
+    if (fmt.find("{}") != std::string_view::npos)
+        throw std::invalid_argument("CUDA log format has missing arguments");
+    os << fmt;
+}
+#else
 inline void log_write(std::ostream& os, std::format_string<Args...> fmt, Args&&... args) {
     os << std::format(fmt, std::forward<Args>(args)...);
 }
+#endif
 
 } // namespace tinytensor
 
