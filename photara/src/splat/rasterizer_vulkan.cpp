@@ -147,6 +147,7 @@ struct VulkanRasterBackend {
 
 struct VulkanForwardContext {
     std::shared_ptr<VulkanRasterBackend> backend;
+    tinytensor::Tensor colors_precomp;
     tinytensor::Tensor visibility_bits;
     splat_drender::vulkan::SplatDeviceFrame frame;
     splat_drender::vulkan::SplatDevicePhotometricOutput photometric;
@@ -195,6 +196,18 @@ splat_drender::vulkan::SplatDeviceGaussians device_gaussians(
     gaussians.sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     gaussians.sh_bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
+    if (requested_options.colors_precomp.is_valid()) {
+        const auto& colors = requested_options.colors_precomp;
+        if (colors.device() != tinytensor::Device::Vulkan ||
+            colors.dtype() != tinytensor::DataType::Float32 ||
+            !colors.is_contiguous() || colors.shape().rank() != 2 ||
+            colors.shape()[0] != model.size() || colors.shape()[1] != 3)
+            throw std::invalid_argument("Vulkan precomputed colors must be contiguous float32 [N,3]");
+        gaussians.sh = buffer_view(colors);
+        gaussians.colors_precomputed = true;
+        gaussians.sh_degree = 0;
+        gaussians.sh_bases = 1;
+    }
     return gaussians;
 }
 
@@ -224,14 +237,12 @@ RenderResult vulkan_raster_forward(
         throw std::invalid_argument("Splat camera dimensions must be positive");
     if (model.means.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument("Vulkan rasterization requires a Vulkan model");
-    if (requested_options.colors_precomp.is_valid())
-        throw std::invalid_argument(
-            "Vulkan precomputed-color rasterization is not implemented yet");
 
     const auto backend = get_backend(backend_value);
     active_training_backend = backend;
     auto context = std::make_shared<VulkanForwardContext>();
     context->backend = backend;
+    context->colors_precomp = requested_options.colors_precomp;
     const auto gaussians = device_gaussians(backend, model, requested_options);
     const auto settings = raster_settings(requested_options);
 
@@ -397,7 +408,10 @@ ModelGradients vulkan_raster_backward(
             "Vulkan backward requires a photometric color gradient");
 
     const std::size_t count = model.size();
-    const std::size_t sh_values = sh_adam ? 0 : model.sh.numel();
+    const bool precomputed = context->colors_precomp.is_valid();
+    if (precomputed && sh_adam)
+        throw std::invalid_argument("Precomputed colors cannot use fused SH Adam");
+    const std::size_t sh_values = sh_adam ? 0 : precomputed ? count * 3U : model.sh.numel();
     // splat_project_backward writes every packed slot for every Gaussian,
     // including zeroing inactive/culled entries and unused SH coefficients.
     // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
@@ -438,7 +452,10 @@ ModelGradients vulkan_raster_backward(
     gradients.means = packed.slice(0, offset, offset + count * 3U)
         .reshape(tinytensor::TensorShape{count, std::size_t{3}});
     offset += count * 3U;
-    if (!sh_adam)
+    if (precomputed)
+        gradients.colors_precomp = packed.slice(0, offset, offset + sh_values)
+            .reshape(tinytensor::TensorShape{count, std::size_t{3}});
+    else if (!sh_adam)
         gradients.sh = packed.slice(0, offset, offset + sh_values)
             .reshape(model.sh.shape());
     offset += sh_values;

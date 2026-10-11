@@ -241,7 +241,7 @@ struct SplatDevicePhotometricOutput {
 // raster shaders, so Adam can update these exact buffers in place.
 struct SplatDeviceGaussians {
     SplatBufferView means;           // [N,3]
-    SplatBufferView sh;              // [N,B,3]
+    SplatBufferView sh;              // [N,B,3], or signed [N,3] if colors_precomputed
     SplatBufferView log_scales;      // [N,3]
     SplatBufferView raw_rotations;   // [N,4]
     SplatBufferView opacity_logits;  // [N]
@@ -249,6 +249,7 @@ struct SplatDeviceGaussians {
     std::uint32_t count = 0;
     std::uint32_t sh_degree = 0;
     std::uint32_t sh_bases = 0;
+    bool colors_precomputed = false;
 };
 
 // 8-bit RGBA frame that stayed on the device. The buffer is owned by the

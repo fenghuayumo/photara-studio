@@ -2211,6 +2211,10 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
 
 tinytensor::Tensor normal_features_to_normals(
     const tinytensor::Tensor& normal_features) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
+        return normal_features_to_normals_vulkan(normal_features);
+#endif
     if (!normal_features.is_valid() ||
         normal_features.device() != tinytensor::Device::CUDA ||
         normal_features.dtype() != tinytensor::DataType::Float32 ||
@@ -2233,6 +2237,10 @@ tinytensor::Tensor normal_features_to_normals(
 tinytensor::Tensor normal_features_backward(
     const tinytensor::Tensor& normal_features,
     const tinytensor::Tensor& grad_normals) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
+        return normal_features_backward_vulkan(normal_features, grad_normals);
+#endif
     if (!grad_normals.is_valid() || grad_normals.shape().rank() != 2 ||
         grad_normals.shape()[0] != normal_features.shape()[0] ||
         grad_normals.shape()[1] != 3)
@@ -2714,6 +2722,12 @@ void add_model_gradients(
             destination_tensor.shape() != source_tensor.shape())
             throw std::invalid_argument(
                 "Cannot merge incompatible GGGS model gradients");
+        if (destination_tensor.device() == tinytensor::Device::Vulkan) {
+            if (source_tensor.device() != destination_tensor.device())
+                throw std::invalid_argument("Cannot merge model gradients across devices");
+            destination_tensor.copy_from(destination_tensor.add(source_tensor));
+            return;
+        }
         const std::size_t count = destination_tensor.numel();
         add_tensor_in_place_kernel<<<
             (count + k_threads - 1) / k_threads, k_threads>>>(
@@ -2863,6 +2877,10 @@ LossGradients compute_training_loss(
 LossGradients compute_normal_field_loss(
     const RenderResult& rendered, const Camera& camera, const float weight,
     const bool collect_scalar_terms) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (rendered.color.device() == tinytensor::Device::Vulkan)
+        return compute_normal_field_loss_vulkan(rendered, camera, weight, collect_scalar_terms);
+#endif
     LossGradients result{
         tinytensor::Tensor::zeros_like(rendered.color),
         tinytensor::Tensor::zeros_like(rendered.alpha),

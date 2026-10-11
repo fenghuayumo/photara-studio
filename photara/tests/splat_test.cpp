@@ -7,6 +7,7 @@
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/geometry_vulkan.hpp"
 #include "../src/splat/focus_mask.hpp"
 #include "../src/splat/focus_mask_frame.hpp"
 #include "splat/simplify.hpp"
@@ -7719,6 +7720,7 @@ int main(int argc, char** argv) {
             test_gggs_multi_view_geometry_and_ncc(tinytensor::Device::Vulkan);
             std::cout << "Vulkan complete MV gradient chain\n";
             test_vulkan_geometry_chain();
+            test_vulkan_normal_field();
             std::cout << "Vulkan geometry trainer and mesh\n";
             test_vulkan_geometry_trainer();
             std::cout << "Vulkan geometry tests passed\n";

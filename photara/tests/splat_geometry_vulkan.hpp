@@ -149,6 +149,143 @@ void test_vulkan_geometry_chain() {
         "Vulkan adaptive MV geometry summary changed");
 }
 
+void test_vulkan_normal_field() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    const auto compare = [](const Tensor& a, const Tensor& b, double tolerance, const char* label) {
+        const auto x = a.to_vector(), y = b.to_vector();
+        require(x.size() == y.size(), label);
+        double error = 0., norm = 0.;
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            require(std::isfinite(x[i]) && std::isfinite(y[i]), label);
+            error += (x[i]-y[i])*(x[i]-y[i]); norm += x[i]*x[i];
+        }
+        const double relative = std::sqrt(error/std::max(norm,1e-16));
+        std::cout << label << " relative_l2=" << relative << '\n';
+        require(relative < tolerance || std::sqrt(error) < 2e-6, label);
+    };
+    auto features = Tensor::from_vector(std::vector<float>{
+        .2F,-.4F,1.3F,.7F, -.5F,.8F,.3F,-1.2F, 0,0,0,.2F, 1,0,0,0}, {4,4}, Device::CUDA);
+    auto g = Tensor::from_vector(std::vector<float>{.1F,-.8F,.2F, -.3F,.6F,.9F, 1,2,3, .5F,0,0}, {4,3}, Device::CUDA);
+    compare(detail::normal_features_to_normals(features),
+        detail::normal_features_to_normals(features.to(Device::Vulkan)), 2e-5, "Vulkan normal feature forward");
+    const auto analytic = detail::normal_features_backward(features.to(Device::Vulkan), g.to(Device::Vulkan));
+    compare(detail::normal_features_backward(features,g), analytic, 2e-5, "Vulkan normal feature backward");
+    auto fv = features.to_vector(); const auto gv = g.to_vector(), av = analytic.to_vector();
+    const auto objective = [&](const std::vector<float>& values) {
+        const auto n = detail::normal_features_to_normals(Tensor::from_vector(values,{4,4},Device::Vulkan)).to_vector();
+        double sum = 0; for (std::size_t j=0;j<n.size();++j) sum += n[j]*gv[j]; return sum;
+    };
+    for (std::size_t j=0;j<8;++j) {
+        auto plus=fv, minus=fv; plus[j]+=1e-3F; minus[j]-=1e-3F;
+        const double fd=(objective(plus)-objective(minus))/.002;
+        require(std::abs(fd-av[j])<2e-4, "Vulkan normal feature finite difference mismatch");
+    }
+    constexpr std::size_t side=16, pixels=side*side;
+    Camera camera; camera.width=camera.height=side;
+    camera.fx=camera.fy=24; camera.cx=camera.cy=7.5F;
+    const float c=std::cos(.37F), s=std::sin(.37F);
+    camera.world_to_camera={c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1};
+    std::vector<float> depth(pixels), field(3*pixels);
+    for (std::size_t y=0;y<side;++y) for (std::size_t x=0;x<side;++x) {
+        const auto i=y*side+x; depth[i]=2.F+.02F*x+.01F*y+.003F*std::sin(float(x*y));
+        field[i]=.15F+.01F*x; field[pixels+i]=-.1F+.02F*y; field[2*pixels+i]=-.7F;
+    }
+    depth[3*side+4]=0; // Invalid depth must mask the surrounding stencil.
+    const auto render = [&](Device device) {
+        RenderResult r;
+        r.color=Tensor::from_vector(field,{3,side,side},device);
+        r.alpha=Tensor::full({side,side},1.F,device);
+        r.median_depth=Tensor::from_vector(depth,{side,side},device);
+        r.normal=Tensor::zeros({3,side,side},device); return r;
+    };
+    const auto cuda=detail::compute_normal_field_loss(render(Device::CUDA),camera,.03F,true);
+    const auto vk=detail::compute_normal_field_loss(render(Device::Vulkan),camera,.03F,true);
+    require(std::abs(cuda.total-vk.total)<1e-6, "Vulkan normal field loss mismatch");
+    compare(cuda.color,vk.color,2e-5,"Vulkan world normal field gradient");
+    compare(cuda.depth,vk.depth,2e-4,"Vulkan normal field depth gradient");
+    const auto quiet=detail::compute_normal_field_loss(render(Device::Vulkan),camera,.03F,false);
+    compare(vk.color,quiet.color,2e-5,"Vulkan non-reporting normal field gradient");
+    compare(vk.depth,quiet.depth,2e-5,"Vulkan non-reporting normal field depth gradient");
+    // Independent finite differences through a rotated camera and depth stencil.
+    for (bool color : {true,false}) {
+        const std::size_t index=8*side+9;
+        const auto& gradient=color?vk.color:vk.depth;
+        const auto grad=gradient.to_vector();
+        auto values=color?field:depth;
+        const auto loss = [&](const std::vector<float>& v) {
+            auto r=render(Device::Vulkan);
+            if(color) r.color=Tensor::from_vector(v,{3,side,side},Device::Vulkan);
+            else r.median_depth=Tensor::from_vector(v,{side,side},Device::Vulkan);
+            return detail::compute_normal_field_loss(r,camera,.03F,true).total;
+        };
+        auto plus=values, minus=values; plus[index]+=.001F; minus[index]-=.001F;
+        const float fd=(loss(plus)-loss(minus))/.002F;
+        require(std::abs(fd-grad[index])<1e-5F,"Vulkan normal field loss finite difference mismatch");
+    }
+    const auto chain = [&](Device device) {
+        GaussianModel m;
+        m.means=Tensor::from_vector(std::vector<float>{-.8F,0,2.F, -.6F,.05F,2.05F},{2,3},device);
+        m.log_scales=Tensor::from_vector(std::vector<float>{std::log(.4F),std::log(.35F),std::log(.035F),
+            std::log(.38F),std::log(.32F),std::log(.03F)},{2,3},device);
+        m.quaternions=Tensor::from_vector(std::vector<float>{.985F,0,.174F,0, .98F,-.08F,-.17F,.015F},{2,4},device);
+        m.opacity_logits=Tensor::from_vector(std::vector<float>{2,1.5F},{2,1},device);
+        m.sh=Tensor::full({2,16,3},.3F,device); m.sh_degree=3;
+        m.normal_features=Tensor::from_vector(std::vector<float>{.2F,-.4F,1.3F,.7F, -.5F,.8F,.3F,-1.2F},{2,4},device);
+        m.filter_3d=Tensor::full({2,1},.005F,device);
+        Rasterizer rasterizer; RasterizeOptions o; o.require_depth=true;
+        o.colors_precomp=detail::normal_features_to_normals(m.normal_features);
+        const auto r=rasterizer.forward(m,camera,o);
+        const auto signed_colors=r.color.to_vector();
+        require(std::any_of(signed_colors.begin(),signed_colors.end(),[](float value){return value < -.01F;}),
+            "Normal field render must preserve signed colors");
+        const auto l=detail::compute_normal_field_loss(r,camera,.03F,true);
+        require(l.total>0 && l.total<.1F,"Normal field render did not contribute loss");
+        auto gradients=rasterizer.backward(m,r,l.color,l.alpha,l.depth,l.normal);
+        require(!gradients.sh.is_valid(),"Normal field must not differentiate SH");
+        gradients.normal_features=detail::normal_features_backward(m.normal_features,gradients.colors_precomp);
+        require_finite(gradients.normal_features,"Non-finite normal field feature gradient");
+        const auto feature_gradient=gradients.normal_features.to_vector();
+        require(std::any_of(feature_gradient.begin(),feature_gradient.end(),[](float value){return std::abs(value)>1e-6F;}),
+            "Normal field chain must produce nonzero feature gradients");
+        return std::make_pair(r.color,gradients);
+    };
+    const auto a=chain(Device::CUDA), b=chain(Device::Vulkan);
+    compare(a.first,b.first,2e-3,"Vulkan signed precomputed render");
+    compare(a.second.normal_features,b.second.normal_features,3e-3,"Vulkan complete normal feature gradient");
+    compare(a.second.means,b.second.means,3e-3,"Vulkan normal field mean gradient");
+    compare(a.second.log_scales,b.second.log_scales,3e-3,"Vulkan normal field scale gradient");
+    compare(a.second.quaternions,b.second.quaternions,3e-3,"Vulkan normal field rotation gradient");
+    compare(a.second.opacity_logits,b.second.opacity_logits,3e-3,"Vulkan normal field opacity gradient");
+    GaussianModel init;
+    init.means=Tensor::zeros({3,3},Device::Vulkan);
+    init.log_scales=Tensor::from_vector(std::vector<float>{-3,-1,-2, -1,-3,-2, -1,-2,-3},{3,3},Device::Vulkan);
+    const std::vector<float> quaternions{2,.3F,-.4F,.1F, 1,-.2F,.3F,.4F, .7F,.1F,-.2F,.3F};
+    init.quaternions=Tensor::from_vector(quaternions,{3,4},Device::Vulkan);
+    const auto initialized=detail::normal_features_from_smallest_axis_vulkan(init).to_vector();
+    for(std::size_t i=0;i<3;++i) {
+        Eigen::Quaternionf q(quaternions[4*i],quaternions[4*i+1],quaternions[4*i+2],quaternions[4*i+3]);
+        q.normalize(); const auto direction=q.toRotationMatrix().col(i).eval();
+        for(std::size_t j=0;j<3;++j)
+            require(std::abs(initialized[4*i+j]-direction(j))<2e-6F,"Vulkan smallest-axis initialization mismatch");
+        require(initialized[4*i+3]==0,"Vulkan initial normal field sign must be zero");
+    }
+    init.log_scales=Tensor::from_vector(std::vector<float>{-30,-31,-32, -30,-31,-32, -30,-31,-32},{3,3},Device::Vulkan);
+    init.filter_3d=Tensor::full({3,1},.01F,Device::Vulkan);
+    const auto tied=detail::normal_features_from_smallest_axis_vulkan(init).to_vector();
+    for(std::size_t i=0;i<3;++i) {
+        Eigen::Quaternionf q(quaternions[4*i],quaternions[4*i+1],quaternions[4*i+2],quaternions[4*i+3]);
+        q.normalize(); const auto direction=q.toRotationMatrix().col(0).eval();
+        for(std::size_t j=0;j<3;++j)
+            require(std::abs(tied[4*i+j]-direction(j))<2e-6F,"Vulkan filtered-scale tie initialization mismatch");
+    }
+#else
+    std::cout << "SKIP Vulkan normal field: backend not built\n";
+#endif
+}
+
 void test_vulkan_geometry_trainer() {
     using namespace photara::splat;
     const auto root = std::filesystem::temp_directory_path()/"photara_vulkan_geometry_smoke";
@@ -183,6 +320,7 @@ void test_vulkan_geometry_trainer() {
     o.initial_opacity = .9F;
     o.initialize_scale_from_knn = true; o.initial_scale = .3F;
     o.use_depth_normal_loss = true; o.depth_normal_from_iter = 1;
+    o.use_normal_field = true; o.normal_field_weight = .05F; o.normal_field_from_iter = 4;
     o.multi_view_geo_weight = .02F; o.multi_view_ncc_weight = .6F;
     o.multi_view_adaptive_frequency = true; o.multi_view_adaptive_stable_refinements = 1;
     o.filter_3d_update_interval = 1;
@@ -208,6 +346,11 @@ void test_vulkan_geometry_trainer() {
         "Vulkan filter was not recomputed after densification");
     require_finite(model.means,"Non-finite Vulkan trained means");
     require_finite(model.filter_3d,"Non-finite Vulkan final 3D filter");
+    require_finite(model.normal_features,"Non-finite Vulkan trained normal field");
+    const auto feature_values=model.normal_features.to_vector();
+    float orientation=0;
+    for(std::size_t i=3;i<feature_values.size();i+=4) orientation+=std::abs(feature_values[i]);
+    require(orientation>1e-6F,"Vulkan normal field Adam did not update orientation");
     SplatMeshOptions mesh_options;
     mesh_options.max_depth = 3.F;
     mesh_options.fusion.mesh_method = photara::mvs::MeshMethod::tsdf;

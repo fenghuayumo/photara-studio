@@ -302,9 +302,9 @@ public:
 
     void bind_model_device(const SplatDeviceGaussians& gaussians) {
         require(gaussians.count > 0, "device Gaussian count must be positive");
-        require(gaussians.sh_degree <= 3 &&
+        require(gaussians.colors_precomputed || (gaussians.sh_degree <= 3 &&
                     gaussians.sh_bases >=
-                        (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1),
+                        (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1)),
                 "device sh_bases does not cover sh_degree");
         const std::uint64_t count = gaussians.count;
         const auto valid = [](const SplatBufferView& view,
@@ -314,7 +314,7 @@ public:
         require(valid(gaussians.means, count * 3 * sizeof(float)),
                 "device means must have shape [N,3]");
         require(valid(gaussians.sh,
-                      count * gaussians.sh_bases * 3 * sizeof(float)),
+                      count * (gaussians.colors_precomputed ? 1 : gaussians.sh_bases) * 3 * sizeof(float)),
                 "device SH must have shape [N,B,3]");
         require(valid(gaussians.log_scales, count * 3 * sizeof(float)),
                 "device log scales must have shape [N,3]");
@@ -337,12 +337,12 @@ public:
                 "device model offsets do not satisfy minStorageBufferOffsetAlignment");
         device_model_ = gaussians;
         device_model_bound_ = true;
-        has_sh_ = true;
+        has_sh_ = !gaussians.colors_precomputed;
         has_scales_ = true;
         raw_chain_ = true;
         count_ = gaussians.count;
         sh_degree_ = gaussians.sh_degree;
-        sh_bases_ = gaussians.sh_bases;
+        sh_bases_ = gaussians.colors_precomputed ? 1 : gaussians.sh_bases;
         model_ready_ = true;
         last_frame_has_snapshots_ = false;
         last_frame_has_stats_ = false;

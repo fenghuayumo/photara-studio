@@ -141,8 +141,10 @@ gradients stay on the shared Vulkan device; only reduced logging terms are
 read back. Filter refresh follows resolution changes, topology changes, and
 the configured periodic schedule. Adaptive multi-view statistics are also
 computed on Vulkan. Native fisheye/equirectangular training still disables
-the pinhole geometry losses. Learned normal fields, external MVS targets, and
-transparent-alpha supervision remain unsupported by the Vulkan trainer.
+the pinhole geometry losses. Learned normal fields also run on Vulkan using
+signed precomputed-color rasterization, world-to-camera field consistency,
+and independent feature Adam state. External MVS targets and transparent-alpha
+supervision remain unsupported by the Vulkan trainer.
 
 ## 7. Learned normal field and PAM
 

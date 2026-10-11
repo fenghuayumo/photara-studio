@@ -855,6 +855,10 @@ void write_float(std::ofstream& stream, const float value) {
 
 tinytensor::Tensor normal_features_from_smallest_axis(
     const GaussianModel& model) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::normal_features_from_smallest_axis_vulkan(model);
+#endif
     const detail::ActivatedParameters activated =
         detail::activate_parameters(model);
     const auto scales = activated.scales.to_vector();
@@ -1129,12 +1133,11 @@ GaussianModel Trainer::train(
         if (options_.densify_revised_noise)
             throw std::invalid_argument(
                 "Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_normal_field ||
-            options_.use_mvs_depth || options_.use_mvs_normals ||
+        if (options_.use_mvs_depth || options_.use_mvs_normals ||
             options_.alpha_mode == AlphaMode::transparent)
             throw std::invalid_argument(
-                "Vulkan training does not yet support normal fields, external "
-                "MVS depth/normal targets, or transparent alpha supervision");
+                "Vulkan training does not yet support external "
+                "MVS depth/normal targets or transparent alpha supervision");
         core::Logger::instance().info(
             "splat training backend=vulkan orchestration=shared");
     } else {
@@ -2174,6 +2177,10 @@ GaussianModel Trainer::train(
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
             normal_options.require_depth = true;
+            // The primary fused RGB pass may omit owned attachments. The
+            // field loss needs the signed color and alpha of this render.
+            normal_options.copy_attachments = true;
+            normal_options.copy_color_only = false;
             const RenderResult normal_field_render = rasterizer.forward(
                 model, target.camera, normal_options);
             const auto normal_field_loss = detail::compute_normal_field_loss(

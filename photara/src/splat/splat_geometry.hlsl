@@ -35,7 +35,35 @@ float3 camera_to_world(float3 p) {
 void main(uint3 tid : SV_DispatchThreadID) {
     uint i = tid.x + tid.y * 65535u * 256u;
     if (i >= pc.count) return;
-    if (pc.mode == 0u) {
+    if (pc.mode == 10u) {
+        float3 scales = float3(input0[3u*i],input0[3u*i+1u],input0[3u*i+2u]);
+        scales = exp(scales);
+        float filter = pc.euclidean != 0u ? camera_data[i] : 0.0f;
+        scales = sqrt(scales*scales + filter*filter);
+        uint axis = scales.y < scales.x ? 1u : 0u;
+        if (scales.z < scales[axis]) axis = 2u;
+        float4 q = float4(input1[4u*i],input1[4u*i+1u],input1[4u*i+2u],input1[4u*i+3u]);
+        q *= rsqrt(max(dot(q,q), 1.0e-20f));
+        float w=q.x, x=q.y, y=q.z, z=q.w;
+        float3 n = axis == 0u ? float3(1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)) :
+            axis == 1u ? float3(2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)) :
+                         float3(2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y));
+        output0.Store4(16u*i,asuint(float4(n,0.0f)));
+    } else if (pc.mode == 7u || pc.mode == 8u) {
+        float3 f = float3(input0[4u*i], input0[4u*i+1u], input0[4u*i+2u]);
+        float len = length(f);
+        if (!(len > 1.0e-12f) || isinf(len)) return;
+        float3 n = f / len;
+        float sign = tanh(input0[4u*i+3u]);
+        if (pc.mode == 7u) {
+            output0.Store3(12u*i, asuint(sign * n));
+        } else {
+            float3 g = float3(input1[3u*i], input1[3u*i+1u], input1[3u*i+2u]);
+            float projection = dot(g, n);
+            output0.Store4(16u*i, asuint(float4(sign/len * (g-n*projection),
+                (1.0f-sign*sign)*projection)));
+        }
+    } else if (pc.mode == 0u || pc.mode == 9u) {
         uint x = i % pc.width, y = i / pc.width;
         if (x == 0u || y == 0u || x + 1u >= pc.width || y + 1u >= pc.height) return;
         uint top = i - pc.width, bottom = i + pc.width, left = i - 1u, right = i + 1u;
@@ -49,11 +77,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float inv_length = rsqrt(length2);
         float3 dn = c * inv_length;
         float3 n = float3(input1[i], input1[pc.count + i], input1[2u * pc.count + i]);
+        if (pc.mode == 9u) {
+            n = float3(dot(float3(camera_data[0],camera_data[4],camera_data[8]),n),
+                       dot(float3(camera_data[1],camera_data[5],camera_data[9]),n),
+                       dot(float3(camera_data[2],camera_data[6],camera_data[10]),n));
+        }
         float scale = pc.weight / (float)pc.count;
         add_float(terms, 0u, scale * (1.0f - dot(n, dn)));
-        add_float(output1, i, -scale * dn.x);
-        add_float(output1, pc.count + i, -scale * dn.y);
-        add_float(output1, 2u * pc.count + i, -scale * dn.z);
+        float3 field_gradient = -scale * dn;
+        if (pc.mode == 9u) field_gradient = camera_to_world(field_gradient);
+        add_float(output1, i, field_gradient.x);
+        add_float(output1, pc.count + i, field_gradient.y);
+        add_float(output1, 2u * pc.count + i, field_gradient.z);
         float3 g = -scale * n;
         float3 gc = (g - dn * dot(dn, g)) * inv_length;
         float3 gy = cross(dx, gc), gx = cross(gc, dy);
