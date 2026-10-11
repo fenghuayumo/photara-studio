@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#if defined(TINYTENSOR_USE_FMT_LOGGING)
+#include <fmt/format.h>
+#else
 #include <format>
+#endif
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -72,22 +76,11 @@ inline void log_write(std::ostream& os, T&& value) {
 // Two or more arguments: treat the first as a std::format format string.
 template <typename... Args>
 requires (sizeof...(Args) >= 1)
-#if defined(__CUDACC__) && defined(_MSC_VER)
-// MSVC's format-argument aggregate initialization triggers an nvcc 12.8
-// host-codegen ICE. CUDA logging call sites use plain {} placeholders; stream
-// those values without instantiating the MSVC format machinery in a .cu file.
-inline void log_write(std::ostream& os, std::string_view fmt, Args&&... args) {
-    const auto append = [&](const auto& value) {
-        const auto placeholder = fmt.find("{}");
-        if (placeholder == std::string_view::npos)
-            throw std::invalid_argument("CUDA log format requires {} placeholders");
-        os << fmt.substr(0, placeholder) << value;
-        fmt.remove_prefix(placeholder + 2);
-    };
-    (append(args), ...);
-    if (fmt.find("{}") != std::string_view::npos)
-        throw std::invalid_argument("CUDA log format has missing arguments");
-    os << fmt;
+#if defined(TINYTENSOR_USE_FMT_LOGGING)
+// Avoid CUDA 12.8's internal compiler error in MSVC std::format when
+// --expt-relaxed-constexpr is enabled; retain the same formatting syntax.
+inline void log_write(std::ostream& os, fmt::format_string<Args...> pattern, Args&&... args) {
+    os << fmt::format(pattern, std::forward<Args>(args)...);
 }
 #else
 inline void log_write(std::ostream& os, std::format_string<Args...> fmt, Args&&... args) {

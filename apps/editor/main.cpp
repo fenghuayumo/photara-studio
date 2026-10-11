@@ -160,6 +160,7 @@ int main(const int argc, char** argv) {
         editor::poll_alignment_preview(app);
         editor::poll_align_live(app);
         editor::poll_camera_photos(app);
+        editor::poll_splat_simplify(app);
 
         if (app.smoke_mode) {
             if (!app.smoke_started && !app.job.running()) {

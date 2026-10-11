@@ -15004,6 +15004,25 @@ ggml_backend_t ggml_backend_vk_init(size_t dev_num) {
     return vk_backend;
 }
 
+ggml_backend_t ggml_backend_vk_init_for_image_model(size_t dev_num) {
+    ggml_backend_t backend = ggml_backend_vk_init(dev_num);
+#ifdef _WIN32
+    auto * ctx = static_cast<ggml_backend_vk_context *>(backend->context);
+    const auto props = ctx->device->physical_device.getProperties();
+    if (props.vendorID == 0x10de && props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu &&
+        getenv("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM") == nullptr &&
+        getenv("GGML_VK_PREFER_HOST_MEMORY") == nullptr &&
+        getenv("GGML_VK_ALLOW_SYSMEM_FALLBACK") == nullptr) {
+        // SAM3's large, short-lived activation buffers and FPN copies are much
+        // slower through mapped VRAM on this Windows/NVIDIA path. Set the
+        // device policy before the model allocates its tensors and graphs.
+        ctx->device->disable_host_visible_vidmem = true;
+        GGML_LOG_INFO("ggml_vulkan: image model uses unmapped device-local memory\n");
+    }
+#endif
+    return backend;
+}
+
 bool ggml_backend_is_vk(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_vk_guid());
 }

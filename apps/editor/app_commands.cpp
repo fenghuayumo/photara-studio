@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "cli_path.hpp"
 #include "file_dialogs.hpp"
 
 #include "i18n.hpp"
@@ -14,6 +15,7 @@
 #include "sfm/export_mvs.hpp"
 #include "sfm/export_nerfstudio.hpp"
 #include "splat/formats.hpp"
+#include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 #if defined(PHOTARA_HAS_TEXTURE)
@@ -34,10 +36,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef PHOTARA_CLI_PATH
-#define PHOTARA_CLI_PATH "photara"
-#endif
 
 namespace editor {
 using i18n::tr;
@@ -95,8 +93,20 @@ void ensure_reconstruction_box(App& app) {
 void write_working_subject_bounds(App& app) {
     ensure_reconstruction_box(app);
     if (app.settings.scene_mode || !app.reconstruction_box.valid) return;
-    write_reconstruction_box(
-        app.reconstruction_box, app.layout.working_subject_bounds);
+    const ReconstructionBox& box = app.reconstruction_box;
+    const ReconstructionBox& previous = app.published_reconstruction_box;
+    std::error_code bounds_error;
+    if (app.published_subject_bounds_path == app.layout.working_subject_bounds &&
+        std::filesystem::exists(app.layout.working_subject_bounds, bounds_error) &&
+        previous.valid && previous.min.x == box.min.x &&
+        previous.min.y == box.min.y && previous.min.z == box.min.z &&
+        previous.max.x == box.max.x && previous.max.y == box.max.y &&
+        previous.max.z == box.max.z)
+        return;
+    if (write_reconstruction_box(box, app.layout.working_subject_bounds)) {
+        app.published_reconstruction_box = box;
+        app.published_subject_bounds_path = app.layout.working_subject_bounds;
+    }
 }
 
 void frame_reconstruction(App& app) {
@@ -392,6 +402,8 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.scene_mode = app.settings.scene_mode;
     settings.iterations = app.settings.iterations;
     settings.densification_cap = app.settings.densification_cap;
+    settings.training_mode = app.settings.training_mode;
+    settings.speedy_pruning = app.settings.speedy_pruning;
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
@@ -411,6 +423,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.build_mesh = app.settings.build_mesh;
     settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
+    settings.mesh_quality = app.settings.mesh_quality;
     settings.depth_normal_weight = app.settings.depth_normal_weight;
     settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
     settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
@@ -458,6 +471,8 @@ void apply_project_settings(
     app.settings.scene_mode = settings.scene_mode;
     app.settings.iterations = settings.iterations;
     app.settings.densification_cap = settings.densification_cap;
+    app.settings.training_mode = settings.training_mode;
+    app.settings.speedy_pruning = settings.speedy_pruning;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
@@ -487,6 +502,7 @@ void apply_project_settings(
     app.settings.build_mesh = settings.build_mesh;
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
+    app.settings.mesh_quality = settings.mesh_quality;
     app.settings.depth_normal_weight = settings.depth_normal_weight;
     app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
@@ -1391,6 +1407,71 @@ bool browse_splat_export_path(App& app) {
         name.c_str(), extension);
 }
 
+void start_splat_simplify(App& app) {
+    if (app.splat_simplify.running || app.job.running()) return;
+    if (!ensure_splat_renderer(app)) return;
+    if (!app.splat_simplify.has_baseline) {
+        if (!app.splat_edit.copy_model(app.splat_simplify.baseline) ||
+            app.splat_simplify.baseline.size() == 0) {
+            set_message(app, tr("Load a trained Gaussian model first."), theme::warning);
+            return;
+        }
+        app.splat_simplify.has_baseline = true;
+        app.splat_simplify.source_count =
+            static_cast<std::uint32_t>(app.splat_simplify.baseline.size());
+    }
+    photara::splat::GaussianModel model = app.splat_simplify.baseline;
+    auto progress = std::make_shared<std::atomic<float>>(0.F);
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    app.splat_simplify.progress_atom = progress;
+    app.splat_simplify.cancel = cancel;
+    app.splat_simplify.progress = 0.F;
+    app.splat_simplify.running = true;
+    app.splat_simplify.error.clear();
+    photara::splat::SimplifyOptions options;
+    options.keep_ratio = std::clamp(app.splat_simplify.keep_ratio, 0.05F, 1.F);
+    options.min_opacity = std::max(app.splat_simplify.min_opacity, 0.F);
+    options.progress = [progress](const float value) {
+        progress->store(value, std::memory_order_relaxed);
+    };
+    options.cancelled = [cancel]() {
+        return cancel->load(std::memory_order_relaxed);
+    };
+    app.splat_simplify.job = std::async(
+        std::launch::async,
+        [model = std::move(model), options = std::move(options)]() mutable {
+            return photara::splat::simplify_gaussians(model, options);
+        });
+}
+
+void poll_splat_simplify(App& app) {
+    if (app.splat_simplify.progress_atom)
+        app.splat_simplify.progress =
+            app.splat_simplify.progress_atom->load(std::memory_order_relaxed);
+    if (!app.splat_simplify.job.valid()) return;
+    if (app.splat_simplify.job.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready)
+        return;
+    app.splat_simplify.running = false;
+    app.splat_simplify.progress_atom.reset();
+    try {
+        auto model = app.splat_simplify.job.get();
+        if (app.splat_simplify.cancel &&
+            app.splat_simplify.cancel->load(std::memory_order_relaxed)) {
+            set_message(app, tr("Simplify cancelled"), theme::warning);
+            return;
+        }
+        const bool record_undo = !app.splat_simplify.applied;
+        app.splat_simplify.result_count =
+            static_cast<std::uint32_t>(model.size());
+        app.splat_edit.replace_from_model(app, model, record_undo);
+        app.splat_simplify.applied = true;
+    } catch (const std::exception& error) {
+        app.splat_simplify.error = error.what();
+        set_message(app, error.what(), theme::danger);
+    }
+}
+
 void open_splat_export_panel(App& app) {
     if (app.job.running() || !can_export_model(app)) return;
     if (!app.splat_export.initialized) {
@@ -1896,7 +1977,7 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
     photara::splat::VisualizeOptions options;
     const bool vulkan_training = live_preview_active(app) &&
                                  app.settings.training_backend == 1;
-    options.mode = vulkan_training
+    options.mode = vulkan_training && app.view_mode == VisualizationMode::points
         ? photara::splat::VisualizationMode::splat
         : app.view_mode == VisualizationMode::points
         ? photara::splat::VisualizationMode::points
@@ -1905,6 +1986,18 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
             : photara::splat::VisualizationMode::splat;
     options.point_size_px = app.view_options.point_size;
     options.ring_scale = app.view_options.ring_scale;
+    if (app.workspace == ViewportWorkspace::scene_3d && app.view_mode == VisualizationMode::splat) {
+        options.channel = app.display_channel == DisplayChannel::depth
+            ? photara::splat::VisualizationChannel::depth
+            : app.display_channel == DisplayChannel::normal
+                ? photara::splat::VisualizationChannel::normal
+                : photara::splat::VisualizationChannel::color;
+    }
+    options.automatic_depth = app.display_options.automatic_depth;
+    options.grayscale_depth = app.display_options.grayscale_depth;
+    options.world_normals = app.display_options.world_normals;
+    options.depth_near = app.display_options.depth_near;
+    options.depth_far = app.display_options.depth_far;
     return options;
 }
 
@@ -2508,7 +2601,7 @@ void start_align(App& app) {
         app.log.open(app.layout.align_log);
         app.job.start(
             build_align_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.align_log);
         app.active_job = JobKind::align;
         // Drop the previous cloud so the next frame only shows this run.
@@ -2644,7 +2737,7 @@ void start_export_sfm(App& app) {
         app.log.open(app.layout.export_log);
         app.job.start(
             build_export_sfm_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.export_log);
         app.active_job = JobKind::export_sfm;
         set_message(app, "Exporting SfM alignment...", theme::accent);
@@ -2937,49 +3030,49 @@ void start_train(App& app, const bool smoke) {
     handles.device_node_mask = gpu::device_node_mask();
     handles.device_uuid = gpu::device_uuid_hex();
 
-    std::string command;
-    if (smoke) {
-        // Fixed COLMAP dataset used only by --interop-smoke.
-        std::ostringstream smoke_command;
-        smoke_command
-            << '"' << PHOTARA_CLI_PATH << "\" --images \""
-            << app.settings.images_dir.data() << "\" --output \""
-            << app.layout.model_output.string()
-            << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
-            << " --splat-use-mask false"
-            << " --splat --backend "
-            << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
-            << " --splat-strategy "
-            << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
-            << " --splat-iterations "
-            << app.settings.iterations << " --splat-preview-interval "
-            << app.settings.preview_interval
-            << " --splat-preview-view 0 --splat-preview-view-file \""
-            << app.layout.preview_view_file.string() << '"'
-            << " --splat-preview-camera-file \""
-            << app.layout.preview_camera_file.string() << '"'
-            << " --splat-preview-vis-file \""
-            << app.layout.preview_vis_file.string() << '"'
-            << " --splat-preview-ack-file \""
-            << app.layout.preview_ack_file.string() << '"'
-            << " --splat-preview-vk-memory-handle " << handles.memory
-            << " --splat-preview-vk-semaphore-handle " << handles.semaphore
-            << " --splat-preview-vk-allocation-size " << handles.allocation_size
-            << " --splat-preview-vk-width " << handles.width
-            << " --splat-preview-vk-height " << handles.height
-            << " --splat-preview-vk-device-luid " << handles.device_luid
-            << " --splat-preview-vk-device-node-mask "
-            << handles.device_node_mask;
-        if (!handles.device_uuid.empty())
-            smoke_command << " --splat-preview-vk-device-uuid "
-                          << handles.device_uuid;
-        command = smoke_command.str();
-    } else {
-        command = build_train_command(
-            PHOTARA_CLI_PATH, app.settings, app.layout, handles);
-    }
-
     try {
+        std::string command;
+        if (smoke) {
+            // Fixed COLMAP dataset used only by --interop-smoke.
+            std::ostringstream smoke_command;
+            smoke_command
+                << '"' << cli_path().c_str() << "\" --images \""
+                << app.settings.images_dir.data() << "\" --output \""
+                << app.layout.model_output.string()
+                << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
+                << " --splat-use-mask false"
+                << " --splat --backend "
+                << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
+                << " --splat-strategy "
+                << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
+                << " --splat-iterations "
+                << app.settings.iterations << " --splat-preview-interval "
+                << app.settings.preview_interval
+                << " --splat-preview-view 0 --splat-preview-view-file \""
+                << app.layout.preview_view_file.string() << '"'
+                << " --splat-preview-camera-file \""
+                << app.layout.preview_camera_file.string() << '"'
+                << " --splat-preview-vis-file \""
+                << app.layout.preview_vis_file.string() << '"'
+                << " --splat-preview-ack-file \""
+                << app.layout.preview_ack_file.string() << '"'
+                << " --splat-preview-vk-memory-handle " << handles.memory
+                << " --splat-preview-vk-semaphore-handle " << handles.semaphore
+                << " --splat-preview-vk-allocation-size " << handles.allocation_size
+                << " --splat-preview-vk-width " << handles.width
+                << " --splat-preview-vk-height " << handles.height
+                << " --splat-preview-vk-device-luid " << handles.device_luid
+                << " --splat-preview-vk-device-node-mask "
+                << handles.device_node_mask;
+            if (!handles.device_uuid.empty())
+                smoke_command << " --splat-preview-vk-device-uuid "
+                              << handles.device_uuid;
+            command = smoke_command.str();
+        } else {
+            command = build_train_command(
+                cli_path().c_str(), app.settings, app.layout, handles);
+        }
+
         app.monitor.begin(JobKind::train);
         app.log.open(app.layout.train_log);
         app.job.start(command, app.layout.train_log);
@@ -3037,7 +3130,7 @@ void start_splat_mesh(App& app) {
         app.log.open(app.layout.dense_log);
         app.job.start(
             build_splat_mesh_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout, model),
+                cli_path().c_str(), app.settings, app.layout, model),
             app.layout.dense_log);
         app.active_job = JobKind::dense;
         set_message(
@@ -3095,7 +3188,7 @@ void start_dense(App& app) {
         app.log.open(app.layout.dense_log);
         app.job.start(
             build_dense_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.dense_log);
         app.active_job = JobKind::dense;
         set_message(
@@ -3164,7 +3257,7 @@ void start_texture(App& app) {
         app.log.open(app.layout.texture_log);
         app.job.start(
             build_texture_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.texture_log);
         app.active_job = JobKind::texture;
         set_message(

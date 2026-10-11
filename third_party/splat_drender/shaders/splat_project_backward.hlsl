@@ -370,10 +370,9 @@ void generic_geometry_backward(
     nJ.m[2][1] = -t.y * iz * iz;
     nJ.m[2][2] = t.z / length_t;
     float3 cam_normal = mat_mul_vec(nJ, ray_normal);
-    float3 nrm = cam_normal * rsqrt(dot(cam_normal, cam_normal));
-    // Deliberately match the CUDA/reference convention: the normalization
-    // Jacobian is evaluated on the already-normalized vector (factor one).
-    float3 d_cam_normal = d_normal - nrm * dot(nrm, d_normal);
+    float inv_normal_length = rsqrt(dot(cam_normal, cam_normal));
+    float3 nrm = cam_normal * inv_normal_length;
+    float3 d_cam_normal = (d_normal - nrm * dot(nrm, d_normal)) * inv_normal_length;
     float3 d_ray_normal = mat_mul_vec(mat_transpose(nJ), d_cam_normal);
     Mat3 d_nJ = mat_outer(d_cam_normal, ray_normal);
     float d_factor =
@@ -389,8 +388,8 @@ void generic_geometry_backward(
     float3 d_uvh_plane = -2.0f * aux * uvh_m_vb + numerator;
     float rsigma = sqrt(vb / ray_len2);
     float d_len2_x2 = -d_plane.w * rsigma / ray_len2;
-    float d_u_sigma = d_len2_x2 * u;
-    float d_v_sigma = d_len2_x2 * v;
+    float d_u_sigma = d_len2_x2 * u + d_plane.w * rsigma * uvh_m_vb.x;
+    float d_v_sigma = d_len2_x2 * v + d_plane.w * rsigma * uvh_m_vb.y;
     float aux_nJ =
         (-mat_at(d_nJ, 2, 0) * u - mat_at(d_nJ, 2, 1) * v - mat_at(d_nJ, 2, 2)) /
         ray_len2 * ray_len_inv;

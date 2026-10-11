@@ -103,7 +103,15 @@ target_compile_options(tinytensor_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr>)
 if(MSVC)
     target_compile_options(tinytensor_cpp PRIVATE /EHsc /utf-8)
-    target_compile_definitions(tinytensor_cuda PRIVATE FMT_UNICODE=0)
+    find_package(fmt CONFIG REQUIRED)
+    target_link_libraries(tinytensor_cuda PRIVATE fmt::fmt-header-only)
+    target_compile_definitions(tinytensor_cuda PRIVATE
+        FMT_UNICODE=0 TINYTENSOR_USE_FMT_LOGGING=1)
+    # Consumers also include the logger from CUDA translation units.
+    target_link_libraries(tinytensor INTERFACE fmt::fmt-header-only)
+    target_compile_definitions(tinytensor INTERFACE
+        $<$<COMPILE_LANGUAGE:CUDA>:TINYTENSOR_USE_FMT_LOGGING=1>
+        $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>)
 endif()
 
 # Alias for linking

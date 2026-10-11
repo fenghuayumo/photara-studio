@@ -276,7 +276,9 @@ struct ProjectSettings {
 
     bool scene_mode = false;
     int iterations = 30'000;
-    int densification_cap = 1'000'000;
+    int densification_cap = 3'000'000;
+    int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
+    bool speedy_pruning = false;
     int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive
@@ -302,6 +304,7 @@ struct ProjectSettings {
     bool build_mesh = false;
     int mesh_source = 0;
     int mesh_method = 0;  // auto, tsdf, delaunay, pam
+    int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High; extraction only.
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
@@ -419,6 +422,29 @@ bool is_video_source(const ProjectSettings& settings);
 
 inline bool mesh_from_gaussians(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 0;
+}
+
+// Resolve Auto for both training-time and standalone Gaussian mesh extraction.
+// Explicit selections take precedence over the normal-field training setting.
+inline int gaussian_mesh_method(const ProjectSettings& settings) {
+    return settings.mesh_method == 0
+        ? (settings.normal_field ? 3 : 1)
+        : settings.mesh_method;
+}
+
+struct MeshQualityPreset {
+    int pam_points, pam_pivots, pam_steps, pam_neighbors, pam_cell_samples;
+    float tsdf_voxel_scale;
+    int tsdf_pixel_step, mesh_points;
+    const char* dense_quality;
+};
+
+inline MeshQualityPreset mesh_quality_preset(const int quality) {
+    if (quality == 0)
+        return {750'000, 750'000, 8, 32, 8, 1.5F, 4, 1'500'000, "preview"};
+    if (quality == 2)
+        return {2'000'000, 2'000'000, 15, 48, 16, 0.5F, 1, 4'000'000, "high"};
+    return {1'000'000, 1'000'000, 10, 32, 10, 1.F, 4, 2'000'000, "default"};
 }
 
 inline bool mesh_from_mvs(const ProjectSettings& settings) {

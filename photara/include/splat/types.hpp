@@ -109,8 +109,9 @@ struct DepthSampleContextImpl;
 
 struct DepthSampleResult {
     tinytensor::Tensor camera_points;  // [P,3], neighbour camera space
-    tinytensor::Tensor inside;         // [P], bool
+    tinytensor::Tensor inside;         // [P], CUDA bool / Vulkan int32 flags
     std::shared_ptr<DepthSampleContextImpl> context;
+    std::shared_ptr<void> backend_impl;
 };
 
 struct DepthSampleGradients {

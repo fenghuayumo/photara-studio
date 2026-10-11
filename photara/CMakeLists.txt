@@ -570,6 +570,7 @@ if(PHOTARA_ENABLE_FEATURES)
 
         add_library(photara_splat_cuda STATIC
             src/splat/rasterizer.cu
+            src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
             src/splat/optimizer.cpp
@@ -577,6 +578,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/ppisp.cu
             src/splat/cuda_vulkan_preview.cu
             src/splat/fused_ssim.cu
+            src/splat/focus_mask.cu
             src/splat/visualize.cu)
         target_include_directories(photara_splat_cuda
             PUBLIC
@@ -592,6 +594,9 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_definitions(photara_splat_cuda PUBLIC PHOTARA_HAS_SPLAT=1)
         target_compile_options(photara_splat_cuda PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+        # Match CPU nearest-neighbor distance ordering and field arithmetic.
+        set_source_files_properties(src/splat/pam_cuda.cu PROPERTIES
+            COMPILE_OPTIONS "--fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
         set_target_properties(photara_splat_cuda PROPERTIES
             CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
             CUDA_SEPARABLE_COMPILATION OFF
@@ -609,6 +614,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_glb.cpp
+            src/splat/simplify.cpp
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
@@ -632,11 +638,26 @@ if(PHOTARA_ENABLE_FEATURES)
             target_sources(photara_splat_cuda PRIVATE
                 src/splat/optimizer_vulkan.cpp
                 src/splat/colour_correction_vulkan.cpp
-                src/splat/rasterizer_vulkan.cpp)
+                src/splat/rasterizer_vulkan.cpp
+                src/splat/geometry_vulkan.cpp
+                src/splat/visualize_vulkan.cpp
+                src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)
             target_compile_definitions(photara_splat_cuda PUBLIC
                 TINYTENSOR_HAS_VULKAN=1)
+            if(PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
+                include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+                photara_vk_embed_hlsl(
+                    TARGET photara_splat_cuda
+                    SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
+                    PROFILE cs_6_0
+                    ENV vulkan1.2
+                    INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
+                    OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/splat_vulkan")
+            endif()
             target_sources(photara_splat PRIVATE src/splat/photometric_loss.cpp)
             target_link_libraries(photara_splat PUBLIC splat_drender::vulkan)
         endif()
@@ -936,7 +957,7 @@ if(TARGET photara_features)
                     PHOTARA_STUDIO_SAM_VULKAN=1)
             endif()
             target_compile_definitions(photara_studio PRIVATE
-                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")
+                PHOTARA_CLI_FILENAME="$<TARGET_FILE_NAME:photara>")
             add_dependencies(photara_studio photara)
             add_custom_command(TARGET photara_studio POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1107,6 +1128,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.vulkan_geometry
+                COMMAND photara_splat_test --vulkan-geometry-only)
+            add_test(NAME photara.splat.vulkan_rings_preview
+                COMMAND photara_splat_test --vulkan-rings-only)
+        endif()
         if(TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.
             add_executable(photara_splat_vulkan_forward_test

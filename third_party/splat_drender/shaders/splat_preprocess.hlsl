@@ -103,6 +103,16 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float det_inv = 1.0f / det;
     float4 conic = float4(geom.cov2 * det_inv, -geom.cov1 * det_inv, geom.cov0 * det_inv,
                           opacity * geom.coef);
+    float preview_opacity = conic.w;
+    // Preview flags reserve bits 16..27 for sigma in units of 1/256.
+    // Tile enumeration and instance emission use conic.w to derive the
+    // footprint cutoff, so set a proxy opacity that gives exactly sigma^2.
+    // Keep the real opacity in rgb.w for the preview shader only.
+    if ((flags & 64u) != 0) {
+        if (preview_opacity <= kAlphaFloor) return;
+        float sigma = float((flags >> 16u) & 4095u) / 256.0f;
+        conic.w = kAlphaFloor * exp(0.5f * sigma * sigma);
+    }
     float mid = 0.5f * (geom.cov0 + geom.cov2);
     float root = sqrt(max(0.1f, mid * mid - det));
     float radius = ceil(3.0f * sqrt(max(mid + root, mid - root)));
@@ -128,7 +138,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint gaussian_base = index * gaussian_slots;
     gauss_f[gaussian_base] = float4(projected.pixel_x, projected.pixel_y, asfloat(depth_key), asfloat(uint(radius)));
     gauss_f[gaussian_base + 1u] = conic;
-    gauss_f[gaussian_base + 2u] = float4(rgb, 0.0f);
+    gauss_f[gaussian_base + 2u] = float4(rgb, (flags & 64u) != 0 ? preview_opacity : 0.0f);
     if (geometry) {
         gauss_f[gaussian_base + 3u] = geom.ray_plane;
         gauss_f[gaussian_base + 4u] = float4(geom.normal, 0.0f);

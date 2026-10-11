@@ -181,7 +181,7 @@ struct OrbitCamera {
 };
 
 // Axis-aligned reconstruction volume in reconstruction space. Defaults to the
-// sparse-cloud AABB; later edits will clip densify / mesh / splat work.
+// sparse-cloud AABB; object-mode splat training follows later edits.
 struct ReconstructionBox {
     Vec3 min;
     Vec3 max;

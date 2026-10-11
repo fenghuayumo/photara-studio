@@ -23,10 +23,6 @@
 #include <system_error>
 #include <vector>
 
-#ifndef PHOTARA_CLI_PATH
-#define PHOTARA_CLI_PATH "photara"
-#endif
-
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

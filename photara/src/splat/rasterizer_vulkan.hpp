@@ -6,6 +6,8 @@
 
 namespace splat_drender::vulkan {
 struct SplatColorCorrectionCommand;
+struct SplatDeviceMultiViewInput;
+struct SplatDeviceMultiViewOutput;
 }
 
 namespace photara::splat::detail {
@@ -13,6 +15,10 @@ namespace photara::splat::detail {
 RenderResult vulkan_raster_forward(
     std::shared_ptr<void>& backend, const GaussianModel& model,
     const Camera& camera, const RasterizeOptions& options);
+
+tinytensor::Tensor vulkan_pruning_scores(
+    std::shared_ptr<void>& backend, const GaussianModel& model,
+    const Camera& camera, RasterizeOptions options);
 
 float vulkan_photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
@@ -31,6 +37,18 @@ ModelGradients vulkan_raster_backward(
     const StructureAdamUpdate* structure_adam = nullptr);
 
 void vulkan_materialize_visibility(RenderResult& rendered);
+
+DepthSampleResult vulkan_sample_depth(
+    std::shared_ptr<void>& backend, const GaussianModel& model,
+    const tinytensor::Tensor& points, const Camera& camera,
+    const RasterizeOptions& options);
+DepthSampleGradients vulkan_sample_depth_backward(
+    const GaussianModel& model, const DepthSampleResult& sampled,
+    const tinytensor::Tensor& gradient);
+void vulkan_multi_view_loss(
+    const RenderResult& rendered,
+    const splat_drender::vulkan::SplatDeviceMultiViewInput& input,
+    const splat_drender::vulkan::SplatDeviceMultiViewOutput& output);
 
 // Reuse the rasterizer that owns the current training frame so colour
 // correction does not construct a duplicate Vulkan pipeline set.

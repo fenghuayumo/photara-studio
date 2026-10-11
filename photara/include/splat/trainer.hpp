@@ -112,16 +112,22 @@ struct PamMeshOptions {
     // structures a chance to enter the Delaunay complex.
     float gaussian_seed_fraction{0.F};
     unsigned oversampling_factor{2};
-    unsigned max_resample_rounds{4};
+    // max_points is an output cap. Accept a smaller converged cloud rather
+    // than repeating the entire refinement just to fill that cap.
+    unsigned max_resample_rounds{1};
     unsigned refinement_steps{10};
     unsigned vector_field_neighbors{32};
+    // Exact CUDA KD-tree queries and device-resident refinement. CPU is kept
+    // as a reference and for neighbor counts exceeding the CUDA limit (64).
+    bool gpu_refinement{true};
     unsigned points_per_tetrahedron{10};
     float occupancy_iso_value{0.5F};
     float vacancy_threshold{0.1F};
     float minimum_gradient_norm_squared{0.5F};
     float refinement_step{0.5F};
     float mask_background_threshold{0.01F};
-    std::size_t occupancy_chunk_size{250'000};
+    // Amortize per-camera Gaussian preparation without reducing samples.
+    std::size_t occupancy_chunk_size{4'000'000};
     unsigned seed{0};
 };
 
@@ -148,7 +154,8 @@ using DevicePreviewCallback = std::function<void(
 Camera camera_from_mvs_view(const mvs::MvsView& view);
 
 GaussianModel initialize_from_dense_cloud(
-    const mvs::MvsScene& scene, const TrainingOptions& options = {});
+    const mvs::MvsScene& scene, const TrainingOptions& options = {},
+    const mvs::OrientedBoundingBox* focus_override = nullptr);
 
 TrainingView make_training_view(
     const mvs::MvsView& view, const TrainingOptions& options = {});

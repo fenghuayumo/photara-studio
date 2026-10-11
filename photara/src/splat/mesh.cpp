@@ -230,6 +230,9 @@ SplatMeshResult extract_splat_mesh(
     raster_options.kernel_size = training_options.kernel_size;
     raster_options.scale_modifier = training_options.scale_modifier;
     raster_options.require_depth = true;
+    // Mesh extraction consumes only forward depth/normal/alpha. Training
+    // snapshots and the backward context are never used here.
+    raster_options.record_backward_state = false;
     Rasterizer rasterizer;
 
     std::size_t valid_depth_pixels = 0;
@@ -246,8 +249,9 @@ SplatMeshResult extract_splat_mesh(
         geometry_view.cy = target.camera.cy;
         geometry_view.width = target.camera.width;
         geometry_view.height = target.camera.height;
-        const RenderResult rendered = rasterizer.forward(
+        RenderResult rendered = rasterizer.forward(
             model, target.camera, raster_options);
+        rendered.context.impl.reset();
         const std::vector<float> depth = rendered.median_depth.to_vector();
         const std::vector<float> normal = rendered.normal.to_vector();
         const std::vector<float> alpha = rendered.alpha.to_vector();

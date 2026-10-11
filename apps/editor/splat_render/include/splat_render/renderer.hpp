@@ -4,6 +4,7 @@
 
 #include "photara_vk/photara_vk.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -22,7 +23,30 @@ inline constexpr std::uint32_t k_camera_equirectangular = 3;
 
 // gaussian is the splat_drender EWA forward. rings draws that same screen
 // covariance out to the alpha = 1/255 contour.
-enum class Shading : std::uint32_t { gaussian = 0, rings = 1 };
+enum class Shading : std::uint32_t { gaussian = 0, rings = 1, depth = 2, normal = 3 };
+
+struct DisplayOptions {
+    bool automatic_depth{true};
+    bool grayscale_depth{};
+    bool world_normals{true};
+    float depth_near{0.1F};
+    float depth_far{10.F};
+    bool operator==(const DisplayOptions&) const = default;
+};
+
+// Shared by the pixel conversion and the viewport legend. Near is warm.
+inline std::array<float, 3> depth_color(float t, bool grayscale) {
+    t = std::clamp(t, 0.F, 1.F);
+    if (grayscale) return {1.F - t, 1.F - t, 1.F - t};
+    constexpr std::array<float, 3> near_color{0.90F, 0.80F, 0.53F};
+    constexpr std::array<float, 3> middle_color{0.51F, 0.73F, 0.65F};
+    constexpr std::array<float, 3> far_color{0.16F, 0.24F, 0.40F};
+    const auto& a = t < 0.5F ? near_color : middle_color;
+    const auto& b = t < 0.5F ? middle_color : far_color;
+    const float u = t < 0.5F ? t * 2.F : (t - 0.5F) * 2.F;
+    return {a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u,
+            a[2] + (b[2] - a[2]) * u};
+}
 
 struct Camera {
     std::array<float, 16> world_to_camera{};
@@ -85,7 +109,9 @@ public:
     void clear_model();
 
     // Sorts back-to-front and draws. An unchanged camera and shading reuse the last image.
-    bool draw(const Camera& camera, FrameTarget& target, Shading shading = Shading::gaussian);
+    bool draw(const Camera& camera, FrameTarget& target, Shading shading = Shading::gaussian,
+              const DisplayOptions& display = {});
+    [[nodiscard]] std::array<float, 2> depth_range() const { return depth_range_; }
     bool download_rgb(
         std::vector<std::uint8_t>& rgb, std::uint32_t& width,
         std::uint32_t& height, std::uint32_t max_long_edge = 0);
@@ -207,6 +233,9 @@ private:
     FrameData cached_{};
     std::uint64_t cached_generation_{};
     bool cache_valid_{};
+    DisplayOptions display_options_{};
+    DisplayOptions cached_display_{};
+    std::array<float, 2> depth_range_{0.F, 1.F};
 };
 
 }  // namespace splat_render

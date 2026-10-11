@@ -12,6 +12,9 @@ struct RasterizeOptions {
     float kernel_size{0.F};
     float scale_modifier{1.F};
     bool require_depth{true};
+    // Forward-only Vulkan preview. Never enabled on a training render.
+    bool preview_rings{false};
+    float preview_ring_scale{2.828427F};
     // Vulkan keeps its live render frame in the backend context. Training can
     // skip color/alpha materialization unless a host preview needs the copies.
     bool copy_attachments{true};
@@ -24,10 +27,15 @@ struct RasterizeOptions {
     // the photometric loss. Regular render callers keep the eager default.
     bool defer_visibility{false};
     bool debug{false};
+    // Inference/preview callers can omit all backward-only pixel state.
+    bool record_backward_state{true};
+    bool compact_pixel_snapshots{true};
+    bool compact_instance_storage{true};
+    std::size_t snapshot_compaction_threshold{512ULL * 1024 * 1024};
     // Multi-view point queries (sample_depth): median-depth seed window in
     // world units, and the bracket width at which refinement stops. Zero keeps
-    // the wide default search (+/-200 with 8 refinements), which is far more
-    // precision than a depth-consistency loss can use.
+    // the wide default search (+/-200 with 8 refinements). Thin surfaces need
+    // accurate roots for the implicit median-depth backward pass.
     float point_depth_bracket{0.F};
     float point_depth_tolerance{0.F};
     // Optional [N,3] world-space feature colors. When present, SH evaluation
@@ -68,8 +76,25 @@ struct StructureAdamUpdate {
     bool capture_opacity_gradient{};
 };
 
+// An extraction-local snapshot for immutable Gaussians/cameras. Recreate this
+// cache after changing the model; never reuse it across training updates.
+struct OccupancyCache {
+    std::shared_ptr<void> state;
+};
+
+struct OccupancyCacheStats {
+    std::size_t prepared_views{}, queries{}, device_bytes{}, host_bytes{};
+    std::size_t preparations{};
+};
+
 class Rasterizer {
 public:
+    // Sum over pixels of (opacity * d(sum RGB)/d alpha)^2, as in
+    // Faster-GS / Speedy-Splat. Evaluates canonical colours, independent of
+    // training residuals, and does not update parameters or Adam moments.
+    tinytensor::Tensor pruning_scores(
+        const GaussianModel& model, const Camera& camera,
+        RasterizeOptions options = {}) const;
     RenderResult forward(
         const GaussianModel& model, const Camera& camera,
         const RasterizeOptions& options = {}) const;
@@ -112,6 +137,19 @@ public:
         const GaussianModel& model, const tinytensor::Tensor& world_points,
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
+
+    // Budgets bound resident draw lists on both devices. Views exceeding both
+    // budgets are prepared on demand, with identical query results.
+    // Zero selects a budget from currently available VRAM; SIZE_MAX forces host
+    // storage (useful for verifying the spill path).
+    OccupancyCache prepare_occupancy_cache(
+        const GaussianModel& model, const std::vector<Camera>& cameras,
+        const RasterizeOptions& options = {}, std::size_t device_budget = 0,
+        std::size_t host_budget = std::size_t{4} << 30) const;
+    OccupancyResult evaluate_occupancy(
+        OccupancyCache& cache, std::size_t camera_index,
+        const tinytensor::Tensor& world_points) const;
+    OccupancyCacheStats occupancy_cache_stats(const OccupancyCache& cache) const;
 
     // Packed [N,2] xy pixel centres from the last forward, or null.
     const float* projected_mean2d(const RenderResult& rendered) const;

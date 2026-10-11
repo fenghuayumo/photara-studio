@@ -59,10 +59,20 @@ struct TrainingOptions {
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
-    unsigned iterations{10'000};
+    unsigned iterations{30'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
+    // Speedy-Splat sensitivity pruning (CUDA/Vulkan). Absolute iteration schedule;
+    // zero score_views evaluates every training camera, never held-out views.
+    bool speedy_pruning{false};
+    unsigned speedy_start{6'000};
+    unsigned speedy_every{3'000};
+    unsigned speedy_stop{30'000};
+    unsigned speedy_score_views{0};
+    // ADC-IGS quality/speed preset; paper ratios 0.8/0.3 remain explicit options.
+    float speedy_soft_ratio{0.3F};
+    float speedy_hard_ratio{0.2F};
     // Console training stats every N steps. Zero logs only the first and last.
     unsigned log_interval{100};
     // Optional windowed CUDA-event timings for the GGGS training loop.
@@ -82,7 +92,7 @@ struct TrainingOptions {
         DensificationStrategy::adc_igs};
     // Growth ceiling while densify is enabled. Initialization uses the full
     // source cloud unless initial_point_budget asks for a subset.
-    std::size_t densification_cap{1'000'000};
+    std::size_t densification_cap{3'000'000};
     // Upper bound on the Gaussians built from the input point cloud. Sparse
     // SfM clouds regularly outnumber the growth ceiling, and an initialization
     // already sitting on it leaves IGS no room to refine anything: every later
@@ -254,22 +264,20 @@ struct TrainingOptions {
     unsigned normal_field_from_iter{8'001};
     float normal_features_lr{0.025F};
     // Depth-normal geometry training implicitly enables the reference
-    // GGGS/Mip-Splatting low-pass filter. It is deliberately not an
-    // independent switch: appearance-only 3DGS must keep canonical Gaussian
-    // scale/opacity untouched, while the 3DGS -> mesh path needs stable
-    // sub-pixel coverage.
+    // GGGS/Mip-Splatting low-pass filter refresh interval. The auto mode
+    // leaves appearance-only 3DGS scale/opacity untouched and enables stable
+    // sub-pixel coverage for pinhole geometric supervision.
     unsigned filter_3d_update_interval{100};
     // GGGS multi-view PatchMatch supervision. Geometry uses a differentiable
     // depth round trip through a nearby camera; NCC uses the reference
     // plane-induced homography and the original image pair.
     float multi_view_geo_weight{0.F};
     float multi_view_ncc_weight{0.F};
-    // Multi-view point-query median-depth search. > 0 overrides the
-    // scene-derived bracket, 0 derives it from the scene extent, < 0 keeps the
-    // wide default search (+/-200 window, eight refinements).
+    // Multi-view point-query median-depth seed window. > 0 overrides it,
+    // 0 derives it from the scene extent, < 0 keeps the wide +/-200 window.
     float multi_view_depth_bracket{0.F};
-    // <= 0 uses all eight refinements. Positive values explicitly opt into
-    // approximate query depths and may invalidate implicit geometry gradients.
+    // Refinement stops early only for an explicit positive tolerance. The
+    // default (<= 0) uses all eight refinements to preserve median gradients.
     float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
     // Subsample the expensive multi-view objective after ADC growth stops.
@@ -410,6 +418,9 @@ struct TrainingOptions {
     // trainer drops a preview instead of waiting for the editor, so a busy
     // editor can never stall the optimizer.
     std::filesystem::path preview_ack_file;
+    // Studio updates this SubjectBounds file while object-mode training runs.
+    // An empty path keeps the scene's initial bounds fixed.
+    std::filesystem::path live_subject_bounds_file;
 };
 
 // Strategy-specific defaults for shared densification knobs. The CLI applies

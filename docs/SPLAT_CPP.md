@@ -133,6 +133,17 @@ and compensates opacity by the scale-determinant ratio. It is recomputed after
 topology changes and periodically during training and is stored as
 `filter_3D` in PLY output.
 
+Vulkan supports the pinhole depth-normal loss, 3D-filter computation and
+refresh, and the complete multi-view geometry/NCC gradient chain. Neighbour
+queries use a separate raster workspace so they cannot overwrite reference
+snapshots or the fused RGB gradient. Images, query points, filter radii, and
+gradients stay on the shared Vulkan device; only reduced logging terms are
+read back. Filter refresh follows resolution changes, topology changes, and
+the configured periodic schedule. Adaptive multi-view statistics are also
+computed on Vulkan. Native fisheye/equirectangular training still disables
+the pinhole geometry losses. Learned normal fields, external MVS targets, and
+transparent-alpha supervision remain unsupported by the Vulkan trainer.
+
 ## 7. Learned normal field and PAM
 
 The trainer can learn four GaussianWrapping-style channels named
@@ -404,6 +415,12 @@ quality rather than timing alone.
 loss gradients, masks, model serialization, topology operations, and training
 data paths. Additional smoke tests validate imported datasets, short training
 runs, mesh extraction, and finite exported model values.
+
+`photara.splat.vulkan_geometry` (`photara_splat_test --vulkan-geometry-only`)
+checks depth-normal finite differences, CUDA/Vulkan filter and full MV gradient
+parity, masked planar NCC, deferred statistics, and synthetic training through
+densification, resolution changes, and TSDF extraction. These are numerical and
+integration gates; real-scene mesh quality still needs dataset evaluation.
 
 Quality acceptance must include held-out rendering, mask support, thin
 structures, connected components, topology diagnostics, and visual inspection;

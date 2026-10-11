@@ -187,26 +187,32 @@ void draw(
             break;
         }
         case Icon::grid: {
-            for (int i = 0; i < 4; ++i) {
-                const float t = 0.22F + i * 0.19F;
-                line(draw_list, min, max, t, 0.22F, t, 0.78F, colour,
-                     thickness * 0.75F);
-                line(draw_list, min, max, 0.22F, t, 0.78F, t, colour,
-                     thickness * 0.75F);
-            }
+            draw_list->AddRect(point(min, max, 0.12F, 0.12F),
+                               point(min, max, 0.88F, 0.88F), colour,
+                               extent * 0.06F, 0, thickness);
+            line(draw_list, min, max, 0.50F, 0.12F, 0.50F, 0.88F, colour, thickness);
+            line(draw_list, min, max, 0.12F, 0.50F, 0.88F, 0.50F, colour, thickness);
             break;
         }
         case Icon::camera: {
-            draw_list->AddRect(
-                point(min, max, 0.17F, 0.33F), point(min, max, 0.83F, 0.76F),
-                colour, 2.F, 0, thickness);
-            draw_list->AddCircle(centre, extent * 0.14F, colour, 16, thickness);
-            const ImVec2 top[] = {
-                point(min, max, 0.29F, 0.33F),
-                point(min, max, 0.38F, 0.21F),
-                point(min, max, 0.60F, 0.21F),
-                point(min, max, 0.69F, 0.33F)};
-            draw_list->AddPolyline(top, 4, colour, 0, thickness);
+            // One continuous body avoids a line crossing the lens housing.
+            draw_list->PathLineTo(point(min, max, 0.20F, 0.32F));
+            draw_list->PathLineTo(point(min, max, 0.31F, 0.32F));
+            draw_list->PathLineTo(point(min, max, 0.40F, 0.18F));
+            draw_list->PathLineTo(point(min, max, 0.60F, 0.18F));
+            draw_list->PathLineTo(point(min, max, 0.69F, 0.32F));
+            draw_list->PathLineTo(point(min, max, 0.80F, 0.32F));
+            draw_list->PathArcTo(point(min, max, 0.80F, 0.40F), extent * 0.08F,
+                                 -1.570796F, 0.F, 4);
+            draw_list->PathArcTo(point(min, max, 0.80F, 0.74F), extent * 0.08F,
+                                 0.F, 1.570796F, 4);
+            draw_list->PathArcTo(point(min, max, 0.20F, 0.74F), extent * 0.08F,
+                                 1.570796F, 3.141593F, 4);
+            draw_list->PathArcTo(point(min, max, 0.20F, 0.40F), extent * 0.08F,
+                                 3.141593F, 4.712389F, 4);
+            draw_list->PathStroke(colour, ImDrawFlags_Closed, thickness);
+            draw_list->AddCircle(point(min, max, 0.50F, 0.56F), extent * 0.16F,
+                                 colour, 20, thickness);
             break;
         }
         case Icon::frame: {
@@ -442,6 +448,17 @@ void draw(
                 thickness);
             break;
         }
+        case Icon::sliders: {
+            for (int row = 0; row < 3; ++row) {
+                const float y = 0.25F + row * 0.25F;
+                const float x = row == 1 ? 0.65F : 0.35F;
+                line(draw_list, min, max, 0.15F, y, x - 0.09F, y, colour, thickness);
+                line(draw_list, min, max, x + 0.09F, y, 0.85F, y, colour, thickness);
+                draw_list->AddCircle(point(min, max, x, y), extent * 0.09F,
+                                     colour, 12, thickness);
+            }
+            break;
+        }
         case Icon::heatmap: {
             draw_list->AddRect(
                 point(min, max, 0.18F, 0.22F), point(min, max, 0.82F, 0.78F),
@@ -663,22 +680,12 @@ void draw(
             break;
         }
         case Icon::edit: {
-            const ImVec2 tip = point(min, max, 0.80F, 0.20F);
-            const ImVec2 neck_a = point(min, max, 0.64F, 0.24F);
-            const ImVec2 neck_b = point(min, max, 0.76F, 0.36F);
-            const ImVec2 back_a = point(min, max, 0.22F, 0.66F);
-            const ImVec2 back_b = point(min, max, 0.34F, 0.78F);
-            const ImVec2 eraser_a = point(min, max, 0.16F, 0.72F);
-            const ImVec2 eraser_b = point(min, max, 0.28F, 0.84F);
-            draw_list->AddTriangleFilled(tip, neck_a, neck_b, colour);
-            draw_list->AddLine(neck_a, back_a, colour, thickness);
-            draw_list->AddLine(neck_b, back_b, colour, thickness);
-            draw_list->AddLine(back_a, back_b, colour, thickness);
-            draw_list->AddLine(eraser_a, back_a, colour, thickness);
-            draw_list->AddLine(eraser_b, back_b, colour, thickness);
-            draw_list->AddLine(eraser_a, eraser_b, colour, thickness);
-            line(draw_list, min, max, 0.58F, 0.30F, 0.70F, 0.42F, colour,
-                 thickness);
+            const ImVec2 pencil[] = {
+                point(min, max, 0.16F, 0.84F), point(min, max, 0.21F, 0.63F),
+                point(min, max, 0.67F, 0.17F), point(min, max, 0.83F, 0.33F),
+                point(min, max, 0.37F, 0.79F)};
+            draw_list->AddPolyline(pencil, 5, colour, ImDrawFlags_Closed, thickness);
+            line(draw_list, min, max, 0.57F, 0.27F, 0.73F, 0.43F, colour, thickness);
             break;
         }
     }

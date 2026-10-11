@@ -48,7 +48,7 @@ void extract_ranges(int instance_count, const unsigned* tile_key,
 // so an upper-bound backward grid can safely early-return).
 void bucket_offsets(int tiles, int buckets, const uint2* range,
                     unsigned* bucket_count, unsigned* bucket_offset,
-                    unsigned* bucket_tile);
+                    unsigned* bucket_tile, const unsigned* max_contributor = nullptr);
 
 void blend(bool need_depth, const uint2* tile_range,
            const unsigned* instance_value, int width, int height,
