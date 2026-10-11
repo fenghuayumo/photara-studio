@@ -1398,6 +1398,7 @@ GaussianModel Trainer::train(
                 model.sh.device());
             normal_features_state = detail::make_adam_state(
                 model.normal_features);
+            normal_features_updates = 0;
             if (use_3d_filter)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras,

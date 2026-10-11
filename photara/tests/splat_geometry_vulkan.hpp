@@ -60,6 +60,18 @@ void test_vulkan_geometry_chain() {
     auto invisible = Tensor::from_vector(std::vector<float>{0,0,-2,100,0,2}, {2,3}, Device::CUDA);
     compare(detail::compute_3d_filter(invisible,{camera}),
         detail::compute_3d_filter(invisible.to(Device::Vulkan),{camera}),2e-5F,"Vulkan invisible filter fallback");
+    auto margin_means = Tensor::from_vector(
+        std::vector<float>{1.F,0.F,2.F, 0.F,0.F,4.F}, {2,3}, Device::CUDA);
+    compare(detail::compute_3d_filter(margin_means,{camera}),
+        detail::compute_3d_filter(margin_means.to(Device::Vulkan),{camera}),
+        2e-5F,"Vulkan 15-percent filter margin parity");
+    auto offset_camera = camera;
+    offset_camera.cx = 6.F;
+    auto offset_means = Tensor::from_vector(
+        std::vector<float>{-.6F,0.F,2.F, 0.F,0.F,4.F}, {2,3}, Device::CUDA);
+    compare(detail::compute_3d_filter(offset_means,{offset_camera}),
+        detail::compute_3d_filter(offset_means.to(Device::Vulkan),{offset_camera}),
+        2e-5F,"Vulkan off-center filter parity");
     auto fisheye = camera;
     fisheye.model = photara::CameraModel::opencv_fisheye;
     fisheye.k1 = .08F; fisheye.k2 = -.025F;
