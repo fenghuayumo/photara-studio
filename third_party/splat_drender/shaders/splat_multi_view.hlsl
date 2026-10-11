@@ -21,18 +21,7 @@ float load_float(uint index) {
     return asfloat(output_buffer.Load(4u * index));
 }
 
-void atomic_add_float(uint index, float value) {
-    if (value == 0.0f || isnan(value) || isinf(value)) return;
-    const uint address = 4u * index;
-    uint expected = output_buffer.Load(address);
-    [loop] for (;;) {
-        uint desired = asuint(asfloat(expected) + value);
-        uint observed;
-        output_buffer.InterlockedCompareExchange(address, expected, desired, observed);
-        if (observed == expected) return;
-        expected = observed;
-    }
-}
+groupshared float reduction[1280];
 
 struct GraySample {
     float value;
@@ -175,7 +164,26 @@ bool plane_warp_ncc(
 }
 
 [numthreads(16, 16, 1)]
-void main(uint3 dispatch_id : SV_DispatchThreadID) {
+void main(uint3 dispatch_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID,
+          uint rank : SV_GroupIndex) {
+    if ((pc.u13 & 0x40000000u) != 0u) {
+        uint item = group_id.x * 256u + rank;
+        [unroll] for (uint term=0u; term<5u; ++term)
+            reduction[term*256u+rank] = item < pc.u19 ? load_float(pc.u14+5u*item+term) : 0.0f;
+        GroupMemoryBarrierWithGroupSync();
+        [unroll] for (uint stride=128u; stride>0u; stride>>=1u) {
+            if (rank < stride) {
+                [unroll] for (uint term=0u; term<5u; ++term)
+                    reduction[term*256u+rank] += reduction[term*256u+rank+stride];
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+        if (rank==0u) {
+            [unroll] for (uint term=0u; term<5u; ++term)
+                store_float(pc.u15+5u*group_id.x+term,reduction[term*256u]);
+        }
+        return;
+    }
     uint reference_width = pc.u0;
     uint reference_height = pc.u1;
     uint neighbour_width = pc.u2;
@@ -248,7 +256,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     round_trip.y = transform_buffer[1] * delta.x + transform_buffer[4] * delta.y + transform_buffer[7] * delta.z;
     round_trip.z = transform_buffer[2] * delta.x + transform_buffer[5] * delta.y + transform_buffer[8] * delta.z;
     if (!(round_trip.z > 0.2f)) return;
-    atomic_add_float(terms_base + 4u, 1.0f);
+    store_float(terms_base + 5u + 5u*pixel + 4u, 1.0f);
     float projected_x = reference_fx * round_trip.x / round_trip.z + reference_cx;
     float projected_y = reference_fy * round_trip.y / round_trip.z + reference_cy;
     float du = projected_x - (float)x;
@@ -269,8 +277,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     store_float(sampled_base + 3u * pixel, grad_sampled.x);
     store_float(sampled_base + 3u * pixel + 1u, grad_sampled.y);
     store_float(sampled_base + 3u * pixel + 2u, grad_sampled.z);
-    atomic_add_float(terms_base, geometry_confidence * noise);
-    atomic_add_float(terms_base + 1u, 1.0f);
+    store_float(terms_base + 5u + 5u*pixel, geometry_confidence * noise);
+    store_float(terms_base + 5u + 5u*pixel + 1u, 1.0f);
 
     if ((pc.u13 & 8u) == 0u) return;
     float3 normal = float3(
@@ -297,6 +305,6 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     store_float(normal_base + pixel, factor * ncc_grad_normal.x);
     store_float(normal_base + pixels + pixel, factor * ncc_grad_normal.y);
     store_float(normal_base + 2u * pixels + pixel, factor * ncc_grad_normal.z);
-    atomic_add_float(terms_base + 2u, geometry_confidence * confidence * error);
-    atomic_add_float(terms_base + 3u, 1.0f);
+    store_float(terms_base + 5u + 5u*pixel + 2u, geometry_confidence * confidence * error);
+    store_float(terms_base + 5u + 5u*pixel + 3u, 1.0f);
 }

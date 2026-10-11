@@ -50,6 +50,36 @@ void test_vulkan_geometry_chain() {
         std::cout << message << " relative_l2=" << relative << '\n';
         require(relative < tolerance || std::sqrt(error) < 2e-6, message);
     };
+    // Exercise chunk boundaries and heavy overlap, with the CUDA query oracle.
+    {
+        constexpr std::size_t queries=270017;
+        std::vector<float> world(3*queries), upstream(3*queries);
+        for (std::size_t i=0;i<queries;++i) {
+            world[3*i]=.01F*float(int(i%23)-11);
+            world[3*i+1]=.01F*float(int(i%19)-9);
+            world[3*i+2]=2.F;
+            upstream[3*i]=.1F/queries;
+            upstream[3*i+1]=-.2F/queries;
+            upstream[3*i+2]=.3F/queries;
+        }
+        const auto run_query = [&](Device device) {
+            auto m=make_model(device);
+            Rasterizer rasterizer;
+            RasterizeOptions options;
+            options.require_depth=true;
+            options.point_depth_tolerance=0.F;
+            const auto sampled=rasterizer.sample_depth(m,
+                Tensor::from_vector(world,{queries,3},device),camera,options);
+            return rasterizer.sample_depth_backward(m,sampled,
+                Tensor::from_vector(upstream,{queries,3},device));
+        };
+        const auto cuda=run_query(Device::CUDA), vk=run_query(Device::Vulkan);
+        compare(cuda.points,vk.points,.003F,"Vulkan chunked query point gradients");
+        compare(cuda.model.means,vk.model.means,.003F,"Vulkan chunked query mean gradients");
+        compare(cuda.model.log_scales,vk.model.log_scales,.003F,"Vulkan chunked query scale gradients");
+        compare(cuda.model.quaternions,vk.model.quaternions,.003F,"Vulkan chunked query rotation gradients");
+        compare(cuda.model.opacity_logits,vk.model.opacity_logits,.003F,"Vulkan chunked query opacity gradients");
+    }
     // Visible, behind-camera, off-screen, and all-invisible fallback radii.
     auto means = Tensor::from_vector(std::vector<float>{0,0,2, .1F,.2F,3, 100,0,2, 0,0,-2}, {4,3}, Device::CUDA);
     for (bool euclidean : {false,true}) {
@@ -209,6 +239,48 @@ void test_vulkan_normal_field() {
     const auto quiet=detail::compute_normal_field_loss(render(Device::Vulkan),camera,.03F,false);
     compare(vk.color,quiet.color,2e-5,"Vulkan non-reporting normal field gradient");
     compare(vk.depth,quiet.depth,2e-5,"Vulkan non-reporting normal field depth gradient");
+    // Full-resolution scalar accumulation used to serialize millions of CAS
+    // retries on one address and reset Windows display GPUs.
+    {
+        constexpr std::size_t width=1920, height=1276, count=width*height;
+        Camera large; large.width=width; large.height=height;
+        large.fx=large.fy=1000; large.cx=width*.5F; large.cy=height*.5F;
+        large.world_to_camera={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        RenderResult r;
+        r.color=Tensor::zeros({3,height,width},Device::Vulkan);
+        r.alpha=Tensor::full({height,width},1.F,Device::Vulkan);
+        r.median_depth=Tensor::full({height,width},2.F,Device::Vulkan);
+        r.normal=Tensor::zeros({3,height,width},Device::Vulkan);
+        const float expected=.05F*float((width-2)*(height-2))/float(count);
+        detail::LossGradients dn;
+        detail::add_depth_normal_loss_vulkan(r,large,.05F,dn,true);
+        require(std::abs(dn.total-expected)<2e-6F,"Full-resolution Vulkan DN reduction mismatch");
+        const auto nf=detail::compute_normal_field_loss(r,large,.05F,true);
+        require(std::abs(nf.total-expected)<2e-6F,"Full-resolution Vulkan normal field reduction mismatch");
+        detail::LossGradients dn_quiet;
+        detail::add_depth_normal_loss_vulkan(r,large,.05F,dn_quiet,false);
+        compare(dn.normal,dn_quiet.normal,1e-6,"Full-resolution quiet DN gradients");
+        const auto nf_quiet=detail::compute_normal_field_loss(r,large,.05F,false);
+        compare(nf.color,nf_quiet.color,1e-6,"Full-resolution quiet normal field gradients");
+        std::cout << "Full-resolution DN/normal field reduction passed\n";
+        // More than 256*256 pixels exercises every level of MV reduction.
+        large.fx=large.fy=1024.F;
+        TrainingView reference, neighbour;
+        reference.camera=neighbour.camera=large;
+        const auto points=detail::unproject_depth_to_world(r.median_depth,large);
+        const auto inside=Tensor::from_vector(std::vector<int>(count,1),{height,width},Device::Vulkan);
+        TrainingOptions options;
+        options.multi_view_geo_weight=.02F;
+        options.multi_view_ncc_weight=0.F;
+        detail::LossGradients mv_gradients;
+        Tensor point_gradients;
+        const auto mv=detail::add_multi_view_loss(points,inside,r,reference,neighbour,
+            options,mv_gradients,point_gradients,true);
+        require(mv.geometry_candidates==count && mv.geometry_pixels==count,
+            "Full-resolution Vulkan MV count reduction mismatch");
+        require(std::abs(mv.geometry-1e-6F)<1e-9F,"Full-resolution Vulkan MV loss reduction mismatch");
+        std::cout << "Full-resolution MV reduction passed\n";
+    }
     // Independent finite differences through a rotated camera and depth stencil.
     for (bool color : {true,false}) {
         const std::size_t index=8*side+9;

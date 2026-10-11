@@ -40,6 +40,7 @@
 #include "splat_ranges_indirect.hlsl.embedded.hpp"
 #include "splat_sample_depth.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward.hlsl.embedded.hpp"
+#include "splat_sample_depth_backward_atomic.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
 #include "splat_ssim.hlsl.embedded.hpp"
 #include "splat_loss_reduce.hlsl.embedded.hpp"
@@ -213,6 +214,9 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_sample_depth_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_sample_depth_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_sample_depth_backward_atomic.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_backward_atomic_hlsl_spv});
     }
     if (shader_name == "splat_multi_view.hlsl.spv") {
         return std::as_bytes(std::span{splat_multi_view_hlsl_spv});

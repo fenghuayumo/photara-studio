@@ -83,7 +83,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
                        dot(float3(camera_data[2],camera_data[6],camera_data[10]),n));
         }
         float scale = pc.weight / (float)pc.count;
-        add_float(terms, 0u, scale * (1.0f - dot(n, dn)));
+        // A single CAS accumulator across millions of pixels can time out on
+        // display GPUs. Write disjoint terms and reduce them in a separate pass.
+        if (pc.camera_count != 0u)
+            terms.Store(4u*i, asuint(scale * (1.0f - dot(n, dn))));
         float3 field_gradient = -scale * dn;
         if (pc.mode == 9u) field_gradient = camera_to_world(field_gradient);
         add_float(output1, i, field_gradient.x);

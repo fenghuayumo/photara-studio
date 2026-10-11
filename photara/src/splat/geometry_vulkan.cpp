@@ -155,10 +155,11 @@ LossGradients compute_normal_field_loss_vulkan(const RenderResult& rendered,
         Tensor::zeros_like(rendered.median_depth), Tensor::zeros_like(rendered.normal)};
     if (!(weight > 0.F)) return result;
     push.weight = weight;
-    auto terms = Tensor::zeros({1}, device);
+    push.camera_count = collect_scalar_terms;
+    auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
     launch(push, {rendered.median_depth, rendered.color, matrix(camera), result.depth, result.color, terms});
     if (collect_scalar_terms) {
-        result.normal_value = terms.to_vector()[0];
+        result.normal_value = terms.sum().to_vector()[0];
         result.total = result.normal_value;
     }
     return result;
@@ -174,10 +175,11 @@ void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& ca
     if (!(weight > 0.F)) return;
     auto push = camera_push(0, camera);
     push.weight = weight;
-    auto terms = Tensor::zeros({1}, device);
+    push.camera_count = collect_scalar_terms;
+    auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
     launch(push, {rendered.median_depth, rendered.normal, {}, gradients.depth, gradients.normal, terms});
     if (collect_scalar_terms) {
-        const float value = terms.to_vector()[0];
+        const float value = terms.sum().to_vector()[0];
         gradients.normal_value += value;
         gradients.total += value;
     }

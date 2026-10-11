@@ -88,6 +88,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_blend_backward_no_geometry_atomic.hlsl
             shaders/splat_sample_depth.hlsl
             shaders/splat_sample_depth_backward.hlsl
+            shaders/splat_sample_depth_backward_atomic.hlsl
             shaders/splat_multi_view.hlsl
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
@@ -135,6 +136,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_pruning_scores.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sample_depth_backward.hlsl"
                 "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
 
         target_include_directories(splat_drender_vulkan

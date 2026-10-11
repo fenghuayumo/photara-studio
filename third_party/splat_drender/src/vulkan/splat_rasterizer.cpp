@@ -44,6 +44,15 @@ std::uint32_t div_up(std::uint32_t value, std::uint32_t divisor) {
     return (value + divisor - 1) / divisor;
 }
 
+std::size_t multi_view_output_count(const std::size_t pixels) {
+    // Preserve the public [7*P gradients, 5 reduced terms] prefix. The
+    // trailing per-pixel terms and hierarchical partials are private scratch.
+    std::size_t count = 12 * pixels + 5;
+    for (std::size_t groups = (pixels + 255) / 256; groups > 1; groups = (groups + 255) / 256)
+        count += 5 * groups;
+    return count;
+}
+
 std::uint32_t scan_scratch_uints(std::uint32_t count) {
     return 4 * div_up(count, 256) + 64;
 }
@@ -171,6 +180,8 @@ public:
             blend_backward_no_geometry_atomic_ = context.create_pipeline(
                 "splat_blend_backward_no_geometry_atomic.hlsl.spv",
                 12, sizeof(Push));
+            sample_depth_backward_atomic_ = context.create_pipeline(
+                "splat_sample_depth_backward_atomic.hlsl.spv", 10, sizeof(Push));
         }
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
@@ -1368,13 +1379,12 @@ public:
         set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
         set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
         set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
-        dispatch_infos(
-            sample_depth_backward_,
+        dispatch_sample_backward(
             {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
              descriptor(*frame_camera_), descriptor(sample_world_points_, sample_point_count_ * 12ull),
              descriptor(sample_f_), descriptor(sample_u_), descriptor(loss, sample_point_count_ * 12ull),
              descriptor(blend_gradient), descriptor(point_gradient, sample_point_count_ * 12ull)},
-            sample_push, div_up(sample_point_count_, 256));
+            sample_push);
 
         Push project_push{};
         project_push.u[0] = count_;
@@ -1487,11 +1497,11 @@ public:
         set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
         set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
         set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
-        dispatch(
-            sample_depth_backward_,
-            {&tile_ranges_, last_instance_values_, &gauss_f_, frame_camera_, &sample_points_,
-             &sample_f_, &sample_u_, &loss, &blend_gradient, &point_gradient},
-            sample_push, div_up(sample_point_count_, 256));
+        dispatch_sample_backward(
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+             descriptor(*frame_camera_), descriptor(sample_points_), descriptor(sample_f_),
+             descriptor(sample_u_), descriptor(loss), descriptor(blend_gradient), descriptor(point_gradient)},
+            sample_push);
 
         const std::size_t total_count = static_cast<std::size_t>(model_gradient_float_count()) +
             (has_scales_ ? static_cast<std::size_t>(count_) * 6 : 0);
@@ -1600,7 +1610,7 @@ public:
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& transform_buffer = grow(multi_transform_, sizeof(transform));
         context_.write_buffer(transform_buffer, transform, sizeof(transform));
-        const auto output_count = 7 * pixels + 5;
+        const auto output_count = multi_view_output_count(pixels);
         Buffer& output = grow(multi_output_, output_count * sizeof(float));
         zero_buffer(output, output_count * sizeof(float));
         Push push{};
@@ -1632,6 +1642,7 @@ public:
             input.neighbour_mask.buffer != VK_NULL_HANDLE ? checked(input.neighbour_mask, neighbour_pixels * 4) : descriptor(dummy_),
             descriptor(output)};
         dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
+        reduce_multi_view_terms(buffers, push, static_cast<std::uint32_t>(pixels));
         push.u[13] |= 0x80000000u;
         dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
         record_buffer_copy({output.handle, output.offset, pixels * 4}, destination.reference_depth_gradient);
@@ -1713,7 +1724,7 @@ public:
         Buffer& reference_mask = grow(multi_reference_mask_, pixels * sizeof(float));
         Buffer& neighbour_mask = grow(
             multi_neighbour_mask_, neighbour_pixels * sizeof(float));
-        const std::size_t output_count = 7 * pixels + 5;
+        const std::size_t output_count = multi_view_output_count(pixels);
         Buffer& output = grow(multi_output_, output_count * sizeof(float));
         context_.write_buffer(depth, input.reference_depth.data(), input.reference_depth.size_bytes());
         context_.write_buffer(normal, input.reference_normal.data(), input.reference_normal.size_bytes());
@@ -1760,6 +1771,10 @@ public:
             &neighbour_mask, &output};
         dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
                  div_up(reference.height, 16));
+        std::vector<VkDescriptorBufferInfo> reduction_buffers;
+        reduction_buffers.reserve(buffers.size());
+        for (const auto* buffer : buffers) reduction_buffers.push_back(descriptor(*buffer));
+        reduce_multi_view_terms(reduction_buffers, push, static_cast<std::uint32_t>(pixels));
         push.u[13] |= 0x80000000u;
         dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
                  div_up(reference.height, 16));
@@ -2771,6 +2786,36 @@ private:
         }
     }
 
+    void dispatch_sample_backward(const std::vector<VkDescriptorBufferInfo>& buffers, Push push) {
+        const bool native = sample_depth_backward_atomic_.valid();
+        const auto& pipeline = native ? sample_depth_backward_atomic_ : sample_depth_backward_;
+        // Bound each dispatch on display GPUs. CAS fallback has much higher
+        // contention when many reference pixels project to the same splats.
+        const std::uint32_t chunk = native ? 262144u : 16384u;
+        for (std::uint32_t start = 0; start < push.u[0]; start += chunk) {
+            push.u[14] = start;
+            push.u[15] = std::min(chunk, push.u[0] - start);
+            dispatch_infos(pipeline, buffers, push, div_up(push.u[15], 256));
+        }
+    }
+
+    void reduce_multi_view_terms(const std::vector<VkDescriptorBufferInfo>& buffers,
+                                Push push, const std::uint32_t pixels) {
+        const std::uint32_t terms_base = 7u * pixels;
+        std::uint32_t input = terms_base + 5u;
+        std::uint32_t scratch = 12u * pixels + 5u;
+        std::uint32_t count = pixels;
+        push.u[13] |= 0x40000000u;
+        while (count > 0) {
+            const auto groups = div_up(count, 256);
+            const auto output = groups == 1 ? terms_base : scratch;
+            push.u[14] = input; push.u[15] = output; push.u[19] = count;
+            dispatch_infos(multi_view_, buffers, push, groups);
+            if (groups == 1) break;
+            input = output; count = groups; scratch += 5u * groups;
+        }
+    }
+
     void dispatch_indirect(
         const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
         const Push& push, const Buffer& indirect, const VkDeviceSize offset) {
@@ -2926,6 +2971,7 @@ private:
     ComputePipeline blend_backward_no_geometry_atomic_;
     ComputePipeline sample_depth_;
     ComputePipeline sample_depth_backward_;
+    ComputePipeline sample_depth_backward_atomic_;
     ComputePipeline multi_view_;
     ComputePipeline ssim_;
     ComputePipeline loss_reduce_;
