@@ -573,7 +573,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
-            src/splat/adc.cpp
+            src/splat/adc_ops.cpp
             src/splat/optimizer.cpp
             src/splat/bilateral_grid.cu
             src/splat/ppisp.cu
