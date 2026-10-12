@@ -52,14 +52,16 @@ int main(int argc, char** argv) {
     try {
         photara::core::Logger::instance().configure({});
         const bool audit_rotations = argc == 5 && std::string_view(argv[3]) == "--rotation-audit";
-        if (argc != 3 && argc != 4 && !audit_rotations) {
+        const bool map_hierarchical = argc == 5 && std::string_view(argv[3]) == "--hierarchical";
+        if (argc != 3 && argc != 4 && !audit_rotations && !map_hierarchical) {
             std::cerr << "Usage: photara_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection]\n"
-                         "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --rotation-audit INPUT.asfm\n";
+                         "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --rotation-audit INPUT.asfm\n"
+                         "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --hierarchical CLUSTER_CAPACITY\n";
             return 1;
         }
         const std::filesystem::path input(argv[1]), output(argv[2]);
         const std::string name = input.stem().string();
-        const std::string prefix = audit_rotations ? "tracks-" : "reconstruction-";
+        const std::string prefix = (audit_rotations || map_hierarchical) ? "tracks-" : "reconstruction-";
         if (!name.starts_with(prefix)) throw std::runtime_error("expected " + prefix + " checkpoint");
         const std::string hex = name.substr(prefix.size());
         std::uint64_t fingerprint{};
@@ -71,10 +73,35 @@ int main(int argc, char** argv) {
         CheckpointOptions options;
         options.directory = input.parent_path();
         options.write = false;
-        if (!CheckpointStore(options).load_scene(audit_rotations ? CheckpointStage::tracks
+        if (!CheckpointStore(options).load_scene((audit_rotations || map_hierarchical) ? CheckpointStage::tracks
                                                                : CheckpointStage::reconstruction, fingerprint, scene))
             throw std::runtime_error("cannot load checkpoint");
         if (audit_rotations) return rotation_audit(scene, argv[4], output);
+        if (map_hierarchical) {
+            ReconstructionConfig config;
+            config.mode = ReconstructionMode::hierarchical;
+            const std::string_view capacity(argv[4]);
+            auto& limit = config.hierarchical.cluster.max_views_per_cluster;
+            const auto result = std::from_chars(capacity.data(), capacity.data()+capacity.size(), limit);
+            if (result.ec != std::errc{} || result.ptr != capacity.data()+capacity.size() || limit < 2)
+                throw std::runtime_error("invalid hierarchical cluster capacity");
+            const auto start = std::chrono::steady_clock::now();
+            const auto summary = reconstruct_from_frontend(scene, config);
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+            std::filesystem::create_directories(output);
+            save_asfm(scene, output / "reconstruction.asfm");
+            std::ofstream metrics(output / "metrics.json");
+            metrics << std::setprecision(17) << "{\"valid\":" << (summary.valid ? "true" : "false")
+                << ",\"images\":" << scene.images.size() << ",\"registered\":" << scene.registered_count()
+                << ",\"landmarks\":" << summary.landmarks
+                << ",\"reprojection_observations\":" << summary.reprojection_observations
+                << ",\"reprojection_mean_pixels\":" << summary.mean_reprojection_error_pixels
+                << ",\"reprojection_rms_pixels\":" << summary.rms_reprojection_error_pixels
+                << ",\"elapsed_seconds\":" << seconds << "}\n";
+            std::cout << "hierarchical mapping from explicit frontend input: registered="
+                << scene.registered_count() << '/' << scene.images.size() << " seconds=" << seconds << '\n';
+            return summary.valid ? 0 : 2;
+        }
         prune_unsupported_registrations(scene);
         if (argc == 4 && std::string_view(argv[3]) == "--resection") {
             const auto before_count = scene.registered_count();

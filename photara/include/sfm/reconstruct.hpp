@@ -23,7 +23,8 @@ struct ReconstructionConfig {
     ResectionConfig resection{};
     HierarchicalConfig hierarchical{};
     // Final product audit: a registered pose must retain this many finite,
-    // positive-depth inlier observations within the reprojection threshold.
+    // oriented inlier observations within the reprojection threshold (a full
+    // sphere camera also observes points behind its optical axis).
     unsigned minimum_final_observations_per_image{30};
     double maximum_final_reprojection_error_pixels{2.0};
     GlobalRotationOptions global_rotation{};
@@ -61,6 +62,10 @@ unsigned split_intrinsics_by_camera_identity(Scene& scene);
 unsigned prune_unsupported_registrations(
     Scene& scene, unsigned minimum_observations = 30,
     double maximum_reprojection_error_pixels = 2.0);
+
+// Mapping and final audits for an already extracted/verified frontend scene.
+ReconstructionSummary reconstruct_from_frontend(
+    Scene& scene, const ReconstructionConfig& config = {});
 
 // Full reconstruction using the mode selected in ReconstructionConfig.
 ReconstructionSummary reconstruct(

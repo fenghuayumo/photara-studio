@@ -192,9 +192,27 @@ rotation averaging: MST -> LAD/ADMM L1 -> robust IRLS
 
 ### 4.2 `hierarchical`
 
-The scene is split by weighted covisibility, each cluster is reconstructed
-incrementally, submaps are aligned with Sim(3) RANSAC plus Umeyama refinement,
-and protected tracks are merged before optional final BA.
+The scene is split by weighted covisibility. A single cluster uses the Global
+fast path; the default capacity is 2048 views. Multiple clusters use Star
+initialization and PnP registration, followed by Sim(3) RANSAC, Umeyama
+refinement and protected track merging.
+Before extracting multiple clusters, physical camera identities and measured
+focal lengths partition the parent calibration groups. Local refinements then
+merge into those groups instead of collapsing distinct lenses into one camera.
+
+A failed local initialization, or coverage below 98%, triggers a cluster-local
+Global retry with the original intrinsics. A supported candidate replaces a
+failed seed or a valid seed with fewer registered views. Retry candidates pass
+the final observation-support audit; explicit CPU BA also selects CPU
+positioning for this retry. Logs identify both attempts and accepted results.
+After merged BA and densification, a bounded polish reconciles the newly added
+observations before the final audit. Its budget uses
+`resection.final_ba_additional_iterations` (60 by default; zero disables it).
+The polish restores its input poses, calibration, tracks and track index if BA
+fails or introduces a new rotation conflict supported by two distinct strong,
+nonplanar, cycle-consistent neighbors. Existing conflicts remain eligible for
+the independent pose recovery below; a smaller pixel cost alone does not justify
+introducing a new verified graph conflict.
 
 After a multi-cluster merge, independent global rotation averaging screens
 camera poses against a dominant common rotation gauge. A rotation discrepancy
@@ -202,9 +220,19 @@ only nominates a candidate: replacement poses require PnP against stable-only
 depths, held-out pixel validation and verified baseline checks. Validated
 repairs can anchor the next recovery pass; rejected candidates retain their
 geometry. The audit copies only weighted edges, not feature-match arrays.
+After all registration and weak-branch recovery, multi-cluster results also
+exclude poses still contradicted by a dominant weight of strong, verified
+neighbors. Their observations leave the inlier prefix before summary/export.
+The CLI and Python `run_sfm_mapping` share `reconstruct_from_frontend`, including
+camera metadata, mapping options, recovery and final support/rotation audits.
 
 All modes finish with a `ReconstructionSummary`, observability analysis, and
 `prune_unsupported_registrations`.
+
+Reprojection summaries, support audits and recovery validation use the camera
+model's checked residual. Equirectangular cameras include the rear hemisphere
+with a seam- and pole-safe tangent residual in pixels. An oriented-ray check
+rejects antipodal observations, whose tangent residual alone can be zero.
 
 ## 5. Bundle adjustment
 

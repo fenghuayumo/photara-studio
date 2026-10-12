@@ -263,6 +263,25 @@ struct PinholeCamera {
         return out;
     }
 
+    // Validation uses oriented rays for a full sphere: a rear-hemisphere
+    // observation is valid, but its antipode must not pass the tangent metric.
+    [[nodiscard]] double checked_reprojection_error(
+        const Vec3& camera_point, const Vec2& observed) const {
+        if (!camera_point.allFinite() || !observed.allFinite())
+            return std::numeric_limits<double>::infinity();
+        if (model == CameraModel::equirectangular) {
+            if (camera_point.dot(unproject(observed)) <= 0.0)
+                return std::numeric_limits<double>::infinity();
+            const auto local = local_reprojection(camera_point, observed);
+            return local.valid ? local.residual.norm() :
+                std::numeric_limits<double>::infinity();
+        }
+        Vec2 projected;
+        return project_checked(camera_point, projected) ?
+            (projected - observed).norm() :
+            std::numeric_limits<double>::infinity();
+    }
+
     // Angular distance between a camera-space point and an observed pixel,
     // expressed in pixels on this camera's image. Valid for every model, so
     // filtering code can share one threshold.

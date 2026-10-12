@@ -1,5 +1,6 @@
 #include "sfm/hierarchical.hpp"
 #include "sfm/reconstruct.hpp"
+#include "sfm/rotation_recovery.hpp"
 #include "sfm/triangulation.hpp"
 
 #include <cmath>
@@ -19,9 +20,7 @@ void expect(const bool condition, const char* message) {
     ++failures;
 }
 
-Scene make_scene() {
-    constexpr int k_views = 6;
-    constexpr int k_points = 80;
+Scene make_scene(const int k_views = 6, const int k_points = 80) {
     Scene scene;
     PinholeCamera camera;
     camera.width = 640;
@@ -186,6 +185,56 @@ int main() {
             expect(
                 reference.track_id < scene.tracks.size(),
                 "hierarchical track index references valid track");
+
+    Scene failed_stars_scene = make_scene(8);
+    HierarchicalConfig retry_config = config;
+    retry_config.cluster.max_views_per_cluster = 4;
+    retry_config.star.min_initial_tracks = 10000;
+    const auto retry_summary = run_hierarchical_mapping(failed_stars_scene, retry_config);
+    expect(retry_summary.valid && retry_summary.registered_views == 8,
+        "failed local stars recover through audited cluster-global initialization");
+    expect(retry_summary.landmarks >= 40,
+        "cluster retry retains independently supported structure");
+
+    Scene mixed_camera_scene = make_scene(8);
+    mixed_camera_scene.cameras.resize(1);
+    mixed_camera_scene.cameras[0].trust_intrinsics = false;
+    for (Image& image : mixed_camera_scene.images) {
+        image.camera_id = 0;
+        image.camera_identity = image.id < 4 ? "camera-a" : "camera-b";
+    }
+    HierarchicalConfig mixed_camera_config = config;
+    mixed_camera_config.cluster.max_views_per_cluster = 4;
+    const auto mixed_summary = run_hierarchical_mapping(mixed_camera_scene, mixed_camera_config);
+    expect(mixed_summary.valid && mixed_summary.registered_views == 8,
+        "multi-cluster reconstruction registers views from both physical cameras");
+    expect(mixed_camera_scene.cameras.size() == 2,
+        "merge preserves physical camera groups initially sharing one intrinsic group");
+    expect(mixed_camera_scene.images[0].camera_id != mixed_camera_scene.images[4].camera_id,
+        "different physical cameras retain separate calibration after merge");
+    for (const Image& image : mixed_camera_scene.images)
+        expect(image.camera_id == mixed_camera_scene.images[image.id < 4 ? 0 : 4].camera_id,
+            "views from the same physical camera share their merged calibration");
+
+    Scene conflict_scene = make_scene(6, 120);
+    const auto conflict_summary = run_hierarchical_mapping(conflict_scene, config);
+    expect(conflict_summary.registered_views == 6, "rotation audit fixture reconstructs all views");
+    for (ImagePair& pair : conflict_scene.pairs) pair.weight_triplet = 0.5F;
+    conflict_scene.images[0].pose.R =
+        Eigen::AngleAxisd(0.2, Vec3::UnitY()).toRotationMatrix() * conflict_scene.images[0].pose.R;
+    Scene repeated_neighbor = conflict_scene;
+    repeated_neighbor.pairs = {conflict_scene.pairs.front(), conflict_scene.pairs.front()};
+    const auto repeated_conflicts = verified_rotation_conflicts(repeated_neighbor);
+    expect(!repeated_conflicts[0] && !repeated_conflicts[1],
+        "repeated edges to one neighbor cannot reject either camera");
+    expect(prune_verified_rotation_conflicts(conflict_scene) == 1,
+        "final audit rejects only the pose contradicting multiple strong neighbors");
+    expect(!conflict_scene.images[0].registered && conflict_scene.registered_count() == 5,
+        "verified rotation conflict is excluded from effective alignment");
+    for (const Track& track : conflict_scene.tracks)
+        for (unsigned i = 0; i < track.num_inliers; ++i)
+            expect(track.observations[i].image_id != 0,
+                "rejected camera observations leave the triangulated inlier prefix");
 
     Scene single_cluster_scene = make_scene();
     HierarchicalConfig single_cluster_config = config;

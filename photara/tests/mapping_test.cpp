@@ -15,6 +15,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <random>
 #include <chrono>
 
@@ -697,6 +698,53 @@ void test_final_registration_audit_prunes_unsupported_pose() {
         "final registration audit removes weak observations");
 }
 
+void test_full_sphere_registration_audit() {
+    Scene scene;
+    auto camera = cam();
+    camera.model = photara::CameraModel::equirectangular;
+    camera.width = 2048;
+    camera.height = 1024;
+    camera.fx = camera.fy = 2048.0 / (2.0 * std::numbers::pi);
+    camera.cx = 1024.0;
+    camera.cy = 512.0;
+    scene.cameras.push_back(camera);
+    scene.images.resize(2);
+    for (Index id = 0; id < 2; ++id) {
+        scene.images[id].id = id;
+        scene.images[id].camera_id = 0;
+        scene.images[id].registered = true;
+        scene.images[id].features.keypoints.resize(3);
+    }
+    // Rear hemisphere, seam crossing and a near-pole observation.
+    const std::vector<Vec3> points = {
+        Vec3(0.001, 0.0, -4.0), Vec3(-1.0, 0.5, -4.0), Vec3(0.01, 4.0, -0.01)};
+    for (Index id = 0; id < points.size(); ++id) {
+        Track track;
+        track.position = points[id];
+        Vec2 pixel = camera.project(points[id]);
+        if (id == 0) pixel.x() -= camera.width;  // Same ray across the seam.
+        for (Index image = 0; image < 2; ++image) {
+            const Vec2 observed = image == 0 ? pixel : camera.project(-points[id]);
+            auto& feature = scene.images[image].features.keypoints[id];
+            feature.x = static_cast<float>(observed.x());
+            feature.y = static_cast<float>(observed.y());
+            track.observations.push_back({image, id});
+        }
+        track.num_inliers = 2;
+        scene.tracks.push_back(std::move(track));
+        expect(camera.checked_reprojection_error(points[id], pixel) < 1e-8,
+            "full-sphere validation accepts rear, seam and pole observations");
+        expect(!std::isfinite(camera.checked_reprojection_error(
+            points[id], camera.project(-points[id]))),
+            "full-sphere validation rejects antipodal tangent minima");
+    }
+    rebuild_track_index(scene);
+    expect(prune_unsupported_registrations(scene, 3, 1.0) == 1,
+        "full-sphere audit rejects only the antipodal registration");
+    expect(scene.images[0].registered && !scene.images[1].registered,
+        "full-sphere audit retains a supported rear-facing view");
+}
+
 void test_alignment_observability_reports_bridge_branch() {
     Scene scene;
     scene.images.resize(7);
@@ -1081,6 +1129,7 @@ int main() {
     test_global_positioning_points_only();
     test_large_point_only_positioning_does_not_require_pairs();
     test_final_registration_audit_prunes_unsupported_pose();
+    test_full_sphere_registration_audit();
     test_alignment_observability_reports_bridge_branch();
     test_global_positioning_irls_downweights_bad_direction();
     test_global_positioning_preserves_fixed_initial_positions();

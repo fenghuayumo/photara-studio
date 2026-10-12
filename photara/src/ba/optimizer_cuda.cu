@@ -1188,8 +1188,10 @@ public:
                 throw std::runtime_error(std::string("PCG graph stream creation failed: ")+
                     cudaGetErrorString(stream_status));
             }
-            check(cudaStreamBeginCapture(capture,cudaStreamCaptureModeThreadLocal),"PCG capture begin");
+            bool capturing=false;
             try {
+                check(cudaStreamBeginCapture(capture,cudaStreamCaptureModeThreadLocal),"PCG capture begin");
+                capturing=true;
                 for (std::size_t i=0;i<graph_iterations;++i)
                     record_pcg_iteration(capture);
                 check(cudaMemsetAsync(pcg_scalars.data()+2,0,sizeof(double),capture),
@@ -1197,11 +1199,21 @@ public:
                 dot_kernel<<<blocks(total_values),threads,0,capture>>>(
                     residual.data(),residual.data(),total_values,pcg_scalars.data()+2);
                 check(cudaGetLastError(),"PCG residual dot capture");
-                check(cudaStreamEndCapture(capture,&pcg_graph),"PCG capture end");
+                const cudaError_t end_status=cudaStreamEndCapture(capture,&pcg_graph);
+                capturing=false;
+                check(end_status,"PCG capture end");
                 check(cudaGraphInstantiateWithFlags(
                           &pcg_graph_exec,pcg_graph,0),
                     "PCG graph instantiate");
             } catch (...) {
+                // Destroying an invalidated stream alone does not end capture.
+                // End it explicitly so fallback kernels and other cluster
+                // workers can use the CUDA context again.
+                if (capturing) {
+                    cudaGraph_t discarded{};
+                    (void)cudaStreamEndCapture(capture,&discarded);
+                    if (discarded) (void)cudaGraphDestroy(discarded);
+                }
                 cudaStreamDestroy(capture);
                 if (pcg_graph) { cudaGraphDestroy(pcg_graph); pcg_graph=nullptr; }
                 throw;

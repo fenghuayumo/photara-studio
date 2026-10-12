@@ -42,11 +42,9 @@ bool supports(const Scene& scene, const Observation& obs, const Vec3& point,
     const Image& image = scene.images[obs.image_id];
     if (image.camera_id >= scene.cameras.size() ||
         obs.feature_id >= image.features.keypoints.size()) return false;
-    Vec2 pixel;
-    if (!scene.camera_of(image).project_checked(pose.transform_world_to_camera(point), pixel))
-        return false;
     const auto& measured = image.features.keypoints[obs.feature_id];
-    return (pixel - Vec2(measured.x, measured.y)).norm() <= threshold;
+    return scene.camera_of(image).checked_reprojection_error(
+        pose.transform_world_to_camera(point), Vec2(measured.x, measured.y)) <= threshold;
 }
 
 double rotation_error_degrees(const Mat3& first, const Mat3& second) {

@@ -120,17 +120,7 @@ struct MeshResultHandle {
 
 sfm::ReconstructionSummary run_sfm_mapping(
     SfmSceneHandle& handle, const sfm::ReconstructionConfig& options) {
-    switch (options.mode) {
-        case sfm::ReconstructionMode::hierarchical:
-            handle.summary = sfm::run_hierarchical_mapping(
-                handle.scene, options.hierarchical);
-            break;
-        case sfm::ReconstructionMode::global:
-            handle.summary = sfm::run_global_mapping(
-                handle.scene, options.global_rotation,
-                options.global_positioning, options.resection);
-            break;
-    }
+    handle.summary = sfm::reconstruct_from_frontend(handle.scene, options);
     return handle.summary;
 }
 

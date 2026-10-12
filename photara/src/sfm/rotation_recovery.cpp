@@ -3,12 +3,72 @@
 #include "core/logging.hpp"
 #include "sfm/global_rotation.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "sfm/tracks.hpp"
 
 #include <Eigen/SVD>
 #include <cmath>
 #include <numbers>
+#include <algorithm>
+#include <set>
 
 namespace photara::sfm {
+
+std::vector<std::uint8_t> verified_rotation_conflicts(const Scene& scene) {
+    std::vector<double> total(scene.images.size()), bad(scene.images.size());
+    std::vector<std::set<Index>> bad_neighbors(scene.images.size());
+    for (const ImagePair& pair : scene.pairs) {
+        const double weight = pair.composite_weight();
+        if (!pair.active || !pair.relative_pose || pair.zero_baseline ||
+            pair.degenerate_planar || pair.num_inliers() < 100 ||
+            pair.weight_triplet < 0.25F || pair.weight_cycle < 0.5F ||
+            !std::isfinite(weight) || weight < 30.0 ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size() ||
+            !scene.images[pair.id1].registered || !scene.images[pair.id2].registered)
+            continue;
+        const Mat3 actual = scene.images[pair.id2].pose.R *
+            scene.images[pair.id1].pose.R.transpose();
+        const double degrees = Eigen::AngleAxisd(
+            actual * pair.relative_pose->R.transpose()).angle() * 180.0 / std::numbers::pi;
+        for (const Index id : {pair.id1, pair.id2}) {
+            total[id] += weight;
+            if (degrees > 5.0) {
+                bad[id] += weight;
+                bad_neighbors[id].insert(id == pair.id1 ? pair.id2 : pair.id1);
+            }
+        }
+    }
+    std::vector<std::uint8_t> result(scene.images.size());
+    for (Index id = 0; id < scene.images.size(); ++id)
+        result[id] = bad_neighbors[id].size() >= 2 && bad[id] >= 0.8 * total[id];
+    return result;
+}
+
+unsigned prune_verified_rotation_conflicts(Scene& scene) {
+    const auto removed = verified_rotation_conflicts(scene);
+    unsigned invalidated = 0;
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        if (!removed[id]) continue;
+        scene.images[id].registered = false;
+        ++invalidated;
+        core::Logger::instance().warning("final rotation audit: rejected image=",
+            scene.images[id].path.filename());
+    }
+    if (invalidated == 0) return 0;
+    for (Track& track : scene.tracks) {
+        const auto end = track.observations.begin() + std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        const auto kept = std::stable_partition(track.observations.begin(), end,
+            [&](const Observation& observation) {
+                return observation.image_id < removed.size() && !removed[observation.image_id];
+            });
+        track.num_inliers = static_cast<std::uint8_t>(std::min<std::size_t>(
+            std::distance(track.observations.begin(), kept), 255));
+        if (track.num_inliers < 2) track.num_inliers = 0;
+        track.split_generation = 0;
+    }
+    rebuild_track_index(scene);
+    return invalidated;
+}
 
 RotationRecoveryReport recover_rotation_inconsistent_views(Scene& scene) {
     core::StageScope stage("sfm.rotation_recovery");

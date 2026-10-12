@@ -1289,6 +1289,10 @@ ReconstructionSummary run_hierarchical_mapping(
         return summarize(scene);
     }
 
+    // Allocate physical camera/lens groups in the parent before extraction.
+    // Otherwise locally refined groups collapse into the original shared
+    // camera when submap intrinsics are averaged during merging.
+    split_intrinsics_by_camera_identity(scene);
     std::vector<HierarchicalSubscene> subscenes =
         extract_hierarchical_subscenes(scene, config.cluster, clusters);
     const unsigned available_threads = scene.thread_count == 0
@@ -1314,6 +1318,10 @@ ReconstructionSummary run_hierarchical_mapping(
         Scene& subscene = subscenes[index].scene;
         const parallel::ScopedOpenMpThreads openmp_budget(
             subscene.thread_count);
+        const auto original_cameras = subscene.cameras;
+        std::vector<Index> original_camera_ids;
+        for (const Image& image : subscene.images)
+            original_camera_ids.push_back(image.camera_id);
         build_tracks(subscene, config.cluster.min_pair_weight);
         bool success = star_initialize(subscene, config.star);
         if (success) {
@@ -1325,6 +1333,43 @@ ReconstructionSummary run_hierarchical_mapping(
                 config.resection.mult_depth_near,
                 config.resection.mult_depth_far);
             success = subscene.registered_count() >= 2;
+        }
+        // A local star can omit a branch before it ever reaches Sim(3) merging.
+        // Retry that cluster jointly using its verified graph and original
+        // intrinsics. Keep the star result unless the audited solve recovers
+        // more views; do not trade coverage for an unaudited registration flag.
+        const unsigned star_registered = subscene.registered_count();
+        if (!success || star_registered * 100ULL < subscene.images.size() * 98ULL) {
+            core::Logger::instance().warning(
+                "hierarchical subscene global retry: cluster=", index,
+                " star_valid=", success,
+                " star_registered=", star_registered, '/', subscene.images.size());
+            Scene candidate = subscene;
+            candidate.cameras = original_cameras;
+            for (Index id = 0; id < candidate.images.size(); ++id) {
+                candidate.images[id].camera_id = original_camera_ids[id];
+                candidate.images[id].registered = false;
+                candidate.images[id].pose = Pose3D::identity();
+            }
+            ResectionConfig resection = config.resection;
+            resection.checkpoint_callback = {};
+            GlobalPositioningOptions positioning;
+            if (bundle_backend_preference() == BundleBackendPreference::cpu) {
+                positioning.backend = PositioningBackend::cpu;
+                positioning.prefer_cuda = false;
+            }
+            const auto global = run_global_mapping(candidate, {}, positioning, resection);
+            if (global.valid) {
+                prune_unsupported_registrations(candidate);
+                if (candidate.registered_count() >= 2 &&
+                    (!success || candidate.registered_count() > star_registered)) {
+                    core::Logger::instance().warning(
+                        "hierarchical subscene accepted global retry: cluster=", index,
+                        " registered=", candidate.registered_count());
+                    subscene = std::move(candidate);
+                    success = subscene.registered_count() >= 2;
+                }
+            }
         }
         std::scoped_lock lock(result_mutex);
         succeeded[index] = success;
@@ -1412,10 +1457,59 @@ ReconstructionSummary run_hierarchical_mapping(
             config.resection.min_angle_deg,
             config.resection.mult_depth_near,
             config.resection.mult_depth_far);
+        // Densification changes points and their inlier observations after
+        // the merged BA. Reconcile that new objective before the final support
+        // audit; convergence of the earlier objective says nothing about it.
+        if (config.resection.final_ba_additional_iterations > 0) {
+            const auto before_outliers = verified_rotation_conflicts(scene);
+            std::vector<Pose3D> original_poses;
+            for (const Image& image : scene.images) original_poses.push_back(image.pose);
+            const auto original_cameras = scene.cameras;
+            auto original_tracks = scene.tracks;
+            const auto original_generation = scene.registration_generation;
+            bundle.optimizer.maximum_iterations =
+                config.resection.final_ba_additional_iterations;
+            core::Logger::instance().info(
+                "hierarchical post-densification polish: maximum_iterations=",
+                bundle.optimizer.maximum_iterations);
+            const auto restore_before_polish = [&] {
+                for (Index id = 0; id < scene.images.size(); ++id)
+                    scene.images[id].pose = original_poses[id];
+                scene.cameras = original_cameras;
+                scene.tracks = std::move(original_tracks);
+                scene.registration_generation = original_generation;
+                rebuild_track_index(scene);
+            };
+            if (run_bundle_adjustment(scene, bundle).success) {
+                const auto after_outliers = verified_rotation_conflicts(scene);
+                bool reject = false;
+                for (Index id = 0; id < scene.images.size(); ++id)
+                    if (after_outliers[id] && !before_outliers[id]) {
+                        reject = true;
+                        core::Logger::instance().warning(
+                            "hierarchical polish rejected: new verified rotation conflict image=",
+                            scene.images[id].path.filename());
+                    }
+                if (reject) {
+                    restore_before_polish();
+                } else {
+                    filter_tracks(
+                        scene,
+                        config.resection.max_reproj_error,
+                        config.resection.min_angle_deg,
+                        config.resection.mult_depth_near,
+                        config.resection.mult_depth_far);
+                }
+            } else {
+                core::Logger::instance().warning("hierarchical polish failed; restoring input map");
+                restore_before_polish();
+            }
+        }
     }
     if (scene.registered_count() < scene.images.size())
         register_images(scene, config.resection);
     recover_rotation_inconsistent_views(scene);
+    prune_verified_rotation_conflicts(scene);
     return summarize(scene);
 }
 

@@ -1,4 +1,5 @@
 #include "sfm/reconstruct.hpp"
+#include "sfm/rotation_recovery.hpp"
 #include "sfm/appearance.hpp"
 
 #include "core/logging.hpp"
@@ -907,13 +908,10 @@ unsigned enforce_zero_baseline_pose_groups(Scene& scene) {
                 continue;
             const Vec3 camera_point =
                 image.pose.transform_world_to_camera(track.position);
-            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
-            const Vec2 projected =
-                scene.cameras[image.camera_id].project(camera_point);
             const auto& keypoint =
                 image.features.keypoints[observation.feature_id];
-            const double error =
-                (projected - Vec2(keypoint.x, keypoint.y)).norm();
+            const double error = scene.camera_of(image).checked_reprojection_error(
+                camera_point, Vec2(keypoint.x, keypoint.y));
             if (!std::isfinite(error)) continue;
             squared_errors[observation.image_id] += error * error;
             ++reprojection_count[observation.image_id];
@@ -984,15 +982,13 @@ void populate_reprojection_stats(
                 continue;
             const Vec3 camera_point =
                 image.pose.transform_world_to_camera(track.position);
-            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
-            const Vec2 projected =
-                scene.cameras[image.camera_id].project(camera_point);
             const auto& keypoint =
                 image.features.keypoints[observation.feature_id];
             const Vec2 measured(
                 static_cast<double>(keypoint.x),
                 static_cast<double>(keypoint.y));
-            const double error = (projected - measured).norm();
+            const double error = scene.camera_of(image).checked_reprojection_error(
+                camera_point, measured);
             if (!std::isfinite(error)) continue;
             error_sum += error;
             squared_error_sum += error * error;
@@ -1315,12 +1311,9 @@ unsigned prune_unsupported_registrations(
                 continue;
             const Vec3 camera_point =
                 image.pose.transform_world_to_camera(track.position);
-            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
-            const Vec2 projected =
-                scene.cameras[image.camera_id].project(camera_point);
             const auto& feature = image.features.keypoints[observation.feature_id];
-            const double error =
-                (projected - Vec2(feature.x, feature.y)).norm();
+            const double error = scene.camera_of(image).checked_reprojection_error(
+                camera_point, Vec2(feature.x, feature.y));
             if (std::isfinite(error) && error <= threshold) {
                 ++support[observation.image_id];
                 const unsigned x = static_cast<unsigned>(std::clamp(
@@ -1745,7 +1738,19 @@ void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config)
                                    config.maximum_final_reprojection_error_pixels);
     bool changed = !recover_stable_resections(scene).empty();
     changed = recover_weakly_connected_views(scene) != 0 || changed;
-    if (!changed) return;
+    const auto final_rotation_audit = [&] {
+        if (config.mode == ReconstructionMode::hierarchical &&
+            scene.images.size() > config.hierarchical.cluster.max_views_per_cluster) {
+            recover_rotation_inconsistent_views(scene);
+            if (prune_verified_rotation_conflicts(scene) > 0)
+                prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
+                                               config.maximum_final_reprojection_error_pixels);
+        }
+    };
+    if (!changed) {
+        final_rotation_audit();
+        return;
+    }
     // Recovery rebuilds tracks and introduces new cross-branch constraints.
     // Reconcile their points and poses before reporting a final alignment.
     // Calibration stays fixed, so weak branches cannot change the lens model.
@@ -1757,6 +1762,7 @@ void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config)
         filter_tracks(scene, 2.F, 1.F, 0.F, 0.F);
         if (pass == 1 || recover_stable_resections(scene).empty()) break;
     }
+    final_rotation_audit();
     prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                    config.maximum_final_reprojection_error_pixels);
 }
@@ -1774,6 +1780,23 @@ void ensure_camera_identity_metadata(
 }
 
 }  // namespace
+
+ReconstructionSummary reconstruct_from_frontend(
+    Scene& scene, const ReconstructionConfig& config) {
+    scene.thread_count = parallel::resolve_thread_count(config.frontend.thread_count);
+    ensure_camera_identity_metadata(scene, config.frontend);
+    if (config.mode == ReconstructionMode::hierarchical) {
+        HierarchicalConfig hierarchical = config.hierarchical;
+        hierarchical.star = config.star;
+        hierarchical.resection = config.resection;
+        run_hierarchical_mapping(scene, hierarchical);
+    } else {
+        run_global_mapping(scene, config.global_rotation,
+                           config.global_positioning, config.resection);
+    }
+    finish_alignment_recovery(scene, config);
+    return summarize_scene(scene);
+}
 
 ReconstructionSummary reconstruct(
     Scene& scene_out,
@@ -1798,21 +1821,7 @@ ReconstructionSummary reconstruct(
         if (summary.valid) colour_triangulated_tracks(scene_out);
         return summary;
     }
-    ReconstructionSummary summary;
-    if (config.mode == ReconstructionMode::hierarchical) {
-        HierarchicalConfig hierarchical = config.hierarchical;
-        hierarchical.star = config.star;
-        hierarchical.resection = config.resection;
-        summary = run_hierarchical_mapping(scene_out, hierarchical);
-    } else if (config.mode == ReconstructionMode::global) {
-        summary = run_global_mapping(
-            scene_out,
-            config.global_rotation,
-            config.global_positioning,
-            config.resection);
-    }
-    finish_alignment_recovery(scene_out, config);
-    summary = summarize_scene(scene_out);
+    const ReconstructionSummary summary = reconstruct_from_frontend(scene_out, config);
     if (config.resection.checkpoint_callback)
         config.resection.checkpoint_callback(scene_out);
     if (summary.valid)
