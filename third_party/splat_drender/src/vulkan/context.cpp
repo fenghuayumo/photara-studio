@@ -41,6 +41,8 @@
 #include "splat_ranges.hlsl.embedded.hpp"
 #include "splat_ranges_indirect.hlsl.embedded.hpp"
 #include "splat_sample_depth.hlsl.embedded.hpp"
+#include "splat_sample_depth_group.hlsl.embedded.hpp"
+#include "splat_sample_depth_tiled.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward_atomic.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
@@ -140,6 +142,10 @@ std::optional<std::filesystem::path> shader_directory_override() {
 }
 
 std::span<const std::byte> embedded_shader(const std::string& shader_name) {
+    if (shader_name == "splat_sample_depth_group.hlsl.spv")
+        return std::as_bytes(std::span{splat_sample_depth_group_hlsl_spv});
+    if (shader_name == "splat_sample_depth_tiled.hlsl.spv")
+        return std::as_bytes(std::span{splat_sample_depth_tiled_hlsl_spv});
     if (shader_name == "splat_blend_backward_geometry_subgroup.hlsl.spv")
         return std::as_bytes(std::span{splat_blend_backward_geometry_subgroup_hlsl_spv});
     if (shader_name == "splat_blend_backward_geometry_atomic.hlsl.spv")

@@ -115,11 +115,13 @@ int run_geometry_benchmark(int argc, char** argv) {
             // Compare this Vulkan capture with DISABLE_SUBGROUP_BACKWARD=1
             // on the same immutable model to isolate the optimized kernel.
             if(save_gradients && iteration==iterations-1) {
+                const auto query_inside=sampled.inside.to(tinytensor::DataType::Float32);
                 const std::pair<const char*,const Tensor*> groups[]={
                     {"means",&gradients.means},{"scales",&gradients.log_scales},
                     {"rotations",&gradients.quaternions},{"opacity",&gradients.opacity_logits},
                     {"sh",&gradients.sh},{"normal_features",&field_gradients.normal_features},
-                    {"refine_weight",&gradients.refine_weight}};
+                    {"refine_weight",&gradients.refine_weight},
+                    {"query_points",&sampled.camera_points},{"query_inside",&query_inside}};
                 for(const auto& [label,tensor]:groups) {
                     if(!tensor->is_valid()) continue;
                     const auto values=tensor->to_vector();

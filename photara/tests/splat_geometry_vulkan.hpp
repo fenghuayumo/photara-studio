@@ -50,6 +50,76 @@ void test_vulkan_geometry_chain() {
         std::cout << message << " relative_l2=" << relative << '\n';
         require(relative < tolerance || std::sqrt(error) < 2e-6, message);
     };
+    // Tiled query scatter must preserve original indices, empty tiles and
+    // per-point tolerance decisions, including non-multiple group tails.
+    {
+        struct QueryEnvironment {
+            bool existed;
+            std::string previous;
+            QueryEnvironment() : existed(std::getenv("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY") != nullptr),
+                previous(existed ? std::getenv("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY") : "") {}
+            static void set(const char* value) {
+#ifdef _WIN32
+                _putenv_s("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY",value);
+#else
+                if (*value) setenv("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY",value,1);
+                else unsetenv("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY");
+#endif
+            }
+            ~QueryEnvironment() { set(existed ? previous.c_str() : ""); }
+        } environment;
+        auto m=make_model(Device::Vulkan);
+        auto c=camera;
+        c.width=37; c.height=35; c.cx=18.F; c.cy=17.F;
+        for (auto mode : {photara::CameraModel::pinhole,photara::CameraModel::opencv_fisheye,
+                          photara::CameraModel::equirectangular}) {
+            c.model=mode;
+            c.k1=mode==photara::CameraModel::opencv_fisheye ? -.08F : 0.F;
+            c.k2=mode==photara::CameraModel::opencv_fisheye ? .01F : 0.F;
+            for (std::size_t n : {1u,127u,128u,129u,255u,256u,257u,513u,4099u}) {
+                std::vector<float> world(3*n), dl(3*n);
+                for (std::size_t i=0;i<n;++i) {
+                    world[3*i]=.04F*float(int((i*13)%43)-21);
+                    world[3*i+1]=.04F*float(int((i*17)%39)-19);
+                    world[3*i+2]=i%11==0 ? -2.F : 2.F;
+                    dl[3*i+2]=.2F/float(n);
+                    if (i%19==0) world[3*i]=100.F;
+                }
+                const auto points=Tensor::from_vector(world,{n,3},Device::Vulkan);
+                const auto upstream=Tensor::from_vector(dl,{n,3},Device::Vulkan);
+                for (float tolerance : {0.F,.02F}) {
+                    RasterizeOptions options;
+                    options.point_depth_tolerance=tolerance;
+                    Rasterizer rasterizer;
+                    QueryEnvironment::set("1");
+                    const auto reference=rasterizer.sample_depth(m,points,c,options);
+                    const auto reference_points=reference.camera_points.to_vector();
+                    const auto reference_inside=reference.inside.to(tinytensor::DataType::Float32).to_vector();
+                    require(reference_inside.size()==n,"Query inside mask was not materialized");
+                    if (n==4099) {
+                        require(std::find(reference_inside.begin(),reference_inside.end(),1.F)!=reference_inside.end(),
+                            "Tiled query fixture must contain valid depths");
+                        require(std::find(reference_inside.begin(),reference_inside.end(),0.F)!=reference_inside.end(),
+                            "Tiled query fixture must contain invalid depths");
+                    }
+                    const auto reference_grad=rasterizer.sample_depth_backward(m,reference,upstream);
+                    QueryEnvironment::set("");
+                    const auto tiled=rasterizer.sample_depth(m,points,c,options);
+                    require(tiled.inside.to(tinytensor::DataType::Float32).to_vector()==reference_inside,
+                        "Tiled query changed inside mask or original query indices");
+                    const auto actual=tiled.camera_points.to_vector();
+                    require(actual.size()==reference_points.size(),"Tiled query output shape changed");
+                    for (std::size_t j=0;j<actual.size();++j)
+                        require(std::isfinite(actual[j]) && std::abs(actual[j]-reference_points[j])<2e-5F,
+                            "Tiled query changed a depth result or original query index");
+                    const auto tiled_grad=rasterizer.sample_depth_backward(m,tiled,upstream);
+                    compare(reference_grad.points,tiled_grad.points,.001F,"Tiled query point gradients");
+                    compare(reference_grad.model.means,tiled_grad.model.means,.001F,"Tiled query model gradients");
+                }
+            }
+        }
+        std::cout<<"Tiled depth query tails, invalid points, scatter and tolerance passed\n";
+    }
     // Exercise chunk boundaries and heavy overlap, with the CUDA query oracle.
     {
         constexpr std::size_t queries=270017;

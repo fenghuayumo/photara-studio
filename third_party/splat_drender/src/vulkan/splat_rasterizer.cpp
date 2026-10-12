@@ -162,6 +162,8 @@ public:
                   "splat_blend_backward_no_geometry_subgroup.hlsl.spv",
                   12, sizeof(Push))),
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
+          sample_depth_group_(context.create_pipeline("splat_sample_depth_group.hlsl.spv", 9, sizeof(Push))),
+          sample_depth_tiled_(context.create_pipeline("splat_sample_depth_tiled.hlsl.spv", 8, sizeof(Push))),
           sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
           ssim_(context.create_pipeline("splat_ssim.hlsl.spv", 12, sizeof(Push))),
@@ -1366,12 +1368,7 @@ public:
         set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
         set_float(push, 14, settings.point_depth_bracket);
         set_float(push, 15, settings.point_depth_tolerance);
-        dispatch_infos(
-            sample_depth_,
-            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-             descriptor(*frame_camera_), descriptor(world_points, point_count * 12ull),
-             descriptor(output_f), descriptor(output_u)},
-            push, div_up(point_count, k_depth_query_threads));
+        dispatch_depth_queries(world_points, point_count, output_f, output_u, push);
         record_buffer_copy({output_f.handle, output_f.offset, point_count * 12ull}, camera_points);
         record_buffer_copy({output_u.handle, output_u.offset + point_count * 4ull, point_count * 4ull}, inside);
         sample_world_points_ = world_points;
@@ -1467,11 +1464,8 @@ public:
         set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
         set_float(push, 14, settings.point_depth_bracket);
         set_float(push, 15, settings.point_depth_tolerance);
-        dispatch(
-            sample_depth_,
-            {&tile_ranges_, last_instance_values_, &gauss_f_, frame_camera_, &points,
-             &output_f, &output_u},
-            push, div_up(point_count, k_depth_query_threads));
+        dispatch_depth_queries({points.handle, points.offset, world_points.size_bytes()},
+                               point_count, output_f, output_u, push);
         flush_batch();
         const auto packed_f = download_vector<float>(
             context_, output_f, static_cast<std::size_t>(point_count) * 4);
@@ -2809,6 +2803,40 @@ private:
         }
     }
 
+    void dispatch_depth_queries(const SplatBufferView& points, const std::uint32_t count,
+                                Buffer& output_f, Buffer& output_u, Push push) {
+        if (environment_flag("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY")) {
+            dispatch_infos(sample_depth_,
+                {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+                 descriptor(*frame_camera_), descriptor(points, count * 12ull),
+                 descriptor(output_f), descriptor(output_u)},
+                push, div_up(count, k_depth_query_threads));
+            return;
+        }
+        Buffer& pixels = grow(sample_pixels_, count * 8ull);
+        Buffer& tiles = grow(sample_tiles_, count * 4ull);
+        Buffer& counts = grow(sample_counts_,
+            static_cast<std::uint64_t>(last_tiles_ + scan_scratch_uints(last_tiles_)) * 4ull);
+        Buffer& order = grow(sample_order_, count * 4ull);
+        Buffer& cursors = grow(sample_cursors_, last_tiles_ * 4ull);
+        zero_buffer(counts, last_tiles_ * 4ull);
+        zero_buffer(cursors, last_tiles_ * 4ull);
+        const std::vector<VkDescriptorBufferInfo> group_buffers{
+            descriptor(*frame_camera_), descriptor(points, count * 12ull),
+            descriptor(pixels), descriptor(tiles), descriptor(counts), descriptor(order),
+            descriptor(cursors), descriptor(output_f), descriptor(output_u)};
+        push.u[16] = 0u;
+        dispatch_infos(sample_depth_group_, group_buffers, push, div_up(count, 256));
+        inclusive_scan(counts, 0, 0, last_tiles_, last_tiles_);
+        push.u[16] = 1u;
+        dispatch_infos(sample_depth_group_, group_buffers, push, div_up(count, 256));
+        dispatch_infos(sample_depth_tiled_,
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+             descriptor(pixels), descriptor(counts), descriptor(order),
+             descriptor(output_f), descriptor(output_u)}, push,
+            last_grid_x_, div_up(last_height_, k_tile));
+    }
+
     void dispatch_sample_backward(const std::vector<VkDescriptorBufferInfo>& buffers, Push push) {
         const bool native = sample_depth_backward_atomic_.valid();
         const auto& pipeline = native ? sample_depth_backward_atomic_ : sample_depth_backward_;
@@ -2995,6 +3023,8 @@ private:
     // pipeline creation on the missing capability.
     ComputePipeline blend_backward_no_geometry_atomic_;
     ComputePipeline sample_depth_;
+    ComputePipeline sample_depth_group_;
+    ComputePipeline sample_depth_tiled_;
     ComputePipeline sample_depth_backward_;
     ComputePipeline sample_depth_backward_atomic_;
     ComputePipeline multi_view_;
@@ -3099,6 +3129,11 @@ private:
     Buffer model_grad_;
     SplatBufferView sample_world_points_;
     Buffer sample_points_;
+    Buffer sample_pixels_;
+    Buffer sample_tiles_;
+    Buffer sample_counts_;
+    Buffer sample_order_;
+    Buffer sample_cursors_;
     Buffer sample_f_;
     Buffer sample_u_;
     Buffer sample_loss_;
