@@ -6943,6 +6943,127 @@ void test_emc_regularizers_match_finite_differences() {
     }
 }
 
+void test_vulkan_adc_fused() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    constexpr std::size_t n = 257;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> refine(n), visible(n), geometry(n), error(n), screen(n);
+    std::vector<int> radii(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        refine[i] = i % 11 == 0 ? nan : i % 13 == 0 ? inf : float(int(i % 17) - 4) * .1F;
+        visible[i] = float(int(i % 3) - 1);
+        radii[i] = int(i % 9) - 2;
+        geometry[i] = i % 7 == 0 ? nan : float(int(i % 19) - 3) * .03F;
+        error[i] = i % 5 == 0 ? inf : float(int(i % 23) - 2) * .01F;
+        screen[i] = float(i % 12) * .09F;
+    }
+    const auto fields = [](detail::DensificationStats& s) {
+        return std::array<Tensor*, 6>{&s.gradient, &s.count, &s.max_screen_radius,
+            &s.priority, &s.geometry_gradient, &s.image_error};
+    };
+    for (unsigned scenario = 0; scenario < 6; ++scenario) {
+        std::array<std::vector<float>, 6> expected;
+        for (unsigned k = 0; k < 6; ++k) expected[k].assign(n, .1F * (k + 1));
+        const bool maximum = scenario % 2 == 0;
+        const bool require_visibility = scenario % 3 != 0;
+        const bool optional = scenario >= 3;
+        const float power = scenario % 3 == 0 ? .5F : scenario % 3 == 1 ? 1.F : 2.F;
+        const float threshold = scenario % 2 == 0 ? .25F : 0.F;
+        constexpr unsigned repeats = 13; // Cross multiple encoder-ring wraps.
+        for (unsigned repeat = 0; repeat < repeats; ++repeat) {
+            for (std::size_t i = 0; i < n; ++i) {
+                if (radii[i] <= 0 || (require_visibility && visible[i] <= 0.F)) continue;
+                const float raw = std::isfinite(refine[i]) ? std::max(refine[i], 0.F) : 0.F;
+                const float weight = power == 1.F ? raw : std::pow(raw, power);
+                expected[0][i] = maximum ? std::max(expected[0][i], weight) : expected[0][i] + weight;
+                expected[1][i] += 1.F;
+                const float size = optional ? screen[i] : radii[i] / 1276.F;
+                expected[2][i] = std::max(expected[2][i], size);
+                expected[3][i] += threshold > 0.F
+                    ? std::log2(std::max(size / threshold, 1.F)) : weight * (1.F + size);
+                if (optional && std::isfinite(geometry[i]))
+                    expected[4][i] = std::max(expected[4][i], geometry[i]);
+                if (optional && std::isfinite(error[i])) expected[5][i] += std::max(error[i], 0.F);
+            }
+        }
+        for (auto device : {Device::CUDA, Device::Vulkan}) {
+            auto stats = detail::make_densification_stats(n, device);
+            auto output = fields(stats);
+            for (unsigned k = 0; k < output.size(); ++k)
+                *output[k] = Tensor::full({n + 6}, .1F * (k + 1), device).slice(0, 3, n + 3);
+            const auto upload = [device]<class T>(const std::vector<T>& values) {
+                std::vector<T> padded(n + 6);
+                std::copy(values.begin(), values.end(), padded.begin() + 3);
+                return Tensor::from_vector(padded, {n + 6}, device).slice(0, 3, n + 3);
+            };
+            const auto r = upload(refine);
+            const auto v = require_visibility || device == Device::CUDA ? upload(visible) : Tensor{};
+            const auto radius = upload(radii);
+            const auto g = optional ? upload(geometry) : Tensor{};
+            const auto e = optional ? upload(error) : Tensor{};
+            const auto s = optional ? upload(screen) : Tensor{};
+            for (unsigned repeat = 0; repeat < repeats; ++repeat)
+                detail::accumulate_densification_stats(r, v, radius, stats,
+                    1920, 1276, maximum, require_visibility, power, threshold, g, -1, e, s);
+            for (unsigned k = 0; k < output.size(); ++k) {
+                const auto actual = output[k]->to_vector();
+                for (std::size_t i = 0; i < n; ++i)
+                    require(std::isfinite(actual[i]) && std::abs(actual[i] - expected[k][i]) <
+                        2e-5F * std::max(1.F, std::abs(expected[k][i])),
+                        "ADC statistics differ from independent host reference");
+            }
+        }
+    }
+    const auto pcg = [](std::uint32_t value) {
+        const std::uint32_t state = value * 747796405u + 2891336453u;
+        const std::uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+        return (word >> 22u) ^ word;
+    };
+    std::vector<float> means((n + 2) * 3, .25F), logits(n), visibility(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        logits[i] = std::array<float, 6>{-12.F, -5.F, -2.F, 0.F, 6.F, 30.F}[i % 6];
+        visibility[i] = i % 11 == 0 ? nan : float(int(i % 3) - 1);
+    }
+    auto storage = Tensor::from_vector(means, {n + 2, 3}, Device::Vulkan);
+    GaussianModel model;
+    model.means = storage.slice(0, 1, n + 1);
+    model.opacity_logits = Tensor::from_vector(logits, {n, 1}, Device::Vulkan);
+    const auto v = Tensor::from_vector(visibility, {n}, Device::Vulkan);
+    const auto original_buffer = tinytensor::vulkan::buffer_view(model.means);
+    for (unsigned step = 0; step < 17; ++step) {
+        const unsigned seed = step == 0 ? 0xffffffffu : 42u + step;
+        const float cap = step == 8 ? 0.F : .03F;
+        detail::inject_adc_noise(model, v, .07F, cap, seed);
+        const auto random01 = [&](std::uint32_t index) {
+            return float(pcg(seed ^ pcg(index + 1u)) >> 8u) / 16777216.F;
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!(visibility[i] > 0.F)) continue;
+            const float opacity = 1.F / (1.F + std::exp(-logits[i]));
+            const float weight = std::pow(1.F - opacity, 150.F) * .07F;
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                const std::uint32_t index = static_cast<std::uint32_t>(3 * i + axis);
+                const float sample = std::sqrt(-2.F * std::log(std::max(random01(index * 2u), 1e-7F))) *
+                    std::cos(6.28318530718F * random01(index * 2u + 1u));
+                means[3 * (i + 1) + axis] += std::clamp(sample * weight, -cap, cap);
+            }
+        }
+    }
+    const auto actual = storage.to_vector();
+    for (std::size_t i = 0; i < actual.size(); ++i)
+        require(std::abs(actual[i] - means[i]) < 2e-5F,
+                "Fused ADC noise differs from PCG host reference or modifies sentinel rows");
+    const auto updated_buffer = tinytensor::vulkan::buffer_view(model.means);
+    require(updated_buffer.buffer == original_buffer.buffer && updated_buffer.offset == original_buffer.offset,
+            "Fused ADC noise replaced the means allocation");
+    std::cout << "CUDA/Vulkan ADC statistics and Vulkan fused noise tests passed\n";
+#endif
+}
+
 void test_densify_statistics_and_oversize_weights() {
     using namespace photara::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -7841,6 +7962,11 @@ int main(int argc, char** argv) {
         }
     }
     try {
+        if (argc > 1 && std::string(argv[1]) == "--adc-fused-only") {
+            test_vulkan_adc_fused();
+            test_densify_statistics_and_oversize_weights();
+            return 0;
+        }
         if (argc>1 && std::string(argv[1])=="--geometry-audit") {
             test_gggs_3d_filter();
             test_gggs_multi_view_geometry_and_ncc();
@@ -8217,6 +8343,7 @@ int main(int argc, char** argv) {
         test_emc_revised_noise_gates_and_scales();
         test_emc_regularizers_match_finite_differences();
         test_densify_statistics_and_oversize_weights();
+        test_vulkan_adc_fused();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_refinement_decisions();

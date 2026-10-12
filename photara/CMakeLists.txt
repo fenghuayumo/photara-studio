@@ -573,6 +573,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
+            src/splat/adc.cpp
             src/splat/optimizer.cpp
             src/splat/bilateral_grid.cu
             src/splat/ppisp.cu
@@ -640,6 +641,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
                 src/splat/geometry_vulkan.cpp
+                src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
@@ -653,6 +655,8 @@ if(PHOTARA_ENABLE_FEATURES)
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
                     ENV vulkan1.2
                     INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
