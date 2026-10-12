@@ -171,6 +171,7 @@ public:
           color_correction_(context.create_pipeline(
               "splat_color_correction.hlsl.spv", 6, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
+          project_structure_adam_(context.create_pipeline("splat_project_backward_structure_adam.hlsl.spv", 28, sizeof(Push) + 8 * sizeof(float))),
           project_sh_adam_(context.create_pipeline("splat_project_backward_sh_adam.hlsl.spv", 19, sizeof(Push) + 8 * sizeof(float))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))),
@@ -2123,7 +2124,8 @@ public:
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
         const SplatBufferView& packed_model_gradients,
         const SplatBufferView& dL_depth, const SplatBufferView& dL_normal,
-        const SplatSHAdamUpdate* sh_adam) {
+        const SplatSHAdamUpdate* sh_adam,
+        const SplatStructureAdamUpdate* structure_adam) {
         require(last_frame_has_snapshots_,
                 "backward_device requires the latest render to use pixel_snapshots=true");
         const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
@@ -2131,7 +2133,9 @@ public:
         const std::uint64_t depth_bytes = alpha_bytes;
         const std::uint64_t normal_bytes = color_bytes;
         const std::uint64_t blend_bytes = blend_gradient_float_count() * sizeof(float);
-        const std::uint64_t model_bytes = (sh_adam ? model_gradient_float_count() -
+        const std::uint64_t model_bytes = structure_adam
+            ? static_cast<std::uint64_t>(count_) * (structure_adam->capture_opacity_gradient ? 2 : 1) * sizeof(float)
+            : (sh_adam ? model_gradient_float_count() -
             static_cast<std::uint64_t>(count_) * sh_bases_ * 3 :
             model_gradient_float_count()) * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
@@ -2170,6 +2174,17 @@ public:
             for (int i = 0; i < 4; ++i)
                 require(views[i].buffer != VK_NULL_HANDLE && views[i].bytes >= sizes[i] &&
                         views[i].offset % alignment == 0, "invalid fused SH Adam buffer");
+        }
+        if (structure_adam) {
+            require(sh_adam && has_sh_ && has_scales_ && raw_chain_,
+                    "fused structure Adam requires fused SH and raw scale/rotation parameters");
+            const std::uint32_t strides[]{3,3,3,3,4,4,1,1};
+            for (int i = 0; i < 8; ++i) {
+                const auto& view = structure_adam->moments[i];
+                require(view.buffer != VK_NULL_HANDLE &&
+                        view.bytes >= static_cast<std::uint64_t>(count_) * strides[i] * sizeof(float) &&
+                        view.offset % alignment == 0, "invalid fused structure Adam moment buffer");
+            }
         }
         // Backward-only scratch joins the phase arena; the blend gradient is
         // per-Gaussian and the geometry loss scratch is per-pixel, and none of
@@ -2294,8 +2309,19 @@ public:
             for (const auto& view : {sh_adam->parameter, sh_adam->first, sh_adam->packed, sh_adam->bounds})
                 project_infos.push_back({view.buffer, view.offset, view.bytes});
         }
+        if (structure_adam) {
+            for (const auto& view : structure_adam->moments)
+                project_infos.push_back({view.buffer, view.offset, view.bytes});
+            // The encoder slot has retired before host writes. The projection pass
+            // is the only reader; the next reuse waits on that slot's fence.
+            Buffer& settings = grow(structure_settings_[encoder_ring_.index()],
+                sizeof(structure_adam->settings), BufferMemory::host_visible);
+            settings.upload(structure_adam->settings.data(), sizeof(structure_adam->settings));
+            project_infos.push_back(descriptor(settings));
+            project_push.u[17] = structure_adam->capture_opacity_gradient ? 1u : 0u;
+        }
         dispatch_infos(
-            sh_adam ? project_sh_adam_ : project_backward_, project_infos, project_push, div_up(count_, 256),
+            structure_adam ? project_structure_adam_ : sh_adam ? project_sh_adam_ : project_backward_, project_infos, project_push, div_up(count_, 256),
             1, 1, sh_adam ? &sh_adam->settings : nullptr);
         write_backward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         // The packed gradients feed TinyTensor's optimizer batch, which is
@@ -2303,6 +2329,9 @@ public:
         // read, gated on its own profiling switch) needs the queue idle.
         submit_batch(backward_profile_enabled_);
         collect_backward_timestamps();
+        // Buffer identities stay unchanged, but an in-place structure update
+        // invalidates projection/sort reuse and repeated backward on this frame.
+        if (structure_adam) last_frame_has_snapshots_ = false;
     }
 
     SplatRgbaImage render_rgba_device(const SplatCamera& camera, SplatSettings settings) {
@@ -3118,6 +3147,7 @@ private:
     ComputePipeline color_correction_;
     ComputePipeline color_correction_atomic_;
     ComputePipeline project_backward_;
+    ComputePipeline project_structure_adam_;
     ComputePipeline project_sh_adam_;
     ComputePipeline clear_;
     ComputePipeline pack_;
@@ -3168,6 +3198,7 @@ private:
     bool device_model_bound_ = false;
     // Per-frame camera constants, double buffered so a frame can be recorded
     // while the previous one is still queued.
+    Buffer structure_settings_[k_batch_slots];
     Buffer camera_[2];
     Buffer* frame_camera_ = &camera_[0];
     std::uint32_t camera_slot_{};
@@ -3360,9 +3391,10 @@ void SplatRasterizer::backward_device(
     const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
     const SplatBufferView& packed_model_gradients,
     const SplatBufferView& dL_median_depth, const SplatBufferView& dL_normal,
-    const SplatSHAdamUpdate* sh_adam) {
+    const SplatSHAdamUpdate* sh_adam,
+        const SplatStructureAdamUpdate* structure_adam) {
     impl_->backward_device(
-        dL_color, dL_alpha, packed_model_gradients, dL_median_depth, dL_normal, sh_adam);
+        dL_color, dL_alpha, packed_model_gradients, dL_median_depth, dL_normal, sh_adam, structure_adam);
 }
 
 std::uint64_t SplatRasterizer::model_gradient_float_count() const noexcept {

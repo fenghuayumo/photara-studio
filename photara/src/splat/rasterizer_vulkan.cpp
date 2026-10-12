@@ -397,9 +397,10 @@ ModelGradients vulkan_raster_backward(
     const auto profile_start = context->backend->profile_stages
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    if (structure_adam != nullptr)
-        throw std::invalid_argument(
-            "Fused structure Adam is not supported by the Vulkan raster primitive");
+    if (structure_adam && (!sh_adam || structure_adam->shape_scale_reg > 0.F ||
+        structure_adam->shape_erank_reg > 0.F || structure_adam->shape_erank_s3_reg > 0.F ||
+        structure_adam->shape_quat_norm_reg > 0.F))
+        throw std::invalid_argument("Vulkan fused structure Adam requires fused SH and no shape regularizers");
     if (densify_map.is_valid() && densify_map.numel() != 0)
         throw std::invalid_argument(
             "Vulkan EMC densify-map backward is not implemented yet");
@@ -421,8 +422,9 @@ ModelGradients vulkan_raster_backward(
     // including zeroing inactive/culled entries and unused SH coefficients.
     // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
     auto packed = tinytensor::Tensor::empty(
-        {context->backend->rasterizer.model_gradient_float_count() -
-            (sh_adam ? model.sh.numel() : 0)}, tinytensor::Device::Vulkan);
+        {structure_adam ? count * (structure_adam->capture_opacity_gradient ? 2U : 1U)
+            : context->backend->rasterizer.model_gradient_float_count() -
+                (sh_adam ? model.sh.numel() : 0)}, tinytensor::Device::Vulkan);
     splat_drender::vulkan::SplatSHAdamUpdate update;
     if (sh_adam) {
         if (sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
@@ -447,13 +449,43 @@ ModelGradients vulkan_raster_backward(
         update.settings = {sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
             sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon, regularization};
     }
+    splat_drender::vulkan::SplatStructureAdamUpdate structure_update;
+    if (structure_adam) {
+        const tinytensor::Tensor* moments[]{&structure_adam->means_first, &structure_adam->means_second,
+            &structure_adam->scales_first, &structure_adam->scales_second,
+            &structure_adam->rotations_first, &structure_adam->rotations_second,
+            &structure_adam->opacity_first, &structure_adam->opacity_second};
+        const std::size_t strides[]{3,3,3,3,4,4,1,1};
+        for (int i = 0; i < 8; ++i) {
+            if (moments[i]->dtype() != tinytensor::DataType::Float32 || moments[i]->numel() != count * strides[i])
+                throw std::invalid_argument("Vulkan fused structure Adam requires full FP32 moments");
+            structure_update.moments[i] = buffer_view(*moments[i]);
+        }
+        structure_update.settings = {structure_adam->means_lr, structure_adam->scales_lr,
+            structure_adam->quaternions_lr, structure_adam->opacities_lr,
+            structure_adam->beta1, structure_adam->beta2, structure_adam->correction1,
+            structure_adam->correction2, structure_adam->epsilon,
+            structure_adam->minimum_log_scale, structure_adam->maximum_log_scale,
+            structure_adam->max_log_scale_ratio, structure_adam->opacity_reg, structure_adam->log_scale_reg};
+        structure_update.capture_opacity_gradient = structure_adam->capture_opacity_gradient;
+    }
     tinytensor::vulkan::submit_async();
     context->backend->rasterizer.backward_device(
         color_gradient, buffer_view(grad_alpha), buffer_view(packed),
-        buffer_view(grad_depth), buffer_view(grad_normal), sh_adam ? &update : nullptr);
+        buffer_view(grad_depth), buffer_view(grad_normal), sh_adam ? &update : nullptr,
+        structure_adam ? &structure_update : nullptr);
 
     std::size_t offset = 0;
     ModelGradients gradients;
+    if (structure_adam) {
+        gradients.refine_weight = packed.slice(0, 0, count);
+        if (structure_adam->capture_opacity_gradient)
+            gradients.opacity_logits = packed.slice(0, count, count * 2U)
+                .reshape(tinytensor::TensorShape{count, std::size_t{1}});
+        if (context->backend->profile_stages)
+            context->backend->record_backward(elapsed_ms(profile_start));
+        return gradients;
+    }
     gradients.means = packed.slice(0, offset, offset + count * 3U)
         .reshape(tinytensor::TensorShape{count, std::size_t{3}});
     offset += count * 3U;

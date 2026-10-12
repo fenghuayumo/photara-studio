@@ -5,6 +5,7 @@
 #include "splat/rasterizer.hpp"
 #include "splat/trainer.hpp"
 #include "../splat/optimizer.hpp"
+#include "../splat/sh_adam_quant.hpp"
 #include "../splat/photometric_loss.hpp"
 #include "../splat/cuda_ops.hpp"
 #include "../splat/geometry_vulkan.hpp"
@@ -742,6 +743,7 @@ int run_benchmark(int argc, char** argv) {
 }
 
 #include "splat_geometry_benchmark.hpp"
+#include "splat_rgb_benchmark.hpp"
 
 // A deliberately small optimizer smoke test over one real training image.
 // It keeps the full Gaussian model and CUDA-compatible Vulkan backward, but
@@ -915,6 +917,8 @@ int run_train_smoke(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--bench") return run_benchmark(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--bench-rgb")
+            return run_rgb_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--bench-geometry")
             return run_geometry_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--train-smoke")

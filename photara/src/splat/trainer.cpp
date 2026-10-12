@@ -2118,7 +2118,9 @@ GaussianModel Trainer::train(
         const bool fused_sh = options_.fuse_sh_adam &&
             !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
-        const bool fused_structure = !vulkan_backend && !normal_field_active &&
+        const bool fused_structure = (!vulkan_backend ||
+            (fused_sh && options_.shape_scale_reg <= 0.F && options_.shape_erank_reg <= 0.F &&
+             options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F)) && !normal_field_active &&
             !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
@@ -2156,7 +2158,7 @@ GaussianModel Trainer::train(
             options_.shape_erank_reg * inverse_count,
             options_.shape_erank_s3_reg * inverse_count,
             options_.shape_quat_norm_reg * inverse_count,
-            report_progress};
+            report_progress && !vulkan_backend};
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map, fused_sh ? &sh_update : nullptr,

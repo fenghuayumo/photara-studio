@@ -402,6 +402,37 @@ build\photara\Release\photara.exe `
   `SPLAT_VULKAN_DISABLE_NORMAL_REUSE=1` selects a full auxiliary forward for A/B
   comparison. Keep the primary owned radii/visibility tensors for ADC because
   the auxiliary render overwrites the backend's internal attachments.
+- Vulkan's default RGB path fuses FP32 Adam for means, log scales, raw
+  quaternions and opacity logits into projection backward, together with SH
+  Adam. Intermediate structure gradients remain invocation-local; only ADC
+  refine weights (and an optional diagnostic opacity gradient) are written.
+  At one million Gaussians this removes 76 MB of packed-gradient output and
+  four independent optimizer dispatches. Scale bounds/ratio, finite-value
+  handling, opacity/scale priors and moment decay for culled rows are preserved.
+  No additional performance-selection environment variable is introduced.
+  Auxiliary gradient merges, shape regularizers, frozen structure and empty
+  renders retain their distinct required update paths.
+- `photara_splat_vulkan_parity --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW]`
+  compares the current CUDA and Vulkan RGB render/loss/fused backward+Adam
+  chain from the same initial model and camera. Three warmups are excluded;
+  phase boundaries synchronize both backends, so these are isolated compute
+  timings, excluding ADC, data loading and normal production queue overlap.
+  The 2026-10-12 million-Gaussian bicycle check at 1920x1276 (21 samples)
+  measured CUDA/Vulkan totals of 13.4602/8.6735, 11.2144/7.5407 and
+  12.9050/7.9250 ms for views 0/27/132. Vulkan projection backward including
+  both Adam updates averaged 1.90-2.02 ms; blend backward remained largest
+  at 2.67-3.38 ms. Forward depth sorting averaged 0.45-0.55 ms and tile sorting
+  0.22-0.27 ms, so sorting is not the largest current cost on these views.
+  Snapshot compression still needs numerical and thin-structure validation.
+- The matched CUDA/Vulkan 1000-step RGB smoke (seed 42, ADC-IGS, quarter
+  resolution, 25 held-out views) yielded PSNR 20.6173/20.5601 dB and SSIM
+  0.446262/0.444780 with finite saved models. It is a short integration check,
+  not a convergence or full-training speed gate. TinyTensor profiling of the
+  Vulkan smoke, including evaluation, counted 47,357 dispatches; elementwise
+  operations dominated its GPU work. The ADC statistics and exploration noise
+  tensor chains are the next fusion candidates. TinyTensor timestamps exclude
+  rasterizer submissions; loss host readbacks already occur only on reporting
+  steps. Local evidence is in `experiments/vulkan_rgb_opt_20261012/`.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the

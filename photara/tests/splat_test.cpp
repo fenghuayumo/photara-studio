@@ -2157,11 +2157,11 @@ void test_vulkan_fused_sh_adam() {
 #endif
 }
 
-void test_fused_structure_adam() {
+photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     using photara::CameraModel;
     using tinytensor::Tensor;
-    constexpr auto device = tinytensor::Device::CUDA;
+    const bool vk = device == tinytensor::Device::Vulkan;
     constexpr std::size_t n = 257;
     std::vector<float> means(n * 3), rotations(n * 4), log_scales(n * 3),
         logits(n), coefficients(n * 12);
@@ -2169,7 +2169,9 @@ void test_fused_structure_adam() {
         means[i * 3] = .02F * float(int(i % 11) - 5);
         means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
         means[i * 3 + 2] = 2.F + .001F * i;
-        rotations[i * 4] = 1.F;
+        rotations[i * 4] = 1.03F;
+        rotations[i * 4 + 1] = .08F;
+        rotations[i * 4 + 2] = -.04F;
         log_scales[i * 3] = -.7F;
         log_scales[i * 3 + 1] = -.5F;
         log_scales[i * 3 + 2] = -.9F;
@@ -2185,6 +2187,7 @@ void test_fused_structure_adam() {
     model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
     model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
     model.sh_degree = 1;
+    model.filter_3d = Tensor::full({n,1}, .04F, device);
     Camera camera;
     camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
     camera.cx = 18; camera.cy = 14;
@@ -2229,11 +2232,13 @@ void test_fused_structure_adam() {
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
     training.log_scale_regularization_weight = .03F;
-    training.max_scale_ratio = 4.F;
+    training.max_scale_ratio = 1.05F;
     training.adam_epsilon = 1e-15F;
+    auto reference_sh = detail::make_sh_adam_quant(n, 12, device);
+    auto fused_sh = detail::make_sh_adam_quant(n, 12, device);
     for (unsigned step : {7U, 8U, 9U}) {
         const auto ref = rasterizer.forward(model, camera, options);
-        const auto fused = rasterizer.forward(fused_model, camera, options);
+
         auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
         const float inverse = 1.F / float(n);
         StructureAdamUpdate update{
@@ -2244,16 +2249,46 @@ void test_fused_structure_adam() {
             training.beta1, training.beta2,
             1.F - std::pow(training.beta1, float(step)),
             1.F - std::pow(training.beta2, float(step)),
-            training.adam_epsilon, -8.F, 2.F, std::log(training.max_scale_ratio),
+            training.adam_epsilon, -.8F, -.4F, std::log(training.max_scale_ratio),
             training.opacity_regularization_weight * inverse,
             training.log_scale_regularization_weight * inverse / 3.F,
             0.F, 0.F, 0.F, 0.F, true};
+        SHAdamUpdate sh_update;
+        sh_update.first = fused_sh.first; sh_update.packed = fused_sh.packed;
+        sh_update.bounds = fused_sh.bounds;
+        sh_update.lr = training.sh0_lr; sh_update.rest_lr = training.sh_rest_lr;
+        sh_update.beta1 = training.beta1; sh_update.beta2 = training.beta2;
+        sh_update.correction1 = update.correction1; sh_update.correction2 = update.correction2;
+        sh_update.epsilon = training.adam_epsilon;
+        const auto fused = rasterizer.forward(fused_model, camera, options);
         const auto fg = rasterizer.backward(
-            fused_model, fused, color_grad, alpha_grad, {}, {}, {}, nullptr, &update);
+            fused_model, fused, color_grad, alpha_grad, {}, {}, {}, &sh_update, &update);
+        if (vk) {
+            bool rejected = false;
+            try { (void)rasterizer.backward(fused_model, fused, color_grad, alpha_grad, {}, {}); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Fused structure update did not invalidate old backward state");
+        }
         require(!fg.means.is_valid(), "Fused structure backward retained mean gradients");
         require(!fg.log_scales.is_valid(),
             "Fused structure backward retained scale gradients");
-        detail::add_geometry_regularization(
+        if (vk) {
+            // Independent host oracle for the priors.
+            auto opacity_gradient = g.opacity_logits.to_vector();
+            auto scale_gradient = g.log_scales.to_vector();
+            const auto raw_opacity = model.opacity_logits.to_vector();
+            const auto raw_scale = model.log_scales.to_vector();
+            for (std::size_t i = 0; i < n; ++i) {
+                const float alpha = 1.F / (1.F + std::exp(-raw_opacity[i]));
+                opacity_gradient[i] += update.opacity_reg * alpha * (1.F - alpha);
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    scale_gradient[3*i+axis] += update.log_scale_reg * std::exp(raw_scale[3*i+axis]);
+            }
+            // Detach packed views before replacing them: Tensor view assignment copies in place.
+            g.opacity_logits = {}; g.log_scales = {};
+            g.opacity_logits = Tensor::from_vector(opacity_gradient, {n,1}, device);
+            g.log_scales = Tensor::from_vector(scale_gradient, {n,3}, device);
+        } else detail::add_geometry_regularization(
             model, g, training.opacity_regularization_weight,
             training.log_scale_regularization_weight);
         require(fg.opacity_logits.is_valid(),
@@ -2262,7 +2297,10 @@ void test_fused_structure_adam() {
             "Fused structure opacity diagnostic parity");
         detail::adam_step_structure(
             model, g, means_state, scales_state, rotations_state, opacity_state,
-            0.01F, step, training, -8.F, 2.F);
+            0.01F, step, training, -.8F, -.4F);
+        detail::sh_adam_quant_step(model.sh, g.sh, reference_sh, 12,
+            training.sh0_lr, training.sh_rest_lr, training.beta1, training.beta2,
+            update.correction1, update.correction2, training.adam_epsilon, 0.F);
         compare(model.means, fused_model.means, "Fused structure mean parity");
         compare(model.log_scales, fused_model.log_scales,
             "Fused structure scale parity");
@@ -2270,12 +2308,19 @@ void test_fused_structure_adam() {
             "Fused structure quaternion parity");
         compare(model.opacity_logits, fused_model.opacity_logits,
             "Fused structure opacity parity");
+        compare(model.sh, fused_model.sh, "Fused structure SH parity");
         compare(means_state.first, fused_means.first, "Fused structure mean m parity");
         compare(scales_state.second, fused_scales.second,
             "Fused structure scale v parity");
+        compare(means_state.second, fused_means.second, "Fused structure mean v parity");
+        compare(scales_state.first, fused_scales.first, "Fused structure scale m parity");
+        compare(rotations_state.first, fused_rotations.first, "Fused structure quaternion m parity");
+        compare(rotations_state.second, fused_rotations.second, "Fused structure quaternion v parity");
+        compare(opacity_state.second, fused_opacity.second, "Fused structure opacity v parity");
         compare(opacity_state.first, fused_opacity.first,
             "Fused structure opacity m parity");
     }
+    return fused_model;
 }
 
 void test_forward_backward() {
@@ -7922,11 +7967,32 @@ int main(int argc, char** argv) {
             std::cout << "Geometry tests passed\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--structure-adam-only") {
+            const auto cuda = test_fused_structure_adam();
+            const auto vk = test_fused_structure_adam(tinytensor::Device::Vulkan);
+            const std::pair<const tinytensor::Tensor*, const tinytensor::Tensor*> pairs[]{
+                {&cuda.means,&vk.means},{&cuda.log_scales,&vk.log_scales},
+                {&cuda.quaternions,&vk.quaternions},{&cuda.opacity_logits,&vk.opacity_logits},
+                {&cuda.sh,&vk.sh}};
+            for (const auto& [reference,actual] : pairs) {
+                const auto x=reference->to_vector(), y=actual->to_vector();
+                double error=0.,norm=0.;
+                for(std::size_t i=0;i<x.size();++i) {
+                    error+=(x[i]-y[i])*(x[i]-y[i]); norm+=x[i]*x[i];
+                }
+                const auto relative=std::sqrt(error/std::max(norm,1e-16));
+                std::cout << "CUDA/Vulkan fused trajectory relative_l2=" << relative << '\n';
+                require(relative < 2e-3, "CUDA/Vulkan fused structure trajectory mismatch");
+            }
+            std::cout << "Structure Adam tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
             test_vulkan_fused_sh_adam();
             test_fused_structure_adam();
+            test_fused_structure_adam(tinytensor::Device::Vulkan);
             test_training_device_cache();
             std::cout << "Memory optimization tests passed\n";
             return 0;
@@ -8000,6 +8066,7 @@ int main(int argc, char** argv) {
         test_vulkan_sh_adam_quant();
         test_vulkan_fused_sh_adam();
         test_fused_structure_adam();
+        test_fused_structure_adam(tinytensor::Device::Vulkan);
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();
         test_pam_smoke();

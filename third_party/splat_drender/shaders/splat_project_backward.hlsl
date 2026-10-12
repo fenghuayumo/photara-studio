@@ -1,6 +1,10 @@
 #include "splat_math.hlsli"
 
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> means;
+#else
 [[vk::binding(0, 0)]] StructuredBuffer<float> means;
+#endif
 [[vk::binding(1, 0)]] StructuredBuffer<float> opacities;
 [[vk::binding(2, 0)]] StructuredBuffer<float> scales;
 [[vk::binding(3, 0)]] StructuredBuffer<float> rotations;
@@ -10,14 +14,35 @@
 [[vk::binding(7, 0)]] StructuredBuffer<float4> gauss_f;
 [[vk::binding(8, 0)]] StructuredBuffer<uint> gauss_u;
 [[vk::binding(9, 0)]] StructuredBuffer<float> blend_grad;
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+[[vk::binding(10, 0)]] RWStructuredBuffer<float> raw_log_scales;
+#else
 [[vk::binding(10, 0)]] StructuredBuffer<float> raw_log_scales;
+#endif
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+[[vk::binding(11, 0)]] RWStructuredBuffer<float> raw_rotations;
+#else
 [[vk::binding(11, 0)]] StructuredBuffer<float> raw_rotations;
+#endif
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+[[vk::binding(12, 0)]] RWStructuredBuffer<float> opacity_logits;
+#else
 [[vk::binding(12, 0)]] StructuredBuffer<float> opacity_logits;
+#endif
 [[vk::binding(13, 0)]] StructuredBuffer<float> filter_3d;
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+[[vk::binding(14, 0)]] RWStructuredBuffer<float> structure_output;
+// One row per invocation: all intermediate gradients remain private.
+static float model_grad[20];
+#else
 [[vk::binding(14, 0)]] RWStructuredBuffer<float> model_grad;
+#endif
 
 #ifdef SPLAT_FUSED_SH_ADAM
 #include "splat_sh_adam_fused.hlsli"
+#endif
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+#include "splat_structure_adam_fused.hlsli"
 #endif
 void write_sh_gradient(uint offset, float value) {
 #ifdef SPLAT_FUSED_SH_ADAM
@@ -458,37 +483,42 @@ void project_backward(uint3 dispatch_id) {
 #ifdef SPLAT_FUSED_SH_ADAM
     feature_count = 0u;
 #endif
-    uint feature_base = 3u * count;
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+    uint gradient_count = 1u, gradient_index = 0u;
+#else
+    uint gradient_count = count, gradient_index = index;
+#endif
+    uint feature_base = 3u * gradient_count;
     uint opacity_base = feature_base + feature_count;
-    uint scale_base = opacity_base + count;
-    uint rotation_base = scale_base + 3u * count;
-    uint covariance_base = rotation_base + 4u * count;
+    uint scale_base = opacity_base + gradient_count;
+    uint rotation_base = scale_base + 3u * gradient_count;
+    uint covariance_base = rotation_base + 4u * gradient_count;
     uint log_scale_base = covariance_base +
-        ((compact_raw_gradients && has_scales) ? 0u : 6u * count);
-    uint raw_rotation_base = log_scale_base + 3u * count;
-    uint logit_base = raw_rotation_base + 4u * count;
-    uint refine_base = logit_base + count;
+        ((compact_raw_gradients && has_scales) ? 0u : 6u * gradient_count);
+    uint raw_rotation_base = log_scale_base + 3u * gradient_count;
+    uint logit_base = raw_rotation_base + 4u * gradient_count;
+    uint refine_base = logit_base + gradient_count;
 
     [unroll] for (uint component = 0u; component < 3u; ++component)
-        model_grad[3u * index + component] = 0.0f;
+        model_grad[3u * gradient_index + component] = 0.0f;
     uint feature_components = has_sh ? bases * 3u : 3u;
     for (uint feature = 0u; feature < feature_components; ++feature)
         write_sh_gradient(index * feature_components + feature, 0.0f);
-    model_grad[opacity_base + index] = 0.0f;
+    model_grad[opacity_base + gradient_index] = 0.0f;
     [unroll] for (uint scale_component = 0u; scale_component < 3u; ++scale_component) {
-        model_grad[scale_base + 3u * index + scale_component] = 0.0f;
-        model_grad[log_scale_base + 3u * index + scale_component] = 0.0f;
+        model_grad[scale_base + 3u * gradient_index + scale_component] = 0.0f;
+        model_grad[log_scale_base + 3u * gradient_index + scale_component] = 0.0f;
     }
     [unroll] for (uint rotation_component = 0u; rotation_component < 4u; ++rotation_component) {
-        model_grad[rotation_base + 4u * index + rotation_component] = 0.0f;
-        model_grad[raw_rotation_base + 4u * index + rotation_component] = 0.0f;
+        model_grad[rotation_base + 4u * gradient_index + rotation_component] = 0.0f;
+        model_grad[raw_rotation_base + 4u * gradient_index + rotation_component] = 0.0f;
     }
     if (!(compact_raw_gradients && has_scales)) {
         [unroll] for (uint covariance_component = 0u; covariance_component < 6u; ++covariance_component)
-            model_grad[covariance_base + 6u * index + covariance_component] = 0.0f;
+            model_grad[covariance_base + 6u * gradient_index + covariance_component] = 0.0f;
     }
-    model_grad[logit_base + index] = 0.0f;
-    model_grad[refine_base + index] = blend_grad[17u * count + index];
+    model_grad[logit_base + gradient_index] = 0.0f;
+    model_grad[refine_base + gradient_index] = blend_grad[17u * count + index];
     if (gauss_u[3u * count + index] == 0u) return;
 
     float3 mean = float3(means[3u * index], means[3u * index + 1u], means[3u * index + 2u]);
@@ -605,7 +635,7 @@ void project_backward(uint3 dispatch_id) {
             gb -= q * 2.0f * b;
         }
     }
-    model_grad[opacity_base + index] = gc.w * coef;
+    model_grad[opacity_base + gradient_index] = gc.w * coef;
     Mat3 G = mat_zero();
     G.m[0][0] = ga;
     G.m[0][1] = 0.5f * gb;
@@ -631,11 +661,11 @@ void project_backward(uint3 dispatch_id) {
         float4 gr;
         cov3d_backward(scale_local, rotation, R, gv0, gv1, gv2, gv3, gv4, gv5, gs, gr);
         gs *= scale_modifier;
-        model_grad[scale_base + 3u * index] = gs.x;
-        model_grad[scale_base + 3u * index + 1u] = gs.y;
-        model_grad[scale_base + 3u * index + 2u] = gs.z;
+        model_grad[scale_base + 3u * gradient_index] = gs.x;
+        model_grad[scale_base + 3u * gradient_index + 1u] = gs.y;
+        model_grad[scale_base + 3u * gradient_index + 2u] = gs.z;
         [unroll] for (uint q = 0u; q < 4u; ++q)
-            model_grad[rotation_base + 4u * index + q] = gr[q];
+            model_grad[rotation_base + 4u * gradient_index + q] = gr[q];
     } else {
         uint o = covariance_base + 6u * index;
         model_grad[o] = gv0;
@@ -690,9 +720,9 @@ void project_backward(uint3 dispatch_id) {
         model_grad[fo + 1u] = gcolor.y;
         model_grad[fo + 2u] = gcolor.z;
     }
-    model_grad[3u * index] = gm.x;
-    model_grad[3u * index + 1u] = gm.y;
-    model_grad[3u * index + 2u] = gm.z;
+    model_grad[3u * gradient_index] = gm.x;
+    model_grad[3u * gradient_index + 1u] = gm.y;
+    model_grad[3u * gradient_index + 2u] = gm.z;
     if (mode == kModeFisheye && (any(gplane != 0.0f) || any(gnormal != 0.0f))) {
         [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
             float eps = 1.0e-3f * max(1.0f, abs(mean[axis]));
@@ -708,7 +738,7 @@ void project_backward(uint3 dispatch_id) {
                 mm, has_scales, scale, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
                 mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
                 kernel, scale_modifier);
-            model_grad[3u * index + axis] +=
+            model_grad[3u * gradient_index + axis] +=
                 (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
                 (2.0f * eps);
         }
@@ -727,7 +757,7 @@ void project_backward(uint3 dispatch_id) {
                     mean, true, sm, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
                     mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
                     kernel, scale_modifier);
-                model_grad[scale_base + 3u * index + axis2] +=
+                model_grad[scale_base + 3u * gradient_index + axis2] +=
                     (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
                     (2.0f * eps);
             }
@@ -745,7 +775,7 @@ void project_backward(uint3 dispatch_id) {
                     mean, true, scale, qm, cv0, cv1, cv2, cv3, cv4, cv5,
                     mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
                     kernel, scale_modifier);
-                model_grad[rotation_base + 4u * index + qi] +=
+                model_grad[rotation_base + 4u * gradient_index + qi] +=
                     (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
                     (2.0f * eps);
             }
@@ -765,7 +795,7 @@ void project_backward(uint3 dispatch_id) {
                     mean, false, scale, rotation, cm[0], cm[1], cm[2], cm[3], cm[4], cm[5],
                     mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
                     kernel, scale_modifier);
-                model_grad[covariance_base + 6u * index + ci] +=
+                model_grad[covariance_base + 6u * gradient_index + ci] +=
                     (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
                     (2.0f * eps);
             }
@@ -774,10 +804,10 @@ void project_backward(uint3 dispatch_id) {
     if (raw_chain && has_scales) {
         float f = filter_3d[index];
         float f2 = f * f;
-        float gop = model_grad[opacity_base + index];
+        float gop = model_grad[opacity_base + gradient_index];
         [unroll] for (uint ax = 0u; ax < 3u; ++ax) {
-            uint o = 3u * index + ax;
-            float raw = exp(raw_log_scales[o]);
+            uint o = 3u * gradient_index + ax;
+            float raw = exp(raw_log_scales[3u * index + ax]);
             float fs = scale[ax];
             model_grad[log_scale_base + o] =
                 model_grad[scale_base + o] * raw * raw / fs +
@@ -789,16 +819,16 @@ void project_backward(uint3 dispatch_id) {
         float rinv = rsqrt(max(dot(rawq, rawq), 1.0e-20f));
         float4 qn = rawq * rinv;
         float4 gq = float4(
-            model_grad[rotation_base + 4u * index],
-            model_grad[rotation_base + 4u * index + 1u],
-            model_grad[rotation_base + 4u * index + 2u],
-            model_grad[rotation_base + 4u * index + 3u]);
+            model_grad[rotation_base + 4u * gradient_index],
+            model_grad[rotation_base + 4u * gradient_index + 1u],
+            model_grad[rotation_base + 4u * gradient_index + 2u],
+            model_grad[rotation_base + 4u * gradient_index + 3u]);
         float qdot = dot(qn, gq);
         float4 grq = rinv * (gq - qn * qdot);
         [unroll] for (uint qi = 0u; qi < 4u; ++qi)
-            model_grad[raw_rotation_base + 4u * index + qi] = grq[qi];
+            model_grad[raw_rotation_base + 4u * gradient_index + qi] = grq[qi];
         float opa = 1.0f / (1.0f + exp(-opacity_logits[index]));
-        model_grad[logit_base + index] =
+        model_grad[logit_base + gradient_index] =
             gop * activated_opacity * (1.0f - opa);
     }
 }
@@ -811,5 +841,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // Even culled rows decay their active state. All reads of the old SH
     // coefficients (including the mean gradient) finish before updating them.
     update_sh_row(dispatch_id.x);
+#endif
+#ifdef SPLAT_FUSED_STRUCTURE_ADAM
+    update_structure_row(dispatch_id.x);
 #endif
 }
