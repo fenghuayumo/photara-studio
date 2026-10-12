@@ -724,6 +724,7 @@ static unsigned triangulate_tracks_impl(
         candidate_count, std::chrono::seconds(1),
         core::LogLevel::debug);
 
+    const auto solve_started = std::chrono::steady_clock::now();
 #if defined(_OPENMP)
     const int worker_count = scene.thread_count > 0
         ? static_cast<int>(scene.thread_count)
@@ -746,12 +747,18 @@ static unsigned triangulate_tracks_impl(
             ++inlier_tracks;
         progress.advance();
     }
+    const double solve_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-solve_started).count();
     progress.finish();
+    core::Logger::instance().debug("triangulation timing: candidates=",candidate_count,
+        " selected=",selected_track_ids!=nullptr," outliers_only=",outliers_only,
+        " solve_wall_ms=",solve_ms," split_enabled=",options.split_tracks && options.max_splits_per_track>0);
 
     if (!options.split_tracks || options.max_splits_per_track == 0)
         return inlier_tracks;
 
     // Breadth-limited peeling of contaminated tracks into new consensus sets.
+    const auto scan_started = std::chrono::steady_clock::now();
     std::vector<std::pair<Index, unsigned>> pending;
     pending.reserve(candidate_count);
     const bool force_split_check = !outliers_only;
@@ -800,6 +807,8 @@ static unsigned triangulate_tracks_impl(
         ++split_checks;
         schedule_split(track_id, 0);
     }
+    const double scan_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-scan_started).count();
     core::Logger::instance().debug(
         "track split scan: checked=", split_checks,
         " skipped_generation=", generation_skips,
@@ -811,6 +820,7 @@ static unsigned triangulate_tracks_impl(
         " generation=", scene.registration_generation);
 
     unsigned split_tracks = 0;
+    const auto split_started = std::chrono::steady_clock::now();
     std::size_t child_consensus_solves = 0;
     std::size_t child_lo_ransac_launches = 0;
     while (!pending.empty()) {
@@ -844,7 +854,16 @@ static unsigned triangulate_tracks_impl(
         schedule_split(parent_id, next_depth);
     }
 
+    const double split_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-split_started).count();
+    const auto index_started = std::chrono::steady_clock::now();
     if (split_tracks > 0) rebuild_track_index(scene);
+    const double index_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-index_started).count();
+    core::Logger::instance().debug("track split timing: scan_wall_ms=",scan_ms,
+        " peel_wall_ms=",split_ms," index_wall_ms=",index_ms,
+        " candidates=",candidate_count," child_solves=",child_consensus_solves,
+        " created=",split_tracks);
     core::Logger::instance().debug(
         "track split: created=", split_tracks,
         " child_solves=", child_consensus_solves,

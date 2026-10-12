@@ -1,8 +1,11 @@
 #include "sift_cuda.hpp"
+#include "core/logging.hpp"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +32,53 @@ constexpr double kTwoPi = 6.283185307179586476925286766559;
                 cudaGetErrorString(photara_sift_status));                        \
         }                                                                        \
     } while (0)
+
+struct SiftTiming {
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point started = Clock::now();
+    std::array<double,6> wait_ms{};
+    std::size_t sync_count{};
+    double sort_ms{}, expand_ms{};
+    std::uint32_t width, height;
+    SiftTiming(std::uint32_t w,std::uint32_t h):width(w),height(h) {}
+    void synchronize(cudaStream_t stream,std::size_t category) {
+        const auto begin=Clock::now();
+        const auto status=cudaStreamSynchronize(stream);
+        wait_ms[category]+=std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+        ++sync_count;
+        PHOTARA_SIFT_CHECK(status);
+    }
+    double total_wait_ms() const {
+        double total=0; for (double value:wait_ms) total+=value; return total;
+    }
+    ~SiftTiming() {
+        core::Logger::instance().debug("CUDA SIFT timing: width=",width," height=",height,
+            " wall_ms=",std::chrono::duration<double,std::milli>(Clock::now()-started).count(),
+            " sync_count=",sync_count," sync_wait_ms=",total_wait_ms(),
+            " count_wait_ms=",wait_ms[0]," keys_download_wait_ms=",wait_ms[1],
+            " sorted_upload_wait_ms=",wait_ms[2]," pyramid_wait_ms=",wait_ms[3],
+            " orientation_download_wait_ms=",wait_ms[4]," descriptor_download_wait_ms=",wait_ms[5],
+            " sort_cpu_ms=",sort_ms," expand_cpu_ms=",expand_ms);
+    }
+};
+
+struct SiftLayerTiming {
+    SiftTiming& timing;
+    const char* phase;
+    int octave,level;
+    SiftTiming::Clock::time_point started=SiftTiming::Clock::now();
+    double wait,sort,expand;
+    std::size_t count;
+    SiftLayerTiming(SiftTiming& t,const char* p,int o,int l):timing(t),phase(p),octave(o),level(l),
+        wait(t.total_wait_ms()),sort(t.sort_ms),expand(t.expand_ms),count(t.sync_count) {}
+    ~SiftLayerTiming() {
+        core::Logger::instance().trace("CUDA SIFT layer timing: phase=",phase,
+            " octave=",octave," level=",level,
+            " wall_ms=",std::chrono::duration<double,std::milli>(SiftTiming::Clock::now()-started).count(),
+            " sync_count=",timing.sync_count-count," sync_wait_ms=",timing.total_wait_ms()-wait,
+            " sort_cpu_ms=",timing.sort_ms-sort," expand_cpu_ms=",timing.expand_ms-expand);
+    }
+};
 
 struct Buffer {
     void* data = nullptr;
@@ -871,7 +921,8 @@ struct SiftCudaEngine::Impl {
 
     int detect_level(
         LevelSlot& slot, const float* previous, const float* current, const float* next,
-        float dog_threshold0, float dog_threshold, float edge_threshold) {
+        float dog_threshold0, float dog_threshold, float edge_threshold, SiftTiming& timing) {
+        SiftLayerTiming layer_timing(timing,"detect",slot.octave,slot.level);
         const int width = static_cast<int>(slot.width);
         const int height = static_cast<int>(slot.height);
         auto launch = [&](int capacity) {
@@ -891,14 +942,14 @@ struct SiftCudaEngine::Impl {
         launch(capacity);
         PHOTARA_SIFT_CHECK(cudaMemcpyAsync(
             &count, counter.get<int>(), sizeof(int), cudaMemcpyDeviceToHost, stream));
-        PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+        timing.synchronize(stream,0);
         if (count > capacity) {
             slot.keys.as<DetKey>(static_cast<std::size_t>(count));
             capacity = count;
             launch(capacity);
             PHOTARA_SIFT_CHECK(cudaMemcpyAsync(
                 &count, counter.get<int>(), sizeof(int), cudaMemcpyDeviceToHost, stream));
-            PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+            timing.synchronize(stream,0);
             if (count > capacity)
                 throw std::runtime_error("CUDA SIFT keypoint count exceeded the compacted buffer");
         }
@@ -907,16 +958,19 @@ struct SiftCudaEngine::Impl {
         PHOTARA_SIFT_CHECK(cudaMemcpyAsync(
             host.data(), slot.keys.get<DetKey>(), host.size() * sizeof(DetKey),
             cudaMemcpyDeviceToHost, stream));
-        PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+        timing.synchronize(stream,1);
+        const auto sort_started=SiftTiming::Clock::now();
         std::sort(host.begin(), host.end(), [](const DetKey& a, const DetKey& b) {
             if (a.y != b.y) return a.y < b.y;
             return a.x < b.x;
         });
+        timing.sort_ms+=std::chrono::duration<double,std::milli>(
+            SiftTiming::Clock::now()-sort_started).count();
         PHOTARA_SIFT_CHECK(cudaMemcpyAsync(
             slot.keys.get<DetKey>(), host.data(), host.size() * sizeof(DetKey),
             cudaMemcpyHostToDevice, stream));
         // The sorted staging vector has to stay alive until the copy finishes.
-        PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+        timing.synchronize(stream,2);
         return count;
     }
 
@@ -930,6 +984,8 @@ struct SiftCudaEngine::Impl {
             pixels.size() < row_stride * static_cast<std::size_t>(height))
             throw std::invalid_argument("Invalid grayscale image view");
         PHOTARA_SIFT_CHECK(cudaSetDevice(device_index));
+
+        SiftTiming timing(width,height);
 
         std::vector<std::uint8_t> contiguous;
         const std::uint8_t* data = pixels.data();
@@ -1060,11 +1116,11 @@ struct SiftCudaEngine::Impl {
                         dogs[static_cast<std::size_t>(feature_level % 3)].get<float>(),
                         dogs[static_cast<std::size_t>((feature_level + 1) % 3)].get<float>(),
                         dogs[static_cast<std::size_t>((feature_level + 2) % 3)].get<float>(),
-                        dog_threshold0, dog_threshold, edge_threshold);
+                        dog_threshold0, dog_threshold, edge_threshold,timing);
                 }
             }
         }
-        PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+        timing.synchronize(stream,3);
         PHOTARA_SIFT_CHECK(cudaGetLastError());
 
         std::vector<LevelSlot*> kept;
@@ -1142,6 +1198,7 @@ struct SiftCudaEngine::Impl {
                     static_cast<std::size_t>(feature_level)];
                 const auto selected = std::find(kept.begin(), kept.end(), slot);
                 if (selected == kept.end()) return;
+                SiftLayerTiming layer_timing(timing,"descriptor",slot->octave,slot->level);
                 Expanded& output = expanded[
                     static_cast<std::size_t>(selected - kept.begin())];
                 const dim3 block(16, 16);
@@ -1169,8 +1226,9 @@ struct SiftCudaEngine::Impl {
                     packed_host.data(), packed_device,
                     packed_host.size() * sizeof(float),
                     cudaMemcpyDeviceToHost, stream));
-                PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+                timing.synchronize(stream,4);
 
+                const auto expand_started=SiftTiming::Clock::now();
                 auto& values = output.values;
                 values.reserve(static_cast<std::size_t>(count) * 8);
                 for (int feature = 0; feature < count; ++feature) {
@@ -1194,6 +1252,8 @@ struct SiftCudaEngine::Impl {
                 }
                 const int oriented_count =
                     static_cast<int>(values.size() / 4);
+                timing.expand_ms+=std::chrono::duration<double,std::milli>(
+                    SiftTiming::Clock::now()-expand_started).count();
                 total_features += static_cast<std::size_t>(oriented_count);
                 if (oriented_count == 0) return;
                 float* key_device = descriptor_keys.as<float>(values.size());
@@ -1214,7 +1274,7 @@ struct SiftCudaEngine::Impl {
                     output.descriptors.data(), descriptor_device,
                     output.descriptors.size() * sizeof(float),
                     cudaMemcpyDeviceToHost, stream));
-                PHOTARA_SIFT_CHECK(cudaStreamSynchronize(stream));
+                timing.synchronize(stream,5);
             };
             for (int level = 1; level < pyramid.level_num; ++level) {
                 float* destination =

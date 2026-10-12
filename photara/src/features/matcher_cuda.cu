@@ -1,8 +1,11 @@
 #include "matcher_cuda.hpp"
+#include "core/cuda_timing.hpp"
+#include "core/logging.hpp"
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -135,6 +138,7 @@ __global__ void finish_matches(const int3* rows, const int3* cols,
 }
 
 class NativeMatcher final : public FeatureMatcher {
+    struct UploadStats { std::size_t hits{}, misses{}, bytes{}, resets{}; };
     struct Entry { std::size_t offset, bytes; std::uint64_t generation; };
     SiftGpuMatcherOptions options_;
     std::thread::id owner_{std::this_thread::get_id()};
@@ -148,11 +152,15 @@ class NativeMatcher final : public FeatureMatcher {
     mutable int* host_{};
     mutable std::size_t host_capacity_{};
 
-    const unsigned* upload(const FeatureSet& features) const {
+    const unsigned* upload(const FeatureSet& features, UploadStats& stats) const {
         const auto found = cache_.find(features.descriptor_identity);
         if (found != cache_.end() && found->second.generation == features.descriptor_generation &&
-            found->second.bytes == features.descriptors_u8.size())
+            found->second.bytes == features.descriptors_u8.size()) {
+            ++stats.hits;
             return descriptors_.data + found->second.offset/4;
+        }
+        ++stats.misses;
+        stats.bytes += features.descriptors_u8.size();
         const std::size_t bytes = padded(features.keypoints.size())*128;
         if (used_ + bytes > budget_) throw std::runtime_error("CUDA descriptor cache budget exceeded");
         const Entry entry{used_, features.descriptors_u8.size(), features.descriptor_generation};
@@ -194,6 +202,11 @@ public:
         if (owner_ != std::this_thread::get_id())
             throw std::runtime_error("CUDA matcher called outside owner thread");
         std::vector<MatchSet> result(pairs.size());
+        const auto started = std::chrono::steady_clock::now();
+        UploadStats stats;
+        std::array<double,3> gpu_ms{};
+        double sync_wait_ms=0, result_cpu_ms=0;
+        std::size_t batches=0;
         // Bound pinned output and cached uploads independently of caller batch size.
         for (std::size_t begin = 0; begin < pairs.size();) {
             std::size_t batch_count=0, batch_bytes=0;
@@ -221,7 +234,7 @@ public:
             }
             // Recycle only at a completed submission boundary; queued kernels
             // never observe overwritten descriptor storage.
-            if (used_+upload_bytes > budget_) { cache_.clear(); used_=0; }
+            if (used_+upload_bytes > budget_) { cache_.clear(); used_=0; ++stats.resets; }
             row_partial_.reserve(row_size);
             if (options_.mutual_check) col_partial_.reserve(col_size);
             output_.reserve(outputs);
@@ -231,11 +244,14 @@ public:
                 host_capacity_=outputs;
             }
             std::size_t offset=0;
+            core::CudaTimeline<3> timing;
             try {
                 for (const auto& [q,t] : batch) {
                     const int nq=static_cast<int>(q->keypoints.size()), nt=static_cast<int>(t->keypoints.size());
                     if (nq && nt) {
-                        const auto* dq=upload(*q); const auto* dt=upload(*t);
+                        timing.mark(0,stream_);
+                        const auto* dq=upload(*q,stats); const auto* dt=upload(*t,stats);
+                        timing.mark(1,stream_);
                         tiles<<<dim3((nt+31)/32,(nq+31)/32),256,0,stream_>>>(
                             dq,dt,nq,nt,row_partial_.data,col_partial_.data,options_.mutual_check);
                         finish_matches<<<(nq+255)/256,256,0,stream_>>>(
@@ -245,11 +261,19 @@ public:
                     offset+=nq;
                 }
                 check(cudaGetLastError());
+                timing.mark(2,stream_);
                 if (outputs) check(cudaMemcpyAsync(host_,output_.data,outputs*sizeof(int),cudaMemcpyDeviceToHost,stream_));
+                timing.finish(stream_);
+                const auto wait_started=std::chrono::steady_clock::now();
                 check(cudaStreamSynchronize(stream_));
+                sync_wait_ms += std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-wait_started).count();
+                const auto elapsed=timing.elapsed_ms();
+                for (std::size_t i=0;i<gpu_ms.size();++i) gpu_ms[i]+=elapsed[i];
             } catch (...) {
                 cudaStreamSynchronize(stream_); cache_.clear(); used_=0; throw;
             }
+            const auto result_started=std::chrono::steady_clock::now();
             offset=0;
             for (std::size_t p=0;p<batch.size();++p) {
                 const auto nq=batch[p].first->keypoints.size();
@@ -260,7 +284,18 @@ public:
                 offset+=nq;
             }
             begin+=batch_count;
+            ++batches;
+            result_cpu_ms += std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-result_started).count();
         }
+        core::Logger::instance().debug("CUDA match timing: pairs=",pairs.size(),
+            " batches=",batches," cache_hits=",stats.hits," cache_misses=",stats.misses,
+            " cache_resets=",stats.resets," uploaded_bytes=",stats.bytes,
+            " upload_ms=",gpu_ms[0]," compute_ms=",gpu_ms[1]," download_ms=",gpu_ms[2],
+            " sync_wait_ms=",sync_wait_ms," result_cpu_ms=",result_cpu_ms,
+            " wall_ms=",std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-started).count(),
+            " gpu_method=stream_event_intervals");
         return result;
     }
 };

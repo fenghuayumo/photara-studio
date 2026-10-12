@@ -2,6 +2,7 @@
 
 #include "ba/linearizer.hpp"
 #include "core/logging.hpp"
+#include "core/cuda_timing.hpp"
 #include "reprojection_detail.cuh"
 
 #include <cuda_runtime.h>
@@ -1325,18 +1326,22 @@ OptimizerSummary CudaOptimizer::optimize() {
     core::StageScope stage("ba.cuda");
     auto& d=*impl_; if (!d.observation_count) throw std::logic_error("Upload a BA problem before optimization");
     const auto started=std::chrono::steady_clock::now(); OptimizerSummary summary;
+    core::CudaTimeline<4> timing;
+    timing.mark(0);
     linearize_kernel<<<blocks(d.observation_count),threads>>>(
         d.poses.data(),d.intrinsics.data(),d.pose_group.data(),d.points.data(),
         d.cameras.data(),d.point_ids.data(),d.ox.data(),d.oy.data(),
         d.weights.data(),d.observation_count,
         d.linearizer_settings(),
         d.linearized.data());
+    timing.mark(3);
     summary.initial_cost=d.cost(d.linearized); summary.final_cost=summary.initial_cost;
     double damping=d.options.initial_damping;
     const std::size_t camera_values=d.camera_count*6;
     const std::size_t intrinsic_values=d.intrinsic_values;
     const std::size_t total_values=d.total_values;
     for (std::size_t iteration=0;iteration<d.options.maximum_iterations;++iteration) {
+        timing.mark(1);
         assemble_points_and_cross_kernel<<<warp_blocks(d.point_count),threads>>>(
             d.linearized.data(),d.point_offsets.data(),d.point_observations.data(),
             d.point_count,d.intrinsic_dof,d.point_inverse.data(),d.point_b.data(),
@@ -1393,6 +1398,7 @@ OptimizerSummary CudaOptimizer::optimize() {
                 k_max_intrinsic_params,d.intrinsic_factor.data());
         std::size_t pcg=0;
         double pcg_relative_residual=0;
+        timing.mark(2);
         {
           d.solution.zero(); check(cudaMemcpy(d.residual.data(),d.rhs.data(),total_values*sizeof(double),cudaMemcpyDeviceToDevice),"PCG init");
           precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.camera_factor.data(),d.residual.data(),d.camera_count,
@@ -1458,6 +1464,7 @@ OptimizerSummary CudaOptimizer::optimize() {
         double norm_sq=d.dot(d.solution,d.solution,total_values)+
             d.dot(d.point_step,d.point_step,d.point_count*3);
         const double norm=std::sqrt(norm_sq);
+        timing.mark(3);
         check(cudaMemcpy(d.pose_backup.data(),d.poses.data(),d.camera_count*sizeof(Pose),cudaMemcpyDeviceToDevice),"pose backup");
         check(cudaMemcpy(d.point_backup.data(),d.points.data(),d.point_count*sizeof(Point3),cudaMemcpyDeviceToDevice),"point backup");
         check(cudaMemcpy(d.intrinsic_backup.data(),d.intrinsics.data(),
@@ -1470,12 +1477,14 @@ OptimizerSummary CudaOptimizer::optimize() {
                 d.intrinsics.data(),d.initial_intrinsics.data(),d.intrinsic_constant.data(),
                 d.solution.data(),d.group_count,d.intrinsic_dof,camera_values,
                 d.intrinsic_settings());
+        timing.mark(0);
         linearize_kernel<<<blocks(d.observation_count),threads>>>(
             d.poses.data(),d.intrinsics.data(),d.pose_group.data(),d.points.data(),
             d.cameras.data(),d.point_ids.data(),d.ox.data(),d.oy.data(),
             d.weights.data(),d.observation_count,
             d.linearizer_settings(),
             d.candidate_linearized.data());
+        timing.mark(3);
         const double candidate=d.cost(d.candidate_linearized);
         const bool accepted=std::isfinite(candidate)&&candidate<summary.final_cost;
         summary.iterations.push_back({iteration,accepted?candidate:summary.final_cost,damping,norm,pcg,accepted});
@@ -1501,7 +1510,16 @@ OptimizerSummary CudaOptimizer::optimize() {
                 break;
             } }
     }
+    timing.finish();
     check(cudaDeviceSynchronize(),"CUDA optimizer synchronize");
+    const auto times=timing.elapsed_ms();
+    summary.linearization_time_ms=times[0];
+    summary.assembly_time_ms=times[1];
+    summary.solve_time_ms=times[2];
+    summary.update_and_cost_time_ms=times[3];
+    core::Logger::instance().debug("CUDA BA timing: method=stream_event_intervals",
+        " linearize_ms=",times[0]," assemble_ms=",times[1],
+        " solve_ms=",times[2]," update_cost_ms=",times[3]);
     summary.total_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
     stage.finish(summary.brief_report());
     return summary;
@@ -1517,7 +1535,19 @@ void CudaOptimizer::download(Problem& problem) const {
 }
 
 OptimizerSummary optimize_cuda(Problem& problem,const OptimizerOptions& options) {
-    CudaOptimizer optimizer(options); optimizer.upload(problem); auto summary=optimizer.optimize(); optimizer.download(problem); return summary;
+    CudaOptimizer optimizer(options);
+    const auto upload_started=std::chrono::steady_clock::now();
+    optimizer.upload(problem);
+    const double upload_ms=std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-upload_started).count();
+    auto summary=optimizer.optimize();
+    const auto download_started=std::chrono::steady_clock::now();
+    optimizer.download(problem);
+    core::Logger::instance().debug("CUDA BA transfer timing: upload_wall_ms=",upload_ms,
+        " download_wall_ms=",std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-download_started).count(),
+        " observations=",problem.observations.size());
+    return summary;
 }
 
 }  // namespace photara::ba

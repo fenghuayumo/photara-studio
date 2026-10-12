@@ -1414,6 +1414,10 @@ void match_and_verify_siftgpu_coordinator(
     std::mutex throttle_mutex;
     std::condition_variable throttle_condition;
     std::size_t in_flight = 0;
+    std::size_t peak_in_flight = 0, throttle_waits = 0;
+    double match_wall_seconds = 0, throttle_wait_seconds = 0;
+    std::atomic<std::int64_t> geometry_work_ns{0}, geometry_queue_ns{0};
+    const auto coordinator_started = std::chrono::steady_clock::now();
     parallel::FutureGroup geometry_tasks;
     geometry_tasks.reserve(candidates.size());
 
@@ -1425,7 +1429,10 @@ void match_and_verify_siftgpu_coordinator(
       for (std::size_t i = begin; i < end; ++i)
           batch.emplace_back(&scene.images[candidates[i].id1].features,
                              &scene.images[candidates[i].id2].features);
+      const auto batch_started = std::chrono::steady_clock::now();
       auto matched = matcher.match_batch(batch);
+      match_wall_seconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now()-batch_started).count();
       for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
         const PairCandidate candidate = candidates[pair_index];
         RawPairMatches raw;
@@ -1442,14 +1449,26 @@ void match_and_verify_siftgpu_coordinator(
 
         {
             std::unique_lock lock(throttle_mutex);
+            const bool throttled = in_flight >= max_in_flight;
+            const auto wait_started = std::chrono::steady_clock::now();
             throttle_condition.wait(
                 lock, [&] { return in_flight < max_in_flight; });
+            if (throttled) {
+                ++throttle_waits;
+                throttle_wait_seconds += std::chrono::duration<double>(
+                    std::chrono::steady_clock::now()-wait_started).count();
+            }
             ++in_flight;
+            peak_in_flight = std::max(peak_in_flight,in_flight);
         }
 
+        const auto queued_at = std::chrono::steady_clock::now();
         geometry_tasks.submit(
             pool,
-            [&, pair_index, candidate, raw = std::move(raw)]() mutable {
+            [&, pair_index, candidate, queued_at, raw = std::move(raw)]() mutable {
+                const auto work_started = std::chrono::steady_clock::now();
+                geometry_queue_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    work_started-queued_at).count(),std::memory_order_relaxed);
                 const auto release_slot = [&] {
                     {
                         std::lock_guard lock(throttle_mutex);
@@ -1462,6 +1481,8 @@ void match_and_verify_siftgpu_coordinator(
                     GeometryVerifyResult verified = verify_pair_geometry(
                         scene, candidate, raw_pairs[pair_index].matches,
                         options.relative);
+                    geometry_work_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now()-work_started).count(),std::memory_order_relaxed);
                     diagnostics[pair_index] = verified.diagnostics;
                     if (verified.pair)
                         pair_slots[pair_index] = *verified.pair;
@@ -1477,7 +1498,18 @@ void match_and_verify_siftgpu_coordinator(
             });
       }
     }
+    const auto drain_started = std::chrono::steady_clock::now();
     geometry_tasks.wait();
+    core::Logger::instance().info("match/verify timing: pairs=",candidates.size(),
+        " verify=",verify_geometry," match_wall_s=",match_wall_seconds,
+        " throttle_wait_s=",throttle_wait_seconds," throttle_waits=",throttle_waits,
+        " peak_in_flight=",peak_in_flight,
+        " geometry_work_sum_s=",geometry_work_ns.load()*1e-9,
+        " geometry_queue_sum_s=",geometry_queue_ns.load()*1e-9,
+        " drain_wait_s=",std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-drain_started).count(),
+        " wall_s=",std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-coordinator_started).count());
     if (live != nullptr) live->flush();
 }
 
@@ -2045,6 +2077,7 @@ FrontEndResult run_frontend(
             std::vector<ImagePair> pairs(candidates.size());
             core::ProgressReporter geometry_progress(
                 "verify pair geometry", candidates.size());
+            core::StageScope geometry_timing("sfm.verify_geometry");
             parallel::parallel_for(
                 candidates.size(), threads, [&](const std::size_t ci) {
                     GeometryVerifyResult verified = verify_pair_geometry(
@@ -2054,6 +2087,7 @@ FrontEndResult run_frontend(
                     if (verified.pair) pairs[ci] = std::move(*verified.pair);
                     geometry_progress.advance();
                 });
+            geometry_timing.finish();
             geometry_progress.finish();
             scene.pairs.clear();
             scene.pairs.reserve(pairs.size());
@@ -2067,11 +2101,13 @@ FrontEndResult run_frontend(
             (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0)) {
             select_scene_camera_models(scene, raw_pairs, candidates, options);
             std::vector<ImagePair> pairs(candidates.size());
+            core::StageScope geometry_timing("sfm.verify_geometry");
             parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
                 auto verified = verify_pair_geometry(scene,candidates[i],raw_pairs[i].matches,options.relative);
                 diagnostics[i] = verified.diagnostics;
                 if (verified.pair) pairs[i] = std::move(*verified.pair);
             });
+            geometry_timing.finish();
             scene.pairs.clear();
             for (auto& pair : pairs)
                 if (!pair.matches.empty()) scene.pairs.push_back(std::move(pair));
@@ -2416,6 +2452,7 @@ FrontEndResult run_frontend(
         std::vector<ImagePair> pairs(candidates.size());
         core::ProgressReporter geometry_progress(
             "verify pair geometry", candidates.size());
+        core::StageScope geometry_timing("sfm.verify_geometry");
         parallel::parallel_for(
             candidates.size(), threads, [&](const std::size_t ci) {
                 const PairCandidate cand = candidates[ci];
@@ -2429,6 +2466,7 @@ FrontEndResult run_frontend(
                     verified.pair ? &pairs[ci] : nullptr);
                 geometry_progress.advance();
             });
+        geometry_timing.finish();
         geometry_progress.finish();
         if (runtime_options.live_preview != nullptr)
             runtime_options.live_preview->flush();

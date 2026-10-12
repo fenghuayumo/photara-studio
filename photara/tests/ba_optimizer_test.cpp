@@ -484,6 +484,16 @@ int main() {
         }
         const OptimizerSummary gpu_summary = optimize_cuda(gpu_problem, options);
         std::cout << "GPU " << gpu_summary.brief_report() << '\n';
+        const double gpu_stage_ms = gpu_summary.linearization_time_ms +
+            gpu_summary.assembly_time_ms + gpu_summary.solve_time_ms +
+            gpu_summary.update_and_cost_time_ms;
+        if (!(gpu_summary.linearization_time_ms > 0) ||
+            !(gpu_summary.assembly_time_ms > 0) || !(gpu_summary.solve_time_ms > 0) ||
+            !(gpu_summary.update_and_cost_time_ms > 0) ||
+            !std::isfinite(gpu_stage_ms) || gpu_stage_ms > gpu_summary.total_time_ms + 1.0) {
+            std::cerr << "GPU stage timing is missing or exceeds solve wall time\n";
+            return 15;
+        }
         if (!gpu_summary.usable() || gpu_summary.successful_steps == 0 ||
             !(gpu_summary.final_cost < initial * 1e-3)) {
             std::cerr << "GPU optimizer failed to reduce synthetic reprojection cost\n";
