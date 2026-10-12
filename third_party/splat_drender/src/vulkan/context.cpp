@@ -19,6 +19,8 @@
 #include "splat_pruning_scores_subgroup.hlsl.embedded.hpp"
 #include "splat_pruning_scores_atomic.hlsl.embedded.hpp"
 #include "splat_blend_backward.hlsl.embedded.hpp"
+#include "splat_blend_backward_geometry_subgroup.hlsl.embedded.hpp"
+#include "splat_blend_backward_geometry_atomic.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_subgroup.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_atomic.hlsl.embedded.hpp"
@@ -138,6 +140,10 @@ std::optional<std::filesystem::path> shader_directory_override() {
 }
 
 std::span<const std::byte> embedded_shader(const std::string& shader_name) {
+    if (shader_name == "splat_blend_backward_geometry_subgroup.hlsl.spv")
+        return std::as_bytes(std::span{splat_blend_backward_geometry_subgroup_hlsl_spv});
+    if (shader_name == "splat_blend_backward_geometry_atomic.hlsl.spv")
+        return std::as_bytes(std::span{splat_blend_backward_geometry_atomic_hlsl_spv});
     if (shader_name == "splat_preprocess.hlsl.spv") {
         return std::as_bytes(std::span{splat_preprocess_hlsl_spv});
     }

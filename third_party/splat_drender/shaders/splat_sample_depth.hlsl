@@ -8,7 +8,7 @@
 [[vk::binding(5, 0)]] RWStructuredBuffer<float> sample_f;
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint> sample_u;
 
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint point_count = pc.u0;
     uint i = dispatch_id.x;
@@ -79,6 +79,10 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         last = contributor;
     }
     bool in_range = T <= kDepthMinTransmittance;
+    // Invalid queries are already zeroed, and backward ignores them. Avoid
+    // performing eight depth searches for a ray without enough opacity.
+    sample_u[i] = last;
+    if (!in_range) return;
     float window = bracket > 0.0f ? bracket : 200.0f;
     float lo = max(seed - window, 0.0f);
     float hi = max(seed + window, 0.0f);
@@ -88,7 +92,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         bool first = refine == 0u;
         uint sb = first ? 0u : 1u;
         uint se = first ? 9u : 8u;
-        [unroll] for (uint sr = sb; sr < se; ++sr) probes[sr] = 1.0f;
+        [unroll] for (uint sr = 0u; sr < 9u; ++sr)
+            if (sr >= sb && sr < se) probes[sr] = 1.0f;
         float interval = (hi - lo) / 8.0f;
         uint used = 0u;
         [loop] for (uint at2 = begin; at2 < end && used < last; ++at2) {
@@ -102,7 +107,24 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             if (alpha < kAlphaFloor) continue;
             float4 rp = gauss_f[7u * g + 3u];
             float peak = rp.x * d.x + rp.y * d.y + rp.z;
-            [unroll] for (uint s2 = sb; s2 < se; ++s2) {
+            // Match CUDA's cfg::kDepthBandSigmas (8): outside this band the
+            // Gaussian exp contribution rounds to zero in float32. Preserve
+            // all eight root refinements; only skip redundant exp/rsqrt work.
+            int band = 0;
+            if (rp.w > 0.0f) {
+                const float half_band = 8.0f / rp.w;
+                const float probe_min = lo + interval * float(sb);
+                const float probe_max = lo + interval * float(se - 1u);
+                if (peak - half_band > probe_max) band = 1;
+                else if (peak + half_band < probe_min) band = -1;
+            }
+            if (band == 1) continue;
+            [unroll] for (uint s2 = 0u; s2 < 9u; ++s2) {
+                if (s2 < sb || s2 >= se) continue;
+                if (band == -1) {
+                    probes[s2] *= 1.0f - alpha;
+                    continue;
+                }
                 float ts = lo + interval * float(s2);
                 float td = (ts - peak) * rp.w;
                 float ge = rp.w > 0.0f ? exp(-0.5f * td * td) : 0.0f;
@@ -110,7 +132,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
                 probes[s2] *= (ts > peak ? (1.0f - alpha) : om) * rsqrt(om);
             }
         }
-        if (first) in_range = in_range && probes[0] >= 0.5f && probes[8] <= 0.5f;
+        if (first && !(probes[0] >= 0.5f && probes[8] <= 0.5f)) return;
         uint sid = 0u;
         [unroll] for (uint s3 = 1u; s3 < 8u; ++s3) {
             if (probes[s3] >= 0.5f) sid = s3;
