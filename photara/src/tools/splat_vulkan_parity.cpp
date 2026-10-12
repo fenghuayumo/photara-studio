@@ -15,6 +15,7 @@
 
 #include "splat_drender/vulkan_api.h"
 #include "vulkan/backend.hpp"
+#include "internal/size_bucketed_pool.hpp"
 
 #include <cuda_runtime.h>
 
