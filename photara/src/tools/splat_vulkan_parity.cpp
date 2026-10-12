@@ -919,6 +919,8 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--bench") return run_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--bench-rgb")
             return run_rgb_benchmark(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--eval-rgb")
+            return run_rgb_evaluation(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--bench-geometry")
             return run_geometry_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--train-smoke")

@@ -1,3 +1,41 @@
+// Evaluate a saved model through the same native metric path used by training.
+// This permits recovering final evaluation without repeating optimization.
+int run_rgb_evaluation(int argc, char** argv) {
+    using namespace photara::splat;
+    require(argc >= 6, "Usage: --eval-rgb MODEL IMAGES OUTPUT SFM [cuda|vulkan] [STRIDE]");
+    const std::string backend = argc > 6 ? argv[6] : "cuda";
+    require(backend == "cuda" || backend == "vulkan", "Invalid evaluation backend");
+    const unsigned stride = argc > 7 ? std::stoul(argv[7]) : 8U;
+    require(stride > 0, "Evaluation stride must be positive");
+    const auto device = backend == "vulkan" ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
+    auto model = load_gaussians(argv[2], device);
+    const auto views = load_views(argv[3], argv[5]);
+    const std::filesystem::path output(argv[4]);
+    const auto stem = std::filesystem::path(argv[2]).stem().string();
+    std::filesystem::create_directories(output);
+    TrainingOptions options;
+    options.backend = backend == "vulkan" ? TrainingBackend::vulkan : TrainingBackend::cuda;
+    options.use_mask = false;
+    options.use_source_resolution = true;
+    options.max_image_dimension = 1920;
+    options.progressive_resolution = false;
+    options.ignore_undistortion_border = true;
+    double psnr = 0.0, ssim = 0.0;
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < views.size(); i += stride) {
+        const auto path = output / (stem + "_view_" + std::to_string(i) + ".png");
+        const auto metrics = render_evaluation_png(model, views[i], path, options);
+        std::cout << "splat_render=" << path << " view=" << i
+                  << " psnr=" << metrics.psnr << " ssim=" << metrics.ssim
+                  << " foreground_psnr=" << metrics.foreground_psnr << std::endl;
+        psnr += metrics.psnr; ssim += metrics.ssim; ++count;
+    }
+    require(count > 0, "No evaluation views");
+    std::cout << "splat_saved_evaluation_views=" << count << " stride=" << stride << " average_psnr="
+              << psnr/count << " average_ssim=" << ssim/count << std::endl;
+    return 0;
+}
+
 // Same model, camera and optimizer configuration on CUDA and Vulkan.
 // Measures RGB render/loss/fused backward+Adam and the per-step ADC statistics
 // and exploration noise. Excludes topology refinement, decay and image loading.
