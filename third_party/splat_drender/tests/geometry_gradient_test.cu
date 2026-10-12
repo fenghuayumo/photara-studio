@@ -46,10 +46,71 @@ void normalize(std::array<float,10>& p) {
     for (int i=6;i<10;++i) norm+=p[i]*p[i];
     for (int i=6;i<10;++i) p[i]/=std::sqrt(norm);
 }
+
+// Compare the RGB specialization against the generic derivative on clipped
+// means, anisotropic scales, rotated cameras and varying kernel footprints.
+// Passing intrinsics at runtime keeps the reference's camera dispatch live.
+__global__ void compare_rgb(CameraIntrinsics K, float* out) {
+    const int i = threadIdx.x;
+    const float view[16] = {.8f,.6f,0,0,-.6f,.8f,0,0,0,0,1,0,.1f,-.2f,.3f,1};
+    const float3 scale = make_float3(.001f + .003f*(i%7), .02f, .07f);
+    const float4 rotation = make_float4(.8f,.2f,-.4f,.4f);
+    geo::SplatBackward reference;
+    reference.mean = make_float3(i%3 == 0 ? 8.f : .03f*(i-64), -.01f*i, 1.f+.02f*i);
+    reference.view = view; reference.K = K;
+    reference.width = 64; reference.height = 48;
+    reference.kernel_size = i%2 ? .1f : 0.f;
+    reference.scale_modifier = .7f;
+    reference.scale = &scale; reference.rotation = &rotation;
+    reference.opacity = .6f;
+    reference.d_conic = make_float4(.2f, -.03f, .1f, .7f);
+    reference.d_mean2d = make_float2(.3f, -.2f);
+    auto specialized = reference;
+    geo::splat_backward(reference);
+    geo::splat_backward<true>(specialized);
+    const auto store = [&](const geo::SplatBackward& io, int offset) {
+        float* p = out + i*22 + offset;
+        p[0]=io.grad_mean.x; p[1]=io.grad_mean.y; p[2]=io.grad_mean.z;
+        p[3]=io.grad_scale.x; p[4]=io.grad_scale.y; p[5]=io.grad_scale.z;
+        p[6]=io.grad_rotation.x; p[7]=io.grad_rotation.y;
+        p[8]=io.grad_rotation.z; p[9]=io.grad_rotation.w;
+        p[10]=io.grad_opacity;
+    };
+    store(reference, 0); store(specialized, 11);
+}
+
+void check_rgb_specialization() {
+    CameraIntrinsics K;
+    K.fx=45; K.fy=43; K.cx=31.2f; K.cy=23.1f;
+    std::array<float,128*22> values;
+    float* device=nullptr;
+    check(cudaMalloc(&device, sizeof(values)));
+    compare_rgb<<<1,128>>>(K, device);
+    check(cudaGetLastError());
+    check(cudaMemcpy(values.data(), device, sizeof(values), cudaMemcpyDeviceToHost));
+    check(cudaFree(device));
+    float max_scaled_error=0.f;
+    bool differs=false;
+    for (int i=0;i<128;++i) for (int c=0;c<11;++c) {
+        const float a=values[i*22+c], b=values[i*22+11+c];
+        max_scaled_error=std::fmax(max_scaled_error, std::abs(a-b)/(1.f+std::abs(a)));
+        // Camera specialization changes compiler contraction/register spilling.
+        // Thin rotated splats have cancellation in the covariance chain, so
+        // compare with a mixed absolute/relative FP32 tolerance.
+        if (!std::isfinite(a) || !std::isfinite(b) ||
+            std::abs(a-b)>1e-4f+1e-4f*std::abs(a)) {
+            std::cerr<<"RGB case="<<i<<" channel="<<c<<" generic="<<a<<" specialized="<<b<<'\n';
+            differs=true;
+        }
+    }
+    std::cout<<"Pinhole RGB specialization max |error|/(1+|reference|)="<<max_scaled_error<<" (128 cases)\n";
+    if (differs) throw std::runtime_error("Pinhole RGB specialization changes geometry gradients");
+}
 }
 
 int main() {
     try {
+        check_rgb_specialization();
         std::array<float,10> base{.3f,-.2f,2.5f,.08f,.05f,.03f,.8f,.2f,-.4f,.4f};
         normalize(base);
         const std::array<std::array<float,7>,5> losses{{

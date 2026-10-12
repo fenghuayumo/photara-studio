@@ -16,6 +16,8 @@ if(SPLAT_DRENDER_BUILD_TESTS)
     add_executable(splat_geometry_gradient_test tests/geometry_gradient_test.cu)
     target_include_directories(splat_geometry_gradient_test PRIVATE include src)
     target_link_libraries(splat_geometry_gradient_test PRIVATE CUDA::cudart)
+    target_compile_options(splat_geometry_gradient_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-use_fast_math>)
     set_target_properties(splat_geometry_gradient_test PROPERTIES
         CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")

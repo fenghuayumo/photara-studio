@@ -954,7 +954,6 @@ NB_MODULE(photara, module) {
         .def_rw("seed", &splat::TrainingOptions::seed)
         .def_rw("log_interval", &splat::TrainingOptions::log_interval)
         .def_rw("profile_cuda", &splat::TrainingOptions::profile_cuda)
-        .def_rw("fuse_sh_adam", &splat::TrainingOptions::fuse_sh_adam)
         .def_rw(
             "cuda_profile_interval",
             &splat::TrainingOptions::cuda_profile_interval)

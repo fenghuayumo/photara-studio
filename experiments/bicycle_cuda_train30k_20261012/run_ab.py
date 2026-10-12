@@ -1,4 +1,8 @@
-"""Sequential 30k-step CUDA A/B using the production trainer and existing CLI."""
+"""Sequential 30k CUDA A/B between two binaries, with identical default options.
+
+Preserve the baseline executable as photara_generic.exe before rebuilding.
+The historical report in this directory predates the removal of the SH switch.
+"""
 import json
 import os
 from pathlib import Path
@@ -34,16 +38,16 @@ def number(text, pattern):
     found = re.findall(pattern, text)
     return float(found[-1]) if found else None
 
-for label, fuse in [("baseline_fused", "true"), ("split_sh_adam", "false")]:
+for label, executable in [("baseline_fused", EXE.with_name("photara_generic.exe")),
+                          ("optimized_fused", EXE)]:
     out = HERE / label
     out.mkdir(parents=True, exist_ok=True)
     log = out / "train.log"
     if log.exists():
         raise RuntimeError(f"Refusing to overwrite an existing experiment: {log}")
-    argv = [str(EXE), *COMMON, "--output", str(out / "bicycle.ply"),
-            f"--splat-fuse-sh-adam={fuse}"]
+    argv = [str(executable), *COMMON, "--output", str(out / "bicycle.ply")]
     (out / "command.json").write_text(json.dumps(argv, indent=2), encoding="utf-8")
-    run = {"label": label, "fuse_sh_adam": fuse == "true", "command": argv,
+    run = {"label": label, "command": argv,
            "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running"}
     state["runs"].append(run)
     state.update(status="running", active_run=label)

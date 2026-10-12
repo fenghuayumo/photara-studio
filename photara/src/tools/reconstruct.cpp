@@ -169,7 +169,6 @@ struct ReconstructCli {
     unsigned splat_preview_vk_device_node_mask{};
     std::string splat_preview_vk_device_uuid;
     bool splat_profile_cuda{false};
-    bool splat_fuse_sh_adam{true};
     unsigned splat_profile_interval{100};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
@@ -850,8 +849,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-async-upload",
          "Upload decoded splat views without blocking the training thread",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
          "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1446,7 +1443,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
                 "--splat-preview-vk-device-uuid must be 32 hex digits");
     }
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
-    cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
     if (cli.splat_profile_interval == 0 ||
@@ -3466,7 +3462,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         cli.splat_normal_field_depth_ratio;
     options.normal_field_from_iter = cli.splat_normal_field_from_iter;
     options.profile_cuda = cli.splat_profile_cuda;
-    options.fuse_sh_adam = cli.splat_fuse_sh_adam;
     options.cuda_profile_interval = cli.splat_profile_interval;
     options.minimum_scale_fraction = cli.splat_min_scale_fraction;
     options.maximum_scale_fraction = cli.splat_max_scale_fraction;
@@ -3577,7 +3572,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " background_noise=", options.background_noise_strength,
         " cuda_profile=", options.profile_cuda,
         " cuda_profile_interval=", options.cuda_profile_interval,
-        " fuse_sh_adam=", options.fuse_sh_adam,
+        " fuse_sh_adam=auto",
         " fuse_structure_adam=auto",
         " sh_adam=fp16_u_logq8_v",
         " ssim=fused_11x11_valid weight=", options.ssim_weight,

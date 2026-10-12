@@ -387,8 +387,13 @@ SD_D2 inline void add_mean2d_gradient(SplatBackward& io) {
     io.grad_mean.z += gm.z;
 }
 
+// Pinhole RGB callers have no ray-plane/normal gradients. Specializing this
+// case removes the native-camera duals and unused geometry algebra from the
+// kernel's register allocation, while sharing the same conic derivatives.
+template <bool PinholeRGB = false>
 SD_D2 inline void splat_backward(SplatBackward& io) {
     using mat::Mat3;
+    if constexpr (PinholeRGB) io.K.mode = CameraMode::pinhole;
     const float h_x = io.K.fx, h_y = io.K.fy;
     // The generic path stores the plane gradient pre-divided by the focal
     // lengths (forward stores plane.x/y * factor / f); the native fisheye
@@ -496,7 +501,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         cov_cam_inv = mat::transpose(W) * Vrk_inv * W;
     }
 
-    if (is_fisheye(io.K.mode)) {
+    if (!PinholeRGB && is_fisheye(io.K.mode)) {
         // Forward-mode duals differentiate the exact native expressions.
         const fisheye::Dual position[3] = {
             fisheye::Dual::variable(t.x, 0), fisheye::Dual::variable(t.y, 1),
@@ -563,9 +568,9 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     // An unused depth/normal branch is exactly zero. Evaluating its inverse
     // covariance algebra anyway can produce 0 * NaN for very thin splats,
     // contaminating otherwise valid RGB derivatives (also in the reference).
-    if (io.d_normal.x != 0.f || io.d_normal.y != 0.f || io.d_normal.z != 0.f ||
+    if (!PinholeRGB && (io.d_normal.x != 0.f || io.d_normal.y != 0.f || io.d_normal.z != 0.f ||
         d_ray_plane.x != 0.f || d_ray_plane.y != 0.f ||
-        d_ray_plane.z != 0.f || d_ray_plane.w != 0.f) {
+        d_ray_plane.z != 0.f || d_ray_plane.w != 0.f)) {
         const float vb = mat::dot3(uvh_m, uvh);
         const float l = norm3df(t.x, t.y, t.z);
         const Mat3 nJ = detail::peak_nJ(t, l);
@@ -811,7 +816,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     const float tz = 1.f / t.z;
     const float tz2 = tz * tz;
     float dL_dtx = 0.f, dL_dty = 0.f, dL_dtz = 0.f;
-    if (is_equirect(io.K.mode)) {
+    if (!PinholeRGB && is_equirect(io.K.mode)) {
         // Polar projection: every Jacobian entry is live and its position
         // derivatives come from the longitude/latitude mapping itself, not
         // from the perspective identities.

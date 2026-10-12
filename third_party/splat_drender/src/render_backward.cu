@@ -744,7 +744,7 @@ __device__ inline void update_structure_adam_row(
                 a.epsilon, -12.f, 12.f);
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH>
+template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false>
 __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
 gaussian_backward(
     const int count, const int sh_degree, const int sh_bases,
@@ -790,10 +790,12 @@ gaussian_backward(
         // Color-only pools leave the geometry scratch unallocated; zero inputs
         // make splat_backward() take its unused-branch early-out, exactly like a
         // memset-to-zero scratch buffer did.
-        io.d_ray_plane =
-            gs.d_ray_plane ? gs.d_ray_plane[i] : make_float4(0.f, 0.f, 0.f, 0.f);
-        io.d_normal =
-            gs.d_normal ? gs.d_normal[i] : make_float3(0.f, 0.f, 0.f);
+        if constexpr (!PinholeRGB) {
+            io.d_ray_plane = gs.d_ray_plane
+                ? gs.d_ray_plane[i] : make_float4(0.f, 0.f, 0.f, 0.f);
+            io.d_normal = gs.d_normal
+                ? gs.d_normal[i] : make_float3(0.f, 0.f, 0.f);
+        }
         io.d_mean2d = make_float2(gs.d_mean2d[i].x, gs.d_mean2d[i].y);
         io.mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
         io.view = view;
@@ -807,7 +809,7 @@ gaussian_backward(
             rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
         io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
         io.opacity = opacities[i];
-        geo::splat_backward(io);
+        geo::splat_backward<PinholeRGB>(io);
         d_mean = io.grad_mean;
         d_opacity = io.grad_opacity;
         if (HasCov) {
@@ -974,14 +976,26 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
         constexpr bool kFused = decltype(fused_c)::value;
-        kernels::gaussian_backward<kSH, kCov, kFused>
-            <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-                cfg::kGaussianBlock>>>(
-                count, sh_degree, sh_bases, means, sh, opacities, scales,
-                rotations, cov6, view, camera_center, K, width, height,
-                kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
-                grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                grad_cov, sh_adam, structure_adam);
+        auto launch_kernel = [&](auto rgb_c) {
+            constexpr bool kPinholeRGB = decltype(rgb_c)::value;
+            kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB>
+                <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                    cfg::kGaussianBlock>>>(
+                    count, sh_degree, sh_bases, means, sh, opacities, scales,
+                    rotations, cov6, view, camera_center, K, width, height,
+                    kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
+                    grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
+                    grad_cov, sh_adam, structure_adam);
+        };
+        // Select only when geometry scratch is absent, not merely when this
+        // particular Gaussian happens to receive zero geometry gradients.
+        if constexpr (kSH && !kCov) {
+            if (is_pinhole(K.mode) && !gs.d_ray_plane && !gs.d_normal) {
+                launch_kernel(std::true_type{});
+                return;
+            }
+        }
+        launch_kernel(std::false_type{});
     };
     const auto off = std::false_type{};
     const auto on = std::true_type{};

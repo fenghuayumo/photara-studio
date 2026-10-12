@@ -80,9 +80,6 @@ struct TrainingOptions {
     // profiling events. The interval is capped by the trainer to avoid an
     // accidentally unbounded CUDA event pool.
     bool profile_cuda{false};
-    // CUDA/Vulkan projection backward updates quantized SH Adam directly,
-    // omitting the full SH gradient when no auxiliary SH gradient merge is needed.
-    bool fuse_sh_adam{true};
     unsigned cuda_profile_interval{100};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.

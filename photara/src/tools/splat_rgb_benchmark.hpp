@@ -46,7 +46,7 @@ int run_rgb_benchmark(int argc, char** argv) {
     using namespace photara::splat;
     using tinytensor::Device;
     using tinytensor::Tensor;
-    require(argc >= 6, "Usage: --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW] [phases|pipeline|streamed|readback] [cuda-first|vulkan-first] [compact|uncompressed] [fused|split-sh|split-all] [default|retain]");
+    require(argc >= 6 && argc <= 12, "Usage: --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW] [phases|pipeline|streamed|readback] [cuda-first|vulkan-first] [compact|uncompressed] [default|retain]");
     const std::filesystem::path output(argv[4]);
     std::filesystem::create_directories(output);
     const auto views = load_views(argv[3], argv[5]);
@@ -55,14 +55,11 @@ int run_rgb_benchmark(int argc, char** argv) {
     const std::string timing = argc > 8 ? argv[8] : "streamed";
     const std::string order = argc > 9 ? argv[9] : "cuda-first";
     const std::string snapshots = argc > 10 ? argv[10] : "compact";
-    const std::string optimizer = argc > 11 ? argv[11] : "fused";
-    const std::string pool_policy = argc > 12 ? argv[12] : "default";
+    const std::string pool_policy = argc > 11 ? argv[11] : "default";
     require(timing == "phases" || timing == "pipeline" || timing == "streamed" || timing == "readback",
             "Invalid RGB benchmark timing mode");
     require(order == "cuda-first" || order == "vulkan-first", "Invalid RGB benchmark order");
     require(snapshots == "compact" || snapshots == "uncompressed", "Invalid snapshot mode");
-    require(optimizer == "fused" || optimizer == "split-sh" || optimizer == "split-all",
-            "Invalid CUDA optimizer mode");
     require(pool_policy == "default" || pool_policy == "retain", "Invalid CUDA pool policy");
     const bool streamed = timing == "streamed";
     const bool phase_sync = timing == "phases" || timing == "readback";
@@ -101,8 +98,6 @@ int run_rgb_benchmark(int argc, char** argv) {
         ro.compact_pixel_snapshots = snapshots == "compact";
         const auto handles = vk ? tinytensor::vulkan::device_handles()
                                 : tinytensor::vulkan::DeviceHandles{};
-        const bool fuse_sh = vk || optimizer == "fused";
-        const bool fuse_structure = vk || optimizer != "split-all";
         cudaMemPool_t cuda_pool{};
         std::uint64_t original_pool_threshold = 0;
         if (!vk) {
@@ -132,7 +127,7 @@ int run_rgb_benchmark(int argc, char** argv) {
         std::cout << name << " RGB benchmark gaussians=" << model.size() << " view=" << index
                   << " size=" << view.camera.width << 'x' << view.camera.height
                   << " timing=" << timing << " order=" << order
-                  << " cuda_snapshots=" << snapshots << " cuda_optimizer=" << optimizer
+                  << " cuda_snapshots=" << snapshots << " cuda_optimizer=fused"
                   << " cuda_pool=" << pool_policy << std::endl;
         std::chrono::steady_clock::time_point measured_loop_start;
         const auto& pool_stats = tinytensor::SizeBucketedPool::instance().stats();
@@ -170,18 +165,7 @@ int run_rgb_benchmark(int argc, char** argv) {
             if (phase_sync) sync();
             const auto after_loss = std::chrono::steady_clock::now();
             const auto gradients = rasterizer.backward(model, rendered, loss.color,
-                loss.alpha, {}, {}, {}, fuse_sh ? &su : nullptr,
-                fuse_structure ? &st : nullptr);
-            if (!fuse_sh)
-                detail::sh_adam_quant_step(model.sh, gradients.sh, sh,
-                    (ro.active_sh_degree + 1) * (ro.active_sh_degree + 1) * 3,
-                    su.lr, su.rest_lr, su.beta1, su.beta2, su.correction1,
-                    su.correction2, su.epsilon,
-                    sh.stride > 3 ? 2.F * std::max(su.regularization_weight, 0.F) /
-                        float(model.size() * (sh.stride - 3)) : 0.F);
-            if (!fuse_structure)
-                detail::adam_step_structure(model, gradients, means, scales, rotations,
-                    opacity, st.means_lr, step, o, st.minimum_log_scale, st.maximum_log_scale);
+                loss.alpha, {}, {}, {}, &su, &st);
             if (phase_sync) sync();
             const auto after_backward = std::chrono::steady_clock::now();
             rasterizer.materialize_visibility(rendered);
@@ -197,9 +181,8 @@ int run_rgb_benchmark(int argc, char** argv) {
                 rendered.radii, false);
             if (!streamed) sync();
             const auto after_noise = std::chrono::steady_clock::now();
-            require(gradients.means.is_valid() == !fuse_structure &&
-                    gradients.sh.is_valid() == !fuse_sh,
-                    "RGB benchmark did not exercise requested optimizers");
+            require(!gradients.means.is_valid() && !gradients.sh.is_valid(),
+                    "RGB benchmark did not exercise fused optimizers");
             const double row[]{
                 phase_sync ? std::chrono::duration<double,std::milli>(after_forward-start).count() : unmeasured_phase,
                 phase_sync ? std::chrono::duration<double,std::milli>(after_loss-after_forward).count() : unmeasured_phase,
@@ -221,7 +204,7 @@ int run_rgb_benchmark(int argc, char** argv) {
             std::chrono::steady_clock::now() - measured_loop_start).count() / iterations;
         std::cout << name << " loop_average_ms=" << loop_average << std::endl;
         summary << name << ',' << timing << ',' << order << ',' << snapshots << ','
-                << optimizer << ',' << pool_policy << ',' << iterations << ',' << loop_average << '\n';
+                << "fused," << pool_policy << ',' << iterations << ',' << loop_average << '\n';
         if (!vk) {
             std::uint64_t reserved = 0, used = 0;
             require(cudaMemPoolGetAttribute(cuda_pool, cudaMemPoolAttrReservedMemCurrent,

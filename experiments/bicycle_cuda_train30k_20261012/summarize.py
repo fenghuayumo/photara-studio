@@ -49,7 +49,7 @@ rows += ["", f"Training time reduction: {report['training_time_reduction_percent
 for bw, cw in zip(b["progress_windows"], c["progress_windows"]):
     reduction = 100 * (1 - cw["seconds"] / bw["seconds"])
     rows.append(f"| {bw['start_iteration']}–{bw['end_iteration']} | {bw['mean_ms']:.3f} | {cw['mean_ms']:.3f} | {reduction:.2f}% |")
-rows += ["", "One sequential pair does not establish a statistical confidence interval. Same seed does not guarantee identical learned models because GPU reductions and densification can diverge. These runs compare two CUDA optimizer implementations; they do not measure Vulkan full-training performance.", "",
-         "The split production path also executes a separate SH regularization kernel and stores FP32 SH gradients, unlike the fused path. Interpret the result as the existing production CLI implementation, not just the isolated Adam kernel."]
+rows += ["", "One sequential pair does not establish a statistical confidence interval. Same seed does not guarantee identical learned models because GPU reductions and densification can diverge. These runs compare two CUDA trainer binaries; they do not measure Vulkan full-training performance.", "",
+         "Both current runs use the automatic fused optimizer with identical CLI options; the executable is the compared variable. Historical split-SH reports in this directory were generated before the manual optimizer switch was removed."]
 (root / "report.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
 print("\n".join(rows))
