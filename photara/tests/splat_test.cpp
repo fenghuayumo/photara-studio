@@ -2157,14 +2157,18 @@ void test_vulkan_fused_sh_adam() {
 #endif
 }
 
-photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device device = tinytensor::Device::CUDA) {
+photara::splat::GaussianModel test_fused_structure_adam(
+    tinytensor::Device device = tinytensor::Device::CUDA, unsigned sh_degree = 1,
+    std::size_t storage_bases = 0) {
     using namespace photara::splat;
     using photara::CameraModel;
     using tinytensor::Tensor;
     const bool vk = device == tinytensor::Device::Vulkan;
     constexpr std::size_t n = 257;
+    const std::size_t bases = storage_bases ? storage_bases : (sh_degree + 1) * (sh_degree + 1);
+    const std::size_t stride = bases * 3;
     std::vector<float> means(n * 3), rotations(n * 4), log_scales(n * 3),
-        logits(n), coefficients(n * 12);
+        logits(n), coefficients(n * stride);
     for (std::size_t i = 0; i < n; ++i) {
         means[i * 3] = .02F * float(int(i % 11) - 5);
         means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
@@ -2176,17 +2180,22 @@ photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device devic
         log_scales[i * 3 + 1] = -.5F;
         log_scales[i * 3 + 2] = -.9F;
         logits[i] = -3.F + .01F * float(i % 17);
-        for (std::size_t j = 0; j < 12; ++j)
-            coefficients[i * 12 + j] = .04F * std::sin(float(i + j));
+        for (std::size_t j = 0; j < stride; ++j)
+            coefficients[i * stride + j] = .04F * std::sin(float(i + j));
     }
     means[(n - 1) * 3 + 2] = -2.F;
+    // Visible large splats exercise both sides of the pinhole Jacobian clamp.
+    means[0] = -2.2F;
+    means[3] = 2.2F;
+    means[7] = -1.8F;
+    means[10] = 1.8F;
     GaussianModel model;
     model.means = Tensor::from_vector(means, {n, 3}, device);
     model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
     model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
     model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
-    model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
-    model.sh_degree = 1;
+    model.sh = Tensor::from_vector(coefficients, {n, bases, 3}, device);
+    model.sh_degree = sh_degree;
     model.filter_3d = Tensor::full({n,1}, .04F, device);
     Camera camera;
     camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
@@ -2213,8 +2222,8 @@ photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device devic
     fused_model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
     fused_model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
     fused_model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
-    fused_model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
-    fused_model.sh_degree = 1;
+    fused_model.sh = Tensor::from_vector(coefficients, {n, bases, 3}, device);
+    fused_model.sh_degree = sh_degree;
     auto means_state = detail::make_adam_state(model.means);
     auto scales_state = detail::make_adam_state(model.log_scales);
     auto rotations_state = detail::make_adam_state(model.quaternions);
@@ -2227,15 +2236,15 @@ photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device devic
     means_state.first = Tensor::from_vector(moment, {n, 3}, device);
     fused_means.first = Tensor::from_vector(moment, {n, 3}, device);
     RasterizeOptions options;
-    options.active_sh_degree = 1;
+    options.active_sh_degree = sh_degree;
     options.require_depth = false;
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
     training.log_scale_regularization_weight = .03F;
     training.max_scale_ratio = 1.05F;
     training.adam_epsilon = 1e-15F;
-    auto reference_sh = detail::make_sh_adam_quant(n, 12, device);
-    auto fused_sh = detail::make_sh_adam_quant(n, 12, device);
+    auto reference_sh = detail::make_sh_adam_quant(n, int(stride), device);
+    auto fused_sh = detail::make_sh_adam_quant(n, int(stride), device);
     for (unsigned step : {7U, 8U, 9U}) {
         const auto ref = rasterizer.forward(model, camera, options);
 
@@ -2298,7 +2307,7 @@ photara::splat::GaussianModel test_fused_structure_adam(tinytensor::Device devic
         detail::adam_step_structure(
             model, g, means_state, scales_state, rotations_state, opacity_state,
             0.01F, step, training, -.8F, -.4F);
-        detail::sh_adam_quant_step(model.sh, g.sh, reference_sh, 12,
+        detail::sh_adam_quant_step(model.sh, g.sh, reference_sh, int(stride),
             training.sh0_lr, training.sh_rest_lr, training.beta1, training.beta2,
             update.correction1, update.correction2, training.adam_epsilon, 0.F);
         compare(model.means, fused_model.means, "Fused structure mean parity");
@@ -8191,6 +8200,12 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--structure-adam-only") {
+            for (unsigned degree : {0U, 2U, 3U})
+                test_fused_structure_adam(tinytensor::Device::Vulkan, degree);
+            // Progressive SH keeps all 16 bases allocated while only a subset
+            // is active; inactive compressed state must retain its semantics.
+            for (unsigned degree : {0U, 1U, 2U})
+                test_fused_structure_adam(tinytensor::Device::Vulkan, degree, 16);
             const auto cuda = test_fused_structure_adam();
             const auto vk = test_fused_structure_adam(tinytensor::Device::Vulkan);
             const std::pair<const tinytensor::Tensor*, const tinytensor::Tensor*> pairs[]{

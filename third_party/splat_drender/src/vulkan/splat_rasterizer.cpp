@@ -172,6 +172,7 @@ public:
               "splat_color_correction.hlsl.spv", 6, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
           project_structure_adam_(context.create_pipeline("splat_project_backward_structure_adam.hlsl.spv", 28, sizeof(Push) + 8 * sizeof(float))),
+          project_pinhole_rgb_adam_(context.create_pipeline("splat_project_backward_pinhole_rgb_adam.hlsl.spv", 28, sizeof(Push) + 8 * sizeof(float))),
           project_sh_adam_(context.create_pipeline("splat_project_backward_sh_adam.hlsl.spv", 19, sizeof(Push) + 8 * sizeof(float))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))),
@@ -2320,8 +2321,15 @@ public:
             project_infos.push_back(descriptor(settings));
             project_push.u[17] = structure_adam->capture_opacity_gradient ? 1u : 0u;
         }
+        // Structure Adam already requires SH and raw scale/rotation parameters.
+        // Geometry and other camera types retain their required general shader.
+        const bool pinhole_rgb_adam = structure_adam && last_mode_ == 0 &&
+                                     !last_frame_has_geometry_;
+        const auto& project_pipeline = pinhole_rgb_adam ? project_pinhole_rgb_adam_
+            : structure_adam ? project_structure_adam_
+            : sh_adam ? project_sh_adam_ : project_backward_;
         dispatch_infos(
-            structure_adam ? project_structure_adam_ : sh_adam ? project_sh_adam_ : project_backward_, project_infos, project_push, div_up(count_, 256),
+            project_pipeline, project_infos, project_push, div_up(count_, 256),
             1, 1, sh_adam ? &sh_adam->settings : nullptr);
         write_backward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         // The packed gradients feed TinyTensor's optimizer batch, which is
@@ -3148,6 +3156,7 @@ private:
     ComputePipeline color_correction_atomic_;
     ComputePipeline project_backward_;
     ComputePipeline project_structure_adam_;
+    ComputePipeline project_pinhole_rgb_adam_;
     ComputePipeline project_sh_adam_;
     ComputePipeline clear_;
     ComputePipeline pack_;

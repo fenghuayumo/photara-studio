@@ -44,9 +44,18 @@ static float model_grad[20];
 #ifdef SPLAT_FUSED_STRUCTURE_ADAM
 #include "splat_structure_adam_fused.hlsli"
 #endif
+#ifdef SPLAT_PINHOLE_RGB
+static uint sh_row_base;
+#endif
 void write_sh_gradient(uint offset, float value) {
 #ifdef SPLAT_FUSED_SH_ADAM
+#ifdef SPLAT_PINHOLE_RGB
+    // Every write belongs to this invocation's SH row. Subtraction preserves
+    // its local coefficient index without a dynamic integer remainder.
+    sh_gradient[offset - sh_row_base] = value;
+#else
     sh_gradient[offset % (pc.u6 * 3u)] = value;
+#endif
 #else
     model_grad[3u * pc.u0 + offset] = value;
 #endif
@@ -455,6 +464,14 @@ void project_backward(uint3 dispatch_id) {
     uint index = dispatch_id.x;
     if (index >= count) return;
     uint flags = pc.u1;
+#ifdef SPLAT_PINHOLE_RGB
+    const uint mode = kModePinhole;
+    const bool has_sh = true;
+    const bool has_scales = true;
+    const bool raw_chain = true;
+    const bool compact_raw_gradients = true;
+    const bool geometry = false;
+#else
     uint mode = pc.u2;
     bool has_sh = (flags & 1u) != 0u;
     bool has_scales = (flags & 2u) != 0u;
@@ -465,6 +482,7 @@ void project_backward(uint3 dispatch_id) {
     // legacy layout so its download adapter remains unchanged.
     bool compact_raw_gradients = (flags & 8u) != 0u;
     bool geometry = (flags & 16u) != 0u;
+#endif
     uint width = pc.u3;
     uint height = pc.u4;
     uint degree = pc.u5;
@@ -598,6 +616,10 @@ void project_backward(uint3 dispatch_id) {
     float4 gc = float4(
         blend_grad[conic_base], blend_grad[conic_base + 1u],
         blend_grad[conic_base + 2u], blend_grad[conic_base + 3u]);
+#ifdef SPLAT_PINHOLE_RGB
+    const float4 gplane = 0.0f;
+    const float3 gnormal = 0.0f;
+#else
     uint plane_grad_base = 10u * count + 4u * index;
     uint normal_grad_base = 14u * count + 3u * index;
     float4 gplane = float4(
@@ -607,6 +629,7 @@ void project_backward(uint3 dispatch_id) {
         blend_grad[normal_grad_base],
         blend_grad[normal_grad_base + 1u],
         blend_grad[normal_grad_base + 2u]);
+#endif
     float a0 = cov.m[0][0];
     float b = cov.m[0][1];
     float c0v = cov.m[1][1];
@@ -836,6 +859,9 @@ void project_backward(uint3 dispatch_id) {
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (dispatch_id.x >= pc.u0) return;
+#ifdef SPLAT_PINHOLE_RGB
+    sh_row_base = dispatch_id.x * pc.u6 * 3u;
+#endif
     project_backward(dispatch_id);
 #ifdef SPLAT_FUSED_SH_ADAM
     // Even culled rows decay their active state. All reads of the old SH

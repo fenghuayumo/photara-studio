@@ -34,6 +34,7 @@
 #include "splat_project_backward.hlsl.embedded.hpp"
 #include "splat_project_backward_sh_adam.hlsl.embedded.hpp"
 #include "splat_project_backward_structure_adam.hlsl.embedded.hpp"
+#include "splat_project_backward_pinhole_rgb_adam.hlsl.embedded.hpp"
 #include "splat_preprocess.hlsl.embedded.hpp"
 #include "splat_radix_hist.hlsl.embedded.hpp"
 #include "splat_radix_hist_indirect.hlsl.embedded.hpp"
@@ -145,6 +146,8 @@ std::optional<std::filesystem::path> shader_directory_override() {
 }
 
 std::span<const std::byte> embedded_shader(const std::string& shader_name) {
+    if (shader_name == "splat_project_backward_pinhole_rgb_adam.hlsl.spv")
+        return std::as_bytes(std::span{splat_project_backward_pinhole_rgb_adam_hlsl_spv});
     if (shader_name == "splat_sample_depth_group.hlsl.spv")
         return std::as_bytes(std::span{splat_sample_depth_group_hlsl_spv});
     if (shader_name == "splat_sample_depth_tiled.hlsl.spv")

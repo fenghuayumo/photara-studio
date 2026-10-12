@@ -102,6 +102,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_project_backward.hlsl
             shaders/splat_project_backward_sh_adam.hlsl
             shaders/splat_project_backward_structure_adam.hlsl
+            shaders/splat_project_backward_pinhole_rgb_adam.hlsl
             shaders/splat_pack_rgba.hlsl
             shaders/splat_blend_rings.hlsl)
         # Photometric training shaders belong to Photara's splat backend, not
@@ -140,6 +141,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward_structure_adam.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_structure_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
