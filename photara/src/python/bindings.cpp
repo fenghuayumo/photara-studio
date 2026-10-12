@@ -121,10 +121,6 @@ struct MeshResultHandle {
 sfm::ReconstructionSummary run_sfm_mapping(
     SfmSceneHandle& handle, const sfm::ReconstructionConfig& options) {
     switch (options.mode) {
-        case sfm::ReconstructionMode::incremental:
-            handle.summary = sfm::run_incremental_mapping(
-                handle.scene, options.star, options.resection);
-            break;
         case sfm::ReconstructionMode::hierarchical:
             handle.summary = sfm::run_hierarchical_mapping(
                 handle.scene, options.hierarchical);
@@ -234,7 +230,6 @@ NB_MODULE(photara, module) {
         .value("EQUIRECTANGULAR", photara::CameraModel::equirectangular);
 
     nb::enum_<sfm::ReconstructionMode>(module, "ReconstructionMode")
-        .value("INCREMENTAL", sfm::ReconstructionMode::incremental)
         .value("HIERARCHICAL", sfm::ReconstructionMode::hierarchical)
         .value("GLOBAL", sfm::ReconstructionMode::global);
 
@@ -703,17 +698,6 @@ NB_MODULE(photara, module) {
         .def_rw("star", &sfm::ReconstructionConfig::star)
         .def_rw("resection", &sfm::ReconstructionConfig::resection)
         .def_rw("hierarchical", &sfm::ReconstructionConfig::hierarchical)
-        .def_rw(
-            "incremental_hierarchical_rescue",
-            &sfm::ReconstructionConfig::incremental_hierarchical_rescue)
-        .def_rw(
-            "incremental_hierarchical_rescue_min_missing",
-            &sfm::ReconstructionConfig::
-                incremental_hierarchical_rescue_min_missing)
-        .def_rw(
-            "incremental_hierarchical_rescue_min_missing_ratio",
-            &sfm::ReconstructionConfig::
-                incremental_hierarchical_rescue_min_missing_ratio)
         .def_rw(
             "minimum_final_observations_per_image",
             &sfm::ReconstructionConfig::minimum_final_observations_per_image)

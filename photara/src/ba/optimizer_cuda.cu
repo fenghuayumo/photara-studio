@@ -597,6 +597,39 @@ __global__ void camera_reduce_kernel(
     }
 }
 
+// Use the diagonal blocks of the reduced Schur system rather than the
+// pre-elimination camera Hessian. The latter misses the weak directions
+// introduced by free points and can leave PCG far from its tolerance.
+__global__ void schur_camera_diagonal_kernel(
+    const std::size_t* offsets,const std::size_t* observations,
+    const Index* point_ids,const double* cross,const double* inverse,
+    const double* camera_h,const std::size_t camera_count,
+    const bool optimize_rotations,const bool optimize_translations,double* reduced_h) {
+    const unsigned lane=threadIdx.x%warp_size;
+    const std::size_t camera=static_cast<std::size_t>(blockIdx.x)*warps_per_block+
+        threadIdx.x/warp_size;
+    if(camera>=camera_count)return;
+    double local[36]{};
+    for(std::size_t cursor=offsets[camera]+lane;cursor<offsets[camera+1];cursor+=warp_size){
+        const std::size_t obs=observations[cursor];
+        const double* w=cross+obs*18;
+        const double* v=inverse+static_cast<std::size_t>(point_ids[obs])*9;
+        double product[18];
+        for(int r=0;r<6;++r)for(int c=0;c<3;++c)
+            product[r*3+c]=w[r*3]*v[c]+w[r*3+1]*v[3+c]+w[r*3+2]*v[6+c];
+        for(int r=0;r<6;++r)for(int c=0;c<6;++c)
+            local[r*6+c]+=product[r*3]*w[c*3]+product[r*3+1]*w[c*3+1]+
+                product[r*3+2]*w[c*3+2];
+    }
+    for(int i=0;i<36;++i){
+        const double total=warp_sum(local[i]);
+        const bool row_free=i/6<3?optimize_rotations:optimize_translations;
+        const bool col_free=i%6<3?optimize_rotations:optimize_translations;
+        if(!lane)reduced_h[camera*36+i]=row_free&&col_free
+            ?camera_h[camera*36+i]-total:(i/6==i%6?1.0:0.0);
+    }
+}
+
 // The damped block is unchanged throughout PCG; factor it once per LM step.
 __global__ void factor_preconditioner_kernel(
     const double* hessian, const std::size_t count, const std::size_t dim,
@@ -979,7 +1012,7 @@ public:
     Buffer<CameraChunk> camera_chunks;
     Buffer<LinearizedObservation> linearized, candidate_linearized;
     Buffer<double> camera_h, camera_b, point_inverse, point_b, cross, reduced_point;
-    Buffer<double> camera_factor, intrinsic_factor;
+    Buffer<double> camera_factor, intrinsic_factor, camera_schur;
     Buffer<double> intrinsic_h, intrinsic_b, pose_intr, point_intr;
     Buffer<double> point_scratch, camera_scratch, intrinsic_scratch;
     Buffer<double> rhs, solution, residual, z, direction, product, point_temporary, point_step;
@@ -1257,6 +1290,7 @@ void CudaOptimizer::upload(const Problem& problem) {
     d.linearized.resize(d.observation_count); d.candidate_linearized.resize(d.observation_count);
     d.camera_h.resize(d.camera_count*36); d.camera_b.resize(d.camera_count*6);
     d.camera_factor.resize(d.camera_count*36);
+    d.camera_schur.resize(d.camera_count*36);
     d.intrinsic_factor.resize(d.group_count*k_max_intrinsic_params*k_max_intrinsic_params);
     d.point_inverse.resize(d.point_count*9); d.point_b.resize(d.point_count*3); d.cross.resize(d.observation_count*18);
     if (d.intrinsic_dof>0) {
@@ -1335,13 +1369,18 @@ OptimizerSummary CudaOptimizer::optimize() {
                 d.point_count,camera_values,d.intrinsic_dof,d.rhs.data());
         }
         check(cudaGetLastError(),"system assembly");
+        schur_camera_diagonal_kernel<<<blocks(d.camera_count*warp_size),threads>>>(
+            d.camera_offsets.data(),d.camera_observations.data(),d.point_ids.data(),
+            d.cross.data(),d.point_inverse.data(),d.camera_h.data(),d.camera_count,
+            d.options.optimize_rotations,d.options.optimize_translations,d.camera_schur.data());
         factor_preconditioner_kernel<<<blocks(d.camera_count),threads>>>(
-            d.camera_h.data(),d.camera_count,6,6,d.camera_factor.data());
+            d.camera_schur.data(),d.camera_count,6,6,d.camera_factor.data());
         if (d.intrinsic_dof>0)
             factor_preconditioner_kernel<<<blocks(d.group_count),threads>>>(
                 d.intrinsic_h.data(),d.group_count,d.intrinsic_dof,
                 k_max_intrinsic_params,d.intrinsic_factor.data());
         std::size_t pcg=0;
+        double pcg_relative_residual=0;
         {
           d.solution.zero(); check(cudaMemcpy(d.residual.data(),d.rhs.data(),total_values*sizeof(double),cudaMemcpyDeviceToDevice),"PCG init");
           precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.camera_factor.data(),d.residual.data(),d.camera_count,
@@ -1397,6 +1436,8 @@ OptimizerSummary CudaOptimizer::optimize() {
             d.dot_to(d.residual,d.z,total_values,3); beta_kernel<<<1,1>>>(d.pcg_scalars.data());
             direction_kernel<<<blocks(total_values),threads>>>(d.direction.data(),d.z.data(),total_values,d.pcg_scalars.data()+4);
           }
+          pcg_relative_residual=std::sqrt(
+              d.dot(d.residual,d.residual,total_values)/std::max(rhs_norm,1e-30));
         }
         recover_points_kernel<<<blocks(d.point_count),threads>>>(d.point_offsets.data(),d.point_observations.data(),d.cameras.data(),
             d.pose_group.data(),d.cross.data(),d.point_intr.data(),d.point_inverse.data(),
@@ -1429,7 +1470,8 @@ OptimizerSummary CudaOptimizer::optimize() {
         core::Logger::instance().debug(
             "CUDA BA iteration=",iteration," cost=",summary.iterations.back().cost,
             " damping=",damping," step_norm=",norm,
-            " pcg_iterations=",pcg," accepted=",accepted);
+            " pcg_iterations=",pcg," pcg_relative_residual=",pcg_relative_residual,
+            " pcg_tolerance=",d.options.pcg_tolerance," accepted=",accepted);
         if (accepted) { const double previous=summary.final_cost; summary.final_cost=candidate;
             d.linearized.swap(d.candidate_linearized); ++summary.successful_steps;
             damping=std::max(d.options.minimum_damping,damping/3.0);

@@ -37,7 +37,7 @@ struct Settings {
     float video_scale = 1.0F;
     int video_rotate = 0;
     int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
-    int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
+    int sfm_mode = 0;  // 0 global, 2 hierarchical (1 is a legacy project value)
     bool reuse_cache = false;
     unsigned max_features = 27'000;
     bool scene_mode = false;

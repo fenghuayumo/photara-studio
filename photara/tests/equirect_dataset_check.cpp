@@ -6,7 +6,7 @@
 // scripts/compare_equirect_reference.py).
 //
 //   photara_equirect_dataset_check <images> <out_colmap_dir>
-//       [--stride N] [--limit N] [--mode global|incremental|hierarchical]
+//       [--stride N] [--limit N] [--mode global|hierarchical]
 //       [--camera-model auto|equirectangular|pinhole|opencv_fisheye]
 //       [--max-features N] [--window N]
 #include "core/logging.hpp"
@@ -121,9 +121,11 @@ int main(const int argc, char** argv) {
     }
 
     photara::sfm::ReconstructionConfig config;
-    if (options.mode == "incremental")
-        config.mode = photara::sfm::ReconstructionMode::incremental;
-    else if (options.mode == "hierarchical")
+    if (options.mode != "global" && options.mode != "hierarchical") {
+        std::cerr << "--mode must be global or hierarchical\n";
+        return 2;
+    }
+    if (options.mode == "hierarchical")
         config.mode = photara::sfm::ReconstructionMode::hierarchical;
     else
         config.mode = photara::sfm::ReconstructionMode::global;

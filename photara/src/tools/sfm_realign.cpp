@@ -1,5 +1,6 @@
 #include "sfm/asfm.hpp"
 #include "sfm/checkpoint.hpp"
+#include "sfm/rotation_recovery.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/submap_recovery.hpp"
 #include "core/logging.hpp"
@@ -14,17 +15,52 @@
 
 using namespace photara::sfm;
 
+// Offline experiment: candidates come solely from verified pair geometry.
+// The COLMAP reference is deliberately not an input to detection or repair.
+int rotation_audit(Scene& scene, const std::filesystem::path& poses,
+                   const std::filesystem::path& output) {
+    Scene reconstruction = load_asfm(poses);
+    if (reconstruction.images.size() != scene.images.size())
+        throw std::runtime_error("pose input image count differs from checkpoint");
+    for (std::size_t i = 0; i < scene.images.size(); ++i) {
+        if (scene.images[i].path.filename() != reconstruction.images[i].path.filename())
+            throw std::runtime_error("pose input image order differs from checkpoint");
+        reconstruction.images[i].camera_identity = scene.images[i].camera_identity;
+        reconstruction.images[i].exif_focal_px = scene.images[i].exif_focal_px;
+    }
+    reconstruction.pairs = std::move(scene.pairs);
+    scene = std::move(reconstruction);
+    const auto report = recover_rotation_inconsistent_views(scene);
+    const auto contains = [](const std::vector<Index>& ids, Index id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    };
+    std::filesystem::create_directories(output);
+    std::ofstream audit(output / "rotation_audit.csv");
+    audit << "image_id,name,suspect,recovered\n";
+    for (Index i = 0; i < scene.images.size(); ++i)
+        audit << i << ',' << std::quoted(scene.images[i].path.filename().string()) << ','
+              << contains(report.candidates, i) << ',' << contains(report.recovered, i) << '\n';
+    save_asfm(scene, output / "reconstruction.asfm");
+    std::cout << "rotation audit: flagged=" << report.candidates.size()
+              << " recovered=" << report.recovered.size()
+              << " (offline pose repair experiment; not an end-to-end benchmark)\n";
+    return std::all_of(report.candidates.begin(), report.candidates.end(),
+        [&](Index id) { return contains(report.recovered, id); }) ? 0 : 2;
+}
+
 int main(int argc, char** argv) {
     try {
         photara::core::Logger::instance().configure({});
-        if (argc != 3 && argc != 4) {
-            std::cerr << "Usage: photara_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection]\n";
+        const bool audit_rotations = argc == 5 && std::string_view(argv[3]) == "--rotation-audit";
+        if (argc != 3 && argc != 4 && !audit_rotations) {
+            std::cerr << "Usage: photara_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection]\n"
+                         "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --rotation-audit INPUT.asfm\n";
             return 1;
         }
         const std::filesystem::path input(argv[1]), output(argv[2]);
         const std::string name = input.stem().string();
-        const std::string prefix = "reconstruction-";
-        if (!name.starts_with(prefix)) throw std::runtime_error("expected reconstruction checkpoint");
+        const std::string prefix = audit_rotations ? "tracks-" : "reconstruction-";
+        if (!name.starts_with(prefix)) throw std::runtime_error("expected " + prefix + " checkpoint");
         const std::string hex = name.substr(prefix.size());
         std::uint64_t fingerprint{};
         const auto parsed = std::from_chars(hex.data(), hex.data() + hex.size(), fingerprint, 16);
@@ -35,8 +71,10 @@ int main(int argc, char** argv) {
         CheckpointOptions options;
         options.directory = input.parent_path();
         options.write = false;
-        if (!CheckpointStore(options).load_scene(CheckpointStage::reconstruction, fingerprint, scene))
+        if (!CheckpointStore(options).load_scene(audit_rotations ? CheckpointStage::tracks
+                                                               : CheckpointStage::reconstruction, fingerprint, scene))
             throw std::runtime_error("cannot load checkpoint");
+        if (audit_rotations) return rotation_audit(scene, argv[4], output);
         prune_unsupported_registrations(scene);
         if (argc == 4 && std::string_view(argv[3]) == "--resection") {
             const auto before_count = scene.registered_count();

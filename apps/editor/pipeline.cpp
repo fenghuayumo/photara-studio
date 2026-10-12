@@ -473,7 +473,6 @@ void append_mesh_quality_flags(
 
 const char* sfm_mode_flag(const int index) {
     switch (index) {
-        case 1: return "incremental";
         case 2: return "hierarchical";
         default: return "global";
     }

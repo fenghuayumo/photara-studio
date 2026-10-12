@@ -130,6 +130,8 @@ Settings decode_settings(
     settings.name = reader.string();
     settings.image_directory = load_path(reader.string(), base);
     settings.sfm_mode = reader.value<std::int32_t>();
+    // Migrate the retired incremental mode to hierarchical; retain stored IDs.
+    if (settings.sfm_mode == 1) settings.sfm_mode = 2;
     settings.reuse_cache = reader.value<std::uint8_t>() != 0;
     settings.max_features = reader.value<unsigned>();
     settings.scene_mode = reader.value<std::uint8_t>() != 0;

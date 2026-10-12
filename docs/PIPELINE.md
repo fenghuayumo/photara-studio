@@ -76,7 +76,7 @@ optional MVS capabilities.
 |---|---|---|---|
 | Video frame extraction | `extract video frames` | `src/io/video_frames.cpp` | `<video>/images/*.jpg` |
 | Features, matching, verification, tracks | `sfm.frontend` | `src/sfm/frontend.cpp`, `src/features/*` | staged checkpoints |
-| Mapping | `sfm.incremental_mapping`, `sfm.global_mapping`, `sfm.hierarchical_mapping` | `src/sfm/*` | `sfm::Scene` |
+| Mapping | `sfm.global_mapping`, `sfm.hierarchical_mapping` | `src/sfm/*` | `sfm::Scene` |
 | Bundle adjustment | `ba.cpu`, `ba.cuda` | `src/ba/*`, `src/sfm/bundle.cpp` | optimized scene |
 | SfM export | `sfm.export_openmvs` | `src/sfm/export_*` | MVS, PLY, ASFM, ASCAN, COLMAP |
 | Subject bounds | `sfm.subject_bounds` | `src/mvs/subject_bounds.cpp` | `*_subject_bounds.txt` |

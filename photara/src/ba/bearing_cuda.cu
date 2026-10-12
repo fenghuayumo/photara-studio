@@ -31,24 +31,67 @@ unsigned blocks(std::size_t n){return static_cast<unsigned>((n+255)/256);}
 // The matrix is column-major with the lower triangle filled; info semantics
 // follow potrf: a positive info means the leading minor at that 1-based row
 // was not positive definite.
-// Pure right-looking Cholesky, one column per step: finalize the pivot,
-// scale the column below it, then apply the rank-1 update to the remaining
-// submatrix. n <= 6000, so the 2n tiny launches stay far below the cost of
-// the cublas/cusolver DLL chain this replaces.
-__global__ void chol_pivot(double* a,int n,int c,int* info){
-    if(blockIdx.x||threadIdx.x)return;
-    double p=a[c+c*n];
-    if(!(p>0.0)||!isfinite(p)){if(!*info)*info=c+1;return;}
-    p=sqrt(p);a[c+c*n]=p;
-    for(int j=c+1;j<n;++j)a[j+c*n]/=p;
+// Factor a panel in shared memory, solve the rectangular panel, then update
+// the trailing matrix with tiled rank-k products. Three launches per 32
+// columns replace the previous two launches per column.
+constexpr int k_chol_tile=32;
+__global__ void chol_diagonal(double* a,int n,int c,int* info){
+    __shared__ double tile[k_chol_tile*k_chol_tile];
+    const int width=min(k_chol_tile,n-c);
+    if(*info)return;
+    for(int t=threadIdx.x;t<width*width;t+=blockDim.x){
+        const int r=t%width,s=t/width;
+        tile[r+s*k_chol_tile]=r>=s?a[c+r+(c+s)*n]:0.0;
+    }
+    __syncthreads();
+    for(int j=0;j<width;++j){
+        if(!threadIdx.x){
+            double p=tile[j+j*k_chol_tile];
+            if(!(p>0.0)||!isfinite(p))*info=c+j+1;
+            else tile[j+j*k_chol_tile]=sqrt(p);
+        }
+        __syncthreads();
+        if(*info)return;
+        for(int r=j+1+threadIdx.x;r<width;r+=blockDim.x)
+            tile[r+j*k_chol_tile]/=tile[j+j*k_chol_tile];
+        __syncthreads();
+        for(int t=threadIdx.x;t<width*width;t+=blockDim.x){
+            const int r=t%width,s=t/width;
+            if(r>=s&&s>j)tile[r+s*k_chol_tile]-=tile[r+j*k_chol_tile]*tile[s+j*k_chol_tile];
+        }
+        __syncthreads();
+    }
+    for(int t=threadIdx.x;t<width*width;t+=blockDim.x){
+        const int r=t%width,s=t/width;
+        if(r>=s)a[c+r+(c+s)*n]=tile[r+s*k_chol_tile];
+    }
 }
-__global__ void chol_rank1(double* a,int n,int c){
-    const int j0=c+1,q=n-j0,total=q*q;
-    for(int t=blockIdx.x*blockDim.x+threadIdx.x;t<total;t+=gridDim.x*blockDim.x){
-        const int s=j0+t/q,r=j0+t%q;
-        if(r<s)continue;
+__global__ void chol_panel(double* a,int n,int c,const int* info){
+    if(*info)return;
+    const int width=min(k_chol_tile,n-c);
+    const int r=c+width+blockIdx.x*blockDim.x+threadIdx.x;
+    if(r>=n)return;
+    for(int j=0;j<width;++j){
+        double v=a[r+(c+j)*n];
+        for(int k=0;k<j;++k)v-=a[r+(c+k)*n]*a[c+j+(c+k)*n];
+        a[r+(c+j)*n]=v/a[c+j+(c+j)*n];
+    }
+}
+__global__ void chol_trailing(double* a,int n,int c,const int* info){
+    if(*info||blockIdx.x<blockIdx.y)return;
+    __shared__ double rows[16*k_chol_tile],cols[16*k_chol_tile];
+    const int width=min(k_chol_tile,n-c),start=c+width;
+    const int r0=start+blockIdx.x*16,s0=start+blockIdx.y*16;
+    for(int t=threadIdx.y*16+threadIdx.x;t<16*width;t+=256){
+        const int r=t%16,k=t/16;
+        rows[r+k*16]=r0+r<n?a[r0+r+(c+k)*n]:0.0;
+        cols[r+k*16]=s0+r<n?a[s0+r+(c+k)*n]:0.0;
+    }
+    __syncthreads();
+    const int r=r0+threadIdx.x,s=s0+threadIdx.y;
+    if(r<n&&s<n&&r>=s){
         double v=a[r+s*n];
-        v-=a[r+c*n]*a[s+c*n];
+        for(int k=0;k<width;++k)v-=rows[threadIdx.x+k*16]*cols[threadIdx.y+k*16];
         a[r+s*n]=v;
     }
 }
@@ -284,12 +327,13 @@ BearingSolveSummary CudaBearingOptimizer::solve(const std::vector<double>& weigh
         baseline_gauge<<<1,1>>>(d.cameras.p,d.nc,d.anchor,d.first,d.second,d.baseline,d.matrix.p,d.rhs.p);
         check(cudaGetLastError());
         const int n=d.nc*3;
-        for(int c=0;c<n;++c){
-            chol_pivot<<<1,1>>>(d.matrix.p,n,c,d.info.p);
-            if(c+1<n){
-                const int q=n-c-1;
-                const int grid=std::min((q*q+255)/256,8192);
-                chol_rank1<<<grid,256>>>(d.matrix.p,n,c);
+        for(int c=0;c<n;c+=k_chol_tile){
+            chol_diagonal<<<1,256>>>(d.matrix.p,n,c,d.info.p);
+            const int q=n-c-k_chol_tile;
+            if(q>0){
+                chol_panel<<<blocks(q),256>>>(d.matrix.p,n,c,d.info.p);
+                const unsigned tiles=(q+15)/16;
+                chol_trailing<<<dim3(tiles,tiles),dim3(16,16)>>>(d.matrix.p,n,c,d.info.p);
             }
         }
         check(cudaGetLastError());

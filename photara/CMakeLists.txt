@@ -385,6 +385,7 @@ if(PHOTARA_ENABLE_FEATURES)
         src/sfm/star_init.cpp
         src/sfm/resection.cpp
         src/sfm/global_rotation.cpp
+        src/sfm/rotation_recovery.cpp
         src/sfm/global_positioning.cpp
         src/sfm/hierarchical.cpp
         src/sfm/submap_recovery.cpp

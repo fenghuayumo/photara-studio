@@ -639,7 +639,6 @@ constexpr Entry k_entries[] = {
     {"Camera Alignment", "相机对齐", "カメラアライメント", "카메라 정렬"},
     {"Solver", "求解器", "ソルバー", "솔버"},
     {"Global", "全局", "グローバル", "전역"},
-    {"Incremental", "增量", "インクリメンタル", "증분"},
     {"Hierarchical", "分层", "階層的", "계층"},
     {"Camera model", "相机模型", "カメラモデル", "카메라 모델"},
     {"Auto", "自动", "自動", "자동"},

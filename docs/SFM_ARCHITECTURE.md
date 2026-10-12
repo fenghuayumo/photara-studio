@@ -190,18 +190,18 @@ rotation averaging: MST -> LAD/ADMM L1 -> robust IRLS
   -> enforce zero-baseline pose groups and retriangulate
 ```
 
-### 4.2 `incremental`
-
-`star_initialize` creates a reference-centered seed with up to 36 views.
-`register_images` performs wave-parallel PnP, periodic local and full BA, and a
-final polish pass. If a large reconstruction stalls, Photara can roll back to
-the frontend state and use hierarchical submap recovery.
-
-### 4.3 `hierarchical`
+### 4.2 `hierarchical`
 
 The scene is split by weighted covisibility, each cluster is reconstructed
 incrementally, submaps are aligned with Sim(3) RANSAC plus Umeyama refinement,
 and protected tracks are merged before optional final BA.
+
+After a multi-cluster merge, independent global rotation averaging screens
+camera poses against a dominant common rotation gauge. A rotation discrepancy
+only nominates a candidate: replacement poses require PnP against stable-only
+depths, held-out pixel validation and verified baseline checks. Validated
+repairs can anchor the next recovery pass; rejected candidates retain their
+geometry. The audit copies only weighted edges, not feature-match arrays.
 
 All modes finish with a `ReconstructionSummary`, observability analysis, and
 `prune_unsupported_registrations`.
@@ -257,7 +257,7 @@ semantics.
 
 | Option | Default | Description |
 |---|---|---|
-| `--mode` | `global` | `global`, `incremental`, or `hierarchical` |
+| `--mode` | `global` | `global` or `hierarchical` |
 | `--window` | 3 | Sequential pair window |
 | `--max-features` | 27,000 | Limit after 3×3 grid selection |
 | `--extractor` × `--matcher` | `siftgpu` × `gpu_mutual_ratio` | Default frontend |
@@ -272,7 +272,7 @@ semantics.
 
 ## 9. Tests
 
-SfM CTests cover two-view geometry, equirectangular residuals, incremental and
+SfM CTests cover two-view geometry, equirectangular residuals, PnP registration and
 global mapping, vocabulary retrieval, checkpoint equivalence, submap recovery,
 hierarchical Sim(3) merge, OpenMVS export, and project I/O. `photara.features`
 also covers feature storage, CPU/CUDA matcher consistency, and mask filtering.

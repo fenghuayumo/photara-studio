@@ -12,31 +12,36 @@
 namespace photara::sfm {
 namespace {
 
-float median_parallax_deg_for_camera(
+std::vector<float> median_parallax_deg_per_group(
     const Scene& scene,
-    const Index camera_id,
+    const std::unordered_map<Index, Index>& camera_to_group,
     const std::unordered_set<Index>& active_images) {
-    std::vector<float> angles;
-    angles.reserve(256);
+    std::vector<std::vector<float>> angles(camera_to_group.size());
+    std::vector<Index> groups;
     for (const Track& track : scene.tracks) {
         if (!track.is_triangulated() || track.num_inliers < 2) continue;
-        bool sees_camera = false;
+        groups.clear();
         for (unsigned o = 0; o < track.num_inliers; ++o) {
             const Index image_id = track.observations[o].image_id;
             if (!active_images.count(image_id)) continue;
-            if (scene.images[image_id].camera_id == camera_id) {
-                sees_camera = true;
-                break;
-            }
+            const Index group = camera_to_group.at(scene.images[image_id].camera_id);
+            if (std::find(groups.begin(), groups.end(), group) == groups.end())
+                groups.push_back(group);
         }
-        if (!sees_camera) continue;
+        if (groups.empty()) continue;
         const float angle = track_min_ray_angle_deg(track, scene);
-        if (angle > 0.F) angles.push_back(angle);
+        if (angle > 0.F)
+            for (const Index group : groups) angles[group].push_back(angle);
     }
-    if (angles.empty()) return 0.F;
-    const std::size_t mid = angles.size() / 2;
-    std::nth_element(angles.begin(), angles.begin() + mid, angles.end());
-    return angles[mid];
+    std::vector<float> medians(angles.size(), 0.F);
+    for (std::size_t group = 0; group < angles.size(); ++group) {
+        auto& values = angles[group];
+        if (values.empty()) continue;
+        const std::size_t mid = values.size() / 2;
+        std::nth_element(values.begin(), values.begin() + mid, values.end());
+        medians[group] = values[mid];
+    }
+    return medians;
 }
 
 std::atomic<BundleBackendPreference>& backend_preference_storage() {
@@ -56,6 +61,7 @@ BundleBackendPreference bundle_backend_preference() {
 }
 
 BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) {
+    core::StageScope packing("bundle_pack");
     BundleSummary summary;
 
     std::unordered_set<Index> free_set(
@@ -65,13 +71,14 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     const bool use_filter = !free_set.empty() || !fixed_set.empty();
 
     std::vector<Index> camera_images;
-    std::unordered_map<Index, Index> image_to_ba;
+    camera_images.reserve(scene.images.size());
+    std::vector<Index> image_to_ba(scene.images.size(), k_invalid);
     if (use_filter) {
         const auto append = [&](const std::vector<Index>& ids) {
             for (Index image_id : ids) {
                 if (image_id >= scene.images.size() ||
                     !scene.images[image_id].registered ||
-                    image_to_ba.count(image_id))
+                    image_to_ba[image_id] != k_invalid)
                     continue;
                 image_to_ba[image_id] = static_cast<Index>(camera_images.size());
                 camera_images.push_back(image_id);
@@ -127,6 +134,8 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     }
 
     std::unordered_map<Index, Index> track_to_point;
+    problem.points.reserve(scene.tracks.size());
+    std::size_t observation_capacity = 0;
     for (Index track_id = 0; track_id < scene.tracks.size(); ++track_id) {
         const Track& track = scene.tracks[track_id];
         if (!track.is_triangulated()) continue;
@@ -135,7 +144,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             const Index image_id = track.observations[o].image_id;
             const bool activates_point =
                 use_filter ? free_set.count(image_id) != 0
-                           : image_to_ba.count(image_id) != 0;
+                           : image_to_ba[image_id] != k_invalid;
             if (activates_point) {
                 visible = true;
                 break;
@@ -144,17 +153,19 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         if (!visible) continue;
         track_to_point[track_id] = static_cast<Index>(problem.points.size());
         problem.points.push_back({track.position.x(), track.position.y(), track.position.z()});
+        observation_capacity += track.num_inliers;
     }
     if (problem.points.empty()) return summary;
+    problem.observations.reserve(observation_capacity);
 
     for (const auto& [track_id, point_id] : track_to_point) {
         const Track& track = scene.tracks[track_id];
         for (unsigned o = 0; o < track.num_inliers; ++o) {
             const Observation& obs = track.observations[o];
-            const auto cam_it = image_to_ba.find(obs.image_id);
-            if (cam_it == image_to_ba.end()) continue;
+            const Index camera_id = image_to_ba[obs.image_id];
+            if (camera_id == k_invalid) continue;
             const auto& kp = scene.images[obs.image_id].features.keypoints[obs.feature_id];
-            problem.observations.push_back(cam_it->second, point_id, kp.x, kp.y);
+            problem.observations.push_back(camera_id, point_id, kp.x, kp.y);
         }
     }
     if (problem.observations.size() == 0) return summary;
@@ -169,6 +180,8 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     if (optimize_any_intrinsics && options.gate_intrinsics_by_observability) {
         std::unordered_set<Index> active_images(
             camera_images.begin(), camera_images.end());
+        const auto parallaxes = median_parallax_deg_per_group(
+            scene, scene_camera_to_group, active_images);
         std::vector<unsigned> views_per_group(problem.intrinsics.size(), 0);
         for (const Index image_id : camera_images) {
             if (fixed_set.count(image_id)) continue;
@@ -178,9 +191,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         }
         unsigned frozen = 0;
         for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
-            const Index camera_id = group_to_scene_camera[group];
-            const float parallax = median_parallax_deg_for_camera(
-                scene, camera_id, active_images);
+            const float parallax = parallaxes[group];
             if (views_per_group[group] < options.min_views_for_intrinsics ||
                 parallax < options.min_median_parallax_deg) {
                 problem.intrinsic_constant[group] = 1;
@@ -257,6 +268,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             " cuda_available=", ba::CudaOptimizer::is_available() ? 1 : 0);
     }
 #endif
+    packing.finish();
     bool solved = false;
     if (use_cuda) {
 #if defined(PHOTARA_HAS_CUDA)

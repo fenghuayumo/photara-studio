@@ -1,5 +1,6 @@
 #include "ba/bearing_cuda.hpp"
 #include "ba/optimizer.hpp"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -74,6 +75,33 @@ int main(int argc,char** argv){try{
     for(unsigned c=0;c<p.cameras.size();++c)if(c!=p.anchor)for(auto& v:p.cameras[c])v+=.08*random(rng);
     for(auto& x:p.points)for(auto& v:x)v+=.08*random(rng);
     const auto initial=p;
+    // Reduced matrix dimensions straddle both full and partial 32-column
+    // panels. Compare one LM step with Ceres before testing convergence.
+    for (unsigned cameras : {5U, 10U, 11U, 21U, 22U}) {
+        auto cpu=initial;
+        cpu.cameras.resize(cameras);
+        cpu.anchor=3;cpu.baseline_first=1;cpu.baseline_second=4;
+        cpu.observations.erase(std::remove_if(cpu.observations.begin(),cpu.observations.end(),
+            [&](const auto& o){return o.camera>=cameras;}),cpu.observations.end());
+        // Additional cameras repeat valid perturbed poses and measurements.
+        for(unsigned c=12;c<cameras;++c){
+            cpu.cameras[c]=initial.cameras[c%12];
+            for(const auto& o:initial.observations)if(o.camera==c%12){
+                auto copy=o;copy.camera=c;cpu.observations.push_back(copy);
+            }
+        }
+        double squared=0;
+        for(int k=0;k<3;++k){double d=truth.cameras[1][k]-truth.cameras[4][k];squared+=d*d;}
+        cpu.baseline=std::sqrt(squared);
+        auto gpu=cpu;std::vector<double> w(cpu.observations.size(),1);
+        const auto reference=solve_reference(cpu,w,1);
+        CudaBearingOptimizer tiled(gpu);const auto result=tiled.solve(w,1,1e-10,0);tiled.download(gpu);
+        double difference=0;
+        for(unsigned c=0;c<cameras;++c)for(int k=0;k<3;++k)
+            difference=std::max(difference,std::abs(cpu.cameras[c][k]-gpu.cameras[c][k]));
+        std::cout<<"panel cameras="<<cameras<<" CPU/GPU difference="<<difference<<'\n';
+        if(!reference.IsSolutionUsable()||!result.usable||difference>1e-8)return 8;
+    }
     CudaBearingOptimizer solver(p);std::vector<double> weights(p.observations.size(),1);
     const auto s=solver.solve(weights,80,1e-10,0);solver.download(p);
     double maximum=0;for(unsigned c=0;c<p.cameras.size();++c)for(int k=0;k<3;++k)

@@ -4,6 +4,7 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/preview.hpp"
 #include "sfm/asfm.hpp"
+#include "sfm/rotation_recovery.hpp"
 #include "core/logging.hpp"
 #include <iostream>
 #include <chrono>
@@ -128,8 +129,72 @@ Scene corridor_fixture() {
     return scene;
 }
 
+void test_rotation_recovery() {
+    Scene coherent = fixture();
+    for (Index id = 0; id < coherent.images.size(); ++id) {
+        coherent.images[id].pose.C = Vec3(0.25 * id, 0.12 * (id % 2), 0);
+        coherent.images[id].pose.R.setIdentity();
+    }
+    triangulate_tracks(coherent, false, 2.F, 1.F);
+    expect(recover_rotation_inconsistent_views(coherent).candidates.empty(),
+           "coherent poses must not be flagged by rotation recovery");
+    for (bool transformed : {false, true}) {
+        Scene scene = coherent;
+        const Mat3 world_rotation = transformed
+            ? Eigen::AngleAxisd(0.9, Vec3(1, 2, 3).normalized()).toRotationMatrix()
+            : Mat3::Identity();
+        const Vec3 offset = transformed ? Vec3(10, -4, 3) : Vec3::Zero();
+        for (auto& image : scene.images) {
+            image.pose.C = world_rotation * image.pose.C + offset;
+            image.pose.R *= world_rotation.transpose();
+        }
+        for (auto& track : scene.tracks)
+            track.position = world_rotation * track.position + offset;
+        const Scene before = scene;
+        scene.images[7].pose.R = Eigen::AngleAxisd(0.4, Vec3::UnitY()).toRotationMatrix()
+                                 * scene.images[7].pose.R;
+        scene.images[7].pose.C += Vec3(3, -2, 1);
+        const auto report = recover_rotation_inconsistent_views(scene);
+        expect(report.candidates == std::vector<Index>{7} &&
+               report.recovered == std::vector<Index>{7},
+               "rotation drift must recover from independent stable depths in either gauge");
+        expect((scene.images[7].pose.C - before.images[7].pose.C).norm() < 1e-4 &&
+               (scene.images[7].pose.R - before.images[7].pose.R).norm() < 1e-4,
+               "rotation recovery must restore the actual pose");
+        for (Index id = 0; id < 7; ++id)
+            expect((scene.images[id].pose.C - before.images[id].pose.C).norm() == 0 &&
+                   (scene.images[id].pose.R - before.images[id].pose.R).norm() == 0,
+                   "rotation recovery must leave stable poses unchanged");
+        for (Index id = 0; id < scene.pairs.size(); ++id)
+            expect(scene.pairs[id].active == before.pairs[id].active,
+                   "rotation audit must not mutate verified pair activation");
+    }
+    Scene invalid = coherent;
+    invalid.images[7].pose.R = Eigen::AngleAxisd(0.4, Vec3::UnitY()).toRotationMatrix();
+    const auto pixels = invalid.images[7].features.keypoints;
+    for (Index p = 0; p < pixels.size(); ++p)
+        invalid.images[7].features.keypoints[p] = pixels[(p * 37) % pixels.size()];
+    const Scene before = invalid;
+    const auto rejected = recover_rotation_inconsistent_views(invalid);
+    expect(rejected.candidates == std::vector<Index>{7} && rejected.recovered.empty(),
+           "rotation disagreement alone must not accept invalid PnP correspondences");
+    for (Index id = 0; id < invalid.images.size(); ++id)
+        expect((invalid.images[id].pose.C - before.images[id].pose.C).norm() == 0 &&
+               (invalid.images[id].pose.R - before.images[id].pose.R).norm() == 0,
+               "rejected recovery must preserve every original pose");
+    Scene ambiguous = fixture();
+    const Scene ambiguous_before = ambiguous;
+    expect(recover_rotation_inconsistent_views(ambiguous).candidates.empty(),
+           "rotation recovery requires a dominant common gauge");
+    for (Index id = 0; id < ambiguous.images.size(); ++id)
+        expect((ambiguous.images[id].pose.C - ambiguous_before.images[id].pose.C).norm() == 0 &&
+               (ambiguous.images[id].pose.R - ambiguous_before.images[id].pose.R).norm() == 0,
+               "ambiguous rotation consensus must leave the reconstruction unchanged");
+}
+
 int main() {
     try {
+        test_rotation_recovery();
         photara::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
@@ -473,8 +538,30 @@ int main() {
         catch (const std::invalid_argument&) { invalid = true; }
         expect(invalid, "duplicate image IDs must be rejected");
         Scene corridor = corridor_fixture();
-        expect(recover_weakly_connected_views(corridor) >= 4,
+        Scene full_rebuild = corridor;
+        WeakBranchRecoveryOptions reference;
+        reference.reuse_verified_geometry = false;
+        const auto reference_count = recover_weakly_connected_views(full_rebuild, reference);
+        const auto cached_count = recover_weakly_connected_views(corridor);
+        expect(cached_count == reference_count && cached_count >= 4,
             "weak branch beyond a locally rigid clique must still recover");
+        expect(corridor.tracks.size() == full_rebuild.tracks.size(),
+               "cached recovery must preserve split track topology");
+        for (Index i=0;i<corridor.images.size();++i)
+            expect(corridor.images[i].registered == full_rebuild.images[i].registered &&
+                   (corridor.images[i].pose.C-full_rebuild.images[i].pose.C).norm()<1e-10 &&
+                   (corridor.images[i].pose.R-full_rebuild.images[i].pose.R).norm()<1e-10,
+                   "cached recovery must match full-rebuild poses");
+        for (Index i=0;i<corridor.tracks.size();++i) {
+            const auto& a=corridor.tracks[i];const auto& b=full_rebuild.tracks[i];
+            expect(a.num_inliers==b.num_inliers && a.observations.size()==b.observations.size() &&
+                   (a.position-b.position).norm()<1e-10,
+                   "cached recovery must match full-rebuild triangulation");
+            for (std::size_t o=0;o<a.observations.size();++o)
+                expect(a.observations[o].image_id==b.observations[o].image_id &&
+                       a.observations[o].feature_id==b.observations[o].feature_id,
+                       "cached recovery must preserve observation ordering");
+        }
         for (Index i = 8; i < 12; ++i)
             expect(corridor.images[i].registered &&
                    (corridor.images[i].pose.C - Vec3(0.25 * i, 0.12 * (i % 2), 0)).norm() < 0.05,

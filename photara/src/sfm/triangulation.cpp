@@ -668,14 +668,16 @@ void commit_peel_registered_outliers(Track& parent, const Scene& scene) {
 
 float track_min_ray_angle_deg(const Track& track, const Scene& scene) {
     if (track.num_inliers < 2) return 0.F;
+    std::vector<Vec3> rays;
+    rays.reserve(track.num_inliers);
+    for (unsigned i = 0; i < track.num_inliers; ++i) {
+        const Image& image = scene.images[track.observations[i].image_id];
+        rays.push_back((track.position - image.pose.C).normalized());
+    }
     double best_cos = 1.0;
     for (unsigned i = 0; i + 1 < track.num_inliers; ++i) {
-        const Image& img_i = scene.images[track.observations[i].image_id];
-        const Vec3 ray_i = (track.position - img_i.pose.C).normalized();
         for (unsigned j = i + 1; j < track.num_inliers; ++j) {
-            const Image& img_j = scene.images[track.observations[j].image_id];
-            const Vec3 ray_j = (track.position - img_j.pose.C).normalized();
-            best_cos = std::min(best_cos, ray_i.dot(ray_j));
+            best_cos = std::min(best_cos, rays[i].dot(rays[j]));
         }
     }
     return static_cast<float>(

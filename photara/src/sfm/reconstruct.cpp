@@ -366,9 +366,8 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
-    // Bump when the single-cluster hierarchy path changes from star-only to
-    // global-first mapping; old hierarchy checkpoints must not bypass it.
-    key.append_string("scaled-weights-20k-v34");
+    // Invalidate mapping checkpoints when supported modes or configuration change.
+    key.append_string("scaled-weights-20k-v35");
     key.append_string(PHOTARA_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -403,9 +402,6 @@ std::uint64_t reconstruction_key(
     key.append(config.hierarchical.alignment.ransac_iterations);
     key.append(config.hierarchical.alignment.random_seed);
     key.append(config.hierarchical.final_bundle_adjustment);
-    key.append(config.incremental_hierarchical_rescue);
-    key.append(config.incremental_hierarchical_rescue_min_missing);
-    key.append(config.incremental_hierarchical_rescue_min_missing_ratio);
     key.append(config.minimum_final_observations_per_image);
     key.append(config.maximum_final_reprojection_error_pixels);
     key.append(config.global_rotation.max_l1_iterations);
@@ -1458,22 +1454,6 @@ unsigned prune_unsupported_registrations(
     return invalidated;
 }
 
-ReconstructionSummary run_incremental_mapping(
-    Scene& scene,
-    const StarInitConfig& star,
-    const ResectionConfig& resection) {
-    core::StageScope stage("sfm.incremental_mapping");
-    ReconstructionSummary summary;
-    if (scene.registered_count() < 2) {
-        if (!star_initialize(scene, star)) return summary;
-        if (resection.checkpoint_callback)
-            resection.checkpoint_callback(scene);
-    }
-    register_images(scene, resection);
-
-    return summarize_scene(scene);
-}
-
 ReconstructionSummary run_global_mapping(
     Scene& scene,
     const GlobalRotationOptions& rotation,
@@ -1760,6 +1740,7 @@ ReconstructionSummary run_global_mapping(
 
 namespace {
 void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config) {
+    core::StageScope stage("sfm.alignment_recovery");
     prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                    config.maximum_final_reprojection_error_pixels);
     bool changed = !recover_stable_resections(scene).empty();
@@ -1802,10 +1783,6 @@ ReconstructionSummary reconstruct(
     FrontEndResult frontend = run_frontend(image_paths, config.frontend);
     scene_out = std::move(frontend.scene);
     ensure_camera_identity_metadata(scene_out, config.frontend);
-    // Small immutable snapshot used only if a large incremental run later
-    // needs an independent hierarchical retry. Incremental BA mutates these
-    // shared intrinsics in place.
-    const std::vector<PinholeCamera> frontend_cameras = scene_out.cameras;
     CheckpointStore checkpoints(config.frontend.checkpoint);
     const std::uint64_t mapping_key =
         reconstruction_key(frontend.tracks_checkpoint_key, config);
@@ -1814,14 +1791,12 @@ ReconstructionSummary reconstruct(
         scene_out.thread_count =
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
-        if (config.mode != ReconstructionMode::incremental) {
-            finish_alignment_recovery(scene_out, config);
-            if (config.resection.checkpoint_callback)
-                config.resection.checkpoint_callback(scene_out);
-            const ReconstructionSummary summary = summarize_scene(scene_out);
-            if (summary.valid) colour_triangulated_tracks(scene_out);
-            return summary;
-        }
+        finish_alignment_recovery(scene_out, config);
+        if (config.resection.checkpoint_callback)
+            config.resection.checkpoint_callback(scene_out);
+        const ReconstructionSummary summary = summarize_scene(scene_out);
+        if (summary.valid) colour_triangulated_tracks(scene_out);
+        return summary;
     }
     ReconstructionSummary summary;
     if (config.mode == ReconstructionMode::hierarchical) {
@@ -1835,128 +1810,6 @@ ReconstructionSummary reconstruct(
             config.global_rotation,
             config.global_positioning,
             config.resection);
-    } else {
-        ResectionConfig resection = config.resection;
-        resection.checkpoint_interval =
-            config.frontend.checkpoint.reconstruction_interval;
-        if (checkpoints.writable()) {
-            const auto application_checkpoint =
-                resection.checkpoint_callback;
-            resection.checkpoint_callback =
-                [&, application_checkpoint](const Scene& scene) {
-                    if (application_checkpoint)
-                        application_checkpoint(scene);
-                    checkpoints.save_scene(
-                        CheckpointStage::reconstruction,
-                        mapping_key, scene);
-                };
-        }
-        summary = run_incremental_mapping(
-            scene_out, config.star, resection);
-        const unsigned missing_views = static_cast<unsigned>(
-            scene_out.images.size() - summary.registered_views);
-        const unsigned rescue_missing_threshold = std::max(
-            config.incremental_hierarchical_rescue_min_missing,
-            static_cast<unsigned>(std::ceil(
-                std::max(
-                    0.0,
-                    config.incremental_hierarchical_rescue_min_missing_ratio) *
-                static_cast<double>(scene_out.images.size()))));
-        if (config.incremental_hierarchical_rescue &&
-            missing_views > 0 &&
-            missing_views >= rescue_missing_threshold &&
-            scene_out.images.size() >
-                config.hierarchical.cluster.max_views_per_cluster) {
-            const ReconstructionSummary incremental_summary = summary;
-            const unsigned incremental_registered = summary.registered_views;
-            core::Logger::instance().warning(
-                "incremental stalled: registered=", summary.registered_views,
-                '/', scene_out.images.size(),
-                "; starting hierarchical submap rescue");
-
-            // Keep only the mapping state that the rescue overwrites. Moving
-            // the large track arrays avoids duplicating feature descriptors
-            // and makes rollback independent of the checkpoint/cache policy.
-            std::vector<Track> incremental_tracks =
-                std::move(scene_out.tracks);
-            std::vector<std::vector<ImageTrackRef>> incremental_image_tracks =
-                std::move(scene_out.image_tracks);
-            const std::vector<PinholeCamera> incremental_cameras =
-                scene_out.cameras;
-            std::vector<Pose3D> incremental_poses;
-            std::vector<bool> incremental_registered_flags;
-            incremental_poses.reserve(scene_out.images.size());
-            incremental_registered_flags.reserve(scene_out.images.size());
-            for (const Image& image : scene_out.images) {
-                incremental_poses.push_back(image.pose);
-                incremental_registered_flags.push_back(image.registered);
-            }
-            std::vector<Vec3> incremental_relative_centers;
-            incremental_relative_centers.reserve(scene_out.pairs.size());
-            for (const ImagePair& pair : scene_out.pairs) {
-                incremental_relative_centers.push_back(
-                    pair.relative_pose.has_value()
-                        ? pair.relative_pose->C
-                        : Vec3::Zero());
-            }
-            const ResectionProgress incremental_progress =
-                scene_out.resection_progress;
-            const std::uint32_t incremental_generation =
-                scene_out.registration_generation;
-            for (Image& image : scene_out.images) {
-                image.registered = false;
-                image.pose = Pose3D::identity();
-            }
-            scene_out.cameras = frontend_cameras;
-            for (ImagePair& pair : scene_out.pairs) {
-                if (!pair.relative_pose.has_value()) continue;
-                Vec3& relative_center = pair.relative_pose->C;
-                const double norm = relative_center.norm();
-                if (std::isfinite(norm) && norm > 1e-12)
-                    relative_center /= norm;
-            }
-            scene_out.resection_progress = {};
-            scene_out.registration_generation = 0;
-            build_tracks(
-                scene_out,
-                config.hierarchical.cluster.min_pair_weight);
-            HierarchicalConfig hierarchical = config.hierarchical;
-            hierarchical.star = config.star;
-            hierarchical.resection = config.resection;
-            // Subscene checkpoints are not valid replacements for the parent
-            // incremental scene. Save only the merged result below.
-            hierarchical.resection.checkpoint_callback = {};
-            ReconstructionSummary rescue =
-                run_hierarchical_mapping(scene_out, hierarchical);
-            core::Logger::instance().info(
-                "incremental hierarchical rescue: registered=",
-                rescue.registered_views, '/', scene_out.images.size(),
-                " valid=", rescue.valid);
-            if (rescue.valid &&
-                rescue.registered_views > incremental_registered) {
-                summary = rescue;
-            } else {
-                scene_out.tracks = std::move(incremental_tracks);
-                scene_out.image_tracks = std::move(incremental_image_tracks);
-                scene_out.cameras = incremental_cameras;
-                for (std::size_t i = 0; i < scene_out.images.size(); ++i) {
-                    scene_out.images[i].pose = incremental_poses[i];
-                    scene_out.images[i].registered =
-                        incremental_registered_flags[i];
-                }
-                for (std::size_t i = 0; i < scene_out.pairs.size(); ++i) {
-                    if (scene_out.pairs[i].relative_pose.has_value())
-                        scene_out.pairs[i].relative_pose->C =
-                            incremental_relative_centers[i];
-                }
-                scene_out.resection_progress = incremental_progress;
-                scene_out.registration_generation = incremental_generation;
-                summary = incremental_summary;
-                core::Logger::instance().warning(
-                    "hierarchical rescue did not improve coverage; restored incremental state registered=",
-                    summary.registered_views);
-            }
-        }
     }
     finish_alignment_recovery(scene_out, config);
     summary = summarize_scene(scene_out);

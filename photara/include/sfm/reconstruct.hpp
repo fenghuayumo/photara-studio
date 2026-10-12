@@ -12,9 +12,8 @@
 namespace photara::sfm {
 
 enum class ReconstructionMode {
-    incremental,
-    hierarchical,
-    global,
+    hierarchical = 1,
+    global = 2,
 };
 
 struct ReconstructionConfig {
@@ -23,12 +22,6 @@ struct ReconstructionConfig {
     StarInitConfig star{};
     ResectionConfig resection{};
     HierarchicalConfig hierarchical{};
-    // If a large incremental reconstruction stalls with missing views, retry
-    // from independent submaps and merge them. Small/successful captures stay
-    // on the ordinary incremental path.
-    bool incremental_hierarchical_rescue{true};
-    unsigned incremental_hierarchical_rescue_min_missing{8};
-    double incremental_hierarchical_rescue_min_missing_ratio{0.02};
     // Final product audit: a registered pose must retain this many finite,
     // positive-depth inlier observations within the reprojection threshold.
     unsigned minimum_final_observations_per_image{30};
@@ -74,12 +67,6 @@ ReconstructionSummary reconstruct(
     Scene& scene_out,
     const std::vector<std::filesystem::path>& image_paths,
     const ReconstructionConfig& config = {});
-
-// Run mapping only on an already-prepared scene (features + verified pairs + tracks).
-ReconstructionSummary run_incremental_mapping(
-    Scene& scene,
-    const StarInitConfig& star = {},
-    const ResectionConfig& resection = {});
 
 // Global rotation averaging -> fixed-rotation positioning -> triangulation -> BA.
 ReconstructionSummary run_global_mapping(

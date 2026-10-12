@@ -31,7 +31,7 @@ Structure from Motion (SfM)
 
 The implementation currently includes:
 
-- global, incremental, and hierarchical SfM;
+- global and hierarchical SfM;
 - pinhole, radial/tangential, OpenCV fisheye, and equirectangular camera paths;
 - Eigen/PoseLib multi-view geometry, including E/F/H estimation, PnP, and
   triangulation;
@@ -241,8 +241,8 @@ a video file. Run `photara --help` for the complete set of options.
 
 The default mapping mode is `global`, which is the recommended starting point
 for turntable captures, 360-degree loops, and other sequences with loop
-closure. `--mode incremental` and `--mode hierarchical` select the other
-implemented mapping backends.
+closure. `--mode hierarchical` selects clustered reconstruction with Sim(3)
+submap alignment and merging.
 
 The camera model defaults to `auto`; it can be set explicitly to `pinhole`,
 `opencv_fisheye`, or `equirectangular`. If `--focal` is omitted or zero,

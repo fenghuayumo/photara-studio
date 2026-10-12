@@ -1,4 +1,5 @@
 #include "sfm/hierarchical.hpp"
+#include "sfm/rotation_recovery.hpp"
 
 #include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
@@ -1033,10 +1034,10 @@ ReconstructionSummary summarize(const Scene& scene) {
 
 }  // namespace
 
-std::vector<HierarchicalSubscene> split_hierarchical_scene(
+static std::vector<HierarchicalSubscene> extract_hierarchical_subscenes(
     const Scene& scene,
-    const ClusterConfig& config) {
-    const std::vector<Cluster> clusters = cluster_scene(scene, config);
+    const ClusterConfig& config,
+    const std::vector<Cluster>& clusters) {
     std::vector<HierarchicalSubscene> output;
     const unsigned parent_threads = scene.thread_count == 0
         ? std::max(1u, std::thread::hardware_concurrency())
@@ -1051,6 +1052,12 @@ std::vector<HierarchicalSubscene> split_hierarchical_scene(
         output.push_back(extract_subscene(scene, cluster, child_threads));
     }
     return output;
+}
+
+std::vector<HierarchicalSubscene> split_hierarchical_scene(
+    const Scene& scene,
+    const ClusterConfig& config) {
+    return extract_hierarchical_subscenes(scene, config, cluster_scene(scene, config));
 }
 
 unsigned estimate_similarity_transform(
@@ -1233,14 +1240,17 @@ ReconstructionSummary run_hierarchical_mapping(
     Scene& scene,
     const HierarchicalConfig& config) {
     core::StageScope stage("sfm.hierarchical_mapping");
-    std::vector<HierarchicalSubscene> subscenes =
-        split_hierarchical_scene(scene, config.cluster);
-    if (subscenes.empty()) return {};
+    std::vector<Cluster> clusters = cluster_scene(scene, config.cluster);
+    if (clusters.size()>1)
+        clusters.erase(std::remove_if(clusters.begin(),clusters.end(),
+            [&](const Cluster& cluster){return cluster.size()<config.cluster.min_views_per_cluster;}),
+            clusters.end());
+    if (clusters.empty()) return {};
 
     // The default cluster capacity intentionally covers ordinary captures.
     // Reconstruct the parent directly in that common case: copying it into a
     // subscene, aligning it back and optimizing it twice adds no information.
-    if (subscenes.size() == 1) {
+    if (clusters.size() == 1) {
         core::Logger::instance().info(
             "hierarchical single-cluster fast path: views=", scene.images.size());
 
@@ -1279,6 +1289,8 @@ ReconstructionSummary run_hierarchical_mapping(
         return summarize(scene);
     }
 
+    std::vector<HierarchicalSubscene> subscenes =
+        extract_hierarchical_subscenes(scene, config.cluster, clusters);
     const unsigned available_threads = scene.thread_count == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : scene.thread_count;
@@ -1403,6 +1415,7 @@ ReconstructionSummary run_hierarchical_mapping(
     }
     if (scene.registered_count() < scene.images.size())
         register_images(scene, config.resection);
+    recover_rotation_inconsistent_views(scene);
     return summarize(scene);
 }
 

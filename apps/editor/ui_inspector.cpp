@@ -311,8 +311,11 @@ Action draw_inspector(App& app) {
         ImGui::BeginDisabled(busy);
         theme::caption("Solver");
         ImGui::SetNextItemWidth(-1.F);
-        const char* modes[] = {tr("Global"), tr("Incremental"), tr("Hierarchical")};
-        ImGui::Combo("##sfm_mode", &app.settings.sfm_mode, modes, 3);
+        const char* modes[] = {tr("Global"), tr("Hierarchical")};
+        // Keep the existing project value for Hierarchical (2).
+        int mode_choice = app.settings.sfm_mode == 2 ? 1 : 0;
+        if (ImGui::Combo("##sfm_mode", &mode_choice, modes, 2))
+            app.settings.sfm_mode = mode_choice == 1 ? 2 : 0;
         theme::caption("Camera model");
         ImGui::SetNextItemWidth(-1.F);
         // Choice order is Auto / Pinhole / Fisheye / Panorama; the stored value

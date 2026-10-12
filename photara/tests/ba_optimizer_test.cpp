@@ -517,6 +517,38 @@ int main() {
             return 8;
         }
         Problem gpu_translation_only_problem = make_problem();
+        // Verify the reduced preconditioner for both restricted pose blocks.
+        // Factoring all six coupled coordinates and zeroing locked outputs
+        // afterwards does not apply the inverse of the active principal block.
+        for (const bool rotations_only : {false, true}) {
+            auto cpu=make_problem(),gpu=cpu;
+            OptimizerOptions step_options=options;
+            step_options.maximum_iterations=1;
+            step_options.maximum_pcg_iterations=500;
+            step_options.pcg_tolerance=1e-10;
+            step_options.optimize_rotations=rotations_only;
+            step_options.optimize_translations=!rotations_only;
+            const auto cpu_step=optimize_cpu(cpu,step_options);
+            const auto gpu_step=optimize_cuda(gpu,step_options);
+            double difference=0;
+            for (std::size_t i=0;i<cpu.poses.size();++i) {
+                const auto& a=cpu.poses[i];const auto& b=gpu.poses[i];
+                difference=std::max(difference,std::abs(a.cx-b.cx));
+                difference=std::max(difference,std::abs(a.cy-b.cy));
+                difference=std::max(difference,std::abs(a.cz-b.cz));
+                difference=std::max(difference,std::abs(a.qw-b.qw));
+                difference=std::max(difference,std::abs(a.qx-b.qx));
+                difference=std::max(difference,std::abs(a.qy-b.qy));
+                difference=std::max(difference,std::abs(a.qz-b.qz));
+            }
+            for (std::size_t i=0;i<cpu.points.size();++i) {
+                difference=std::max(difference,std::abs(cpu.points[i].x-gpu.points[i].x));
+                difference=std::max(difference,std::abs(cpu.points[i].y-gpu.points[i].y));
+                difference=std::max(difference,std::abs(cpu.points[i].z-gpu.points[i].z));
+            }
+            std::cout<<"restricted Schur CPU/GPU difference="<<difference<<'\n';
+            if (!cpu_step.usable()||!gpu_step.usable()||difference>1e-7) return 26;
+        }
         const std::vector<Pose> gpu_translation_only_poses =
             gpu_translation_only_problem.poses;
         OptimizerOptions gpu_translation_only_options = options;

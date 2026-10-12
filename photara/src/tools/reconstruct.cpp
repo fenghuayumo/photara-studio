@@ -409,7 +409,6 @@ void print_help(const cxxopts::Options& options) {
               << "  compose   any compatible --extractor × --matcher\n"
               << "  fused     --pipeline lightglue_end2end (optional recipe)\n"
               << "Modes:\n"
-              << "  incremental  star initialization + PnP resection\n"
               << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
@@ -613,7 +612,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "refined by view-graph consensus + BA unless trusted)",
          cxxopts::value<double>()->default_value("0"))
         ("m,mode",
-         "Reconstruction mode: global (default), incremental, or hierarchical",
+         "Reconstruction mode: global (default) or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
         ("camera-model", "Camera model: auto | pinhole | opencv_fisheye (alias fisheye) | equirectangular (aliases panorama, equirect)",
          cxxopts::value<std::string>()->default_value("auto"))
@@ -1268,10 +1267,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
             "--focal must be finite and nonnegative; --trust-focal requires --focal > 0");
-    if (cli.mode != "global" && cli.mode != "incremental" &&
-        cli.mode != "hierarchical")
+    if (cli.mode != "global" && cli.mode != "hierarchical")
         throw std::invalid_argument(
-            "--mode must be global, incremental, or hierarchical");
+            "--mode must be global or hierarchical");
     const std::string ba_backend = result["ba-backend"].as<std::string>();
     cli.positioning_cuda = result["positioning-cuda"].as<bool>();
     const std::string positioning_backend = result["positioning-backend"].as<std::string>();
@@ -1985,10 +1983,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
 
     if (cli.focal_pixels < 0.0)
         throw std::invalid_argument("--focal must be >= 0");
-    if (cli.mode != "incremental" && cli.mode != "hierarchical" &&
-        cli.mode != "global") {
+    if (cli.mode != "hierarchical" && cli.mode != "global") {
         throw std::invalid_argument(
-            "--mode must be incremental, hierarchical, or global");
+            "--mode must be hierarchical or global");
     }
     if (cli.match_ratio <= 0.F || cli.match_ratio > 1.F)
         throw std::invalid_argument("--match-ratio must be in (0, 1]");
@@ -2414,8 +2411,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.video_scale = cli.video_scale;
     settings.video_rotate = cli.video_rotate;
     settings.camera_model = static_cast<int>(cli.camera_model);
-    if (cli.mode == "incremental") settings.sfm_mode = 1;
-    else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
+    if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
     settings.iterations = static_cast<int>(cli.splat_iterations);
@@ -4423,8 +4419,6 @@ int main(int argc, char** argv) {
             config.mode = photara::sfm::ReconstructionMode::global;
         else if (cli.mode == "hierarchical")
             config.mode = photara::sfm::ReconstructionMode::hierarchical;
-        else
-            config.mode = photara::sfm::ReconstructionMode::incremental;
         config.frontend.camera_model = cli.camera_model;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;

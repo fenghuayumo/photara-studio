@@ -241,7 +241,7 @@ struct ProjectSettings {
     // (the values mirror photara::CameraModel so the CLI flag and the
     // persisted project setting stay in sync).
     int camera_model = 2;
-    int sfm_mode = 0;  // global, incremental, hierarchical
+    int sfm_mode = 0;  // 0 global, 2 hierarchical
     bool reuse_cache = false;
     // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
     // mesh/dense, preview sidecars). Empty keeps them next to the project

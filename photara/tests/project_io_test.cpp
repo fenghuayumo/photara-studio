@@ -272,6 +272,18 @@ int main() {
     expect(round_trip.sam_masks && round_trip.sam_text == "glass cup",
            "SAM generation settings preserved with alignment opt-in");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
+    auto retired_sfm_settings = settings;
+    retired_sfm_settings.sfm_mode = 1;
+    expect(
+        decode_settings(encode_settings(retired_sfm_settings, ascan_path),
+                        ascan_path).sfm_mode == 2,
+        "legacy incremental SfM projects migrate to hierarchical");
+    auto global_sfm_settings = settings;
+    global_sfm_settings.sfm_mode = 0;
+    expect(
+        decode_settings(encode_settings(global_sfm_settings, ascan_path),
+                        ascan_path).sfm_mode == 0,
+        "global SfM project mode is preserved");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
     expect(round_trip.mesh_quality == 2, "settings mesh quality");

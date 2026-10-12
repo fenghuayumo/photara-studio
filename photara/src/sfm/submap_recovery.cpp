@@ -75,7 +75,8 @@ std::vector<std::uint8_t> find_structural_pair_risks(const Scene& scene) {
     return audit.reliable;
 }
 
-unsigned recover_weakly_connected_views(Scene& scene) {
+unsigned recover_weakly_connected_views(
+    Scene& scene, const WeakBranchRecoveryOptions& options) {
     Scene graph;
     graph.images.resize(scene.images.size());
     for (Index i=0;i<scene.images.size();++i) {
@@ -178,6 +179,64 @@ unsigned recover_weakly_connected_views(Scene& scene) {
     }
     unsigned recovered_count=0;
     std::vector<std::uint8_t> recovered(scene.images.size(),0);
+    // Pose/registration changes do not affect verified feature unions. Keep
+    // their canonical topology while propagation repeatedly triangulates it.
+    // Do not reuse this snapshot after the pair graph is pruned below.
+    std::vector<Track> verified_tracks;
+    std::vector<Track> triangulated_tracks;
+    std::vector<Pose3D> triangulated_poses;
+    std::vector<std::uint8_t> triangulated_registered;
+    const auto restore_and_triangulate=[&]() {
+        if (!options.reuse_verified_geometry) {
+            build_tracks(scene);
+            triangulate_tracks(scene,false,2.F,1.F);
+            return;
+        }
+        core::StageScope stage("weak_branch_restore_tracks");
+        if (verified_tracks.empty()) {
+            build_tracks(scene);
+            verified_tracks=scene.tracks;
+        } else {
+            scene.tracks=verified_tracks;
+            rebuild_track_index(scene);
+        }
+        stage.finish();
+        std::vector<Index> dirty;
+        dirty.reserve(verified_tracks.size());
+        std::vector<std::uint8_t> changed(scene.images.size(),1);
+        if (!triangulated_tracks.empty()) {
+            for (Index id=0;id<scene.images.size();++id) {
+                const auto& image=scene.images[id];
+                changed[id]=image.registered!=triangulated_registered[id] ||
+                    (image.registered &&
+                     (image.pose.C!=triangulated_poses[id].C ||
+                      image.pose.R!=triangulated_poses[id].R));
+            }
+        }
+        for (Index id=0;id<verified_tracks.size();++id) {
+            bool reuse=!triangulated_tracks.empty() &&
+                triangulated_tracks[id].is_triangulated() &&
+                // A peeled parent must be solved from the original topology
+                // again, so its split children retain their exact ordering.
+                triangulated_tracks[id].observations.size()==verified_tracks[id].observations.size();
+            if (reuse) for (const auto& obs:verified_tracks[id].observations)
+                if (changed[obs.image_id]) { reuse=false;break; }
+            if (reuse) scene.tracks[id]=triangulated_tracks[id];
+            else dirty.push_back(id);
+        }
+        core::Logger::instance().info("weak branch triangulation: dirty=",dirty.size(),
+            " reused=",verified_tracks.size()-dirty.size());
+        triangulate_tracks(scene,dirty,false,2.F,1.F);
+        triangulated_tracks.assign(scene.tracks.begin(),
+            scene.tracks.begin()+verified_tracks.size());
+        triangulated_poses.resize(scene.images.size());
+        triangulated_registered.resize(scene.images.size());
+        for (Index id=0;id<scene.images.size();++id) {
+            triangulated_poses[id]=scene.images[id].pose;
+            triangulated_registered[id]=scene.images[id].registered;
+        }
+        rebuild_track_index(scene);
+    };
     const auto propagate=[&]() {
         for (unsigned pass=0;pass<8;++pass) {
             const auto relocated=recover_stable_resections(scene,stable);
@@ -193,8 +252,7 @@ unsigned recover_weakly_connected_views(Scene& scene) {
             // Suspect cameras must not contribute to this triangulation.
             for (Index i=0;i<scene.images.size();++i)
                 if (!stable[i]) scene.images[i].registered=false;
-            build_tracks(scene);
-            triangulate_tracks(scene,false,2.F,1.F);
+            restore_and_triangulate();
         }
     };
     propagate();
@@ -207,10 +265,11 @@ unsigned recover_weakly_connected_views(Scene& scene) {
         // Old global triangulation can split a good track around a drifting
         // pose. Rebuild from the original verified matches, triangulating only
         // the frozen anchors before trying the remaining cameras again.
-        build_tracks(scene);
-        triangulate_tracks(scene,false,2.F,1.F);
+        restore_and_triangulate();
         propagate();
     }
+    std::vector<Track>().swap(verified_tracks);
+    std::vector<Track>().swap(triangulated_tracks);
     unsigned rejected=0;
     for (Index i=0;i<scene.images.size();++i) if (originally_registered[i] && !stable[i]) {
         scene.images[i].registered=false;
