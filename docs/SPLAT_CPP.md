@@ -382,6 +382,26 @@ build\photara\Release\photara.exe `
   the per-dispatch host cost that dominates a Vulkan frame with dozens of small
   compute passes. Descriptor-set binding remains the fallback for devices
   without the extension.
+- Reuse the depth-query tile counts/order in Vulkan sample backward. Each
+  128-thread group stages projected splats once for its point batch, then
+  32-lane subgroups sum the mean/conic/opacity/ray-plane gradients before
+  global atomics. Skip reductions for waves with no contribution. Tail and
+  invalid points still reach all barriers; off-screen point gradients are
+  cleared before dispatch. Devices without 32-lane arithmetic/vote support
+  retain the per-point path. Native float atomics and CAS remain supported.
+  `SPLAT_DRENDER_DISABLE_TILED_SAMPLE_BACKWARD=1` selects the reference path;
+  disabling tiled depth queries also selects that path because no grouping
+  state exists to reuse.
+- After primary backward, the Vulkan learned-normal render uses
+  `RasterizeOptions::reuse_projection` to refresh only precomputed feature
+  colors and reblend. It preserves projected geometry, radii, sorted instances,
+  tile ranges and bucket offsets, while regenerating attachments and snapshots
+  for its own backward. The model geometry must remain unchanged until this
+  auxiliary backward completes; camera/projection settings and geometry buffer
+  identity are checked before reuse. CUDA keeps its existing path.
+  `SPLAT_VULKAN_DISABLE_NORMAL_REUSE=1` selects a full auxiliary forward for A/B
+  comparison. Keep the primary owned radii/visibility tensors for ADC because
+  the auxiliary render overwrites the backend's internal attachments.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the
@@ -406,9 +426,9 @@ build\photara\Release\photara.exe `
   count, strategy, and iteration schedule as part of every benchmark.
 
 Dataset-specific Nsight captures and A/B tables belong under `artifacts/`.
-Architecture documentation records the stable conclusions: sample-depth
-backward is generally more expensive than forward, occupancy varies strongly
-with scene coverage, and scheduling changes must be validated for geometry
+Architecture documentation records the stable conclusions: sample-depth cost
+and occupancy vary with scene coverage and reduction strategy, and scheduling
+changes must be validated for geometry
 quality rather than timing alone.
 
 ## 13. Validation
@@ -420,9 +440,25 @@ runs, mesh extraction, and finite exported model values.
 
 `photara.splat.vulkan_geometry` (`photara_splat_test --vulkan-geometry-only`)
 checks depth-normal finite differences, CUDA/Vulkan filter and full MV gradient
-parity, masked planar NCC, deferred statistics, and synthetic training through
+parity, grouped-query tails and invalid points, reused normal-field render/
+gradient parity and changed-camera rejection, masked planar NCC, deferred
+statistics, and synthetic training through
 densification, resolution changes, and TSDF extraction. These are numerical and
 integration gates; real-scene mesh quality still needs dataset evaluation.
+
+The 2026-10-12 matched Vulkan bicycle check completed 10,000 iterations per
+variant with seed 42, ADC-IGS, a one-million Gaussian cap, progressive resolution
+up to 1920 pixels, and 25 held-out views. The reference disabled tiled sample
+backward and normal projection reuse in the same binary. DN, MV and NF started
+at iteration 7000 (NF advanced for this validation). Reference/optimized mean
+PSNR was 24.7393/24.7538 dB and SSIM was 0.705157/0.704105, passing predeclared
+drop limits of 0.15 dB and 0.005. Both models had finite parameters, positive
+scales and nonzero quaternions. Common-renderer inspection of three cameras,
+including both wheel crops, found no broad spoke, depth or surface-normal
+regression; wheel-crop PSNR decreased by 0.208 and 0.313 dB, so local results
+are not identical. This checks this scene at 10k, not ground-truth mesh accuracy
+or convergence on other scenes. Local logs and comparisons are retained under
+`experiments/vulkan_geometry_opt_20261012/train_10k/`.
 
 Quality acceptance must include held-out rendering, mask support, thin
 structures, connected components, topology diagnostics, and visual inspection;

@@ -195,6 +195,13 @@ public:
                 blend_backward_geometry_atomic_ = context.create_pipeline(
                     "splat_blend_backward_geometry_atomic.hlsl.spv", 12, sizeof(Push));
         }
+        if (subgroup_backward_supported_ && subgroup_size_ == 32u && subgroup_vote_supported_) {
+            sample_depth_backward_tiled_ = context.create_pipeline(
+                "splat_sample_depth_backward_tiled.hlsl.spv", 12, sizeof(Push));
+            if (sample_depth_backward_atomic_.valid())
+                sample_depth_backward_tiled_atomic_ = context.create_pipeline(
+                    "splat_sample_depth_backward_tiled_atomic.hlsl.spv", 12, sizeof(Push));
+        }
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
         if (subgroup_backward_supported_) {
@@ -487,7 +494,8 @@ public:
         const SplatCamera& camera, const SplatSettings& settings,
         const bool pack_rgba,
         const SplatDeviceFrame* destination = nullptr,
-        const bool depth_query_only = false) {
+        const bool depth_query_only = false,
+        const bool reuse_projection = false) {
         sample_live_ = false;
         require(!depth_query_only || (!pack_rgba && destination == nullptr &&
                     settings.need_depth && !settings.pixel_snapshots),
@@ -542,227 +550,246 @@ public:
         Buffer& gauss_u = grow(gauss_u_, static_cast<std::uint64_t>(gauss_u_count) * sizeof(std::uint32_t));
         write_forward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
-        Push prep{};
-        prep.u[0] = count;
-        prep.u[1] = sh_degree_;
-        prep.u[2] = sh_bases_;
-        prep.u[3] = (has_sh ? k_flag_sh : 0) |
-                    (has_scales ? k_flag_scales : 0) |
-                    (settings.need_depth ? k_flag_geometry : 0) |
-                    (device_model_bound_ ? k_flag_raw_parameters : 0);
         const float ring_sigma = std::round(std::clamp(settings.preview_ring_scale, 0.5F, 8.F) * 256.F) / 256.F;
-        if (settings.preview_rings)
-            prep.u[3] |= 64u | (static_cast<std::uint32_t>(ring_sigma * 256.F) << 16u);
-        prep.u[4] = camera.width;
-        prep.u[5] = camera.height;
-        prep.u[6] = grid_x;
-        prep.u[7] = grid_y;
-        set_float(prep, 8, camera.fx);
-        set_float(prep, 9, camera.fy);
-        set_float(prep, 10, camera.cx);
-        set_float(prep, 11, camera.cy);
-        set_float(prep, 12, camera.k1);
-        set_float(prep, 13, camera.k2);
-        set_float(prep, 14, camera.k3);
-        set_float(prep, 15, camera.k4);
-        prep.u[16] = camera.mode;
-        set_float(prep, 17, settings.kernel_size);
-        set_float(prep, 18, settings.scale_modifier);
-        prep.u[19] = static_cast<std::uint32_t>(wrap_width);
-        dispatch_infos(
-            preprocess_,
-            {model_means(), model_opacities(), model_scales(),
-             model_rotations(), model_covariances(), model_colors(),
-             descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
-             descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
-            prep, div_up(count, 256));
-
-        inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
-        inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
-        // Sort dispatches read the visible and instance counts on the device.
-        // A new Gaussian count or image size re-seeds the capacity once with
-        // 2x headroom over that frame's measurement; afterwards only a frame
-        // that actually overflowed (harvested from its mirror) raises it, so
-        // the steady state keeps the sort sized to the seeded capacity instead
-        // of growing with every peak view.
-        if (count != capacity_count_ || tiles != capacity_tiles_) {
-            instance_capacity_ = 0;
-            capacity_count_ = count;
-            capacity_tiles_ = tiles;
-        }
-        const bool use_gpu_driven = instance_capacity_ != 0;
-        Buffer& frame_counts = grow(
-            frame_counts_, 19 * sizeof(std::uint32_t),
-            BufferMemory::host_visible,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-        Buffer& count_mirrors = grow(
-            count_mirrors_,
-            k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
-            BufferMemory::host_visible);
-        if (use_gpu_driven) {
-            Push control_push{};
-            control_push.u[0] = count;
-            control_push.u[1] = instance_capacity_;
-            control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
-            dispatch(
-                indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
-                control_push, 1);
-            // The control shader publishes this frame's counts into the
-            // batch slot's mirror word; the fence that retires this submission
-            // is what makes the host read safe.
-            mirror_recorded_ = true;
-        } else {
-            Push counts_push = emit_constants(
-                1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
-            dispatch(
-                emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
-                        &dummy_, &dummy_},
-                counts_push, 1);
-        }
-        write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        std::uint32_t frame_count_values[2]{};
-        if (!use_gpu_driven) {
-            flush_batch();
-            frame_counts.download(frame_count_values, sizeof(frame_count_values));
-            reported_instances_ = frame_count_values[0];
-            reported_visible_ = frame_count_values[1];
-            // The one synchronous frame seeds the capacity; later frames only
-            // raise it when a retired mirror reports an actual overflow.
-            instance_capacity_ = instance_capacity_for(frame_count_values[0]);
-        }
-        const std::uint32_t instances = use_gpu_driven
-            ? instance_capacity_
-            : frame_count_values[0];
-        const std::uint32_t visible = use_gpu_driven
-            ? count
-            : frame_count_values[1];
-
-        Buffer* instance_values = &dummy_;
-        Buffer* range_lo = &dummy_;
-        Buffer* range_hi = &dummy_;
+        std::uint32_t instances = last_instances_;
+        Buffer* instance_values = last_instance_values_;
         Buffer& tile_ranges = grow(tile_ranges_, static_cast<std::uint64_t>(tiles) * 2 * sizeof(std::uint32_t));
-        zero_buffer(
-            tile_ranges,
-            static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
-        const bool single_sort = !use_gpu_driven && instances <= k_single_sort_limit;
-        if (instances > 0) {
-            if (!use_gpu_driven && visible == 0)
-                throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
-            const auto key_bytes = static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
-            const std::uint32_t hist_blocks = std::max(
-                div_up(instances, 1024), div_up(count, 1024));
-            const std::uint32_t hist_n = 256 * hist_blocks;
-            const std::uint64_t hist_bytes =
-                static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) *
-                sizeof(std::uint32_t);
-            const std::uint32_t compact_count = use_gpu_driven ? count : visible;
-            const std::uint64_t compact_bytes =
-                static_cast<std::uint64_t>(compact_count + scan_scratch_uints(compact_count)) *
-                sizeof(std::uint32_t);
-            const auto phase_aligned = [this](const VkDeviceSize bytes) {
-                return (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
-            };
-            // The final instance values survive into backward, so whichever
-            // half the sort ends in stays standalone; the other five key
-            // buffers, the histogram and the compact scratch only live inside
-            // this forward and share the phase arena.
-            const bool survivor_is_zero = !use_gpu_driven && single_sort;
-            phase_begin(phase_aligned(key_bytes) * 5 +
-                        phase_aligned(hist_bytes) + phase_aligned(compact_bytes));
-            Buffer& lo0 = phase_slot(lo0_, key_bytes);
-            Buffer& lo1 = phase_slot(lo1_, key_bytes);
-            Buffer& hi0 = phase_slot(hi0_, key_bytes);
-            Buffer& hi1 = phase_slot(hi1_, key_bytes);
-            Buffer& val0 = survivor_is_zero
-                ? grow(val0_, key_bytes)
-                : phase_slot(val0_, key_bytes);
-            Buffer& val1 = survivor_is_zero
-                ? phase_slot(val1_, key_bytes)
-                : grow(val1_, key_bytes);
-            Buffer& hist = phase_slot(hist_space_, hist_bytes);
-            Buffer& compact = phase_slot(compact_, compact_bytes);
-            instance_values = &val0;
-            range_lo = &lo0;
-            range_hi = &hi0;
-            if (use_gpu_driven) {
-                Push depth_push = emit_constants(
-                    count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(
-                    emit_indirect_,
-                    {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_,
-                     &dummy_, &frame_counts},
-                    depth_push, div_up(count, 256));
-                const std::uint32_t depth_hist_n =
-                    256 * div_up(count, 1024);
-                radix_sort_indirect(
-                    false, count, 1u, 10u * sizeof(std::uint32_t),
-                    lo0, hi0, val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
-                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                Push gather_push = emit_constants(
-                    count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch_indirect(
-                    emit_indirect_,
-                    {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
-                     &dummy_, &frame_counts},
-                    gather_push, frame_counts, 4u * sizeof(std::uint32_t));
-                inclusive_scan(compact, 0, 0, count, count);
-                Push tile_push = emit_constants(
-                    count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch_indirect(
-                    emit_indirect_,
-                    {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0,
-                     &compact, &frame_counts},
-                    tile_push, frame_counts, 7u * sizeof(std::uint32_t));
-                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                const std::uint32_t tile_hist_n =
-                    256 * div_up(instances, 1024);
-                radix_sort_indirect(
-                    false, instances, 0u, 13u * sizeof(std::uint32_t),
-                    lo1, hi1, val1, lo0, hi0, val0, hist, tile_hist_n,
-                    tile_bits);
-                instance_values = &val1;
-                range_lo = &lo1;
-                range_hi = &hi1;
-            } else if (single_sort) {
-                Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, emit_push, div_up(count, 256));
-                radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n, 32u + tile_bits);
-                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-            } else {
-                Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
-                radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
-                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
-                         gather_push, div_up(visible, 256));
-                inclusive_scan(compact, 0, 0, visible, visible);
-                Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
-                         tile_push, div_up(visible, 256));
-                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                radix_sort(
-                    false, instances, lo1, hi1, val1, lo0, hi0, val0,
-                    hist, hist_n, tile_bits);
-                instance_values = &val1;
-                range_lo = &lo1;
-                range_hi = &hi1;
+        if (reuse_projection) {
+            // Geometry and sorted instances survive the primary backward.
+            Push colors_push{};
+            colors_push.u[0] = count;
+            colors_push.u[3] = 128u | (settings.need_depth ? k_flag_geometry : 0u);
+            dispatch_infos(preprocess_,
+                {model_means(), model_opacities(), model_scales(),
+                 model_rotations(), model_covariances(), model_colors(),
+                 descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
+                 descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
+                colors_push, div_up(count, 256));
+            write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        } else {
+            Push prep{};
+            prep.u[0] = count;
+            prep.u[1] = sh_degree_;
+            prep.u[2] = sh_bases_;
+            prep.u[3] = (has_sh ? k_flag_sh : 0) |
+                        (has_scales ? k_flag_scales : 0) |
+                        (settings.need_depth ? k_flag_geometry : 0) |
+                        (device_model_bound_ ? k_flag_raw_parameters : 0);
+            if (settings.preview_rings)
+                prep.u[3] |= 64u | (static_cast<std::uint32_t>(ring_sigma * 256.F) << 16u);
+            prep.u[4] = camera.width;
+            prep.u[5] = camera.height;
+            prep.u[6] = grid_x;
+            prep.u[7] = grid_y;
+            set_float(prep, 8, camera.fx);
+            set_float(prep, 9, camera.fy);
+            set_float(prep, 10, camera.cx);
+            set_float(prep, 11, camera.cy);
+            set_float(prep, 12, camera.k1);
+            set_float(prep, 13, camera.k2);
+            set_float(prep, 14, camera.k3);
+            set_float(prep, 15, camera.k4);
+            prep.u[16] = camera.mode;
+            set_float(prep, 17, settings.kernel_size);
+            set_float(prep, 18, settings.scale_modifier);
+            prep.u[19] = static_cast<std::uint32_t>(wrap_width);
+            dispatch_infos(
+                preprocess_,
+                {model_means(), model_opacities(), model_scales(),
+                 model_rotations(), model_covariances(), model_colors(),
+                 descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
+                 descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
+                prep, div_up(count, 256));
+
+            inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
+            inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
+            // Sort dispatches read the visible and instance counts on the device.
+            // A new Gaussian count or image size re-seeds the capacity once with
+            // 2x headroom over that frame's measurement; afterwards only a frame
+            // that actually overflowed (harvested from its mirror) raises it, so
+            // the steady state keeps the sort sized to the seeded capacity instead
+            // of growing with every peak view.
+            if (count != capacity_count_ || tiles != capacity_tiles_) {
+                instance_capacity_ = 0;
+                capacity_count_ = count;
+                capacity_tiles_ = tiles;
             }
-            Push range_push{};
+            const bool use_gpu_driven = instance_capacity_ != 0;
+            Buffer& frame_counts = grow(
+                frame_counts_, 19 * sizeof(std::uint32_t),
+                BufferMemory::host_visible,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+            Buffer& count_mirrors = grow(
+                count_mirrors_,
+                k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
+                BufferMemory::host_visible);
             if (use_gpu_driven) {
-                dispatch_indirect(
-                    ranges_indirect_,
-                    {range_lo, range_hi, &tile_ranges, &frame_counts},
-                    range_push, frame_counts,
-                    16u * sizeof(std::uint32_t));
-            } else {
-                range_push.u[0] = instances;
-                range_push.u[1] = single_sort ? 1u : 0u;
+                Push control_push{};
+                control_push.u[0] = count;
+                control_push.u[1] = instance_capacity_;
+                control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
                 dispatch(
-                    ranges_, {range_lo, range_hi, &tile_ranges}, range_push,
-                    div_up(instances, 256));
+                    indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
+                    control_push, 1);
+                // The control shader publishes this frame's counts into the
+                // batch slot's mirror word; the fence that retires this submission
+                // is what makes the host read safe.
+                mirror_recorded_ = true;
+            } else {
+                Push counts_push = emit_constants(
+                    1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch(
+                    emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
+                            &dummy_, &dummy_},
+                    counts_push, 1);
+            }
+            write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            std::uint32_t frame_count_values[2]{};
+            if (!use_gpu_driven) {
+                flush_batch();
+                frame_counts.download(frame_count_values, sizeof(frame_count_values));
+                reported_instances_ = frame_count_values[0];
+                reported_visible_ = frame_count_values[1];
+                // The one synchronous frame seeds the capacity; later frames only
+                // raise it when a retired mirror reports an actual overflow.
+                instance_capacity_ = instance_capacity_for(frame_count_values[0]);
+            }
+            instances = use_gpu_driven
+                ? instance_capacity_
+                : frame_count_values[0];
+            const std::uint32_t visible = use_gpu_driven
+                ? count
+                : frame_count_values[1];
+
+            instance_values = &dummy_;
+            Buffer* range_lo = &dummy_;
+            Buffer* range_hi = &dummy_;
+
+            zero_buffer(
+                tile_ranges,
+                static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
+            const bool single_sort = !use_gpu_driven && instances <= k_single_sort_limit;
+            if (instances > 0) {
+                if (!use_gpu_driven && visible == 0)
+                    throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
+                const auto key_bytes = static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
+                const std::uint32_t hist_blocks = std::max(
+                    div_up(instances, 1024), div_up(count, 1024));
+                const std::uint32_t hist_n = 256 * hist_blocks;
+                const std::uint64_t hist_bytes =
+                    static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) *
+                    sizeof(std::uint32_t);
+                const std::uint32_t compact_count = use_gpu_driven ? count : visible;
+                const std::uint64_t compact_bytes =
+                    static_cast<std::uint64_t>(compact_count + scan_scratch_uints(compact_count)) *
+                    sizeof(std::uint32_t);
+                const auto phase_aligned = [this](const VkDeviceSize bytes) {
+                    return (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+                };
+                // The final instance values survive into backward, so whichever
+                // half the sort ends in stays standalone; the other five key
+                // buffers, the histogram and the compact scratch only live inside
+                // this forward and share the phase arena.
+                const bool survivor_is_zero = !use_gpu_driven && single_sort;
+                phase_begin(phase_aligned(key_bytes) * 5 +
+                            phase_aligned(hist_bytes) + phase_aligned(compact_bytes));
+                Buffer& lo0 = phase_slot(lo0_, key_bytes);
+                Buffer& lo1 = phase_slot(lo1_, key_bytes);
+                Buffer& hi0 = phase_slot(hi0_, key_bytes);
+                Buffer& hi1 = phase_slot(hi1_, key_bytes);
+                Buffer& val0 = survivor_is_zero
+                    ? grow(val0_, key_bytes)
+                    : phase_slot(val0_, key_bytes);
+                Buffer& val1 = survivor_is_zero
+                    ? phase_slot(val1_, key_bytes)
+                    : grow(val1_, key_bytes);
+                Buffer& hist = phase_slot(hist_space_, hist_bytes);
+                Buffer& compact = phase_slot(compact_, compact_bytes);
+                instance_values = &val0;
+                range_lo = &lo0;
+                range_hi = &hi0;
+                if (use_gpu_driven) {
+                    Push depth_push = emit_constants(
+                        count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(
+                        emit_indirect_,
+                        {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_,
+                         &dummy_, &frame_counts},
+                        depth_push, div_up(count, 256));
+                    const std::uint32_t depth_hist_n =
+                        256 * div_up(count, 1024);
+                    radix_sort_indirect(
+                        false, count, 1u, 10u * sizeof(std::uint32_t),
+                        lo0, hi0, val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
+                    write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                    Push gather_push = emit_constants(
+                        count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch_indirect(
+                        emit_indirect_,
+                        {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
+                         &dummy_, &frame_counts},
+                        gather_push, frame_counts, 4u * sizeof(std::uint32_t));
+                    inclusive_scan(compact, 0, 0, count, count);
+                    Push tile_push = emit_constants(
+                        count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch_indirect(
+                        emit_indirect_,
+                        {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0,
+                         &compact, &frame_counts},
+                        tile_push, frame_counts, 7u * sizeof(std::uint32_t));
+                    write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                    const std::uint32_t tile_hist_n =
+                        256 * div_up(instances, 1024);
+                    radix_sort_indirect(
+                        false, instances, 0u, 13u * sizeof(std::uint32_t),
+                        lo1, hi1, val1, lo0, hi0, val0, hist, tile_hist_n,
+                        tile_bits);
+                    instance_values = &val1;
+                    range_lo = &lo1;
+                    range_hi = &hi1;
+                } else if (single_sort) {
+                    Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, emit_push, div_up(count, 256));
+                    radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n, 32u + tile_bits);
+                    write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                    write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                } else {
+                    Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
+                    radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
+                    write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                    Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
+                             gather_push, div_up(visible, 256));
+                    inclusive_scan(compact, 0, 0, visible, visible);
+                    Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
+                             tile_push, div_up(visible, 256));
+                    write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                    radix_sort(
+                        false, instances, lo1, hi1, val1, lo0, hi0, val0,
+                        hist, hist_n, tile_bits);
+                    instance_values = &val1;
+                    range_lo = &lo1;
+                    range_hi = &hi1;
+                }
+                Push range_push{};
+                if (use_gpu_driven) {
+                    dispatch_indirect(
+                        ranges_indirect_,
+                        {range_lo, range_hi, &tile_ranges, &frame_counts},
+                        range_push, frame_counts,
+                        16u * sizeof(std::uint32_t));
+                } else {
+                    range_push.u[0] = instances;
+                    range_push.u[1] = single_sort ? 1u : 0u;
+                    dispatch(
+                        ranges_, {range_lo, range_hi, &tile_ranges}, range_push,
+                        div_up(instances, 256));
+                }
             }
         }
 
@@ -777,11 +804,13 @@ public:
             bucket_offsets = &grow(
                 bucket_offsets_,
                 static_cast<std::uint64_t>(tiles + scan_scratch_uints(tiles)) * sizeof(std::uint32_t));
-            Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count, gauss_slots);
-            dispatch(
-                emit_, {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
-                bucket_push, div_up(tiles, 256));
-            inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
+            if (!reuse_projection) {
+                Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch(
+                    emit_, {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
+                    bucket_push, div_up(tiles, 256));
+                inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
+            }
         }
         write_forward_timestamp(4, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
@@ -885,6 +914,8 @@ public:
         last_frame_has_stats_ = !pack_rgba && !depth_query_only;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
         last_instance_values_ = instance_values;
+        std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(), last_transform_.begin());
+        std::copy(camera.center.begin(), camera.center.end(), last_center_.begin());
         last_width_ = camera.width;
         last_height_ = camera.height;
         last_grid_x_ = grid_x;
@@ -962,6 +993,39 @@ public:
         const SplatDeviceFrame& destination) {
         const FrameCounts counts =
             record_frame(camera, settings, false, &destination);
+        return make_device_frame(camera, settings, counts);
+    }
+
+    SplatDeviceFrame render_colors_device_copy(
+        const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
+        const SplatSettings& settings, const SplatDeviceFrame& destination) {
+        const auto same_view = [](const SplatBufferView& a, const SplatBufferView& b) {
+            return a.buffer == b.buffer && a.offset == b.offset && a.bytes == b.bytes;
+        };
+        require(device_model_bound_ && last_frame_has_snapshots_ &&
+                    last_frame_has_geometry_ && settings.need_depth &&
+                    settings.pixel_snapshots && !settings.preview_rings &&
+                    gaussians.colors_precomputed && gaussians.count == count_ &&
+                    same_view(gaussians.means, device_model_.means) &&
+                    same_view(gaussians.log_scales, device_model_.log_scales) &&
+                    same_view(gaussians.raw_rotations, device_model_.raw_rotations) &&
+                    same_view(gaussians.opacity_logits, device_model_.opacity_logits) &&
+                    same_view(gaussians.filter_3d, device_model_.filter_3d) &&
+                    camera.world_to_camera.size() == last_transform_.size() &&
+                    camera.center.size() == last_center_.size() &&
+                    camera.width == last_width_ && camera.height == last_height_ &&
+                    camera.mode == last_mode_ && camera.fx == last_fx_ &&
+                    camera.fy == last_fy_ && camera.cx == last_cx_ && camera.cy == last_cy_ &&
+                    camera.k1 == last_k1_ && camera.k2 == last_k2_ &&
+                    camera.k3 == last_k3_ && camera.k4 == last_k4_ &&
+                    std::equal(camera.world_to_camera.begin(), camera.world_to_camera.end(), last_transform_.begin()) &&
+                    std::equal(camera.center.begin(), camera.center.end(), last_center_.begin()) &&
+                    settings.kernel_size == last_kernel_size_ &&
+                    settings.scale_modifier == last_scale_modifier_,
+                "color rerender requires unchanged device geometry and camera with live geometry snapshots");
+        // Consume the old backward before overwriting colors and snapshots.
+        bind_model_device(gaussians);
+        const FrameCounts counts = record_frame(camera, settings, false, &destination, false, true);
         return make_device_frame(camera, settings, counts);
     }
 
@@ -2367,6 +2431,8 @@ private:
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &subgroup};
         vkGetPhysicalDeviceProperties2(context_.physical_device, &properties);
         subgroup_size_ = subgroup.subgroupSize;
+        subgroup_vote_supported_ =
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) != 0;
         subgroup_backward_supported_ =
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
@@ -2645,6 +2711,10 @@ private:
             std::memset(static_cast<std::byte*>(buffer.mapped) + buffer.offset, 0, bytes);
             return;
         }
+        zero_buffer_view(buffer.handle, buffer.offset, bytes);
+    }
+
+    void zero_buffer_view(VkBuffer handle, VkDeviceSize offset, VkDeviceSize bytes) {
         // Keep the clear in the raster command batch. A one-shot fill with
         // vkQueueWaitIdle here used to drain the shared queue twice per frame.
         // The barriers are global (not buffer-scoped) because phase-arena
@@ -2658,7 +2728,7 @@ private:
             command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr,
             0, nullptr);
-        vkCmdFillBuffer(command_, buffer.handle, buffer.offset, bytes, 0u);
+        vkCmdFillBuffer(command_, handle, offset, bytes, 0u);
         VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
@@ -2805,7 +2875,8 @@ private:
 
     void dispatch_depth_queries(const SplatBufferView& points, const std::uint32_t count,
                                 Buffer& output_f, Buffer& output_u, Push push) {
-        if (environment_flag("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY")) {
+        sample_grouped_ = !environment_flag("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY");
+        if (!sample_grouped_) {
             dispatch_infos(sample_depth_,
                 {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
                  descriptor(*frame_camera_), descriptor(points, count * 12ull),
@@ -2838,6 +2909,18 @@ private:
     }
 
     void dispatch_sample_backward(const std::vector<VkDescriptorBufferInfo>& buffers, Push push) {
+        if (sample_grouped_ && sample_depth_backward_tiled_.valid() &&
+            !environment_flag("SPLAT_DRENDER_DISABLE_TILED_SAMPLE_BACKWARD")) {
+            auto grouped = buffers;
+            grouped.push_back(descriptor(sample_counts_));
+            grouped.push_back(descriptor(sample_order_));
+            // Off-screen points are absent from the tile lists.
+            zero_buffer_view(buffers[9].buffer, buffers[9].offset, push.u[0] * 12ull);
+            const auto& pipeline = sample_depth_backward_tiled_atomic_.valid()
+                ? sample_depth_backward_tiled_atomic_ : sample_depth_backward_tiled_;
+            dispatch_infos(pipeline, grouped, push, last_grid_x_, div_up(last_height_, k_tile));
+            return;
+        }
         const bool native = sample_depth_backward_atomic_.valid();
         const auto& pipeline = native ? sample_depth_backward_atomic_ : sample_depth_backward_;
         // Bound each dispatch on display GPUs. CAS fallback has much higher
@@ -3025,6 +3108,8 @@ private:
     ComputePipeline sample_depth_;
     ComputePipeline sample_depth_group_;
     ComputePipeline sample_depth_tiled_;
+    ComputePipeline sample_depth_backward_tiled_;
+    ComputePipeline sample_depth_backward_tiled_atomic_;
     ComputePipeline sample_depth_backward_;
     ComputePipeline sample_depth_backward_atomic_;
     ComputePipeline multi_view_;
@@ -3040,6 +3125,7 @@ private:
     VkCommandBuffer command_{};
     VkQueryPool backward_timestamp_pool_{};
     bool backward_profile_enabled_{};
+    bool subgroup_vote_supported_{};
     bool subgroup_backward_supported_{};
     std::uint32_t subgroup_size_{};
     std::uint32_t backward_profile_interval_{100};
@@ -3148,9 +3234,12 @@ private:
     Buffer multi_reference_mask_;
     Buffer multi_neighbour_mask_;
     Buffer multi_output_;
+    std::array<float, 16> last_transform_{};
+    std::array<float, 3> last_center_{};
     bool last_frame_has_snapshots_{};
     bool last_frame_has_stats_{};
     bool last_frame_has_geometry_{};
+    bool sample_grouped_{};
     bool sample_live_{};
     std::uint32_t sample_point_count_{};
     Buffer* last_instance_values_ = &dummy_;
@@ -3241,6 +3330,12 @@ SplatDeviceFrame SplatRasterizer::render_device_copy(
     const SplatCamera& camera, const SplatSettings& settings,
     const SplatDeviceFrame& destination) {
     return impl_->render_device_copy(camera, settings, destination);
+}
+
+SplatDeviceFrame SplatRasterizer::render_colors_device_copy(
+    const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
+    const SplatSettings& settings, const SplatDeviceFrame& destination) {
+    return impl_->render_colors_device_copy(gaussians, camera, settings, destination);
 }
 
 void SplatRasterizer::copy_frame_device(

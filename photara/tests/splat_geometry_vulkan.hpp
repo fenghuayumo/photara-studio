@@ -367,7 +367,7 @@ void test_vulkan_normal_field() {
         const float fd=(loss(plus)-loss(minus))/.002F;
         require(std::abs(fd-grad[index])<1e-5F,"Vulkan normal field loss finite difference mismatch");
     }
-    const auto chain = [&](Device device) {
+    const auto chain = [&](Device device, bool reuse = false) {
         GaussianModel m;
         m.means=Tensor::from_vector(std::vector<float>{-.8F,0,2.F, -.6F,.05F,2.05F},{2,3},device);
         m.log_scales=Tensor::from_vector(std::vector<float>{std::log(.4F),std::log(.35F),std::log(.035F),
@@ -378,6 +378,15 @@ void test_vulkan_normal_field() {
         m.normal_features=Tensor::from_vector(std::vector<float>{.2F,-.4F,1.3F,.7F, -.5F,.8F,.3F,-1.2F},{2,4},device);
         m.filter_3d=Tensor::full({2,1},.005F,device);
         Rasterizer rasterizer; RasterizeOptions o; o.require_depth=true;
+        if (reuse) {
+            o.active_sh_degree = 3;
+            o.copy_attachments = false;
+            const auto primary = rasterizer.forward(m,camera,o);
+            (void)rasterizer.backward(m,primary,
+                Tensor::zeros({3,side,side},device),Tensor{},Tensor{},Tensor{});
+            o.copy_attachments = true;
+            o.reuse_projection = true;
+        }
         o.colors_precomp=detail::normal_features_to_normals(m.normal_features);
         const auto r=rasterizer.forward(m,camera,o);
         const auto signed_colors=r.color.to_vector();
@@ -386,6 +395,14 @@ void test_vulkan_normal_field() {
         const auto l=detail::compute_normal_field_loss(r,camera,.03F,true);
         require(l.total>0 && l.total<.1F,"Normal field render did not contribute loss");
         auto gradients=rasterizer.backward(m,r,l.color,l.alpha,l.depth,l.normal);
+        if (reuse) {
+            auto changed_camera = camera;
+            changed_camera.fx += 1.F;
+            bool rejected = false;
+            try { (void)rasterizer.forward(m,changed_camera,o); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected,"Vulkan projection reuse accepted a changed camera");
+        }
         require(!gradients.sh.is_valid(),"Normal field must not differentiate SH");
         gradients.normal_features=detail::normal_features_backward(m.normal_features,gradients.colors_precomp);
         require_finite(gradients.normal_features,"Non-finite normal field feature gradient");
@@ -401,6 +418,13 @@ void test_vulkan_normal_field() {
     compare(a.second.log_scales,b.second.log_scales,3e-3,"Vulkan normal field scale gradient");
     compare(a.second.quaternions,b.second.quaternions,3e-3,"Vulkan normal field rotation gradient");
     compare(a.second.opacity_logits,b.second.opacity_logits,3e-3,"Vulkan normal field opacity gradient");
+    const auto reused = chain(Device::Vulkan,true);
+    compare(b.first,reused.first,2e-5,"Vulkan reused normal field render");
+    compare(b.second.normal_features,reused.second.normal_features,2e-5,"Vulkan reused normal feature gradient");
+    compare(b.second.means,reused.second.means,2e-5,"Vulkan reused normal field mean gradient");
+    compare(b.second.log_scales,reused.second.log_scales,2e-5,"Vulkan reused normal field scale gradient");
+    compare(b.second.quaternions,reused.second.quaternions,2e-5,"Vulkan reused normal field rotation gradient");
+    compare(b.second.opacity_logits,reused.second.opacity_logits,2e-5,"Vulkan reused normal field opacity gradient");
     GaussianModel init;
     init.means=Tensor::zeros({3,3},Device::Vulkan);
     init.log_scales=Tensor::from_vector(std::vector<float>{-3,-1,-2, -1,-3,-2, -1,-2,-3},{3,3},Device::Vulkan);

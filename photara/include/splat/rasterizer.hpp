@@ -26,6 +26,9 @@ struct RasterizeOptions {
     // densification/optimizer batch instead of forcing a queue hand-off before
     // the photometric loss. Regular render callers keep the eager default.
     bool defer_visibility{false};
+    // Vulkan auxiliary colors: consume primary backward first and keep
+    // geometry/camera unchanged. Overwrites internal frame and snapshots.
+    bool reuse_projection{false};
     bool debug{false};
     // Inference/preview callers can omit all backward-only pixel state.
     bool record_backward_state{true};

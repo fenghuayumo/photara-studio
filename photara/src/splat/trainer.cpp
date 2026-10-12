@@ -2176,6 +2176,7 @@ GaussianModel Trainer::train(
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
+            normal_options.reuse_projection = vulkan_backend;
             normal_options.require_depth = true;
             // The primary fused RGB pass may omit owned attachments. The
             // field loss needs the signed color and alpha of this render.

@@ -285,11 +285,16 @@ RenderResult vulkan_raster_forward(
     tinytensor::vulkan::submit_async();
     const double sync_ms = backend->profile_stages
         ? elapsed_ms(profile_start) : 0.0;
-    backend->rasterizer.bind_model_device(gaussians);
+    const bool reuse = requested_options.reuse_projection &&
+        !environment_flag("SPLAT_VULKAN_DISABLE_NORMAL_REUSE");
+    if (!reuse) backend->rasterizer.bind_model_device(gaussians);
     const double bind_ms = backend->profile_stages
         ? elapsed_ms(profile_start) - sync_ms : 0.0;
-    context->frame = backend->rasterizer.render_device_copy(
-        camera_view(camera), settings, destination);
+    context->frame = reuse
+        ? backend->rasterizer.render_colors_device_copy(
+            gaussians, camera_view(camera), settings, destination)
+        : backend->rasterizer.render_device_copy(
+            camera_view(camera), settings, destination);
     const double render_ms = backend->profile_stages
         ? elapsed_ms(profile_start) - sync_ms - bind_ms : 0.0;
     // Keep the per-Gaussian contribution flags device-resident. The 0/1

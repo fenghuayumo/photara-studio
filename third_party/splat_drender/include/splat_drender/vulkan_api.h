@@ -380,6 +380,12 @@ public:
     [[nodiscard]] SplatDeviceFrame render_device_copy(
         const SplatCamera& camera, const SplatSettings& settings,
         const SplatDeviceFrame& destination);
+    // Reblend precomputed colors using the latest geometry projection/sort.
+    // Consume primary backward first and keep model parameters unchanged.
+    // Overwrites the previous colors, attachments and snapshots.
+    [[nodiscard]] SplatDeviceFrame render_colors_device_copy(
+        const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
+        const SplatSettings& settings, const SplatDeviceFrame& destination);
     // Copies selected attachments into caller-owned VkBuffer slices on the
     // adopted device. Empty destination slices are skipped. This is the bridge
     // used by backend-neutral tensor code without staging through the CPU.

@@ -93,6 +93,7 @@ int run_geometry_benchmark(int argc, char** argv) {
             ModelGradients field_gradients;
             if(field) {
                 auto normal_options=ro;
+                normal_options.reuse_projection=vk;
                 normal_options.copy_attachments=true;
                 normal_options.copy_color_only=false;
                 normal_options.colors_precomp=detail::normal_features_to_normals(model.normal_features);
@@ -121,7 +122,8 @@ int run_geometry_benchmark(int argc, char** argv) {
                     {"rotations",&gradients.quaternions},{"opacity",&gradients.opacity_logits},
                     {"sh",&gradients.sh},{"normal_features",&field_gradients.normal_features},
                     {"refine_weight",&gradients.refine_weight},
-                    {"query_points",&sampled.camera_points},{"query_inside",&query_inside}};
+                    {"query_points",&sampled.camera_points},{"query_inside",&query_inside},
+                    {"sample_point_gradient",&sample_gradients.points}};
                 for(const auto& [label,tensor]:groups) {
                     if(!tensor->is_valid()) continue;
                     const auto values=tensor->to_vector();
