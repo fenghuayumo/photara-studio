@@ -1,6 +1,7 @@
 #include "sfm/triangulation.hpp"
 
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
 
 #include <Eigen/Cholesky>
@@ -664,6 +665,76 @@ void commit_peel_registered_outliers(Track& parent, const Scene& scene) {
     parent.observations.resize(kept);
 }
 
+struct SplitCounters {
+    std::size_t absorbed{}, gate_candidates{}, gate_passes{}, gate_rejections{};
+    void add(const SplitCounters& other) {
+        absorbed += other.absorbed;
+        gate_candidates += other.gate_candidates;
+        gate_passes += other.gate_passes;
+        gate_rejections += other.gate_rejections;
+    }
+};
+
+bool prepare_track_split(
+    Track& track, const Scene& scene, const TriangulationOptions& options,
+    const unsigned depth, SplitCounters& counters) {
+    if (!track.is_triangulated()) return false;
+    track.split_generation = scene.registration_generation;
+    if (depth >= options.max_splits_per_track) return false;
+    counters.absorbed += absorb_parent_supported_observations(
+        track, scene, options.reproj_threshold_px);
+    const std::size_t outliers = count_registered_outliers(track, scene);
+    if (outliers < options.min_inliers) return false;
+    const bool gated = options.use_fast_split_gate && options.use_lo_ransac &&
+        outliers >= options.min_observations_for_ransac;
+    if (gated) ++counters.gate_candidates;
+    if (!has_alternate_geometric_consensus(track, scene, options, outliers)) {
+        if (gated) ++counters.gate_rejections;
+        return false;
+    }
+    if (gated) ++counters.gate_passes;
+    return true;
+}
+
+struct SplitBranch {
+    // Root followed by children in the original serial creation order.
+    std::vector<Track> tracks;
+    SplitCounters counters;
+    std::size_t child_solves{}, lo_ransac_launches{};
+};
+
+SplitBranch solve_split_branch(
+    const Track& root, const unsigned initial_depth, const Scene& scene,
+    const TriangulationOptions& options) {
+    SplitBranch branch;
+    branch.tracks.push_back(root);
+    std::vector<std::pair<std::size_t, unsigned>> pending{{0, initial_depth}};
+    const auto schedule = [&](std::size_t id, unsigned depth) {
+        if (prepare_track_split(branch.tracks[id], scene, options, depth, branch.counters))
+            pending.emplace_back(id, depth);
+    };
+    while (!pending.empty()) {
+        const auto [parent_id, depth] = pending.back();
+        pending.pop_back();
+        if (!branch.tracks[parent_id].is_triangulated() || depth >= options.max_splits_per_track)
+            continue;
+        Track child;
+        if (!build_child_from_registered_outliers(branch.tracks[parent_id], scene, child))
+            continue;
+        ++branch.child_solves;
+        if (options.use_lo_ransac && child.observations.size() >= options.min_observations_for_ransac)
+            ++branch.lo_ransac_launches;
+        if (triangulate_track_impl(child, scene, options) < options.min_inliers)
+            continue;
+        commit_peel_registered_outliers(branch.tracks[parent_id], scene);
+        branch.tracks.push_back(std::move(child));
+        // Preserve the serial LIFO traversal: parent is revisited before child.
+        schedule(branch.tracks.size() - 1, depth + 1);
+        schedule(parent_id, depth + 1);
+    }
+    return branch;
+}
+
 }  // namespace
 
 float track_min_ray_angle_deg(const Track& track, const Scene& scene) {
@@ -764,34 +835,13 @@ static unsigned triangulate_tracks_impl(
     const bool force_split_check = !outliers_only;
     std::size_t split_checks = 0;
     std::size_t generation_skips = 0;
-    std::size_t absorbed_parent_observations = 0;
-    std::size_t split_gate_candidates = 0;
-    std::size_t split_gate_passes = 0;
-    std::size_t split_gate_rejections = 0;
+    SplitCounters split_counters;
     const auto schedule_split = [&](const Index track_id,
                                     const unsigned depth) {
         if (track_id >= scene.tracks.size()) return;
         Track& track = scene.tracks[track_id];
-        if (!track.is_triangulated()) return;
-        track.split_generation = scene.registration_generation;
-        if (depth >= options.max_splits_per_track) return;
-        absorbed_parent_observations +=
-            absorb_parent_supported_observations(
-                track, scene, options.reproj_threshold_px);
-        const std::size_t registered_outliers =
-            count_registered_outliers(track, scene);
-        if (registered_outliers < options.min_inliers) return;
-        const bool gated = options.use_fast_split_gate &&
-            options.use_lo_ransac &&
-            registered_outliers >= options.min_observations_for_ransac;
-        if (gated) ++split_gate_candidates;
-        if (!has_alternate_geometric_consensus(
-                track, scene, options, registered_outliers)) {
-            if (gated) ++split_gate_rejections;
-            return;
-        }
-        if (gated) ++split_gate_passes;
-        pending.push_back({track_id, depth});
+        if (prepare_track_split(track, scene, options, depth, split_counters))
+            pending.push_back({track_id, depth});
     };
     for (std::size_t candidate = 0; candidate < candidate_count; ++candidate) {
         const Index track_id = selected_track_ids
@@ -813,45 +863,80 @@ static unsigned triangulate_tracks_impl(
         "track split scan: checked=", split_checks,
         " skipped_generation=", generation_skips,
         " pending=", pending.size(),
-        " absorbed_parent=", absorbed_parent_observations,
-        " gate_candidates=", split_gate_candidates,
-        " gate_pass=", split_gate_passes,
-        " gate_rejected=", split_gate_rejections,
+        " absorbed_parent=", split_counters.absorbed,
+        " gate_candidates=", split_counters.gate_candidates,
+        " gate_pass=", split_counters.gate_passes,
+        " gate_rejected=", split_counters.gate_rejections,
         " generation=", scene.registration_generation);
 
     unsigned split_tracks = 0;
     const auto split_started = std::chrono::steady_clock::now();
     std::size_t child_consensus_solves = 0;
     std::size_t child_lo_ransac_launches = 0;
-    while (!pending.empty()) {
-        const auto [parent_id, depth] = pending.back();
-        pending.pop_back();
-        if (parent_id >= scene.tracks.size()) continue;
-        if (!scene.tracks[parent_id].is_triangulated()) continue;
-        if (depth >= options.max_splits_per_track) continue;
+    // Small batches stay serial. The shared pool also serializes nested calls,
+    // respecting hierarchical mapping's per-subscene CPU budget.
+    const unsigned split_workers = pending.size() >= 64
+        ? parallel::resolve_thread_count(scene.thread_count) : 1U;
+    const std::size_t root_count = pending.size();
+    double merge_ms = 0;
+    if (split_workers > 1) {
+        std::vector<SplitBranch> branches(pending.size());
+        parallel::parallel_for(pending.size(), split_workers, [&](std::size_t i) {
+            const auto [root_id, depth] = pending[i];
+            // Workers read camera geometry and own their entire local branch.
+            // No worker mutates scene.tracks or assigns global child IDs.
+            branches[i] = solve_split_branch(scene.tracks[root_id], depth, scene, options);
+        });
+        const auto merge_started = std::chrono::steady_clock::now();
+        std::size_t child_count = 0;
+        for (const auto& branch : branches) child_count += branch.tracks.size() - 1;
+        scene.tracks.reserve(scene.tracks.size() + child_count);
+        // Initial roots were pushed in ascending candidate order, then popped
+        // from the back. Commit in that exact order to preserve child IDs.
+        for (std::size_t i = branches.size(); i-- > 0;) {
+            auto& branch = branches[i];
+            scene.tracks[pending[i].first] = std::move(branch.tracks[0]);
+            for (std::size_t child = 1; child < branch.tracks.size(); ++child)
+                scene.tracks.push_back(std::move(branch.tracks[child]));
+            split_counters.add(branch.counters);
+            child_consensus_solves += branch.child_solves;
+            child_lo_ransac_launches += branch.lo_ransac_launches;
+        }
+        split_tracks = static_cast<unsigned>(child_count);
+        inlier_tracks += split_tracks;
+        merge_ms = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-merge_started).count();
+    } else {
+        while (!pending.empty()) {
+            const auto [parent_id, depth] = pending.back();
+            pending.pop_back();
+            if (parent_id >= scene.tracks.size()) continue;
+            if (!scene.tracks[parent_id].is_triangulated()) continue;
+            if (depth >= options.max_splits_per_track) continue;
 
-        Track child;
-        if (!build_child_from_registered_outliers(
-                scene.tracks[parent_id], scene, child))
-            continue;
-        ++child_consensus_solves;
-        if (options.use_lo_ransac &&
-            child.observations.size() >=
-                options.min_observations_for_ransac)
-            ++child_lo_ransac_launches;
-        if (triangulate_track_impl(child, scene, options) < options.min_inliers)
-            continue;
+            Track child;
+            if (!build_child_from_registered_outliers(
+                    scene.tracks[parent_id], scene, child))
+                continue;
+            ++child_consensus_solves;
+            if (options.use_lo_ransac &&
+                child.observations.size() >=
+                    options.min_observations_for_ransac)
+                ++child_lo_ransac_launches;
+            if (triangulate_track_impl(child, scene, options) < options.min_inliers)
+                continue;
 
-        // Do not keep a Track reference across push_back: appending the child
-        // can reallocate scene.tracks and invalidate every reference into it.
-        commit_peel_registered_outliers(scene.tracks[parent_id], scene);
-        scene.tracks.push_back(std::move(child));
-        const Index child_id = static_cast<Index>(scene.tracks.size() - 1);
-        ++split_tracks;
-        ++inlier_tracks;
-        const unsigned next_depth = depth + 1;
-        schedule_split(child_id, next_depth);
-        schedule_split(parent_id, next_depth);
+            // Do not keep a Track reference across push_back: appending the child
+            // can reallocate scene.tracks and invalidate every reference into it.
+            commit_peel_registered_outliers(scene.tracks[parent_id], scene);
+            scene.tracks.push_back(std::move(child));
+            const Index child_id = static_cast<Index>(scene.tracks.size() - 1);
+            ++split_tracks;
+            ++inlier_tracks;
+            const unsigned next_depth = depth + 1;
+            schedule_split(child_id, next_depth);
+            schedule_split(parent_id, next_depth);
+        }
     }
 
     const double split_ms = std::chrono::duration<double,std::milli>(
@@ -862,16 +947,17 @@ static unsigned triangulate_tracks_impl(
         std::chrono::steady_clock::now()-index_started).count();
     core::Logger::instance().debug("track split timing: scan_wall_ms=",scan_ms,
         " peel_wall_ms=",split_ms," index_wall_ms=",index_ms,
+        " merge_wall_ms=",merge_ms," workers=",split_workers," roots=",root_count,
         " candidates=",candidate_count," child_solves=",child_consensus_solves,
         " created=",split_tracks);
     core::Logger::instance().debug(
         "track split: created=", split_tracks,
         " child_solves=", child_consensus_solves,
         " lo_ransac_launches=", child_lo_ransac_launches,
-        " absorbed_parent=", absorbed_parent_observations,
-        " gate_candidates=", split_gate_candidates,
-        " gate_pass=", split_gate_passes,
-        " gate_rejected=", split_gate_rejections,
+        " absorbed_parent=", split_counters.absorbed,
+        " gate_candidates=", split_counters.gate_candidates,
+        " gate_pass=", split_counters.gate_passes,
+        " gate_rejected=", split_counters.gate_rejections,
         " total_tracks=", scene.tracks.size());
     return inlier_tracks;
 }

@@ -10,6 +10,7 @@
 #include "sfm/triangulation.hpp"
 #include "sfm/appearance.hpp"
 #include "io/image.hpp"
+#include "parallel/thread_pool.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -959,6 +960,110 @@ void test_fast_split_gate() {
         "fast split gate preserves a real alternate geometric consensus");
 }
 
+void expect_same_split_scene(const Scene& a, const Scene& b) {
+    expect(a.tracks.size() == b.tracks.size(), "recursive split preserves track count");
+    for (std::size_t i = 0; i < std::min(a.tracks.size(), b.tracks.size()); ++i) {
+        const auto& x = a.tracks[i];
+        const auto& y = b.tracks[i];
+        expect(x.position == y.position && x.num_inliers == y.num_inliers &&
+               x.split_generation == y.split_generation && x.color_r == y.color_r &&
+               x.color_g == y.color_g && x.color_b == y.color_b && x.has_color == y.has_color,
+               "recursive split preserves ordered geometry and metadata exactly");
+        expect(x.observations.size() == y.observations.size(), "recursive split preserves observation count");
+        for (std::size_t o = 0; o < std::min(x.observations.size(), y.observations.size()); ++o)
+            expect(x.observations[o].image_id == y.observations[o].image_id &&
+                   x.observations[o].feature_id == y.observations[o].feature_id,
+                   "recursive split preserves ordered child observations");
+    }
+    expect(a.image_tracks.size() == b.image_tracks.size(), "recursive split preserves image index size");
+    for (std::size_t i = 0; i < std::min(a.image_tracks.size(), b.image_tracks.size()); ++i) {
+        expect(a.image_tracks[i].size() == b.image_tracks[i].size(), "recursive split preserves image index count");
+        for (std::size_t j = 0; j < std::min(a.image_tracks[i].size(), b.image_tracks[i].size()); ++j)
+            expect(a.image_tracks[i][j].track_id == b.image_tracks[i][j].track_id &&
+                   a.image_tracks[i][j].feature_id == b.image_tracks[i][j].feature_id,
+                   "recursive split preserves global child IDs in image index");
+    }
+}
+
+void test_parallel_recursive_track_split() {
+    constexpr Index roots = 160;
+    Scene input;
+    input.cameras.assign(13, cam());
+    input.images.resize(13);
+    const Vec3 points[] = {Vec3(0, 0, 5), Vec3(0.8, 0.4, 6), Vec3(-0.9, -0.6, 4)};
+    for (Index i = 0; i < input.images.size(); ++i) {
+        auto& image = input.images[i];
+        image.id = image.camera_id = i;
+        image.registered = i < 12;
+        image.pose.C = Vec3(double(i) * 0.6 - 3, double(i % 3) * 0.2, 0);
+        image.features.keypoints.resize(roots * 3);
+        for (Index root = 0; root < roots; ++root)
+            for (Index point = 0; point < 3; ++point) {
+                const Vec3 shifted = points[point] + Vec3(root * 0.001, 0, 0);
+                const Vec2 pixel = input.cameras[i].project(image.pose.transform_world_to_camera(shifted));
+                auto& keypoint = image.features.keypoints[root * 3 + point];
+                keypoint.x = static_cast<float>(pixel.x());
+                keypoint.y = static_cast<float>(pixel.y());
+            }
+    }
+    for (Index root = 0; root < roots; ++root) {
+        Track track;
+        track.position = points[0] + Vec3(root * 0.001, 0, 0);
+        track.num_inliers = 6;
+        track.has_color = true;
+        track.color_r = static_cast<std::uint8_t>(root);
+        for (Index image = 0; image < 12; ++image) {
+            const Index point = image < 6 ? 0 : image < 10 ? 1 : 2;
+            track.observations.push_back({image, root * 3 + point});
+        }
+        track.observations.push_back({12, root * 3}); // Retained unregistered observation.
+        input.tracks.push_back(std::move(track));
+    }
+    for (bool fast_gate : {false, true}) {
+        for (unsigned depth : {1U, 2U}) {
+            for (bool selected : {false, true}) {
+                TriangulationOptions options;
+                options.reproj_threshold_px = 0.25F;
+                options.min_angle_deg = 0.5F;
+                options.ransac_iterations = 48;
+                options.refine_nonlinear = false;
+                options.max_splits_per_track = depth;
+                options.use_fast_split_gate = fast_gate;
+                std::vector<Index> ids;
+                for (Index i = roots; i-- > 0;)
+                    if (i % 2 == 0) { ids.push_back(i); ids.push_back(i); }
+                ids.push_back(k_invalid);
+                const auto run = [&](Scene& scene) {
+                    return selected ? triangulate_tracks(scene, ids, true, options)
+                                    : triangulate_tracks(scene, true, options);
+                };
+                Scene serial = input;
+                serial.thread_count = 1;
+                const auto expected = run(serial);
+                const auto processed = selected ? roots / 2 : roots;
+                expect(serial.tracks.size() == roots + processed * depth,
+                       "recursive split exercises the requested depth");
+                for (unsigned threads : {2U, 4U}) {
+                    Scene threaded = input;
+                    threaded.thread_count = threads;
+                    expect(run(threaded) == expected, "parallel split preserves return count");
+                    expect_same_split_scene(serial, threaded);
+                    run(serial);
+                    run(threaded);
+                    expect_same_split_scene(serial, threaded);
+                }
+                Scene nested = input;
+                nested.thread_count = 4;
+                {
+                    const photara::parallel::ScopedParallelRegion region(true);
+                    run(nested);
+                }
+                expect_same_split_scene(serial, nested);
+            }
+        }
+    }
+}
+
 void test_dirty_track_updates_are_isolated() {
     Scene scene;
     scene.cameras.assign(3, cam());
@@ -1137,6 +1242,7 @@ int main() {
     test_long_track_merge();
     test_robust_triangulation_and_track_split();
     test_fast_split_gate();
+    test_parallel_recursive_track_split();
     test_dirty_track_updates_are_isolated();
     test_retrieval_inverted_index();
     test_local_ba_boundary_selection();
