@@ -130,6 +130,9 @@ __global__ void fused_l1_ssim_forward_kernel(
 
     __shared__ float tile[k_shared_y][k_shared_x][2];
     __shared__ float horizontal[k_conv_y][k_conv_x][5];
+    __shared__ float metric_partials[2][k_block_x * k_block_y];
+    float local_metric_sum = 0.F;
+    float local_metric_count = 0.F;
 
     for (int channel = 0; channel < channels; ++channel) {
         const int tile_size = k_shared_y * k_shared_x;
@@ -246,8 +249,8 @@ __global__ void fused_l1_ssim_forward_kernel(
                     const int mask_index = pixel_y * width + pixel_x;
                     if (valid_window && (!metric_mask_enabled ||
                                          metric_mask[mask_index] > 0.F)) {
-                        atomicAdd(metric_sum, ssim);
-                        atomicAdd(metric_count, 1.F);
+                        local_metric_sum += ssim;
+                        local_metric_count += 1.F;
                     }
                 }
                 if constexpr (StoreDerivatives) {
@@ -263,6 +266,51 @@ __global__ void fused_l1_ssim_forward_kernel(
         }
         block.sync();
     }
+    if constexpr (AccumulateMetric) {
+        const int rank = block.thread_rank();
+        metric_partials[0][rank] = local_metric_sum;
+        metric_partials[1][rank] = local_metric_count;
+        block.sync();
+        for (int stride = k_block_x * k_block_y / 2; stride; stride /= 2) {
+            if (rank < stride) {
+                metric_partials[0][rank] += metric_partials[0][rank + stride];
+                metric_partials[1][rank] += metric_partials[1][rank + stride];
+            }
+            block.sync();
+        }
+        if (rank == 0) {
+            const int index = (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+            metric_sum[index] = metric_partials[0][0];
+            metric_count[index] = metric_partials[1][0];
+        }
+    }
+}
+
+// A fixed reduction avoids the rounding bias from millions of unordered
+// additions to one FP32 accumulator. Only the small array of block sums
+// requires FP64 arithmetic; SSIM statistics and training stay unchanged.
+__global__ void reduce_ssim_metric_kernel(
+    const float* sums, const float* counts, const std::size_t size,
+    float* result) {
+    __shared__ double partials[2][256];
+    double sum = 0.0, count = 0.0;
+    for (std::size_t i = threadIdx.x; i < size; i += blockDim.x) {
+        sum += sums[i];
+        count += counts[i];
+    }
+    partials[0][threadIdx.x] = sum;
+    partials[1][threadIdx.x] = count;
+    __syncthreads();
+    for (unsigned stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) {
+            partials[0][threadIdx.x] += partials[0][threadIdx.x + stride];
+            partials[1][threadIdx.x] += partials[1][threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        result[0] = partials[1][0] > 0.0
+            ? static_cast<float>(partials[0][0] / partials[1][0]) : 0.F;
 }
 
 // This is fusedl1ssim_loss_backwardCUDA from fused-ssim. The valid-window
@@ -469,8 +517,12 @@ float fused_ssim_metric(
         masked_prediction = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
         masked_target = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     }
-    auto sum = tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
-    auto count_t = tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+    const std::size_t blocks =
+        ((width + k_block_x - 1) / k_block_x) *
+        ((height + k_block_y - 1) / k_block_y);
+    auto sum = tinytensor::Tensor::empty({blocks}, tinytensor::Device::CUDA);
+    auto count_t = tinytensor::Tensor::empty({blocks}, tinytensor::Device::CUDA);
+    auto result = tinytensor::Tensor::empty({1}, tinytensor::Device::CUDA);
 
     constexpr int threads = 256;
     const float* image1 = prediction.ptr<float>();
@@ -496,9 +548,10 @@ float fused_ssim_metric(
         nullptr, 0.F, use_mask ? mask.ptr<float>() : nullptr, use_mask,
         sum.ptr<float>(), count_t.ptr<float>());
     check_cuda(cudaGetLastError(), "run fused SSIM metric");
-    const float host_sum = sum.to_vector()[0];
-    const float host_count = count_t.to_vector()[0];
-    return host_count <= 0.F ? 0.F : host_sum / host_count;
+    reduce_ssim_metric_kernel<<<1, 256>>>(
+        sum.ptr<float>(), count_t.ptr<float>(), blocks, result.ptr<float>());
+    check_cuda(cudaGetLastError(), "reduce fused SSIM metric");
+    return result.to_vector()[0];
 }
 
 }  // namespace photara::splat::detail

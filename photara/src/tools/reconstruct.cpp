@@ -3821,9 +3821,11 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         };
     }
     photara::splat::GaussianModel gaussians;
+    double training_seconds = 0.0;
     if (cli.splat_mesh_only) {
         gaussians = load_trained_gaussians(cli, project_archive);
     } else {
+    const auto training_started = std::chrono::steady_clock::now();
     gaussians = photara::splat::Trainer(options).train(
             scene,
             [](const photara::splat::TrainingProgress& progress) {
@@ -3863,6 +3865,12 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 return true;
             },
             evaluate, preview, device_preview);
+    training_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - training_started).count();
+    photara::core::Logger::instance().info(
+        "splat_training_completed iterations=", options.iterations,
+        " training_s=", training_seconds,
+        " checkpoint_evaluations=", options.evaluation_iterations.size());
     const std::filesystem::path model_path = splat_file_path(cli);
     if (!model_path.empty()) {
         ensure_artifact_parent(model_path);
@@ -3902,7 +3910,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         "splat_model=", model_path,
         " gaussians=", gaussians.size(),
         " training_s=",
-        elapsed);
+        training_seconds,
+        " elapsed_s=", elapsed);
     if (project_archive) {
         project_archive->set_chunk(
             photara::project::ChunkType::gaussians,

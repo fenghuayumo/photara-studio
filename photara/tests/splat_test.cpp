@@ -5708,6 +5708,91 @@ void test_masked_photometric_gradient() {
     }
 }
 
+void test_ssim_metric_large_reduction() {
+    using tinytensor::Device;
+    using tinytensor::Tensor;
+    const std::array<double, 11> weights{
+        0.001028380123898387F, 0.0075987582094967365F,
+        0.036000773310661316F, 0.10936068743467331F,
+        0.21300552785396576F, 0.26601171493530273F,
+        0.21300552785396576F, 0.10936068743467331F,
+        0.036000773310661316F, 0.0075987582094967365F,
+        0.001028380123898387F};
+    for (const bool masked : {false, true}) {
+        const unsigned width = masked ? 191 : 1920;
+        const unsigned height = masked ? 137 : 1276;
+        const std::size_t pixels = std::size_t{width} * height;
+        std::vector<float> prediction(3 * pixels), target(3 * pixels), mask(pixels);
+        for (std::size_t p = 0; p < pixels; ++p) {
+            mask[p] = ((p % width + p / width) % 7 == 0) ? 1.F : 0.F;
+            for (unsigned c = 0; c < 3; ++c) {
+                const float base = .15F + .7F * float((p * 37 + c * 71) % 1021) / 1021.F;
+                target[c * pixels + p] = base;
+                prediction[c * pixels + p] = std::clamp(
+                    base + .13F * std::sin(float(p % width) * .19F + float(p / width) * .11F + c),
+                    0.F, 1.F);
+            }
+        }
+        // Independent host separable convolution and FP64 metric reduction.
+        std::vector<std::array<double, 5>> horizontal(pixels);
+        double reference_sum = 0.0;
+        std::size_t reference_count = 0;
+        for (unsigned c = 0; c < 3; ++c) {
+            for (unsigned y = 0; y < height; ++y) {
+                for (unsigned x = 0; x < width; ++x) {
+                    auto& moments = horizontal[std::size_t{y} * width + x];
+                    moments = {};
+                    for (int d = -5; d <= 5; ++d) {
+                        const int sx = int(x) + d;
+                        if (sx < 0 || sx >= int(width)) continue;
+                        const std::size_t p = std::size_t{y} * width + sx;
+                        const double coverage = masked ? mask[p] : 1.0;
+                        const double a = prediction[c * pixels + p] * coverage;
+                        const double b = target[c * pixels + p] * coverage;
+                        const std::array<double, 5> values{a, a*a, b, b*b, a*b};
+                        for (unsigned k = 0; k < 5; ++k)
+                            moments[k] += weights[d + 5] * values[k];
+                    }
+                }
+            }
+            for (unsigned y = 5; y + 5 < height; ++y) {
+                for (unsigned x = 5; x + 5 < width; ++x) {
+                    if (masked && mask[std::size_t{y} * width + x] == 0.F) continue;
+                    std::array<double, 5> moments{};
+                    for (int d = -5; d <= 5; ++d) {
+                        const auto& row = horizontal[std::size_t(int(y) + d) * width + x];
+                        for (unsigned k = 0; k < 5; ++k)
+                            moments[k] += weights[d + 5] * row[k];
+                    }
+                    const auto [a, aa, b, bb, ab] = moments;
+                    reference_sum += (2*a*b + .0001) * (2*(ab-a*b) + .0009) /
+                        ((a*a + b*b + .0001) * (aa-a*a + bb-b*b + .0009));
+                    ++reference_count;
+                }
+            }
+        }
+        const auto a = Tensor::from_vector(prediction, {3, height, width}, Device::CUDA);
+        const auto b = Tensor::from_vector(target, {3, height, width}, Device::CUDA);
+        auto m = Tensor::from_vector(mask, {height, width}, Device::CUDA);
+        const double reference = reference_sum / reference_count;
+        const auto start = std::chrono::steady_clock::now();
+        const float score = photara::splat::detail::fused_ssim_metric(a, b, m, masked, width, height);
+        const double milliseconds = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        std::cout << "SSIM metric " << width << 'x' << height << " masked=" << masked
+                  << " host=" << reference << " cuda=" << score
+                  << " error=" << std::abs(score-reference) << " ms=" << milliseconds << '\n';
+        require(std::abs(score-reference) < 2e-5, "SSIM metric differs from FP64 host oracle");
+        require(score == photara::splat::detail::fused_ssim_metric(a, b, m, masked, width, height),
+                "SSIM reduction is not deterministic");
+        if (masked) {
+            m = Tensor::zeros({height, width}, Device::CUDA);
+            require(photara::splat::detail::fused_ssim_metric(a, b, m, true, width, height) == 0.F,
+                    "Empty SSIM mask should return zero");
+        }
+    }
+}
+
 void test_ssim_loss_and_scale_constraint() {
     using namespace photara::splat;
     constexpr std::size_t side = 13;
@@ -7743,6 +7828,18 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 #include "splat_rings_vulkan.hpp"
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
+        try {
+            test_ssim_metric_large_reduction();
+            test_ssim_loss_and_scale_constraint();
+            test_masked_photometric_gradient();
+            std::cout << "SSIM metric tests passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "SSIM metric test failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     try {
         if (argc>1 && std::string(argv[1])=="--geometry-audit") {
             test_gggs_3d_filter();
@@ -8104,6 +8201,7 @@ int main(int argc, char** argv) {
         test_openmvs_dataset_loading();
         test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
+        test_ssim_metric_large_reduction();
         test_ssim_loss_and_scale_constraint();
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();

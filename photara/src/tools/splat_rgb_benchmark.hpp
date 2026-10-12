@@ -1,5 +1,6 @@
 // Same model, camera and optimizer configuration on CUDA and Vulkan.
-// This measures RGB render/loss/fused backward+Adam; excludes ADC and image loading.
+// Measures RGB render/loss/fused backward+Adam and the per-step ADC statistics
+// and exploration noise. Excludes topology refinement, decay and image loading.
 int run_rgb_benchmark(int argc, char** argv) {
     using namespace photara::splat;
     using tinytensor::Device;
@@ -12,7 +13,7 @@ int run_rgb_benchmark(int argc, char** argv) {
     const std::size_t index = argc > 7 ? std::stoul(argv[7]) : 0;
     require(index < views.size(), "RGB benchmark view outside dataset");
     std::ofstream csv(output / ("rgb_view_" + std::to_string(index) + ".csv"));
-    csv << "backend,iteration,forward_ms,loss_ms,backward_adam_ms,total_ms\n";
+    csv << "backend,iteration,forward_ms,loss_ms,backward_adam_ms,adc_stats_ms,noise_ms,total_ms\n";
     for (const auto device : {Device::CUDA, Device::Vulkan}) {
         const bool vk = device == Device::Vulkan;
         const char* name = vk ? "Vulkan" : "CUDA";
@@ -29,6 +30,7 @@ int run_rgb_benchmark(int argc, char** argv) {
         auto rotations = detail::make_adam_state(model.quaternions);
         auto opacity = detail::make_adam_state(model.opacity_logits);
         auto sh = detail::make_sh_adam_quant(model.size(), model.sh.shape()[1] * 3, device);
+        auto stats = detail::make_densification_stats(model.size(), device);
         Rasterizer rasterizer;
         RasterizeOptions ro;
         ro.active_sh_degree = model.sh_degree; ro.require_depth = false;
@@ -37,7 +39,7 @@ int run_rgb_benchmark(int argc, char** argv) {
             if (vk) (void)Tensor::zeros({1}, Device::Vulkan).to_vector();
             else require(cudaDeviceSynchronize() == cudaSuccess, "RGB benchmark CUDA sync failed");
         };
-        std::vector<double> times[4];
+        std::vector<double> times[6];
         std::cout << name << " RGB benchmark gaussians=" << model.size() << " view=" << index
                   << " size=" << view.camera.width << 'x' << view.camera.height << std::endl;
         for (unsigned step = 1; step <= iterations + 3; ++step) {
@@ -66,21 +68,34 @@ int run_rgb_benchmark(int argc, char** argv) {
             const auto gradients = rasterizer.backward(model, rendered, loss.color,
                 loss.alpha, {}, {}, {}, &su, &st);
             sync(); const auto after_backward = std::chrono::steady_clock::now();
+            rasterizer.materialize_visibility(rendered);
+            detail::accumulate_densification_stats(
+                gradients.refine_weight, rendered.visibility, rendered.radii,
+                stats, view.camera.width, view.camera.height, true, true,
+                1.F, o.densify_screen_threshold, gradients.refine_weight,
+                static_cast<int>(index));
+            sync(); const auto after_stats = std::chrono::steady_clock::now();
+            detail::inject_adc_noise(model, rendered.visibility,
+                o.means_lr * o.mean_noise_weight, 1.F, o.seed + step,
+                rendered.radii, false);
+            sync(); const auto after_noise = std::chrono::steady_clock::now();
             require(!gradients.means.is_valid() && !gradients.sh.is_valid(),
                 "RGB benchmark did not exercise fused optimizers");
             const double row[]{
                 std::chrono::duration<double,std::milli>(after_forward-start).count(),
                 std::chrono::duration<double,std::milli>(after_loss-after_forward).count(),
                 std::chrono::duration<double,std::milli>(after_backward-after_loss).count(),
-                std::chrono::duration<double,std::milli>(after_backward-start).count()};
+                std::chrono::duration<double,std::milli>(after_stats-after_backward).count(),
+                std::chrono::duration<double,std::milli>(after_noise-after_stats).count(),
+                std::chrono::duration<double,std::milli>(after_noise-start).count()};
             if (step > 3) {
                 csv << name << ',' << step-4;
-                for (unsigned i=0; i<4; ++i) { times[i].push_back(row[i]); csv << ',' << row[i]; }
+                for (unsigned i=0; i<6; ++i) { times[i].push_back(row[i]); csv << ',' << row[i]; }
                 csv << '\n';
             }
         }
-        const char* labels[]{"forward","photo_loss","backward_adam","total"};
-        for (unsigned i=0; i<4; ++i)
+        const char* labels[]{"forward","photo_loss","backward_adam","adc_stats","noise","total"};
+        for (unsigned i=0; i<6; ++i)
             std::cout << name << " phase=" << labels[i] << " median_ms=" << median_ms(times[i]) << std::endl;
         for (const auto* tensor : {&model.means, &model.log_scales, &model.quaternions,
                                    &model.opacity_logits, &model.sh}) {
