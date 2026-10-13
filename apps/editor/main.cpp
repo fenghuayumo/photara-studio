@@ -201,6 +201,7 @@ int main(const int argc, char** argv) {
         editor::poll_align_live(app);
         editor::poll_camera_photos(app);
         editor::poll_splat_simplify(app);
+        editor::poll_splat_export(app);
 
         if (app.smoke_mode) {
             if (!app.smoke_started && !app.job.running()) {
@@ -447,6 +448,8 @@ int main(const int argc, char** argv) {
     }
 
     if (app.job.running()) app.job.stop();
+    if (app.splat_export.cancel) app.splat_export.cancel->store(true);
+    if (app.splat_export.job.valid()) app.splat_export.job.wait();
     editor::cleanup_cache_session(app);
     editor::gpu::wait_idle();
     app.image_qa_session.clear();

@@ -54,6 +54,8 @@ The implementation currently includes:
   checkpoint are available;
 - `.ascan` project archives and exports for OpenMVS, COLMAP, Nerfstudio, PLY,
   OBJ, GLB, SOG, and SPZ, depending on the selected stage.
+- native C++ [Streamed SOG LOD export](docs/splat-deployment.md),
+  with Vulkan merge-cost evaluation.
 
 OpenCV is intentionally not part of the default dependency graph. JPEG and PNG
 use their native libraries, FreeImage handles the remaining supported image

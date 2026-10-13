@@ -26,6 +26,8 @@ void save_gaussians(
     const GaussianModel& model, const std::filesystem::path& path,
     GaussianFormat format = GaussianFormat::auto_detect);
 
+void save_sog_unbundled(const GaussianModel&, const std::filesystem::path& directory);
+
 // Keep bands 0..degree and drop the rest. No-op when `degree` is already
 // greater than or equal to the model degree. Degree must be 0 to 3.
 void restrict_sh_degree(GaussianModel& model, unsigned degree);

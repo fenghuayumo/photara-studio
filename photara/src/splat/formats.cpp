@@ -369,11 +369,12 @@ struct SogAssets {
 
 [[nodiscard]] SogAssets read_sog_assets(const std::filesystem::path& path) {
     SogAssets result;
-    if (std::filesystem::is_directory(path)) {
-        const auto meta_path = path / "meta.json";
+    if (std::filesystem::is_directory(path) || path.filename() == "meta.json") {
+        const auto directory = std::filesystem::is_directory(path) ? path : path.parent_path();
+        const auto meta_path = directory / "meta.json";
         const Bytes meta_bytes = read_file(meta_path);
         result.meta.assign(meta_bytes.begin(), meta_bytes.end());
-        for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
             if (!entry.is_regular_file() || entry.path().filename() == "meta.json")
                 continue;
             result.files.emplace(entry.path().filename().generic_string(),
@@ -1434,6 +1435,12 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
     return "";
 }
 
+void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
+    const auto files = read_sog_zip(save_sog(model));
+    std::filesystem::create_directories(directory);
+    for (const auto& [name, bytes] : files) write_file(directory / name, bytes);
+}
+
 void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
     if (degree > 3U)
         throw std::runtime_error("SH degree must be between 0 and 3");
@@ -1475,7 +1482,7 @@ GaussianModel load_gaussians(
     const std::filesystem::path& path, GaussianFormat format,
     const tinytensor::Device device) {
     if (format == GaussianFormat::auto_detect) {
-        format = std::filesystem::is_directory(path)
+        format = (std::filesystem::is_directory(path) || path.filename() == "meta.json")
             ? GaussianFormat::sog
             : gaussian_format_from_path(path);
     }

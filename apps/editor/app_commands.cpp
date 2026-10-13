@@ -1395,6 +1395,7 @@ std::filesystem::path suggested_splat_export_path(
         case 1: path += ".sog"; break;
         case 2: path += ".spz"; break;
         case 3: path += ".glb"; break;
+        case 4: path += "_lod"; break;
         default: path += ".ply"; break;
     }
     return path;
@@ -1411,6 +1412,12 @@ void sync_splat_export_path(App& app, const bool force) {
         auto parent = current.parent_path();
         if (!parent.empty()) directory = parent;
         auto current_stem = current.stem();
+        if (app.splat_export.path_format >= 4) {
+            auto name = current.filename().wstring();
+            const std::wstring suffix = L"_lod";
+            if (name.ends_with(suffix)) name.resize(name.size() - suffix.size());
+            current_stem = name;
+        }
         const std::wstring text = current_stem.wstring();
         constexpr wchar_t suffix[] = L"_splat";
         const std::size_t suffix_n = 6;
@@ -1426,6 +1433,13 @@ void sync_splat_export_path(App& app, const bool force) {
 
 bool browse_splat_export_path(App& app) {
     sync_splat_export_path(app, false);
+    if (app.splat_export.format >= 4) {
+        std::array<char, 1024> folder{};
+        if (!pick_folder(L"Choose parent folder for export", folder)) return false;
+        const auto current = path_from_utf8_field(app.splat_export.path.data());
+        store_path_field(app.splat_export.path, path_from_utf8_field(folder.data()) / current.filename());
+        return true;
+    }
     const wchar_t* extension = splat_export_extension_wide(app);
     const auto current = path_from_utf8_field(app.splat_export.path.data());
     const std::wstring name = current.filename().empty()
@@ -1591,8 +1605,23 @@ bool can_export_mesh_file(const App& app) {
     return app.has_mesh || app.mesh.has() || can_export_textured_mesh(app);
 }
 
+void poll_splat_export(App& app) {
+    auto& state = app.splat_export;
+    if (!state.job.valid() || state.job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    try {
+        state.job.get();
+        state.error.clear();
+        set_message(app, "Exported splat assets: " + path_to_utf8(state.output), theme::success);
+    } catch (const std::exception& error) {
+        state.error = error.what();
+        set_message(app, state.error, theme::danger);
+    }
+    state.cancel.reset();
+    state.progress.reset();
+}
+
 void export_trained_model(App& app) {
-    if (app.job.running() || !can_export_model(app)) return;
+    if (app.job.running() || app.splat_export.job.valid() || !can_export_model(app)) return;
     const auto format = splat_export_format(app);
     const auto* extension = splat_export_extension_wide(app);
     app.splat_export.sh_degree = std::clamp(app.splat_export.sh_degree, 0, 3);
@@ -1603,7 +1632,7 @@ void export_trained_model(App& app) {
         out = path_from_utf8_field(app.splat_export.path.data());
     }
     if (out.empty()) return;
-    if (out.extension().empty()) {
+    if (app.splat_export.format < 4 && out.extension().empty()) {
         out += ".";
         out += std::filesystem::path(extension);
         store_path_field(app.splat_export.path, out);
@@ -1615,7 +1644,8 @@ void export_trained_model(App& app) {
             app.splat_edit.dirty() && app.splat_edit.copy_model(model);
         if (!from_edit) {
             if (!source.empty()) {
-                model = photara::splat::load_gaussians(source);
+                model = photara::splat::load_gaussians(source,
+                    app.splat_export.format >= 4 ? tinytensor::Device::CPU : tinytensor::Device::CUDA);
             } else {
                 const auto archive =
                     photara::project::Archive::open(app.layout.project_file);
@@ -1626,6 +1656,25 @@ void export_trained_model(App& app) {
         const unsigned export_degree =
             std::min(model.sh_degree,
                      static_cast<unsigned>(app.splat_export.sh_degree));
+        if (app.splat_export.format >= 4) {
+            photara::splat::restrict_sh_degree(model, export_degree);
+            auto cancel = std::make_shared<std::atomic<bool>>(false);
+            auto progress = std::make_shared<std::atomic<float>>(0.F);
+            auto lod = app.splat_export.lod;
+            lod.cancelled = [cancel] { return cancel->load(); };
+            lod.progress = [progress](float p) { progress->store(p); };
+            app.splat_export.cancel = cancel;
+            app.splat_export.progress = progress;
+            app.splat_export.output = std::filesystem::absolute(out);
+            app.splat_export.error.clear();
+            app.splat_export.job = std::async(std::launch::async,
+                [model = std::move(model), out = app.splat_export.output, lod] {
+                    photara::splat::export_streamed_sog(model, out, lod);
+                });
+            app.splat_export.show = true;
+            set_message(app, "Processing splat assets on Vulkan...", theme::success);
+            return;
+        }
         const auto dest_ext = lower_path_extension(out);
         const auto source_ext = lower_path_extension(source);
         if (!from_edit && export_degree >= model.sh_degree && !source.empty() &&
