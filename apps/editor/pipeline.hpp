@@ -237,7 +237,7 @@ struct ProjectSettings {
     // Optional existing trained Gaussian file to preview/import. Empty uses
     // the working copy in cache, or a leftover sidecar from an older run.
     std::array<char, 1024> splat_model_source{};
-    int splat_format = 0;  // export format: auto/PLY, PLY, SOG, SPZ, GLB
+    int splat_format = 0;  // export format: auto/PLY, PLY, SOG, SPZ, GLB, USDC
 
     // 0 = pinhole, 1 = OpenCV fisheye, 2 = automatic, 3 = equirectangular
     // (the values mirror photara::CameraModel so the CLI flag and the
@@ -354,6 +354,7 @@ struct ProjectLayout {
     std::filesystem::path splat_sog;
     std::filesystem::path splat_spz;
     std::filesystem::path splat_glb;
+    std::filesystem::path splat_usdc;
     std::filesystem::path splat_model;
     std::filesystem::path mesh_ply;
     std::filesystem::path mvs_mesh_ply;

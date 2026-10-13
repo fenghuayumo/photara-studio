@@ -278,8 +278,13 @@ void draw_splat_export_modal(App& app) {
     auto& state = app.splat_export;
     const bool running = state.job.valid();
     ImGui::BeginDisabled(running);
-    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)"), tr("Collision Mesh (Vulkan)")};
-    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 6))
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)"), tr("Collision Mesh (Vulkan)")
+#ifdef PHOTARA_HAS_USDC
+        , "USDC (OpenUSD 3DGS)"
+#endif
+    };
+    constexpr int format_count = static_cast<int>(std::size(formats));
+    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, format_count))
         sync_splat_export_path(app, true);
     if (app.splat_export.format == 1)
         theme::caption("PlayCanvas compressed Gaussians.");
@@ -291,6 +296,8 @@ void draw_splat_export_modal(App& app) {
         theme::caption("Streamed SOG: lod-meta.json and spatial LOD chunks.");
     else if (state.format == 5)
         theme::caption("Gaussian voxelization, sparse octree, and collision GLB.");
+    else if (state.format == 6)
+        theme::caption("OpenUSD ParticleField3DGaussianSplat with full SH data.");
     else
         theme::caption("Standard 3DGS PLY.");
 
@@ -320,7 +327,8 @@ void draw_splat_export_modal(App& app) {
     }
 
     ImGui::Spacing();
-    theme::caption(state.format >= 4 ? "New output folder" : "Location");
+    const bool folder_export = state.format == 4 || state.format == 5;
+    theme::caption(folder_export ? "New output folder" : "Location");
     ImGui::SetNextItemWidth(-78.F);
     ImGui::InputText(
         "##splat_path", app.splat_export.path.data(),
@@ -332,7 +340,7 @@ void draw_splat_export_modal(App& app) {
     ImGui::Spacing();
     const auto out = path_from_utf8_field(app.splat_export.path.data());
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
-    const float writes_h = ImGui::GetTextLineHeightWithSpacing() * (state.format >= 4 ? 4.F : 2.F) + 14.F;
+    const float writes_h = ImGui::GetTextLineHeightWithSpacing() * (folder_export ? 4.F : 2.F) + 14.F;
     ImGui::BeginChild(
         "##splat_writes", ImVec2(-1.F, writes_h), true,
         ImGuiWindowFlags_NoScrollbar);

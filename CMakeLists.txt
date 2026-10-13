@@ -62,6 +62,7 @@ function(photara_resolve_cuda_architectures out_var)
 endfunction()
 option(PHOTARA_ENABLE_SPLAT
     "Build CUDA Gaussian splat training (TinyTensor + splat_drender)" ON)
+option(PHOTARA_ENABLE_USDC "Enable native USDC Gaussian export with LightUSD" ON)
 option(PHOTARA_ENABLE_VULKAN_COMPUTE
     "Build the TinyTensor Vulkan compute backend (HLSL/DXC, independent VkDevice)" ON)
 option(PHOTARA_ENABLE_ACCUTILE

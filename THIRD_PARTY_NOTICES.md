@@ -56,6 +56,13 @@ terms do not fit the intended distribution.
 
 ## Submodule and fetched native libraries
 
+USDC support (`PHOTARA_ENABLE_USDC=ON`) fetches and statically links
+[LightUSD](https://github.com/lighttransport/tinyusdz), revision
+`d1ede90f919f6fe7c0014487be5441afb919cc79`, under Apache-2.0 (Light Transport
+Entertainment Inc. and contributors). Its native crate writer uses the upstream
+bundled LZ4 (BSD-2-Clause); retain that source tree's license notices when
+distributing the library. No Python USD package is required at runtime.
+
 | Component | License | Used for |
 |---|---|---|
 | photara_drender | MIT | UV unwrap, projective texture bake, optional mesh tools |

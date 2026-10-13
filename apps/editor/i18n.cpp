@@ -29,6 +29,7 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"OpenUSD ParticleField3DGaussianSplat with full SH data.", "OpenUSD 3D 高斯粒子场，保留完整球谐数据。", "完全な SH データを持つ OpenUSD ガウス粒子フィールド。", "전체 SH 데이터를 포함한 OpenUSD 가우시안 입자 필드."},
     {"LOD Streaming (Vulkan)", "LOD 流式模型（Vulkan）", "LOD ストリーミング (Vulkan)", "LOD 스트리밍 (Vulkan)"},
     {"Collision Mesh (Vulkan)", "碰撞网格（Vulkan）", "衝突メッシュ (Vulkan)", "충돌 메시 (Vulkan)"},
     {"LOD levels", "LOD 级数", "LOD レベル数", "LOD 레벨 수"},
