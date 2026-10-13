@@ -318,6 +318,7 @@ struct ReconstructCli {
     // Unset keeps the default atlas size (kDefaultAtlasResolution).
     std::optional<std::uint32_t> atlas_resolution;
     std::uint32_t uv_parallel_partitions{8};
+    float uv_max_stretch{1.F / 3.F};
     bool texture_optimize{true};
     std::string texture_color_space{"srgb"};
     std::string texture_blend{"softmax"};
@@ -526,8 +527,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-adaptive-sigma BOOL  adapt visibility scale to local point density\n"
               << "  --mesh-max-edge-scale F  reject gap-spanning cut facets (default 4; 0 disables)\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
-              << "  --mesh-target-faces N  photara/CGAL repair + decimate target (0 disables)\n"
-              << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
+              << "  --mesh-target-faces N  optional decimation target (default 0; baking still repairs manifold topology)\n"
+              << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (bake-only false; otherwise true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
               << "  --mesh-tsdf-pixel-step N  sparse allocation stride (1 preserves thin wires; default 4)\n"
@@ -552,6 +553,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
+              << "  --uv-max-stretch F  UV distortion budget in [0,1] (default 0.333333)\n"
               << "  --texture-color-space srgb|linear  blend space (default srgb, matches photographs)\n"
               << "  --texture-optimize BOOL  photara_drender photometric + seam optimization (default true)\n"
               << "  --texture-optimize-steps N  native Vulkan Adam steps (default 3000)\n"
@@ -1100,7 +1102,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
         ("mesh-target-faces",
-         "Optional photara/CGAL repair and decimation target (0 disables)",
+         "Optional photara/CGAL decimation target (default 0; baking still repairs manifold topology)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1159,8 +1161,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "1 = ignore masks during the bake)",
          cxxopts::value<float>()->default_value("0.05"))
         ("texture-fill-unobserved",
-         "Fill rasterized atlas texels that received no projection sample from "
-         "the nearest valid texel",
+         "Fill unobserved texels from observed faces along shared mesh edges",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("texture-optimize",
          "Refine projected atlas with photara_drender's native optimizer",
@@ -1251,7 +1252,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint32_t>())
         ("uv-parallel-partitions",
          "Spatial UVAtlas partitioning level (1 = serial)",
-         cxxopts::value<std::uint32_t>()->default_value("8"));
+         cxxopts::value<std::uint32_t>()->default_value("8"))
+        ("uv-max-stretch", "UV distortion budget (higher values allow fewer cuts)",
+         cxxopts::value<float>()->default_value("0.333333333"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("version")) {
@@ -1651,6 +1654,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
+    cli.uv_max_stretch = result["uv-max-stretch"].as<float>();
     cli.texture_color_space = result["texture-color-space"].as<std::string>();
     if (cli.texture_color_space != "srgb" &&
         cli.texture_color_space != "linear")
@@ -1811,6 +1815,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         !cli.working_mesh.empty() || !cli.mask_mesh.empty();
     cli.texture_only = cli.texture && have_existing_mesh && !cli.splat &&
                        !cli.dense && result.count("mesh") == 0;
+    // Preserve extracted thin structures when preparing an existing mesh.
+    // Field-aligned remeshing remains available through an explicit override.
+    if (cli.texture_only && result.count("mesh-remesh") == 0)
+        cli.mesh_remesh = false;
     if (cli.texture && !cli.texture_only) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     // An explicitly selected capture mode is the product-level full rebuild
@@ -1978,6 +1986,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.uv_parallel_partitions == 0)
         throw std::invalid_argument(
             "--uv-parallel-partitions must be positive");
+    if (!std::isfinite(cli.uv_max_stretch) || cli.uv_max_stretch < 0.F ||
+        cli.uv_max_stretch > 1.F)
+        throw std::invalid_argument("--uv-max-stretch must be finite and within [0,1]");
     if (cli.texture_optimize &&
         (cli.texture_optimize_steps == 0 ||
          cli.texture_optimize_batch_size == 0))
@@ -2614,12 +2625,19 @@ void write_mesh_artifact(
 }
 
 #if defined(PHOTARA_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+bool repair_and_decimate_mesh(
+    photara::mvs::Mesh& mesh, std::uint64_t target_faces,
+    bool use_instant_remesh, bool preserve_components);
+#endif
+
 photara::texture::TextureOptions texture_options_from_cli(
     const ReconstructCli& cli) {
     photara::texture::TextureOptions options;
     options.atlas_resolution =
         cli.atlas_resolution.value_or(options.atlas_resolution);
     options.uv_parallel_partitions = cli.uv_parallel_partitions;
+    options.uv_max_stretch = cli.uv_max_stretch;
     options.color_space = cli.texture_color_space == "linear"
         ? photara::texture::BlendColorSpace::linear
         : photara::texture::BlendColorSpace::srgb;
@@ -2726,6 +2744,33 @@ void bake_texture_only(
     const auto parent = cli.output.parent_path().empty()
         ? std::filesystem::current_path()
         : cli.output.parent_path();
+    if (cli.mesh_target_faces > 0) {
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+        if (repair_and_decimate_mesh(
+                scene.mesh, cli.mesh_target_faces, cli.mesh_remesh, true)) {
+            const auto processed_path = parent /
+                (cli.output.stem().string() + "_bake_mesh.ply");
+            const auto aliases_source = [&](const std::filesystem::path& source) {
+                if (source.empty()) return false;
+                std::error_code error;
+                return std::filesystem::equivalent(source, processed_path, error);
+            };
+            if (aliases_source(cli.working_mesh) || aliases_source(cli.mask_mesh))
+                throw std::runtime_error(
+                    "Processed baking mesh output aliases the input mesh; "
+                    "choose a different --output stem");
+            ensure_artifact_parent(processed_path);
+            photara::mvs::save_mesh_ply(scene.mesh, processed_path);
+            photara::core::Logger::instance().info(
+                "texture_source_mesh=", processed_path,
+                " faces=", scene.mesh.faces.size());
+        }
+#else
+        throw std::runtime_error(
+            "Bake Texture mesh postprocessing requires CGAL mesh tools; "
+            "use --mesh-target-faces 0 to disable it");
+#endif
+    }
     write_texture_artifact(
         cli, scene, parent / (cli.output.stem().string() + "_textured"),
         write_project ? &archive : nullptr, write_project);
@@ -3227,7 +3272,7 @@ void retain_largest_edge_component(
 
 bool repair_and_decimate_mesh(
     photara::mvs::Mesh& mesh, const std::uint64_t target_faces,
-    const bool use_instant_remesh) {
+    const bool use_instant_remesh, const bool preserve_components = false) {
     if (target_faces == 0 || mesh.faces.empty()) return false;
     if (mesh.faces.size() <= target_faces) {
         photara::core::Logger::instance().info(
@@ -3280,7 +3325,8 @@ bool repair_and_decimate_mesh(
                 " -> ", remeshed.indices.size() / 3);
             positions = std::move(remeshed.positions);
             indices = std::move(remeshed.indices);
-            retain_largest_edge_component(positions, indices);
+            if (!preserve_components)
+                retain_largest_edge_component(positions, indices);
         } catch (const std::exception& error) {
             photara::core::Logger::instance().warning(
                 "Instant Meshes failed; continuing with CGAL repair: ",
@@ -3296,7 +3342,10 @@ bool repair_and_decimate_mesh(
         positions, indices,
         photara_mesh::DecimateOptions{
             static_cast<std::size_t>(target_faces), false});
-    retain_largest_edge_component(result.positions, result.indices);
+    // A scene can contain useful disconnected objects. The largest component
+    // may be the surrounding surface rather than the subject being textured.
+    if (!preserve_components)
+        retain_largest_edge_component(result.positions, result.indices);
     photara::mvs::Mesh processed;
     processed.vertices.reserve(result.positions.size() / 3);
     for (std::size_t vertex = 0; vertex < result.positions.size() / 3;

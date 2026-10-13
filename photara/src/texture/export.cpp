@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -76,6 +78,7 @@ void save_textured_obj(
 
     std::ofstream obj(obj_path);
     if (!obj) throw std::runtime_error("Failed to create OBJ: " + obj_path);
+    obj << std::setprecision(std::numeric_limits<float>::max_digits10);
     obj << "# Photara textured mesh";
     if (mesh.delighted) obj << " (albedo / delighted)";
     obj << '\n';

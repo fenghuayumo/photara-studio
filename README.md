@@ -359,8 +359,29 @@ therefore requires both splat support and a CGAL-enabled build.
 ```
 
 `--texture` implies mesh generation unless an editor working mesh is supplied.
-It creates UVs and bakes projective color through `photara_drender`. Blending
-defaults to sRGB so the atlas matches the photographs. Pass
+It creates UVs and bakes projective color through `photara_drender`.
+
+An existing mesh supplied with `--working-mesh` is checked for manifold topology
+before UV unwrapping. CGAL repairs non-manifold edges and vertex fans without a
+face reduction target; vertex duplication can preserve the original surfaces.
+Baking preserves disconnected components and defaults to no simplification or
+remeshing. Degenerate or duplicate faces may be removed during repair.
+Explicitly pass `--mesh-target-faces N` to request simplification, and optionally
+`--mesh-remesh=true` to run Instant Meshes first. `--mesh-target-faces 0` disables
+simplification while retaining the manifold repair. The source PLY is preserved;
+an explicitly simplified mesh is written to `<output_stem>_bake_mesh.ply`.
+
+`--uv-parallel-partitions` defaults to 8. Increasing it adds spatial cuts and
+can fragment charts; prefer the default when texture continuity matters.
+`--uv-max-stretch` defaults to one third. Higher values allow more UV distortion
+in exchange for fewer chart cuts; it does not change mesh geometry.
+Large chart sets are packed concurrently into separate atlas tiles.
+`--texture-fill-unobserved` extrapolates measured face colours along shared mesh
+edges, including UV seams, before gutter padding. It preserves measured texels
+and leaves disconnected components without observations empty. Filled regions
+contain estimated colour rather than recovered photographic detail.
+
+Blending defaults to sRGB so the atlas matches the photographs. Pass
 `--texture-color-space linear` to blend in scene-linear light instead. Add
 `--delight` to run the optional intrinsic-image model before baking; this
 requires ONNX Runtime and the licensed `stage_0.onnx` through `stage_3.onnx`
