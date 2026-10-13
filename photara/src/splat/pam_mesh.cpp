@@ -12,14 +12,25 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <queue>
 #include <random>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#undef near
+#undef far
+#endif
 
 #if defined(PHOTARA_HAS_CGAL)
 #include <CGAL/Delaunay_triangulation_3.h>
@@ -33,12 +44,38 @@
 namespace photara::splat {
 namespace {
 
+std::size_t pam_host_cache_budget() {
+    constexpr std::size_t gib = std::size_t{1} << 30;
+    std::size_t available = 0;
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) available = status.ullAvailPhys;
+#elif defined(__linux__)
+    std::ifstream memory("/proc/meminfo");
+    std::string line;
+    while (std::getline(memory, line)) {
+        if (line.starts_with("MemAvailable:")) {
+            std::istringstream row(line.substr(13));
+            std::size_t kb = 0;
+            if (row >> kb) available = kb * 1024;
+            break;
+        }
+    }
+#endif
+    if (!available) return 4 * gib;
+    // Leave room for Delaunay, sample staging, the OS and other applications.
+    // Use at most half the remaining headroom, and never exceed 8 GiB.
+    const auto reserve = std::min(available, 4 * gib);
+    return std::min(8 * gib, (available - reserve) / 2);
+}
+
 class KnnTree {
 public:
     explicit KnnTree(std::vector<mvs::Vec3f> points)
         : points_(std::move(points)), order_(points_.size()) {
         std::iota(order_.begin(), order_.end(), std::size_t{0});
-        nodes_.reserve(points.size());
+        nodes_.reserve(points_.size());
         root_ = build(0, order_.size());
     }
 
@@ -309,10 +346,6 @@ tinytensor::Tensor evaluate_global_occupancy_device(
         for (std::size_t begin = 0; begin < point_count; begin += capacity) {
             const std::size_t count = std::min(capacity, point_count - begin);
             const auto query = points.slice(0, begin, begin + count);
-            // Use owned chunk storage during the ternary reductions; sliced
-            // accumulators are copied back only after the view vote is ready.
-            auto occupancy = result.slice(0, begin, begin + count).clone();
-            auto observed = all_observed.slice(0, begin, begin + count).clone();
             OccupancyResult view_result;
 #ifdef TINYTENSOR_HAS_VULKAN
             if (device==tinytensor::Device::Vulkan) {
@@ -324,6 +357,17 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                 ? rasterizer.evaluate_occupancy(*cache, view_index, query)
                 : rasterizer.evaluate_occupancy(
                     model, query, camera_from_mvs_view(view), raster_options);
+            if (device == tinytensor::Device::CUDA && !has_masks) {
+                auto occupancy = result.slice(0, begin, begin + count);
+                auto observed = all_observed.slice(0, begin, begin + count);
+                detail::pam_accumulate_occupancy_cuda(
+                    occupancy, observed, view_result.occupancy, view_result.inside);
+                continue;
+            }
+            // Use owned chunk storage during the ternary reductions; sliced
+            // accumulators are copied back only after the view vote is ready.
+            auto occupancy = result.slice(0, begin, begin + count).clone();
+            auto observed = all_observed.slice(0, begin, begin + count).clone();
             tinytensor::Tensor possibly_foreground = view_result.inside;
             tinytensor::Tensor definitely_background =
                 tinytensor::Tensor::zeros_like(view_result.inside);
@@ -399,12 +443,12 @@ std::vector<float> evaluate_global_occupancy(
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
     OccupancyCache* cache = nullptr, bool pivot_mask = false) {
-    // Stage bounded batches on Vulkan so several dispatch chunks share each
+    // Stage bounded batches so several dispatch chunks share each
     // view preparation. Four million queries need 48 MiB of point storage;
     // never upload all tens of millions of tetrahedral samples at once.
     std::vector<float> result(points.size());
     const std::size_t capacity = std::max<std::size_t>(chunk_size,
-        model.means.device() == tinytensor::Device::Vulkan ? 4 * 1024 * 1024 : 1);
+        std::size_t{4} * 1024 * 1024);
     const std::span<const mvs::Vec3f> all_points(points);
     for (std::size_t begin = 0; begin < points.size(); begin += capacity) {
         const std::size_t count = std::min(capacity, points.size() - begin);
@@ -900,8 +944,15 @@ PamMeshResult extract_pam_mesh(
     occupancy_options.scale_modifier = training_options.scale_modifier;
     // CUDA caches per-view projections; Vulkan keeps one bounded raster
     // workspace reused across views/chunks rather than retaining N*V buffers.
+    const std::size_t host_cache_budget = vulkan ? 0 :
+        (options.occupancy_cache_host_budget ? options.occupancy_cache_host_budget
+                                            : pam_host_cache_budget());
     auto occupancy_cache = vulkan ? OccupancyCache{} : Rasterizer().prepare_occupancy_cache(
-        model, occupancy_cameras, occupancy_options);
+        model, occupancy_cameras, occupancy_options, 0,
+        host_cache_budget);
+    if (!vulkan)
+        core::Logger::instance().info("splat PAM CUDA occupancy host cache: budget_bytes=",
+            host_cache_budget);
     std::mt19937 random(options.seed);
     mvs::Mesh generated_seed_mesh;
     const mvs::Mesh* active_seed_mesh = &seed_mesh;
@@ -1055,7 +1106,7 @@ PamMeshResult extract_pam_mesh(
     cells.reserve(triangulation.number_of_finite_cells());
     std::uniform_real_distribution<float> uniform(0.F, 1.F);
     const std::size_t query_batch = std::max<std::size_t>(options.occupancy_chunk_size,
-        vulkan ? 4 * 1024 * 1024 : 1);
+        std::size_t{4} * 1024 * 1024);
     const std::size_t cell_chunk = std::max<std::size_t>(
         1, query_batch /
                options.points_per_tetrahedron);
@@ -1236,6 +1287,9 @@ PamMeshResult extract_pam_mesh(
             " host_bytes=", cache_stats.host_bytes);
         core::Logger::instance().info(
             "splat PAM occupancy preparations=", cache_stats.preparations);
+        core::Logger::instance().info(
+            "splat PAM occupancy uploads=", cache_stats.uploads,
+            " upload_bytes=", cache_stats.upload_bytes);
     }
     stage.finish();
     return result;

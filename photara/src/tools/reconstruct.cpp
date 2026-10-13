@@ -277,6 +277,7 @@ struct ReconstructCli {
     unsigned pam_neighbors{32};
     bool pam_gpu_refinement{true};
     std::uint64_t pam_occupancy_chunk_size{4'000'000};
+    std::uint64_t pam_occupancy_host_cache_mb{0};
     unsigned pam_points_per_tetrahedron{10};
     float pam_occupancy_iso_value{0.5F};
     float pam_vacancy_threshold{0.1F};
@@ -513,6 +514,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
               << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
               << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
+              << "  --pam-occupancy-host-cache-mb N  CUDA host cache MiB (0 = auto, up to 8 GiB)\n"
               << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
@@ -1064,6 +1066,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("pam-occupancy-chunk-size", "PAM query batch size; larger batches amortize camera preparation",
          cxxopts::value<std::uint64_t>()->default_value("4000000"))
+        ("pam-occupancy-host-cache-mb", "CUDA PAM host draw-list cache MiB (0 = automatic, at most 8 GiB)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
         ("pam-points-per-tetrahedron", "PAM occupancy samples per tetrahedron",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-occupancy-iso-value",
@@ -1668,6 +1672,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
     cli.pam_gpu_refinement = result["pam-gpu-refinement"].as<bool>();
     cli.pam_occupancy_chunk_size = result["pam-occupancy-chunk-size"].as<std::uint64_t>();
+    cli.pam_occupancy_host_cache_mb = result["pam-occupancy-host-cache-mb"].as<std::uint64_t>();
     cli.pam_points_per_tetrahedron =
         result["pam-points-per-tetrahedron"].as<unsigned>();
     cli.pam_occupancy_iso_value =
@@ -1967,6 +1972,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.pam_neighbors == 0 ||
         cli.pam_occupancy_chunk_size == 0 ||
         cli.pam_occupancy_chunk_size > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) ||
+        cli.pam_occupancy_host_cache_mb > (std::numeric_limits<std::size_t>::max)() / (1024 * 1024) ||
         cli.pam_points_per_tetrahedron == 0 ||
         !std::isfinite(cli.pam_pivot_std_factor) ||
         !(cli.pam_pivot_std_factor > 0.F) ||
@@ -3986,6 +3992,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         pam_options.vector_field_neighbors = cli.pam_neighbors;
         pam_options.gpu_refinement = cli.pam_gpu_refinement;
         pam_options.occupancy_chunk_size = static_cast<std::size_t>(cli.pam_occupancy_chunk_size);
+        pam_options.occupancy_cache_host_budget =
+            static_cast<std::size_t>(cli.pam_occupancy_host_cache_mb) * 1024 * 1024;
         pam_options.points_per_tetrahedron =
             cli.pam_points_per_tetrahedron;
         pam_options.occupancy_iso_value =

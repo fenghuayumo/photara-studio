@@ -172,6 +172,13 @@ keeps the model and refinement points on its device; KD-tree construction and
 CGAL tetrahedralization remain CPU stages. `--splat-mesh-only --backend vulkan`
 loads the saved model directly on Vulkan. Disabling GPU refinement moves the
 vector-field projection to CPU while occupancy queries stay on the model device.
+CUDA reuses the active view's draw list across consecutive point chunks, including
+host-spilled and uncached views. PAM selects a pageable host cache from available
+RAM, leaving 4 GiB plus half the remaining headroom for staging, Delaunay and other
+applications, with an 8 GiB cache ceiling. `--pam-occupancy-host-cache-mb` overrides
+this budget (0 selects automatic sizing). Quality presets and sample counts are
+unaffected. The default 32-neighbour and High 48-neighbour CUDA kernels use smaller
+private heaps than the 64-neighbour fallback.
 GW PLY opacity logits of positive/negative infinity are loaded as finite logits
 with the same saturated float32 sigmoid values; NaNs remain rejected.
 

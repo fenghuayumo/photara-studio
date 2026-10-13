@@ -31,4 +31,10 @@ void pam_refine_points(
     const tinytensor::Tensor& occupancy, unsigned neighbors,
     float iso_value, float minimum_gradient_norm_squared, float step);
 
+// Reduce an unmasked view directly into initialized occupancy/visibility
+// accumulators, preserving frustum abstentions and the exact min operation.
+void pam_accumulate_occupancy_cuda(
+    tinytensor::Tensor& occupancy, tinytensor::Tensor& observed,
+    const tinytensor::Tensor& view_occupancy, const tinytensor::Tensor& inside);
+
 }  // namespace photara::splat::detail

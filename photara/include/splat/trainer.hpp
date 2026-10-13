@@ -138,6 +138,9 @@ struct PamMeshOptions {
     float mask_background_threshold{0.01F};
     // Amortize per-camera Gaussian preparation without reducing samples.
     std::size_t occupancy_chunk_size{4'000'000};
+    // Zero selects a bounded budget from available system memory. Positive
+    // values cap immutable CUDA draw lists on the host (bytes, pageable RAM).
+    std::size_t occupancy_cache_host_budget{0};
     unsigned seed{0};
 };
 

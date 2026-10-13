@@ -88,6 +88,7 @@ struct OccupancyCache {
 struct OccupancyCacheStats {
     std::size_t prepared_views{}, queries{}, device_bytes{}, host_bytes{};
     std::size_t preparations{};
+    std::size_t uploads{}, upload_bytes{};
 };
 
 class Rasterizer {
@@ -142,7 +143,9 @@ public:
         const RasterizeOptions& options = {}) const;
 
     // Budgets bound resident draw lists on both devices. Views exceeding both
-    // budgets are prepared on demand, with identical query results.
+    // budgets are prepared on demand, with identical query results. One active
+    // view can temporarily reside beyond the permanent budget until a camera
+    // switch, so consecutive point chunks share preparation and upload.
     // Zero selects a budget from currently available VRAM; SIZE_MAX forces host
     // storage (useful for verifying the spill path).
     OccupancyCache prepare_occupancy_cache(

@@ -2570,6 +2570,11 @@ void test_normal_field_parameterization_and_occupancy() {
                 std::vector<float>{0.F, 0.F, 2.F, .02F * repeat, 0.F, 2.1F,
                                    100.F, 0.F, 2.F, 0.F, 0.F, -2.F},
                 {4, 3}, tinytensor::Device::CUDA);
+            auto accumulated = tinytensor::Tensor::ones({7}, tinytensor::Device::CUDA);
+            auto observed = tinytensor::Tensor::zeros(
+                {7}, tinytensor::Device::CUDA, tinytensor::DataType::Bool);
+            std::vector<float> expected(7, 1.F);
+            std::vector<bool> expected_observed(7, false);
             for (std::size_t view = 0; view < cache_cameras.size(); ++view) {
                 const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
                 const auto pinned_before = tinytensor::VramProfiler::instance().snapshot().process.pinned_host_used;
@@ -2582,6 +2587,19 @@ void test_normal_field_parameterization_and_occupancy() {
                 require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
                         reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
                         "PAM cached occupancy differs from uncached query");
+                auto values = accumulated.slice(0, 1, 5);
+                auto visible = observed.slice(0, 1, 5);
+                detail::pam_accumulate_occupancy_cuda(values, visible, cached.occupancy, cached.inside);
+                const auto reference_values = reference.occupancy.to_vector();
+                const auto reference_inside = reference.inside.to_vector_bool();
+                for (std::size_t i = 0; i < reference_values.size(); ++i)
+                    if (reference_inside[i]) {
+                        expected[1 + i] = std::min(expected[1 + i], reference_values[i]);
+                        expected_observed[1 + i] = true;
+                    }
+                require(accumulated.to_vector() == expected &&
+                            observed.to_vector_bool() == expected_observed,
+                        "PAM fused occupancy changed view votes or slice boundaries");
             }
         }
         const auto stats = rasterizer.occupancy_cache_stats(cache);
@@ -2612,6 +2630,30 @@ void test_normal_field_parameterization_and_occupancy() {
         require(stats.host_bytes == 0 && stats.device_bytes == 0 &&
                 stats.prepared_views == 2 && stats.preparations == 6,
             "PAM cache exceeded residency budgets");
+    }
+
+    // Keep only the active view when both residency budgets are exhausted.
+    // Changed query points must not reuse previous occupancy values, and a
+    // camera switch must replace the temporary preparation/upload.
+    for (bool host_spill : {false, true}) {
+        Rasterizer rasterizer;
+        auto cache = rasterizer.prepare_occupancy_cache(model, cache_cameras, {},
+            std::numeric_limits<std::size_t>::max(), host_spill ? 1 << 20 : 0);
+        for (std::size_t view : {0U, 0U, 0U, 1U, 0U, 0U}) {
+            const auto queries = tinytensor::Tensor::from_vector(
+                std::vector<float>{0.F, 0.F, 2.F, .02F * float(rasterizer.occupancy_cache_stats(cache).queries),
+                                   0.F, 2.1F}, {2, 3}, tinytensor::Device::CUDA);
+            const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
+            const auto cached = rasterizer.evaluate_occupancy(cache, view, queries);
+            require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
+                        reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
+                    "PAM active-view reuse returned stale query results");
+        }
+        const auto stats = rasterizer.occupancy_cache_stats(cache);
+        require(stats.queries == 6 && stats.prepared_views == 2 &&
+                    stats.preparations == (host_spill ? 2 : 3) &&
+                    stats.uploads == (host_spill ? 3 : 0) && stats.device_bytes == 0,
+                "PAM active-view preparation/upload was not reused");
     }
 
     // Enough overlapping footprints to exercise depth-sort + stable tile-sort,
@@ -2810,7 +2852,7 @@ void test_pam_cuda_field() {
             static_cast<float>(i % 19) * 0.047F, static_cast<float>(i % 11) * 0.061F});
     const auto points = tinytensor::Tensor::from_vector(queries,
         {queries.size()/3, std::size_t{3}}, tinytensor::Device::CUDA);
-    for (unsigned neighbors : {1U, 4U, 32U, 64U}) {
+    for (unsigned neighbors : {1U, 4U, 32U, 33U, 48U, 49U, 64U}) {
         const auto reference = detail::pam_field_gradients_reference(model, queries, neighbors);
         const auto gpu = detail::pam_field_gradients(field, points, neighbors).to_vector();
         for (std::size_t i = 0; i < gpu.size(); ++i) {
