@@ -1972,7 +1972,10 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
 void show_mesh_view(App& app, const bool frame_when_ready) {
     app.view_mode = VisualizationMode::mesh;
     if (app.mesh.has()) {
-        frame_reconstruction(app);
+        // Manual mode switching keeps the orbit camera so mesh and 3DGS can
+        // be compared from the exact same viewpoint; only callers that just
+        // produced a new mesh ask for reframing.
+        if (frame_when_ready) frame_reconstruction(app);
         return;
     }
     app.mesh_load_failed = false;
@@ -2039,7 +2042,7 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
     if (mode == VisualizationMode::points)
         app.suppress_scene_auto_load = false;
     if (mode == VisualizationMode::mesh) {
-        show_mesh_view(app, !app.mesh.has());
+        show_mesh_view(app, false);
         write_preview_vis(app);
         return;
     }
@@ -2375,7 +2378,11 @@ void poll_mesh_load(App& app) {
     if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
     pack_mesh_gpu_buffers(app);
     ensure_reconstruction_box(app);
-    frame_reconstruction(app);
+    // Frame only when this load was requested with framing intent (fresh
+    // mesh from extraction or first session entry). A load triggered by
+    // switching to the mesh tab keeps the current camera for 3DGS/mesh
+    // comparison.
+    if (app.frame_mesh_on_load) frame_reconstruction(app);
     app.frame_mesh_on_load = false;
     app.view_mode = VisualizationMode::mesh;
     set_message(
