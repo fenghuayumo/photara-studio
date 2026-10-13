@@ -166,6 +166,27 @@ void test_pam_vulkan() {
     camera.position = {0, 0, -4};
     std::shared_ptr<void> backend;
     const auto actual = detail::vulkan_occupancy(backend, vk, points, camera, {});
+    // A prepared view must serve nonzero-offset chunks and a short tail
+    // identically to a complete query. Switching views starts a fresh frame.
+    for (unsigned view_index = 0; view_index < 2; ++view_index) {
+        auto test_camera = camera;
+        test_camera.world_to_camera[12] = .25F * float(view_index);
+        const auto reference = detail::vulkan_occupancy(
+            backend, vk, points, test_camera, {});
+        const auto expected_occ = reference.occupancy.to_vector();
+        const auto expected_inside = reference.inside.to_vector();
+        for (std::size_t begin = 0; begin < points.shape()[0]; begin += 257) {
+            const auto end = std::min(begin + 257, points.shape()[0]);
+            const auto chunk = detail::vulkan_occupancy(
+                backend, vk, points.slice(0, begin, end), test_camera, {}, begin != 0);
+            const auto occ = chunk.occupancy.to_vector();
+            const auto inside = chunk.inside.to_vector();
+            for (std::size_t i = 0; i < occ.size(); ++i) {
+                require(occ[i] == expected_occ[begin + i], "PAM prepared occupancy chunk parity");
+                require(inside[i] == expected_inside[begin + i], "PAM prepared frustum chunk parity");
+            }
+        }
+    }
     if (has_cuda) {
         const auto reference = Rasterizer().evaluate_occupancy(
             cpu, Tensor::from_vector(queries, {queries.size() / 3, std::size_t{3}}, Device::CUDA),
@@ -229,10 +250,14 @@ void test_pam_vulkan() {
                 for (unsigned x = 0; x < 24; ++x)
                     scene.views[0].foreground_mask[64 * y + x] = 0;
         }
+        auto chunk_scene = scene;
+        auto shifted_view = scene.views[0];
+        shifted_view.pose.C.x() += .25;
+        chunk_scene.views.push_back(shifted_view);
         options.gpu_refinement = has_cuda;
-        auto a = extract_pam_mesh(cpu, scene, seed, {}, options);
+        auto a = extract_pam_mesh(cpu, chunk_scene, seed, {}, options);
         options.gpu_refinement = true;
-        auto b = extract_pam_mesh(vk, scene, seed, {}, options);
+        auto b = extract_pam_mesh(vk, chunk_scene, seed, {}, options);
         require(!b.mesh.faces.empty() &&
                     a.candidate_cloud.points.size() == b.candidate_cloud.points.size(),
                 "PAM Vulkan extraction failed");
@@ -242,6 +267,17 @@ void test_pam_vulkan() {
                     "PAM Vulkan candidate parity");
         require(a.occupied_tetrahedron_count == b.occupied_tetrahedron_count,
                 "PAM Vulkan tetrahedron classification parity");
+        auto single_chunk_options = options;
+        single_chunk_options.occupancy_chunk_size = 4096;
+        const auto single_chunk = extract_pam_mesh(vk, chunk_scene, seed, {}, single_chunk_options);
+        require(single_chunk.occupied_tetrahedron_count == b.occupied_tetrahedron_count &&
+                    single_chunk.mesh.faces == b.mesh.faces &&
+                    single_chunk.candidate_cloud.points.size() == b.candidate_cloud.points.size(),
+                "PAM prepared view changed extraction topology");
+        for (std::size_t i = 0; i < b.candidate_cloud.points.size(); ++i)
+            require((single_chunk.candidate_cloud.points[i].position -
+                     b.candidate_cloud.points[i].position).norm() < 1e-6F,
+                    "PAM prepared view changed candidate positions");
     }
     // Also exercise the native empty-seed pivot path.
     scene.views[0].foreground_mask.clear();

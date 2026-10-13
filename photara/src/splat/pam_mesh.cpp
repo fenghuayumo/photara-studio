@@ -285,28 +285,39 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     const std::size_t point_count = points.shape()[0];
     const auto device=model.means.device();
     std::shared_ptr<void> local_backend;
-    auto result = tinytensor::Tensor::empty({point_count}, device);
+    auto result = tinytensor::Tensor::ones({point_count}, device);
     Rasterizer rasterizer;
     RasterizeOptions raster_options;
     raster_options.kernel_size = training_options.kernel_size;
     raster_options.scale_modifier = training_options.scale_modifier;
     const std::size_t capacity = std::max<std::size_t>(chunk_size, 1);
-    for (std::size_t begin = 0; begin < point_count; begin += capacity) {
-        const std::size_t count = std::min(capacity, point_count - begin);
-        const auto query = points.slice(0, begin, begin + count);
-        std::vector<float> host_query;
-        auto occupancy = tinytensor::Tensor::ones(
-            {count}, device);
-        auto observed = tinytensor::Tensor::zeros(
-            {count}, device,
-            tinytensor::DataType::Bool);
-        for (std::size_t view_index = 0; view_index < scene.views.size(); ++view_index) {
-            const mvs::MvsView& view = scene.views[view_index];
+    // Mask projection uses host double precision. Download once for all
+    // masked views; unmasked refinement stays entirely on the device.
+    std::vector<float> host_points;
+    const bool has_masks = std::any_of(scene.views.begin(), scene.views.end(), [](const auto& view) {
+            return !view.foreground_mask.empty() && view.foreground_mask.size() ==
+                static_cast<std::size_t>(view.width) * view.height;
+        });
+    auto all_observed = tinytensor::Tensor::zeros(
+        {point_count}, device, tinytensor::DataType::Bool);
+    if (has_masks)
+        host_points = points.to_vector();
+    // Prepare a view once, then query all its point chunks before moving on.
+    // Vulkan retains only one view's tile lists, irrespective of camera count.
+    for (std::size_t view_index = 0; view_index < scene.views.size(); ++view_index) {
+        const mvs::MvsView& view = scene.views[view_index];
+        for (std::size_t begin = 0; begin < point_count; begin += capacity) {
+            const std::size_t count = std::min(capacity, point_count - begin);
+            const auto query = points.slice(0, begin, begin + count);
+            // Use owned chunk storage during the ternary reductions; sliced
+            // accumulators are copied back only after the view vote is ready.
+            auto occupancy = result.slice(0, begin, begin + count).clone();
+            auto observed = all_observed.slice(0, begin, begin + count).clone();
             OccupancyResult view_result;
 #ifdef TINYTENSOR_HAS_VULKAN
             if (device==tinytensor::Device::Vulkan) {
                 view_result=detail::vulkan_occupancy(cache?cache->state:local_backend,
-                    model,query,camera_from_mvs_view(view),raster_options);
+                    model,query,camera_from_mvs_view(view),raster_options,begin != 0);
             } else
 #endif
             view_result = cache
@@ -319,9 +330,6 @@ tinytensor::Tensor evaluate_global_occupancy_device(
             const std::size_t mask_pixels =
                 static_cast<std::size_t>(view.width) * view.height;
             if (view.foreground_mask.size() == mask_pixels) {
-                // Retain the established double-precision mask projection.
-                // Unmasked refinement never downloads points between steps.
-                if (host_query.empty()) host_query = query.to_vector();
                 const float mask_denominator =
                     *std::max_element(
                         view.foreground_mask.begin(),
@@ -332,7 +340,7 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                 for (std::size_t i = 0; i < count; ++i) {
                     const Eigen::Vector3d camera =
                         view.pose.transform_world_to_camera(
-                            Eigen::Map<const mvs::Vec3f>(host_query.data() + 3 * i).cast<double>());
+                            Eigen::Map<const mvs::Vec3f>(host_points.data() + 3 * (begin + i)).cast<double>());
                     if (!(camera.z() > 0.0)) continue;
                     const float pixel_x = view.fx *
                         static_cast<float>(camera.x() / camera.z()) + view.cx;
@@ -377,12 +385,12 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                     definitely_background,
                     tinytensor::Tensor::zeros_like(occupancy), occupancy));
             observed = observed.logical_or(pivot_mask ? possibly_foreground : view_result.inside);
+            result.slice(0, begin, begin + count).copy_(occupancy);
+            all_observed.slice(0, begin, begin + count).copy_(observed);
         }
-        occupancy = tinytensor::Tensor::where(
-            observed, occupancy, tinytensor::Tensor::zeros_like(occupancy));
-        result.slice(0, begin, begin + count).copy_(occupancy);
     }
-    return result;
+    return tinytensor::Tensor::where(
+        all_observed, result, tinytensor::Tensor::zeros_like(result));
 }
 
 std::vector<float> evaluate_global_occupancy(
@@ -391,11 +399,12 @@ std::vector<float> evaluate_global_occupancy(
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
     OccupancyCache* cache = nullptr, bool pivot_mask = false) {
-    // CPU callers can have tens of millions of tetrahedral samples. Stream
-    // the same query chunks instead of uploading a second full-size copy and
-    // staging it through a power-of-two pinned host allocation.
+    // Stage bounded batches on Vulkan so several dispatch chunks share each
+    // view preparation. Four million queries need 48 MiB of point storage;
+    // never upload all tens of millions of tetrahedral samples at once.
     std::vector<float> result(points.size());
-    const std::size_t capacity = std::max<std::size_t>(chunk_size, 1);
+    const std::size_t capacity = std::max<std::size_t>(chunk_size,
+        model.means.device() == tinytensor::Device::Vulkan ? 4 * 1024 * 1024 : 1);
     const std::span<const mvs::Vec3f> all_points(points);
     for (std::size_t begin = 0; begin < points.size(); begin += capacity) {
         const std::size_t count = std::min(capacity, points.size() - begin);
@@ -1045,8 +1054,10 @@ PamMeshResult extract_pam_mesh(
     std::vector<Delaunay::Cell_handle> cells;
     cells.reserve(triangulation.number_of_finite_cells());
     std::uniform_real_distribution<float> uniform(0.F, 1.F);
+    const std::size_t query_batch = std::max<std::size_t>(options.occupancy_chunk_size,
+        vulkan ? 4 * 1024 * 1024 : 1);
     const std::size_t cell_chunk = std::max<std::size_t>(
-        1, options.occupancy_chunk_size /
+        1, query_batch /
                options.points_per_tetrahedron);
     std::size_t occupied_count = 0;
     {

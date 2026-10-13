@@ -521,7 +521,7 @@ ModelGradients vulkan_raster_backward(
 OccupancyResult vulkan_occupancy(
     std::shared_ptr<void>& backend_value, const GaussianModel& model,
     const tinytensor::Tensor& points, const Camera& camera,
-    const RasterizeOptions& options) {
+    const RasterizeOptions& options, bool reuse_prepared_view) {
     if (!points.is_valid() || points.device()!=tinytensor::Device::Vulkan ||
         points.dtype()!=tinytensor::DataType::Float32 || !points.is_contiguous() ||
         points.shape().rank()!=2 || points.shape()[1]!=3 ||
@@ -534,10 +534,11 @@ OccupancyResult vulkan_occupancy(
     if(points.shape()[0]) {
         auto backend=get_backend(backend_value);
         tinytensor::vulkan::submit_async();
-        backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
+        if (!reuse_prepared_view)
+            backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
         backend->rasterizer.occupancy_device(buffer_view(points),
             static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(options),
-            buffer_view(result.occupancy),buffer_view(inside));
+            buffer_view(result.occupancy),buffer_view(inside),reuse_prepared_view);
     }
     result.inside=inside.gt(0);
     return result;

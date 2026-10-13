@@ -469,10 +469,13 @@ public:
         const SplatBufferView& camera_points, const SplatBufferView& inside);
     // Forward-only integrated occupancy; inside denotes frustum visibility,
     // including rays whose occupancy is zero.
+    // reuse_prepared_view queries the preceding occupancy call's projection.
+    // Model, camera and settings must match, with no intervening bind or frame.
     void occupancy_device(
         const SplatBufferView& world_points, std::uint32_t point_count,
         const SplatCamera& camera, const SplatSettings& settings,
-        const SplatBufferView& occupancy, const SplatBufferView& inside);
+        const SplatBufferView& occupancy, const SplatBufferView& inside,
+        bool reuse_prepared_view = false);
     void sample_depth_backward_device(
         const SplatBufferView& dL_camera_points,
         const SplatBufferView& packed_model_gradients,

@@ -42,10 +42,11 @@ DepthSampleResult vulkan_sample_depth(
     std::shared_ptr<void>& backend, const GaussianModel& model,
     const tinytensor::Tensor& points, const Camera& camera,
     const RasterizeOptions& options);
+// Reuse is limited to consecutive chunks of the same model/view/options.
 OccupancyResult vulkan_occupancy(
     std::shared_ptr<void>& backend, const GaussianModel& model,
     const tinytensor::Tensor& points, const Camera& camera,
-    const RasterizeOptions& options);
+    const RasterizeOptions& options, bool reuse_prepared_view = false);
 DepthSampleGradients vulkan_sample_depth_backward(
     const GaussianModel& model, const DepthSampleResult& sampled,
     const tinytensor::Tensor& gradient);

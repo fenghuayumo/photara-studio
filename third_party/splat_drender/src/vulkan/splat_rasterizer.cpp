@@ -244,6 +244,7 @@ public:
     }
 
     void upload_model(const SplatGaussians& gaussians) {
+        occupancy_prepared_ = false;
         const auto count = static_cast<std::uint32_t>(gaussians.means.size() / 3);
         require(count > 0 && gaussians.means.size() == static_cast<std::size_t>(count) * 3, "means must have shape [N, 3]");
         require(gaussians.opacities.size() == count, "opacities must have shape [N]");
@@ -333,6 +334,7 @@ public:
     }
 
     void bind_model_device(const SplatDeviceGaussians& gaussians) {
+        occupancy_prepared_ = false;
         require(gaussians.count > 0, "device Gaussian count must be positive");
         require(gaussians.colors_precomputed || (gaussians.sh_degree <= 3 &&
                     gaussians.sh_bases >=
@@ -499,6 +501,7 @@ public:
         const SplatDeviceFrame* destination = nullptr,
         const bool depth_query_only = false,
         const bool reuse_projection = false) {
+        occupancy_prepared_ = false;
         sample_live_ = false;
         require(!depth_query_only || (!pack_rgba && destination == nullptr &&
                     settings.need_depth && !settings.pixel_snapshots),
@@ -1414,14 +1417,22 @@ public:
     void occupancy_device(
         const SplatBufferView& points, std::uint32_t count,
         const SplatCamera& camera, SplatSettings settings,
-        const SplatBufferView& occupancy, const SplatBufferView& inside) {
+        const SplatBufferView& occupancy, const SplatBufferView& inside,
+        bool reuse_prepared_view) {
         require(count > 0 && points.buffer != VK_NULL_HANDLE && points.bytes >= count*12ull &&
             occupancy.buffer != VK_NULL_HANDLE && occupancy.bytes >= count*4ull &&
             inside.buffer != VK_NULL_HANDLE && inside.bytes >= count*4ull,
             "invalid device occupancy buffers");
         settings.need_depth = true;
         settings.pixel_snapshots = false;
-        (void)record_frame(camera, settings, false, nullptr, true);
+        // Subsequent point chunks use the same projection and sorted tile lists.
+        // The caller must not bind a model or record another frame in between.
+        require(!reuse_prepared_view || occupancy_prepared_,
+                "occupancy reuse requires a preceding prepared view");
+        if (!reuse_prepared_view) {
+            (void)record_frame(camera, settings, false, nullptr, true);
+            occupancy_prepared_ = true;
+        }
         const std::scoped_lock lock(context_.dispatch_mutex);
         Push push{};
         push.u[0]=count; push.u[1]=last_width_; push.u[2]=last_height_;
@@ -3317,6 +3328,7 @@ private:
     bool last_frame_has_geometry_{};
     bool sample_grouped_{};
     bool sample_live_{};
+    bool occupancy_prepared_{};
     std::uint32_t sample_point_count_{};
     Buffer* last_instance_values_ = &dummy_;
     std::uint32_t last_width_{};
@@ -3460,8 +3472,9 @@ SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
 void SplatRasterizer::occupancy_device(
     const SplatBufferView& points, std::uint32_t count,
     const SplatCamera& camera, const SplatSettings& settings,
-    const SplatBufferView& occupancy, const SplatBufferView& inside) {
-    impl_->occupancy_device(points,count,camera,settings,occupancy,inside);
+    const SplatBufferView& occupancy, const SplatBufferView& inside,
+    bool reuse_prepared_view) {
+    impl_->occupancy_device(points,count,camera,settings,occupancy,inside,reuse_prepared_view);
 }
 
 void SplatRasterizer::sample_depth_device(
