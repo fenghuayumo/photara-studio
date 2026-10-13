@@ -37,10 +37,16 @@ $env:PHOTARA_LOG_LEVEL = 'debug'
 | `triangulation timing` | `solve_wall_ms`, `candidates`, `selected`, `outliers_only`, `split_enabled` | 首轮三角化循环的墙钟时间和执行范围，包含循环内进度计数 |
 | `track split timing` | `scan_wall_ms`, `peel_wall_ms`, `index_wall_ms` | 候选扫描/fast gate、递归子轨迹求解与提交、索引重建的墙钟时间 |
 | 同上 | `merge_wall_ms`, `workers`, `roots` | 并行分支确定性合并耗时（包含在 peel_wall_ms 内）、请求的拆分线程数、初始待拆分父轨迹数 |
+| `global positioning CPU pass timing` | `attempt`, `pass`, `budget_s`, `iteration_limit` | 本轮定位路径、IRLS 轮数、传给 Ceres 的时间预算和迭代上限，debug 等级 |
+| 同上 | `iterations`, `accepted`, `accepted_updates`, `rejected` | Ceres 迭代记录数及接受/拒绝计数；accepted_updates 排除仅评估初始值的第 0 次迭代 |
+| 同上 | `total_s`, `preprocess_s`, `linear_s`, `residual_s`, `jacobian_s` | Ceres Summary 的总耗时、预处理、线性求解、残差及 Jacobian 评估耗时，子阶段可能重叠，不能直接相加 |
+| 同上 | `cost_initial`, `cost_final`, `termination`, `message` | 本轮优化前后代价与终止原因，用于区分收敛、预算耗尽和无有效更新 |
 | `CUDA BA timing` | `linearize_ms`, `assemble_ms`, `solve_ms`, `update_cost_ms` | 重投影线性化、系统组装/预条件器、PCG/点回代/步长范数、更新/代价/接受拒绝/回滚的 stream 区间 |
 | `CUDA BA transfer timing` | `upload_wall_ms`, `download_wall_ms` | optimize_cuda 包装入口的 CPU 打包/分配/上传与结果下载耗时，不包含在 optimizer.total_time_ms 中 |
 
 CUDA BA 的四项结果同时填入 `OptimizerSummary` 原有字段，因此 `brief_report()` 中的四项子阶段不再固定为零。直接调用持久化 optimizer 的 upload/download 不经过包装入口的传输日志。
+
+`photara_sfm_positioning_benchmark` 同样支持 `PHOTARA_LOG_LEVEL`。Ceres 将预处理时间计入本轮时间预算；后续 IRLS 分配到的短预算可能在产生有效更新前耗尽。判断停滞应同时检查 accepted_updates、代价变化与终止信息，不能仅根据权重变化为零认定几何已经收敛。
 
 轨迹拆分在至少 64 条待处理父轨迹、CPU 线程预算大于 1 时使用共享线程池。各父轨迹及其递归子轨迹独立求解，再按原串行 LIFO 顺序提交；子轨迹 ID 和观测排序保持不变。小批次、单线程以及嵌套线程池调用保留串行路径。候选扫描与最终索引重建仍串行执行。
 

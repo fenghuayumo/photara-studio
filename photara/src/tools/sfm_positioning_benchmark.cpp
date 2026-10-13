@@ -4,6 +4,7 @@
 #include "sfm/reconstruct.hpp"
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 
 namespace {
@@ -22,7 +23,11 @@ unsigned parse_unsigned(const char *text, const char *name) {
 int main(int argc, char **argv) {
     try {
         using namespace photara::sfm;
-        photara::core::Logger::instance().configure({});
+        const char* configured_level = std::getenv("PHOTARA_LOG_LEVEL");
+        const auto console_level = configured_level
+            ? photara::core::parse_log_level(configured_level, photara::core::LogLevel::info)
+            : photara::core::LogLevel::info;
+        photara::core::Logger::instance().configure({}, "photara", console_level);
         if (argc < 4 || argc > 7)
             throw std::invalid_argument("Usage: photara_sfm_positioning_benchmark tracks-HEX.bin "
                                         "cpu|cuda|vulkan NEW_OUTPUT.asfm [tracks_per_image] "
