@@ -3037,13 +3037,19 @@ void start_train(App& app, const bool smoke) {
     try {
         std::string command;
         if (smoke) {
-            // Fixed COLMAP dataset used only by --interop-smoke.
+            // Fixed COLMAP dataset used only by --interop-smoke. The dataset
+            // root is the parent of the images directory, so the harness
+            // follows PHOTARA_SMOKE_IMAGES without a second hard-coded path.
+            const std::filesystem::path smoke_dataset =
+                path_from_utf8_field(app.settings.images_dir.data())
+                    .parent_path();
             std::ostringstream smoke_command;
             smoke_command
                 << '"' << cli_path().c_str() << "\" --images \""
                 << app.settings.images_dir.data() << "\" --output \""
                 << app.layout.model_output.string()
-                << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
+                << "\" --splat-dataset \""
+                << smoke_dataset.string() << "\""
                 << " --splat-use-mask false"
                 << " --splat --backend "
                 << (app.settings.training_backend == 1 ? "vulkan" : "cuda")

@@ -50,12 +50,25 @@ int main(const int argc, char** argv) {
     if (!app.smoke_mode) editor::load_editor_preferences(app);
 
     if (app.smoke_mode) {
+        // The interop smoke harness is a manual developer tool. The defaults
+        // keep the original author's fixed COLMAP dataset so runs stay
+        // comparable; redirect them per machine with PHOTARA_SMOKE_IMAGES /
+        // PHOTARA_SMOKE_PROJECT instead of editing the source.
+        const char* smoke_images = std::getenv("PHOTARA_SMOKE_IMAGES");
+        const char* smoke_project = std::getenv("PHOTARA_SMOKE_PROJECT");
         std::snprintf(
             app.settings.images_dir.data(), app.settings.images_dir.size(),
-            "D:\\ScanVideo\\ori_img\\images");
+            "%s",
+            smoke_images != nullptr && smoke_images[0] != '\0'
+                ? smoke_images
+                : "D:\\ScanVideo\\ori_img\\images");
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
-            "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\cuda_vulkan_smoke");
+            "%s",
+            smoke_project != nullptr && smoke_project[0] != '\0'
+                ? smoke_project
+                : "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\"
+                  "cuda_vulkan_smoke");
         app.settings.iterations = stop_smoke ? 30'000 : 100;
         if (smoke_arg == "--interop-smoke-vulkan" ||
             smoke_arg == "--interop-stop-smoke-vulkan" ||
