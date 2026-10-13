@@ -281,7 +281,7 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     const tinytensor::Tensor& points,
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache = nullptr) {
+    OccupancyCache* cache = nullptr, bool pivot_mask = false) {
     const std::size_t point_count = points.shape()[0];
     const auto device=model.means.device();
     std::shared_ptr<void> local_backend;
@@ -334,22 +334,24 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                         view.pose.transform_world_to_camera(
                             Eigen::Map<const mvs::Vec3f>(host_query.data() + 3 * i).cast<double>());
                     if (!(camera.z() > 0.0)) continue;
-                    const float x = view.fx *
+                    const float pixel_x = view.fx *
                         static_cast<float>(camera.x() / camera.z()) + view.cx;
-                    const float y = view.fy *
+                    const float pixel_y = view.fy *
                         static_cast<float>(camera.y() / camera.z()) + view.cy;
-                    if (x < 0.F || y < 0.F ||
-                        x > static_cast<float>(view.width - 1) ||
-                        y > static_cast<float>(view.height - 1))
-                        continue;
-                    const auto x0 = static_cast<std::uint32_t>(std::floor(x));
-                    const auto y0 = static_cast<std::uint32_t>(std::floor(y));
-                    const auto x1 = std::min(x0 + 1, view.width - 1);
-                    const auto y1 = std::min(y0 + 1, view.height - 1);
+                    // GW builds a pixel-center normalized grid but calls
+                    // grid_sample with align_corners=True, including zero padding.
+                    const float x = (pixel_x + 0.5F) * (view.width - 1.F) / view.width;
+                    const float y = (pixel_y + 0.5F) * (view.height - 1.F) / view.height;
+                    if (x <= -1.F || y <= -1.F || x >= view.width || y >= view.height) continue;
+                    const auto x0 = static_cast<int>(std::floor(x));
+                    const auto y0 = static_cast<int>(std::floor(y));
+                    const auto x1 = x0 + 1;
+                    const auto y1 = y0 + 1;
                     const float tx = x - static_cast<float>(x0);
                     const float ty = y - static_cast<float>(y0);
-                    const auto alpha = [&](const std::uint32_t px,
-                                           const std::uint32_t py) {
+                    const auto alpha = [&](const int px, const int py) {
+                        if (px < 0 || py < 0 || px >= static_cast<int>(view.width) ||
+                            py >= static_cast<int>(view.height)) return 0.F;
                         return static_cast<float>(view.foreground_mask[
                             static_cast<std::size_t>(py) * view.width + px]) /
                             mask_denominator;
@@ -363,9 +365,10 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                 auto mask = tinytensor::Tensor::from_vector(
                     sampled_mask, {count}, device);
                 possibly_foreground = view_result.inside.logical_and(
-                    mask.ge(mask_background_threshold));
-                definitely_background = view_result.inside.logical_and(
-                    mask.lt(mask_background_threshold));
+                    pivot_mask ? mask.gt(0.5F) : mask.ge(mask_background_threshold));
+                if (!pivot_mask)
+                    definitely_background = view_result.inside.logical_and(
+                        mask.lt(mask_background_threshold));
             }
             occupancy = tinytensor::Tensor::where(
                 possibly_foreground,
@@ -373,7 +376,7 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                 tinytensor::Tensor::where(
                     definitely_background,
                     tinytensor::Tensor::zeros_like(occupancy), occupancy));
-            observed = observed.logical_or(view_result.inside);
+            observed = observed.logical_or(pivot_mask ? possibly_foreground : view_result.inside);
         }
         occupancy = tinytensor::Tensor::where(
             observed, occupancy, tinytensor::Tensor::zeros_like(occupancy));
@@ -387,7 +390,7 @@ std::vector<float> evaluate_global_occupancy(
     const std::vector<mvs::Vec3f>& points,
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache = nullptr) {
+    OccupancyCache* cache = nullptr, bool pivot_mask = false) {
     // CPU callers can have tens of millions of tetrahedral samples. Stream
     // the same query chunks instead of uploading a second full-size copy and
     // staging it through a power-of-two pinned host allocation.
@@ -398,7 +401,7 @@ std::vector<float> evaluate_global_occupancy(
         const std::size_t count = std::min(capacity, points.size() - begin);
         const auto values = evaluate_global_occupancy_device(
             model, scene, upload_points(all_points.subspan(begin, count),model.means.device()),
-            training_options, chunk_size, mask_background_threshold, cache).to_vector();
+            training_options, chunk_size, mask_background_threshold, cache, pivot_mask).to_vector();
         std::copy(values.begin(), values.end(), result.begin() + begin);
     }
     return result;
@@ -408,44 +411,84 @@ bool in_camera_frustum(
     const mvs::Vec3f& point, const mvs::MvsView& view) {
     const Eigen::Vector3d camera = view.pose.transform_world_to_camera(
         point.cast<double>());
-    if (!(camera.z() > 0.0)) return false;
+    if (!(camera.z() > 0.01 && camera.z() < 100.0)) return false;
     const float x = view.fx * static_cast<float>(camera.x() / camera.z()) +
                     view.cx;
     const float y = view.fy * static_cast<float>(camera.y() / camera.z()) +
                     view.cy;
-    return x >= 0.F && y >= 0.F && x < static_cast<float>(view.width) &&
-           y < static_cast<float>(view.height);
+    return x >= 0.F && y >= 0.F && x <= static_cast<float>(view.width - 1) &&
+           y <= static_cast<float>(view.height - 1);
+}
+
+mvs::Mesh crop_seed_mesh_to_scene(
+    const mvs::Mesh& mesh, const mvs::MvsScene& scene, float scaling) {
+    mvs::Vec3f camera_mean = mvs::Vec3f::Zero();
+    for (const auto& view : scene.views) camera_mean += view.pose.C.cast<float>();
+    camera_mean /= static_cast<float>(scene.views.size());
+    float radius = 0.F;
+    for (const auto& view : scene.views)
+        radius = std::max(radius, (view.pose.C.cast<float>() - camera_mean).norm());
+    radius *= 1.1F * scaling;
+    // Deliberately centered at the world origin, not at camera_mean: this is
+    // GW's scene bounding box. Open3D keeps faces only when all vertices are in.
+    mvs::Mesh cropped;
+    std::vector<int> remap(mesh.vertices.size(), -1);
+    for (const auto& face : mesh.faces) {
+        bool inside = true;
+        for (int corner = 0; corner < 3; ++corner)
+            inside &= (mesh.vertices[face[corner]].array().abs() <= radius).all();
+        if (!inside) continue;
+        Eigen::Vector3i mapped;
+        for (int corner = 0; corner < 3; ++corner) {
+            const auto index = static_cast<std::size_t>(face[corner]);
+            if (remap[index] < 0) {
+                remap[index] = static_cast<int>(cropped.vertices.size());
+                cropped.vertices.push_back(mesh.vertices[index]);
+            }
+            mapped[corner] = remap[index];
+        }
+        cropped.faces.push_back(mapped);
+    }
+    core::Logger::instance().info("splat PAM scene crop: half_extent=", radius,
+        " faces_before=", mesh.faces.size(), " faces_after=", cropped.faces.size());
+    if (cropped.faces.empty()) throw std::runtime_error("PAM scene crop produced an empty seed mesh");
+    return cropped;
 }
 
 std::vector<mvs::Vec3f> sample_seed_mesh(
     const mvs::Mesh& mesh, const mvs::MvsScene& scene,
-    const std::size_t count, std::mt19937& random) {
-    std::vector<double> weights(mesh.faces.size(), 0.0);
-    const auto face_count = static_cast<std::ptrdiff_t>(mesh.faces.size());
+    const std::size_t count, std::mt19937& random,
+    std::vector<double>& weights) {
+    if (weights.empty()) {
+        weights.assign(mesh.faces.size(), 0.0);
+        const auto face_count = static_cast<std::ptrdiff_t>(mesh.faces.size());
 #if defined(PHOTARA_HAS_OPENMP)
 #pragma omp parallel for schedule(static) if(face_count >= 1024)
 #endif
-    for (std::ptrdiff_t face_index = 0; face_index < face_count; ++face_index) {
-        const Eigen::Vector3i face = mesh.faces[face_index];
-        const mvs::Vec3f a = mesh.vertices[static_cast<std::size_t>(face.x())];
-        const mvs::Vec3f b = mesh.vertices[static_cast<std::size_t>(face.y())];
-        const mvs::Vec3f c = mesh.vertices[static_cast<std::size_t>(face.z())];
-        const float area = 0.5F * (b - a).cross(c - a).norm();
-        const mvs::Vec3f center = (a + b + c) / 3.F;
-        float minimum_distance2 = std::numeric_limits<float>::infinity();
-        for (const mvs::MvsView& view : scene.views)
-            if (in_camera_frustum(center, view))
-                minimum_distance2 = std::min(
-                    minimum_distance2,
-                    (center - view.pose.C.cast<float>()).squaredNorm());
-        if (std::isfinite(minimum_distance2) && area > 0.F)
-            weights[face_index] =
-                static_cast<double>(area) /
-                std::max(static_cast<double>(minimum_distance2), 1e-12);
+        for (std::ptrdiff_t face_index = 0; face_index < face_count; ++face_index) {
+            const Eigen::Vector3i face = mesh.faces[face_index];
+            const mvs::Vec3f a = mesh.vertices[static_cast<std::size_t>(face.x())];
+            const mvs::Vec3f b = mesh.vertices[static_cast<std::size_t>(face.y())];
+            const mvs::Vec3f c = mesh.vertices[static_cast<std::size_t>(face.z())];
+            const float area = 0.5F * (b - a).cross(c - a).norm();
+            const mvs::Vec3f center = (a + b + c) / 3.F;
+        // GW retains an infinitesimal sampling weight for unseen faces by
+        // assigning a finite distance of 1e6, rather than discarding them.
+        float minimum_distance2 = 1e12F;
+            for (const mvs::MvsView& view : scene.views)
+                if (in_camera_frustum(center, view))
+                    minimum_distance2 = std::min(
+                        minimum_distance2,
+                        (center - view.pose.C.cast<float>()).squaredNorm());
+            if (std::isfinite(minimum_distance2) && area > 0.F)
+                weights[face_index] =
+                    static_cast<double>(area) /
+                    std::max(static_cast<double>(minimum_distance2), 1e-12);
+        }
+        if (std::accumulate(weights.begin(), weights.end(), 0.0) <= 0.0)
+            throw std::runtime_error(
+                "PAM seed mesh has no camera-visible surface area");
     }
-    if (std::accumulate(weights.begin(), weights.end(), 0.0) <= 0.0)
-        throw std::runtime_error(
-            "PAM seed mesh has no camera-visible surface area");
     std::discrete_distribution<std::size_t> select_face(
         weights.begin(), weights.end());
     std::uniform_real_distribution<float> uniform(0.F, 1.F);
@@ -582,18 +625,27 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options, const HostGaussianField& field,
     const PamMeshOptions& options, std::mt19937& random, OccupancyCache* cache) {
-    const std::size_t gaussian_budget = std::max<std::size_t>(
-        options.pivot_max_points / 2, 2);
-    const std::vector<std::size_t> selected = sample_gaussian_indices(
-        field, gaussian_budget, random);
+    std::vector<std::size_t> selected;
+    if (options.pivot_max_points == 0) {
+        selected.resize(field.means.size());
+        std::iota(selected.begin(), selected.end(), 0);
+    } else {
+        const std::size_t budget = std::max<std::size_t>(options.pivot_max_points / 2, 2);
+        selected.resize(field.means.size());
+        std::iota(selected.begin(), selected.end(), 0);
+        if (budget < selected.size()) {
+            std::shuffle(selected.begin(), selected.end(), random);
+            selected.resize(budget);
+        }
+    }
     std::vector<mvs::Vec3f> pivots;
     std::vector<float> pivot_scales;
     pivots.reserve(2 * selected.size());
     pivot_scales.reserve(2 * selected.size());
     for (const std::size_t index : selected) {
-        const mvs::Vec3f normal = field.normals[index].normalized();
+        const mvs::Vec3f normal = field.normals[index] /
+            std::max(field.normals[index].norm(), 1e-12F);
         const float sigma = gaussian_normal_sigma(field, index, normal);
-        if (!(sigma > 0.F)) continue;
         const mvs::Vec3f offset = field.means[index] +
             options.pivot_std_factor * sigma * normal;
         const float edge_scale = 3.F * field.scales[index].maxCoeff();
@@ -612,7 +664,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
 
     const std::vector<float> occupancy = evaluate_global_occupancy(
         model, scene, pivots, training_options,
-        options.occupancy_chunk_size, options.mask_background_threshold, cache);
+        options.occupancy_chunk_size, options.mask_background_threshold, cache, true);
 
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
     using VertexBase =
@@ -649,6 +701,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
         {{0,1}}, {{1,2}}, {{2,0}}, {{0,3}}, {{1,3}}, {{2,3}}
     }};
     mvs::Mesh mesh;
+    std::vector<PivotEdge> intersections;
     std::unordered_map<PivotEdge, int, PivotEdgeHash> edge_vertices;
     edge_vertices.reserve(triangulation.number_of_finite_cells());
     std::size_t rejected_large_edges = 0;
@@ -677,7 +730,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
                 const PivotEdge key{a, b};
                 auto found = edge_vertices.find(key);
                 if (found == edge_vertices.end()) {
-                    if ((pivots[a] - pivots[b]).norm() >
+                    if (options.pivot_filter_large_edges && (pivots[a] - pivots[b]).norm() >
                         pivot_scales[a] + pivot_scales[b]) {
                         ++rejected_large_edges;
                         valid = false;
@@ -693,6 +746,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
                     const int index = static_cast<int>(mesh.vertices.size());
                     mesh.vertices.push_back(
                         (1.F - t) * pivots[a] + t * pivots[b]);
+                    intersections.push_back(key);
                     found = edge_vertices.emplace(key, index).first;
                 }
                 face(vertex) = found->second;
@@ -705,6 +759,39 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
     if (mesh.faces.empty())
         throw std::runtime_error(
             "Gaussian pivot marching tetrahedra produced no surface");
+    if (options.pivot_binary_steps > 0) {
+        std::vector<mvs::Vec3f> left, right;
+        std::vector<float> left_values;
+        left.reserve(intersections.size());
+        right.reserve(intersections.size());
+        left_values.reserve(intersections.size());
+        for (const auto& edge : intersections) {
+            left.push_back(pivots[edge.a]);
+            right.push_back(pivots[edge.b]);
+            left_values.push_back(occupancy[edge.a] - options.occupancy_iso_value);
+        }
+        for (unsigned step = 0; step < options.pivot_binary_steps; ++step) {
+            core::Logger::instance().info("splat pivot binary search: step=",
+                step + 1, '/', options.pivot_binary_steps);
+            for (std::size_t i = 0; i < intersections.size(); ++i)
+                mesh.vertices[i] = 0.5F * (left[i] + right[i]);
+            const auto values = evaluate_global_occupancy(
+                model, scene, mesh.vertices, training_options,
+                options.occupancy_chunk_size, options.mask_background_threshold, cache, true);
+            for (std::size_t i = 0; i < intersections.size(); ++i) {
+                const float value = values[i] - options.occupancy_iso_value;
+                // Strict sign comparison also matches GW at an exact zero.
+                if ((value < 0.F && left_values[i] < 0.F) ||
+                    (value > 0.F && left_values[i] > 0.F)) {
+                    left[i] = mesh.vertices[i];
+                    left_values[i] = value;
+                } else {
+                    right[i] = mesh.vertices[i];
+                }
+                mesh.vertices[i] = 0.5F * (left[i] + right[i]);
+            }
+        }
+    }
     compute_vertex_normals(mesh);
     core::Logger::instance().info(
         "splat pivot mesh: tetrahedra=",
@@ -737,19 +824,27 @@ std::vector<float> detail::pam_field_gradients_reference(
 }
 
 PamMeshResult extract_pam_mesh(
-    const GaussianModel& model, const mvs::MvsScene& scene,
+    const GaussianModel& model, const mvs::MvsScene& source_scene,
     const mvs::Mesh& seed_mesh,
     const TrainingOptions& training_options,
     const PamMeshOptions& options) {
 #if !defined(PHOTARA_HAS_CGAL)
     (void)model;
-    (void)scene;
+    (void)source_scene;
     (void)seed_mesh;
     (void)training_options;
     (void)options;
     throw std::runtime_error(
         "PAM requires a CGAL-enabled Photara build");
 #else
+    mvs::MvsScene training_scene;
+    if (training_options.evaluation_split_every > 0) {
+        for (std::size_t i = 0; i < source_scene.views.size(); ++i)
+            if (i % training_options.evaluation_split_every != 0)
+                training_scene.views.push_back(source_scene.views[i]);
+    }
+    const auto& scene = training_options.evaluation_split_every > 0
+        ? training_scene : source_scene;
     if (model.size() == 0 || !model.normal_features.is_valid())
         throw std::invalid_argument(
             "PAM requires Gaussians with normal-field features");
@@ -762,11 +857,12 @@ PamMeshResult extract_pam_mesh(
     if ((seed_mesh.vertices.empty()) != (seed_mesh.faces.empty()))
         throw std::invalid_argument(
             "PAM seed mesh must be complete or entirely omitted");
-    if (options.max_points < 4 || options.pivot_max_points < 4 ||
+    if (options.max_points < 4 || (options.pivot_max_points != 0 && options.pivot_max_points < 4) ||
         options.vector_field_neighbors == 0 ||
         options.points_per_tetrahedron == 0 ||
         !std::isfinite(options.pivot_std_factor) ||
         !(options.pivot_std_factor > 0.F) ||
+        !std::isfinite(options.bounding_box_scaling) || !(options.bounding_box_scaling > 0.F) ||
         !std::isfinite(options.gaussian_seed_fraction) ||
         options.gaussian_seed_fraction < 0.F ||
         options.gaussian_seed_fraction > 1.F ||
@@ -776,6 +872,8 @@ PamMeshResult extract_pam_mesh(
         throw std::invalid_argument("Invalid PAM extraction options");
 
     core::StageScope stage("splat.pam");
+    core::Logger::instance().info("splat PAM cameras: training=", scene.views.size(),
+        " held_out=", source_scene.views.size() - scene.views.size());
     HostGaussianField field(model);
     const bool use_gpu = options.gpu_refinement &&
         options.vector_field_neighbors <= detail::pam_gpu_max_neighbors;
@@ -802,6 +900,12 @@ PamMeshResult extract_pam_mesh(
         generated_seed_mesh = build_gaussian_pivot_seed_mesh(
             model, scene, training_options, field, options, random, &occupancy_cache);
         active_seed_mesh = &generated_seed_mesh;
+    }
+    mvs::Mesh cropped_seed_mesh;
+    if (options.scene_crop) {
+        cropped_seed_mesh = crop_seed_mesh_to_scene(
+            *active_seed_mesh, scene, options.bounding_box_scaling);
+        active_seed_mesh = &cropped_seed_mesh;
     }
     std::vector<mvs::Vec3f> candidates;
     candidates.reserve(options.max_points);
@@ -881,18 +985,28 @@ PamMeshResult extract_pam_mesh(
     refine_and_append(sample_gaussian_detail_seeds(
         field, gaussian_seed_count, random));
     const std::size_t gaussian_candidates = candidates.size();
-    const unsigned rounds = std::max(options.max_resample_rounds, 1U);
+    const unsigned rounds = options.max_resample_rounds;
+    unsigned stalled_rounds = 0;
+    std::vector<double> sampling_weights;
     for (unsigned round = 0;
-         round < rounds && candidates.size() < options.max_points; ++round) {
+         (rounds == 0 || round < rounds) && candidates.size() < options.max_points; ++round) {
         core::Logger::instance().info(
-            "splat PAM sampling: round=", round + 1, '/', rounds,
+            "splat PAM sampling: round=", round + 1, " round_limit=", rounds,
             " candidate_cap=", options.max_points,
             " accepted=", candidates.size());
         const std::size_t missing = options.max_points - candidates.size();
+        const auto accepted_before = candidates.size();
+        if (missing > (std::numeric_limits<std::size_t>::max)() /
+                std::max(options.oversampling_factor, 1U))
+            throw std::overflow_error("PAM sampling count overflow");
         const std::size_t sample_count = missing *
             std::max(options.oversampling_factor, 1U);
         refine_and_append(sample_seed_mesh(
-            *active_seed_mesh, scene, sample_count, random));
+            *active_seed_mesh, scene, sample_count, random, sampling_weights));
+        stalled_rounds = candidates.size() == accepted_before ? stalled_rounds + 1 : 0;
+        if (rounds == 0 && stalled_rounds >= 3)
+            throw std::runtime_error(
+                "PAM could not fill the candidate budget: three sampling rounds accepted no points");
     }
     core::Logger::instance().info(
         "splat PAM seeds: gaussian_requested=", gaussian_seed_count,
@@ -1040,35 +1154,38 @@ PamMeshResult extract_pam_mesh(
     // only the singular vertices required to turn the soup into an orientable,
     // combinatorially manifold surface. This matters for bicycle spokes and
     // other thin components that an area/component filter could otherwise lose.
-    std::vector<Point> soup_points;
-    soup_points.reserve(result.mesh.vertices.size());
-    for (const mvs::Vec3f& vertex : result.mesh.vertices)
-        soup_points.emplace_back(vertex.x(), vertex.y(), vertex.z());
-    std::vector<std::vector<std::size_t>> soup_faces;
-    soup_faces.reserve(result.mesh.faces.size());
-    for (const Eigen::Vector3i& face : result.mesh.faces)
-        soup_faces.push_back({
-            static_cast<std::size_t>(face.x()),
-            static_cast<std::size_t>(face.y()),
-            static_cast<std::size_t>(face.z())});
-    const std::size_t vertices_before_orientation = soup_points.size();
-    CGAL::Polygon_mesh_processing::orient_polygon_soup(
-        soup_points, soup_faces);
-    result.mesh.vertices.clear();
-    result.mesh.vertices.reserve(soup_points.size());
-    for (const Point& point : soup_points)
-        result.mesh.vertices.emplace_back(
-            static_cast<float>(CGAL::to_double(point.x())),
-            static_cast<float>(CGAL::to_double(point.y())),
-            static_cast<float>(CGAL::to_double(point.z())));
-    result.mesh.faces.clear();
-    result.mesh.faces.reserve(soup_faces.size());
-    for (const std::vector<std::size_t>& face : soup_faces)
-        result.mesh.faces.emplace_back(
-            static_cast<int>(face[0]), static_cast<int>(face[1]),
-            static_cast<int>(face[2]));
-    const std::size_t topology_duplicated_vertices =
-        soup_points.size() - vertices_before_orientation;
+    std::size_t topology_duplicated_vertices = 0;
+    if (options.manifold_cleanup) {
+        std::vector<Point> soup_points;
+        soup_points.reserve(result.mesh.vertices.size());
+        for (const mvs::Vec3f& vertex : result.mesh.vertices)
+            soup_points.emplace_back(vertex.x(), vertex.y(), vertex.z());
+        std::vector<std::vector<std::size_t>> soup_faces;
+        soup_faces.reserve(result.mesh.faces.size());
+        for (const Eigen::Vector3i& face : result.mesh.faces)
+            soup_faces.push_back({
+                static_cast<std::size_t>(face.x()),
+                static_cast<std::size_t>(face.y()),
+                static_cast<std::size_t>(face.z())});
+        const std::size_t vertices_before_orientation = soup_points.size();
+        CGAL::Polygon_mesh_processing::orient_polygon_soup(
+            soup_points, soup_faces);
+        result.mesh.vertices.clear();
+        result.mesh.vertices.reserve(soup_points.size());
+        for (const Point& point : soup_points)
+            result.mesh.vertices.emplace_back(
+                static_cast<float>(CGAL::to_double(point.x())),
+                static_cast<float>(CGAL::to_double(point.y())),
+                static_cast<float>(CGAL::to_double(point.z())));
+        result.mesh.faces.clear();
+        result.mesh.faces.reserve(soup_faces.size());
+        for (const std::vector<std::size_t>& face : soup_faces)
+            result.mesh.faces.emplace_back(
+                static_cast<int>(face[0]), static_cast<int>(face[1]),
+                static_cast<int>(face[2]));
+        topology_duplicated_vertices =
+            soup_points.size() - vertices_before_orientation;
+    }
     compute_vertex_normals(result.mesh);
     const std::vector<float> candidate_gradients = use_gpu
         ? detail::pam_field_gradients(gpu_field, upload_points(candidates,device),

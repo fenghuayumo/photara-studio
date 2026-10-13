@@ -156,12 +156,14 @@ state and follows clone, split, prune, and recycle operations.
 PAM (`--mesh --mesh-method pam`) is available in CGAL-enabled builds and does
 not use TSDF:
 
-1. Create center/normal-offset pivots from selected Gaussians.
+1. Create center/normal-offset pivots from every Gaussian by default.
 2. Evaluate multi-view occupancy and build a Delaunay tetrahedralization.
-3. Extract a pivot mesh with Marching Tetrahedra.
-4. Sample refinement candidates by projected face importance.
+3. Extract a pivot mesh with Marching Tetrahedra and refine intersected edges
+   with eight binary-search steps (GW's default).
+4. Crop the initial mesh with GW's default scene box, then sample candidates
+   by face area / nearest-visible-camera-distance squared.
 5. Project candidates toward the occupancy isosurface with the learned normal
-   field.
+   field, resampling until the candidate budget is filled by default.
 6. Tetrahedralize again and extract the occupied/free boundary.
 
 PAM follows the model device: CUDA and Vulkan both provide integrated occupancy
@@ -174,15 +176,36 @@ GW PLY opacity logits of positive/negative infinity are loaded as finite logits
 with the same saturated float32 sigmoid values; NaNs remain rejected.
 
 Foreground mask views contribute occupancy; explicit background votes empty;
-views outside the frustum abstain. PAM processes the full scene and does not
-apply camera focus, automatic ROI, `SubjectBounds`, or an external convex-hull
-crop. Intermediate outputs include `*_pam_pivot_mesh.ply` and
+views outside the frustum abstain. When `--splat-eval-split-every` is enabled,
+PAM uses the same training views as training, excluding held-out views from
+occupancy queries and camera-weighted sampling. The default scene crop is a
+cube centered at the world origin. Its half extent is 1.1 times the largest
+training-camera distance from the mean camera center, multiplied by
+`--pam-bounding-box-scaling`. Faces crossing the crop boundary are discarded,
+matching Open3D/GW; they are not clipped. This does not implement GW's optional
+ground-truth transform or Blender convex-hull crop modes.
+Intermediate outputs include the uncropped `*_pam_pivot_mesh.ply` and
 `*_pam_candidates.ply`.
 
-Important options include `--pam-pivot-max-points`,
-`--pam-pivot-std-factor`, `--pam-max-points`, `--pam-refinement-steps`,
+`--pam-input-mesh` reuses an existing GW initial PLY mesh. Without it, the
+initial mesh is generated natively. `--pam-pivot-max-points=0` uses all
+Gaussians; a positive cap uniformly subsamples Gaussians as an explicit
+resource-saving extension. Long-edge filtering defaults off as in GW;
+`--pam-pivot-filter-large-edges=true` enables it. Initial occupancy follows
+GW's mask > 0.5 validity rule with background abstaining, whereas PAM
+refinement uses the separate mask-background threshold and empty votes.
+Both use GW's grid_sample pixel-center/align_corners convention.
+The final boundary preserves GW's raw connectivity by default;
+`--pam-manifold-cleanup=true` enables CGAL singular-vertex splitting.
+
+Important options include `--pam-scene-crop`, `--pam-pivot-max-points`,
+`--pam-pivot-std-factor`, `--pam-pivot-binary-steps` (8; 0 uses linear
+interpolation), `--pam-max-resample-rounds` (0 fills the budget; a positive
+value caps the rounds), `--pam-max-points`, `--pam-refinement-steps`,
 `--pam-neighbors`, `--pam-points-per-tetrahedron`, and
 `--pam-occupancy-iso-value`.
+Unlimited resampling reports an error if three consecutive rounds accept no
+points, rather than remaining stuck on an incompatible seed or isovalue.
 
 ## 8. Densification strategies
 

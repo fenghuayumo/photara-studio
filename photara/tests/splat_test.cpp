@@ -2938,6 +2938,8 @@ void test_pam_smoke() {
     options.max_points = 64;
     options.oversampling_factor = 8;
     options.max_resample_rounds = 4;
+    options.scene_crop = false;
+    options.manifold_cleanup = true;
     options.refinement_steps = 0;
     options.vector_field_neighbors = shell.size();
     options.points_per_tetrahedron = 1;

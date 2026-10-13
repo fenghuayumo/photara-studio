@@ -214,6 +214,7 @@ void test_pam_vulkan() {
                   {2, 0, 5}, {1, 2, 5}, {3, 1, 5}, {0, 3, 5}};
     PamMeshOptions options;
     options.max_points = 64;
+    options.scene_crop = false;
     options.oversampling_factor = 8;
     options.occupancy_chunk_size = 257;
     options.refinement_steps = 2;
@@ -248,6 +249,91 @@ void test_pam_vulkan() {
     auto generated = extract_pam_mesh(vk, scene, {}, {}, options);
     require(!generated.seed_mesh.faces.empty() && !generated.mesh.faces.empty(),
             "PAM Vulkan generated pivot mesh failed");
+    auto reference_seed = extract_pam_mesh(cpu, scene, {}, {}, options);
+    require(reference_seed.seed_mesh.vertices.size() == generated.seed_mesh.vertices.size(),
+            "PAM binary-search pivot count parity");
+    for (std::size_t i = 0; i < generated.seed_mesh.vertices.size(); ++i)
+        require((reference_seed.seed_mesh.vertices[i] - generated.seed_mesh.vertices[i]).norm() < 1e-4F,
+                "PAM binary-search pivot position parity");
+    // Held-out views must abstain from both occupancy and mesh sampling.
+    // This deliberately incompatible camera would remove the training surface.
+    auto held_out = view;
+    held_out.foreground_mask.assign(4096, 0);
+    auto split_scene = scene;
+    split_scene.views.insert(split_scene.views.begin(), held_out);
+    TrainingOptions split_options;
+    split_options.evaluation_split_every = 2;
+    auto split_result = extract_pam_mesh(vk, split_scene, {}, split_options, options);
+    require(split_result.candidate_cloud.points.size() == generated.candidate_cloud.points.size(),
+            "PAM training-view split candidate count");
+    for (std::size_t i = 0; i < generated.candidate_cloud.points.size(); ++i)
+        require((split_result.candidate_cloud.points[i].position -
+                 generated.candidate_cloud.points[i].position).norm() < 1e-6F,
+                "PAM held-out view affected extraction");
+    auto refill_options = options;
+    refill_options.oversampling_factor = 1;
+    refill_options.max_resample_rounds = 1;
+    auto probe = extract_pam_mesh(vk, scene, seed, {}, refill_options);
+    std::vector<float> probe_points;
+    for (const auto& point : probe.candidate_cloud.points)
+        probe_points.insert(probe_points.end(), point.position.data(), point.position.data() + 3);
+    auto probe_tensor = Tensor::from_vector(probe_points,
+        {probe.candidate_cloud.points.size(), std::size_t{3}}, Device::Vulkan);
+    std::shared_ptr<void> probe_backend;
+    auto probe_values = detail::vulkan_occupancy(probe_backend, vk, probe_tensor,
+        camera_from_mvs_view(view), {}).occupancy.to_vector();
+    std::sort(probe_values.begin(), probe_values.end());
+    const float low = probe_values[probe_values.size() / 4];
+    const float high = probe_values[3 * probe_values.size() / 4];
+    require(high > low, "PAM refill fixture has no occupancy variation");
+    refill_options.occupancy_iso_value = .5F * (low + high);
+    refill_options.vacancy_threshold = .5F * (high - low);
+    auto partial = extract_pam_mesh(vk, scene, seed, {}, refill_options);
+    require(partial.candidate_cloud.points.size() < refill_options.max_points,
+            "PAM refill fixture must reject some initial samples");
+    refill_options.max_resample_rounds = 0;
+    auto filled = extract_pam_mesh(vk, scene, seed, {}, refill_options);
+    require(filled.candidate_cloud.points.size() == refill_options.max_points,
+            "PAM unlimited resampling did not fill the candidate budget");
+    refill_options.occupancy_iso_value = .999F;
+    refill_options.vacancy_threshold = 0.F;
+    bool stalled = false;
+    try {
+        (void)extract_pam_mesh(vk, scene, seed, {}, refill_options);
+    } catch (const std::runtime_error& error) {
+        stalled = std::string(error.what()).find("three sampling rounds") != std::string::npos;
+    }
+    require(stalled, "PAM stalled sampling did not report an error");
+    // Match Open3D/GW scene cropping: radius = 1.1*max distance from camera
+    // mean, but the cube is centered at zero; crossing faces are discarded.
+    auto crop_scene = scene;
+    auto second_view = view;
+    second_view.pose.C = {0, 0, 4};
+    crop_scene.views.push_back(second_view);
+    auto crop_options = options;
+    crop_options.scene_crop = true;
+    auto crossing_seed = seed;
+    crossing_seed.vertices.emplace_back(10.F, 0.F, 0.F);
+    crossing_seed.faces.emplace_back(0, 2, static_cast<int>(crossing_seed.vertices.size() - 1));
+    auto cropped = extract_pam_mesh(vk, crop_scene, crossing_seed, {}, crop_options);
+    auto crop_reference = extract_pam_mesh(vk, crop_scene, seed, {}, crop_options);
+    require(cropped.candidate_cloud.points.size() == crop_reference.candidate_cloud.points.size(),
+            "PAM scene crop candidate count");
+    for (std::size_t i = 0; i < cropped.candidate_cloud.points.size(); ++i)
+        require((cropped.candidate_cloud.points[i].position -
+                 crop_reference.candidate_cloud.points[i].position).norm() < 1e-6F,
+                "PAM scene crop retained a crossing face");
+    // Translating camera centers must not translate GW's origin-centered box.
+    for (auto& crop_view : crop_scene.views) crop_view.pose.C.x() += 20;
+    bool empty_crop = false;
+    try {
+        auto far_seed = seed;
+        for (auto& vertex : far_seed.vertices) vertex.x() += 20;
+        (void)extract_pam_mesh(vk, crop_scene, far_seed, {}, crop_options);
+    } catch (const std::runtime_error& error) {
+        empty_crop = std::string(error.what()).find("empty seed mesh") != std::string::npos;
+    }
+    require(empty_crop, "PAM scene crop incorrectly followed the camera mean");
 #endif
     std::cout
         << "PAM Vulkan field, projection, occupancy and extraction tests passed; CUDA available="

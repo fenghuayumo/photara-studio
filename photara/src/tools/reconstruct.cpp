@@ -263,8 +263,15 @@ struct ReconstructCli {
     float mesh_max_edge_scale{4.F};
     float mesh_free_space_quantile{0.95F};
     std::uint64_t pam_max_points{1'000'000};
-    std::uint64_t pam_pivot_max_points{1'000'000};
+    std::uint64_t pam_pivot_max_points{0};
+    std::filesystem::path pam_input_mesh;
+    bool pam_scene_crop{true};
+    float pam_bounding_box_scaling{1.F};
+    bool pam_pivot_filter_large_edges{false};
+    bool pam_manifold_cleanup{false};
     float pam_pivot_std_factor{3.F};
+    unsigned pam_pivot_binary_steps{8};
+    unsigned pam_max_resample_rounds{0};
     float pam_gaussian_seed_fraction{0.F};
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
@@ -493,8 +500,15 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-method auto|tsdf|delaunay|pam\n"
               << "               auto uses TSDF for splats, otherwise the quality preset\n"
               << "  --pam-max-points N  PAM refined surface candidates (default 1000000)\n"
-              << "  --pam-pivot-max-points N  GaussianWrapping pivot vertices before tetra_triangulation\n"
+              << "  --pam-pivot-max-points N  pivot vertex cap (default 0 = all Gaussians)\n"
+              << "  --pam-input-mesh PATH  use an existing GW initial mesh\n"
+              << "  --pam-scene-crop BOOL  GW scene-radius crop (default true)\n"
+              << "  --pam-bounding-box-scaling F  scene crop scale (default 1)\n"
+              << "  --pam-pivot-filter-large-edges BOOL  filter long pivot edges (default false)\n"
+              << "  --pam-manifold-cleanup BOOL  split singular boundary vertices (default false)\n"
               << "  --pam-pivot-std-factor F  learned-normal pivot displacement in sigma (default 3)\n"
+              << "  --pam-pivot-binary-steps N  pivot edge bisection steps (default 8; 0 = linear)\n"
+              << "  --pam-max-resample-rounds N  candidate sampling rounds (default 0 = fill budget)\n"
               << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
               << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
               << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
@@ -1019,13 +1033,27 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("1000000"))
         ("pam-pivot-max-points",
          "Maximum Gaussian pivot vertices for initial tetra triangulation",
-         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("pam-input-mesh", "Existing GW initial mesh PLY (otherwise generate from Gaussians)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("pam-scene-crop", "Apply GW origin-centered scene-radius crop",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("pam-bounding-box-scaling", "GW scene crop radius multiplier",
+         cxxopts::value<float>()->default_value("1"))
+        ("pam-pivot-filter-large-edges", "Filter pivot edges exceeding summed scales",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("pam-manifold-cleanup", "Split singular tetrahedral boundary vertices",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("pam-pivot-std-factor",
          "Learned-normal Gaussian pivot displacement in sigma",
          cxxopts::value<float>()->default_value("3"))
         ("pam-gaussian-seed-fraction",
          "Fraction of PAM candidates seeded from learned Gaussians",
          cxxopts::value<float>()->default_value("0"))
+        ("pam-pivot-binary-steps", "Pivot edge bisection steps (0 uses linear interpolation)",
+         cxxopts::value<unsigned>()->default_value("8"))
+        ("pam-max-resample-rounds", "Candidate sampling rounds (0 fills the budget)",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("pam-refinement-steps", "PAM occupancy/vector-field refinement steps",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
@@ -1621,6 +1649,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["pam-pivot-max-points"].as<std::uint64_t>();
     cli.pam_pivot_std_factor =
         result["pam-pivot-std-factor"].as<float>();
+    cli.pam_pivot_binary_steps = result["pam-pivot-binary-steps"].as<unsigned>();
+    cli.pam_max_resample_rounds = result["pam-max-resample-rounds"].as<unsigned>();
+    cli.pam_input_mesh = utf8_to_path(result["pam-input-mesh"].as<std::string>());
+    cli.pam_scene_crop = result["pam-scene-crop"].as<bool>();
+    cli.pam_bounding_box_scaling = result["pam-bounding-box-scaling"].as<float>();
+    cli.pam_pivot_filter_large_edges = result["pam-pivot-filter-large-edges"].as<bool>();
+    cli.pam_manifold_cleanup = result["pam-manifold-cleanup"].as<bool>();
     cli.pam_gaussian_seed_fraction =
         result["pam-gaussian-seed-fraction"].as<float>();
     cli.pam_refinement_steps =
@@ -1923,13 +1958,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_method == "pam" && !cli.splat)
         throw std::invalid_argument(
             "--mesh-method pam requires splat training");
-    if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
+    if (cli.pam_max_points < 4 || (cli.pam_pivot_max_points != 0 && cli.pam_pivot_max_points < 4) ||
         cli.pam_neighbors == 0 ||
         cli.pam_occupancy_chunk_size == 0 ||
         cli.pam_occupancy_chunk_size > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) ||
         cli.pam_points_per_tetrahedron == 0 ||
         !std::isfinite(cli.pam_pivot_std_factor) ||
         !(cli.pam_pivot_std_factor > 0.F) ||
+        !std::isfinite(cli.pam_bounding_box_scaling) || !(cli.pam_bounding_box_scaling > 0.F) ||
         !std::isfinite(cli.pam_gaussian_seed_fraction) ||
         cli.pam_gaussian_seed_fraction < 0.F ||
         cli.pam_gaussian_seed_fraction > 1.F ||
@@ -3930,6 +3966,12 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 cli.pam_pivot_max_points,
                 (std::numeric_limits<std::size_t>::max)()));
         pam_options.pivot_std_factor = cli.pam_pivot_std_factor;
+        pam_options.pivot_binary_steps = cli.pam_pivot_binary_steps;
+        pam_options.max_resample_rounds = cli.pam_max_resample_rounds;
+        pam_options.scene_crop = cli.pam_scene_crop;
+        pam_options.bounding_box_scaling = cli.pam_bounding_box_scaling;
+        pam_options.pivot_filter_large_edges = cli.pam_pivot_filter_large_edges;
+        pam_options.manifold_cleanup = cli.pam_manifold_cleanup;
         pam_options.gaussian_seed_fraction =
             cli.pam_gaussian_seed_fraction;
         pam_options.refinement_steps = cli.pam_refinement_steps;
@@ -3947,8 +3989,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         // An empty seed requests GaussianWrapping's native path:
         // learned-normal pivots -> tetra_triangulation -> marching tetrahedra
         // -> PAM resampling and a second occupancy-classified Delaunay.
+        const auto pam_seed = cli.pam_input_mesh.empty() ? photara::mvs::Mesh{}
+            : photara::mvs::load_mesh_ply(cli.pam_input_mesh);
         auto pam = photara::splat::extract_pam_mesh(
-            gaussians, scene, photara::mvs::Mesh{}, options,
+            gaussians, scene, pam_seed, options,
             pam_options);
         const auto seed_ply = out_dir /
             (cli.output.stem().string() + "_pam_pivot_mesh.ply");
