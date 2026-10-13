@@ -21,6 +21,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint index = dispatch_id.x;
     if (index >= count) return;
 
+    // Auxiliary normal-field render keeps all projected geometry intact.
+    if ((pc.u3 & 128u) != 0u) {
+        uint base = index * ((pc.u3 & 4u) != 0u ? 7u : 5u);
+        gauss_f[base + 2u] = float4(color_src[3u * index],
+            color_src[3u * index + 1u], color_src[3u * index + 2u], 0.0f);
+        gauss_f[base + ((pc.u3 & 4u) != 0u ? 6u : 4u)] = 0.0f;
+        return;
+    }
+
     gauss_u[index] = 0;
     gauss_u[count + index] = 0;
     gauss_u[3 * count + index] = 0;

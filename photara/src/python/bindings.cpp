@@ -928,7 +928,6 @@ NB_MODULE(photara, module) {
         .def_rw("seed", &splat::TrainingOptions::seed)
         .def_rw("log_interval", &splat::TrainingOptions::log_interval)
         .def_rw("profile_cuda", &splat::TrainingOptions::profile_cuda)
-        .def_rw("fuse_sh_adam", &splat::TrainingOptions::fuse_sh_adam)
         .def_rw(
             "cuda_profile_interval",
             &splat::TrainingOptions::cuda_profile_interval)
@@ -1240,6 +1239,11 @@ NB_MODULE(photara, module) {
     nb::class_<splat::PamMeshOptions>(module, "PamOptions")
         .def(nb::init<>())
         .def_rw("max_points", &splat::PamMeshOptions::max_points)
+        .def_rw("pivot_binary_steps", &splat::PamMeshOptions::pivot_binary_steps)
+        .def_rw("pivot_filter_large_edges", &splat::PamMeshOptions::pivot_filter_large_edges)
+        .def_rw("scene_crop", &splat::PamMeshOptions::scene_crop)
+        .def_rw("bounding_box_scaling", &splat::PamMeshOptions::bounding_box_scaling)
+        .def_rw("manifold_cleanup", &splat::PamMeshOptions::manifold_cleanup)
         .def_rw(
             "pivot_max_points",
             &splat::PamMeshOptions::pivot_max_points)

@@ -78,6 +78,7 @@ struct OccupancyCacheImpl {
     std::vector<View> views;
     tinytensor::Tensor gaussian_buffer, instance_buffer, tile_buffer, point_buffer;
     tinytensor::Tensor upload_buffer;
+    std::size_t active_view = std::numeric_limits<std::size_t>::max();
     std::size_t device_budget{}, device_bytes{}, host_budget{};
     OccupancyCacheStats stats;
 };
@@ -800,12 +801,20 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     if (camera_index >= context.views.size())
         throw std::out_of_range("occupancy cache camera index");
     auto& view = context.views[camera_index];
+    const bool same_view = context.active_view == camera_index;
+    if (!same_view && context.active_view < context.views.size()) {
+        auto& previous = context.views[context.active_view];
+        if (!previous.prepared) {
+            previous.storage = {};
+            previous.draw.storage = nullptr;
+        }
+    }
     splat_drender::WorkspacePools pools;
     pools.gaussian = resize_buffer(context.gaussian_buffer, "occupancy.prepare.gaussian");
     pools.instance = resize_buffer(context.instance_buffer, "occupancy.prepare.instance");
     pools.tile = resize_buffer(context.tile_buffer, "occupancy.prepare.tile");
     pools.point = resize_buffer(context.point_buffer, "occupancy.point");
-    if (!view.prepared) {
+    if (!view.prepared && (!same_view || !view.storage.is_valid())) {
         pools.pixel = resize_buffer(view.storage, "occupancy.cache");
         view.draw = splat_drender::Rasterizer::prepare_occupancy(
             pools, gaussians_of(context.model, context.activated, context.options, {}),
@@ -842,9 +851,13 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     if (!view.host_storage.empty()) {
         const auto upload = resize_buffer(context.upload_buffer, "occupancy.cache.upload");
         draw.storage = upload(draw.bytes);
-        if (cudaMemcpyAsync(draw.storage, view.host_storage.data(), draw.bytes,
+        if (!same_view && cudaMemcpyAsync(draw.storage, view.host_storage.data(), draw.bytes,
                             cudaMemcpyHostToDevice) != cudaSuccess)
             throw std::runtime_error("unable to upload cached occupancy draw list");
+        if (!same_view) {
+            ++context.stats.uploads;
+            context.stats.upload_bytes += draw.bytes;
+        }
     } else {
         draw.storage = static_cast<char*>(view.storage.data_ptr());
     }
@@ -860,10 +873,9 @@ OccupancyResult Rasterizer::evaluate_occupancy(
         pools, draw, camera_view_of(view.camera, view.constants), settings_of(context.options),
         world_points.ptr<float>(), static_cast<int>(count), out);
     ++context.stats.queries;
-    if (!view.prepared) {
-        view.storage = {};
-        view.draw.storage = nullptr;
-    }
+    context.active_view = camera_index;
+    // Keep one nonresident view until the camera changes. Consecutive point
+    // chunks reuse its preparation without expanding the resident cache.
     return result;
 }
 

@@ -17,15 +17,22 @@ layout(push_constant) uniform Push {
 } pc;
 
 void main() {
-    vec3 n = v_cam_normal;
-    const float len = length(n);
-    if (len > 1e-8)
-        n /= len;
-    if (n.z > 0.0)
-        n = -n;
-    const float light = 0.22 + 0.78 * abs(n.z);
+    // Textured mode shows the baked albedo as-is so the mesh preview can be
+    // compared against 3DGS/photos without an editor-side shading term. The
+    // headlight only shapes untextured clay / vertex-colour previews.
+    const bool textured = pc.clay_flags.w > 1.5;
+    float light = 1.0;
+    if (!textured) {
+        vec3 n = v_cam_normal;
+        const float len = length(n);
+        if (len > 1e-8)
+            n /= len;
+        if (n.z > 0.0)
+            n = -n;
+        light = 0.22 + 0.78 * abs(n.z);
+    }
     vec3 base = v_colour;
-    if (pc.clay_flags.w > 1.5)
+    if (textured)
         base = texture(albedo, v_uv).rgb;
     out_colour = vec4(base * light, 1.0);
 }

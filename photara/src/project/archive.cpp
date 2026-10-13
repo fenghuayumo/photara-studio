@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <fstream>
+#include <cstring>
 #include <stdexcept>
 #include <system_error>
 #include <string>
@@ -155,6 +156,54 @@ Archive Archive::open(const std::filesystem::path& path) {
     return archive;
 }
 
+Archive Archive::from_bytes(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < sizeof(FileHeader)) throw std::runtime_error("Truncated .ascan header");
+    FileHeader header; std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.magic != k_magic) throw std::runtime_error("Not a Photara .ascan payload");
+    io::require_readable(header.version, header.min_reader_version, k_ascan_version, ".ascan");
+    if (header.chunk_count > 64 || bytes.size() < sizeof(header) + header.chunk_count * sizeof(FileEntry))
+        throw std::runtime_error("Invalid .ascan chunk directory");
+    Archive archive;
+    archive.writer_version_ = header.version;
+    archive.min_reader_version_ = io::normalize_min_reader(header.min_reader_version);
+    for (unsigned index = 0; index < header.chunk_count; ++index) {
+        FileEntry entry;
+        std::memcpy(&entry, bytes.data() + sizeof(header) + index * sizeof(entry), sizeof(entry));
+        if (entry.offset > bytes.size() || entry.size > bytes.size() - entry.offset)
+            throw std::runtime_error(".ascan chunk is outside the payload");
+        const auto type = static_cast<ChunkType>(entry.type);
+        if (archive.has(type) || (!known_chunk_type(type) && (entry.flags & io::k_chunk_must_understand)))
+            throw std::runtime_error("Invalid or required unknown .ascan chunk");
+        std::vector<std::uint8_t> payload(bytes.begin() + entry.offset, bytes.begin() + entry.offset + entry.size);
+        if (checksum_bytes(payload) != entry.checksum) throw std::runtime_error(".ascan chunk checksum mismatch");
+        archive.set_chunk(type, std::move(payload), entry.flags);
+    }
+    return archive;
+}
+
+std::vector<std::uint8_t> Archive::encode() const {
+    std::vector<Slot> ordered = slots_;
+    std::sort(ordered.begin(), ordered.end(), [](const Slot& a, const Slot& b) {
+        return static_cast<std::uint32_t>(a.type) < static_cast<std::uint32_t>(b.type);
+    });
+    std::vector<std::vector<std::uint8_t>> payloads;
+    std::vector<FileEntry> entries;
+    std::uint64_t cursor = sizeof(FileHeader) + ordered.size() * sizeof(FileEntry);
+    for (const auto& slot : ordered) {
+        payloads.push_back(chunk(slot.type)); cursor = align8(cursor);
+        entries.push_back({static_cast<std::uint32_t>(slot.type), slot.flags,
+            cursor, payloads.back().size(), checksum_bytes(payloads.back())});
+        cursor += payloads.back().size();
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(cursor), 0);
+    const FileHeader header{k_magic, k_ascan_version, 0, static_cast<std::uint32_t>(entries.size()), k_ascan_min_reader};
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    if (!entries.empty()) std::memcpy(bytes.data() + sizeof(header), entries.data(), entries.size() * sizeof(FileEntry));
+    for (std::size_t i = 0; i < entries.size(); ++i)
+        if (!payloads[i].empty()) std::memcpy(bytes.data() + entries[i].offset, payloads[i].data(), payloads[i].size());
+    return bytes;
+}
+
 bool Archive::has(const ChunkType type) const {
     return find(type) != nullptr;
 }
@@ -269,6 +318,16 @@ void Archive::save(const std::filesystem::path& path) const {
     }
     try {
         atomic_replace(temporary, path);
+        // A same-file rewrite can change every source offset. Refresh the lazy
+        // cache so subsequent stage saves read the newly published container.
+        source_ = path;
+        for (const auto& entry : entries) {
+            if (auto* slot = const_cast<Archive*>(this)->find(static_cast<ChunkType>(entry.type))) {
+                slot->source_offset = entry.offset;
+                slot->size = entry.size;
+                slot->checksum = entry.checksum;
+            }
+        }
     } catch (...) {
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);

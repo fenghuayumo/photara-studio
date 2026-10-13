@@ -8,11 +8,23 @@
 [[vk::binding(5, 0)]] StructuredBuffer<float> sample_f;
 [[vk::binding(6, 0)]] StructuredBuffer<uint> sample_u;
 [[vk::binding(7, 0)]] StructuredBuffer<float> loss_points;
+#ifdef SPLAT_SAMPLE_NATIVE_ATOMIC
+[[vk::binding(8, 0)]] RWStructuredBuffer<float> blend_grad;
+[[vk::ext_extension("SPV_EXT_shader_atomic_float_add")]]
+[[vk::ext_capability(6033)]]
+[[vk::ext_instruction(6035)]]
+float op_atomic_f_add([[vk::ext_reference]] float destination,
+    uint scope, uint semantics, float value);
+#else
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> blend_grad;
+#endif
 [[vk::binding(9, 0)]] RWStructuredBuffer<float> point_grad;
 
 void atomic_add_f32(uint index, float value) {
     if (value == 0.0f || isnan(value) || isinf(value)) return;
+#ifdef SPLAT_SAMPLE_NATIVE_ATOMIC
+    op_atomic_f_add(blend_grad[index], 1u, 0u, value);
+#else
     uint expected = blend_grad[index];
     [loop] for (;;) {
         uint desired = asuint(asfloat(expected) + value);
@@ -21,12 +33,14 @@ void atomic_add_f32(uint index, float value) {
         if (observed == expected) return;
         expected = observed;
     }
+#endif
 }
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint point_count = pc.u0;
-    uint i = dispatch_id.x;
+    uint i = pc.u14 + dispatch_id.x;
+    if (dispatch_id.x >= pc.u15) return;
     if (i >= point_count) return;
     uint width = pc.u1;
     uint height = pc.u2;

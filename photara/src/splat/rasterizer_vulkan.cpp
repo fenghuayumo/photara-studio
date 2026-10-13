@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 
 namespace photara::splat::detail {
@@ -147,6 +148,7 @@ struct VulkanRasterBackend {
 
 struct VulkanForwardContext {
     std::shared_ptr<VulkanRasterBackend> backend;
+    tinytensor::Tensor colors_precomp;
     tinytensor::Tensor visibility_bits;
     splat_drender::vulkan::SplatDeviceFrame frame;
     splat_drender::vulkan::SplatDevicePhotometricOutput photometric;
@@ -195,6 +197,18 @@ splat_drender::vulkan::SplatDeviceGaussians device_gaussians(
     gaussians.sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     gaussians.sh_bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
+    if (requested_options.colors_precomp.is_valid()) {
+        const auto& colors = requested_options.colors_precomp;
+        if (colors.device() != tinytensor::Device::Vulkan ||
+            colors.dtype() != tinytensor::DataType::Float32 ||
+            !colors.is_contiguous() || colors.shape().rank() != 2 ||
+            colors.shape()[0] != model.size() || colors.shape()[1] != 3)
+            throw std::invalid_argument("Vulkan precomputed colors must be contiguous float32 [N,3]");
+        gaussians.sh = buffer_view(colors);
+        gaussians.colors_precomputed = true;
+        gaussians.sh_degree = 0;
+        gaussians.sh_bases = 1;
+    }
     return gaussians;
 }
 
@@ -224,14 +238,12 @@ RenderResult vulkan_raster_forward(
         throw std::invalid_argument("Splat camera dimensions must be positive");
     if (model.means.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument("Vulkan rasterization requires a Vulkan model");
-    if (requested_options.colors_precomp.is_valid())
-        throw std::invalid_argument(
-            "Vulkan precomputed-color rasterization is not implemented yet");
 
     const auto backend = get_backend(backend_value);
     active_training_backend = backend;
     auto context = std::make_shared<VulkanForwardContext>();
     context->backend = backend;
+    context->colors_precomp = requested_options.colors_precomp;
     const auto gaussians = device_gaussians(backend, model, requested_options);
     const auto settings = raster_settings(requested_options);
 
@@ -274,11 +286,16 @@ RenderResult vulkan_raster_forward(
     tinytensor::vulkan::submit_async();
     const double sync_ms = backend->profile_stages
         ? elapsed_ms(profile_start) : 0.0;
-    backend->rasterizer.bind_model_device(gaussians);
+    const bool reuse = requested_options.reuse_projection &&
+        !environment_flag("SPLAT_VULKAN_DISABLE_NORMAL_REUSE");
+    if (!reuse) backend->rasterizer.bind_model_device(gaussians);
     const double bind_ms = backend->profile_stages
         ? elapsed_ms(profile_start) - sync_ms : 0.0;
-    context->frame = backend->rasterizer.render_device_copy(
-        camera_view(camera), settings, destination);
+    context->frame = reuse
+        ? backend->rasterizer.render_colors_device_copy(
+            gaussians, camera_view(camera), settings, destination)
+        : backend->rasterizer.render_device_copy(
+            camera_view(camera), settings, destination);
     const double render_ms = backend->profile_stages
         ? elapsed_ms(profile_start) - sync_ms - bind_ms : 0.0;
     // Keep the per-Gaussian contribution flags device-resident. The 0/1
@@ -381,9 +398,10 @@ ModelGradients vulkan_raster_backward(
     const auto profile_start = context->backend->profile_stages
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    if (structure_adam != nullptr)
-        throw std::invalid_argument(
-            "Fused structure Adam is not supported by the Vulkan raster primitive");
+    if (structure_adam && (!sh_adam || structure_adam->shape_scale_reg > 0.F ||
+        structure_adam->shape_erank_reg > 0.F || structure_adam->shape_erank_s3_reg > 0.F ||
+        structure_adam->shape_quat_norm_reg > 0.F))
+        throw std::invalid_argument("Vulkan fused structure Adam requires fused SH and no shape regularizers");
     if (densify_map.is_valid() && densify_map.numel() != 0)
         throw std::invalid_argument(
             "Vulkan EMC densify-map backward is not implemented yet");
@@ -397,13 +415,17 @@ ModelGradients vulkan_raster_backward(
             "Vulkan backward requires a photometric color gradient");
 
     const std::size_t count = model.size();
-    const std::size_t sh_values = sh_adam ? 0 : model.sh.numel();
+    const bool precomputed = context->colors_precomp.is_valid();
+    if (precomputed && sh_adam)
+        throw std::invalid_argument("Precomputed colors cannot use fused SH Adam");
+    const std::size_t sh_values = sh_adam ? 0 : precomputed ? count * 3U : model.sh.numel();
     // splat_project_backward writes every packed slot for every Gaussian,
     // including zeroing inactive/culled entries and unused SH coefficients.
     // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
     auto packed = tinytensor::Tensor::empty(
-        {context->backend->rasterizer.model_gradient_float_count() -
-            (sh_adam ? model.sh.numel() : 0)}, tinytensor::Device::Vulkan);
+        {structure_adam ? count * (structure_adam->capture_opacity_gradient ? 2U : 1U)
+            : context->backend->rasterizer.model_gradient_float_count() -
+                (sh_adam ? model.sh.numel() : 0)}, tinytensor::Device::Vulkan);
     splat_drender::vulkan::SplatSHAdamUpdate update;
     if (sh_adam) {
         if (sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
@@ -428,17 +450,50 @@ ModelGradients vulkan_raster_backward(
         update.settings = {sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
             sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon, regularization};
     }
+    splat_drender::vulkan::SplatStructureAdamUpdate structure_update;
+    if (structure_adam) {
+        const tinytensor::Tensor* moments[]{&structure_adam->means_first, &structure_adam->means_second,
+            &structure_adam->scales_first, &structure_adam->scales_second,
+            &structure_adam->rotations_first, &structure_adam->rotations_second,
+            &structure_adam->opacity_first, &structure_adam->opacity_second};
+        const std::size_t strides[]{3,3,3,3,4,4,1,1};
+        for (int i = 0; i < 8; ++i) {
+            if (moments[i]->dtype() != tinytensor::DataType::Float32 || moments[i]->numel() != count * strides[i])
+                throw std::invalid_argument("Vulkan fused structure Adam requires full FP32 moments");
+            structure_update.moments[i] = buffer_view(*moments[i]);
+        }
+        structure_update.settings = {structure_adam->means_lr, structure_adam->scales_lr,
+            structure_adam->quaternions_lr, structure_adam->opacities_lr,
+            structure_adam->beta1, structure_adam->beta2, structure_adam->correction1,
+            structure_adam->correction2, structure_adam->epsilon,
+            structure_adam->minimum_log_scale, structure_adam->maximum_log_scale,
+            structure_adam->max_log_scale_ratio, structure_adam->opacity_reg, structure_adam->log_scale_reg};
+        structure_update.capture_opacity_gradient = structure_adam->capture_opacity_gradient;
+    }
     tinytensor::vulkan::submit_async();
     context->backend->rasterizer.backward_device(
         color_gradient, buffer_view(grad_alpha), buffer_view(packed),
-        buffer_view(grad_depth), buffer_view(grad_normal), sh_adam ? &update : nullptr);
+        buffer_view(grad_depth), buffer_view(grad_normal), sh_adam ? &update : nullptr,
+        structure_adam ? &structure_update : nullptr);
 
     std::size_t offset = 0;
     ModelGradients gradients;
+    if (structure_adam) {
+        gradients.refine_weight = packed.slice(0, 0, count);
+        if (structure_adam->capture_opacity_gradient)
+            gradients.opacity_logits = packed.slice(0, count, count * 2U)
+                .reshape(tinytensor::TensorShape{count, std::size_t{1}});
+        if (context->backend->profile_stages)
+            context->backend->record_backward(elapsed_ms(profile_start));
+        return gradients;
+    }
     gradients.means = packed.slice(0, offset, offset + count * 3U)
         .reshape(tinytensor::TensorShape{count, std::size_t{3}});
     offset += count * 3U;
-    if (!sh_adam)
+    if (precomputed)
+        gradients.colors_precomp = packed.slice(0, offset, offset + sh_values)
+            .reshape(tinytensor::TensorShape{count, std::size_t{3}});
+    else if (!sh_adam)
         gradients.sh = packed.slice(0, offset, offset + sh_values)
             .reshape(model.sh.shape());
     offset += sh_values;
@@ -461,6 +516,32 @@ ModelGradients vulkan_raster_backward(
     if (context->backend->profile_stages)
         context->backend->record_backward(elapsed_ms(profile_start));
     return gradients;
+}
+
+OccupancyResult vulkan_occupancy(
+    std::shared_ptr<void>& backend_value, const GaussianModel& model,
+    const tinytensor::Tensor& points, const Camera& camera,
+    const RasterizeOptions& options, bool reuse_prepared_view) {
+    if (!points.is_valid() || points.device()!=tinytensor::Device::Vulkan ||
+        points.dtype()!=tinytensor::DataType::Float32 || !points.is_contiguous() ||
+        points.shape().rank()!=2 || points.shape()[1]!=3 ||
+        points.shape()[0]>std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument("Vulkan occupancy requires float32 [P,3] points");
+    OccupancyResult result;
+    result.occupancy=tinytensor::Tensor::empty({points.shape()[0]},tinytensor::Device::Vulkan);
+    auto inside=tinytensor::Tensor::empty({points.shape()[0]},tinytensor::Device::Vulkan,
+        tinytensor::DataType::Int32);
+    if(points.shape()[0]) {
+        auto backend=get_backend(backend_value);
+        tinytensor::vulkan::submit_async();
+        if (!reuse_prepared_view)
+            backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
+        backend->rasterizer.occupancy_device(buffer_view(points),
+            static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(options),
+            buffer_view(result.occupancy),buffer_view(inside),reuse_prepared_view);
+    }
+    result.inside=inside.gt(0);
+    return result;
 }
 
 DepthSampleResult vulkan_sample_depth(
@@ -502,11 +583,11 @@ DepthSampleGradients vulkan_sample_depth_backward(const GaussianModel& model,
         throw std::invalid_argument("Vulkan sample gradient must have shape [P,3]");
     auto& rasterizer = context->backend->rasterizer;
     auto packed = tinytensor::Tensor::empty(
-        {rasterizer.model_gradient_float_count()}, tinytensor::Device::Vulkan);
+        {rasterizer.sample_gradient_float_count(true)}, tinytensor::Device::Vulkan);
     DepthSampleGradients result;
     result.points = tinytensor::Tensor::empty(context->points.shape(), tinytensor::Device::Vulkan);
     tinytensor::vulkan::submit_async();
-    rasterizer.sample_depth_backward_device(buffer_view(gradient), buffer_view(packed), buffer_view(result.points));
+    rasterizer.sample_depth_backward_device(buffer_view(gradient), buffer_view(packed), buffer_view(result.points), true);
     const auto count = model.size();
     std::size_t offset = 0;
     const auto take = [&](std::size_t size, const tinytensor::TensorShape& shape) {
@@ -515,9 +596,8 @@ DepthSampleGradients vulkan_sample_depth_backward(const GaussianModel& model,
         return value;
     };
     result.model.means = take(count * 3, model.means.shape());
-    // The sample objective has no appearance derivative, but preserve the full
-    // public ModelGradients layout for callers and regression comparisons.
-    result.model.sh = take(model.sh.numel(), model.sh.shape());
+    // Depth queries have no appearance derivative. Keep that field absent
+    // instead of allocating/writing a full zero SH gradient for every row.
     offset += count * 8; // activated opacity, scales, and rotation
     result.model.log_scales = take(count * 3, model.log_scales.shape());
     result.model.quaternions = take(count * 4, model.quaternions.shape());

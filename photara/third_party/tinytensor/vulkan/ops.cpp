@@ -844,34 +844,47 @@ void constrain_scale_ratio(Tensor& log_scales, const float maximum_ratio) {
                             &push, sizeof(push), groups_for(count));
 }
 
+std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks) {
+    if (masks.empty() || masks.size() > 3)
+        throw std::invalid_argument("Vulkan count_masks requires one to three masks");
+    std::vector<Tensor> input;
+    for (const auto& mask : masks) {
+        if (mask.device() != Device::Vulkan || mask.dtype() != DataType::Bool ||
+            mask.numel() != masks.front().numel())
+            throw std::invalid_argument("Vulkan count_masks requires equally sized Bool masks");
+        input.push_back(prepared(mask));
+    }
+    if (input.front().numel() == 0) return std::vector<std::size_t>(input.size(), 0);
+    auto& ctx = Context::get();
+    auto result = ctx.alloc(input.size() * sizeof(std::uint32_t));
+    ctx.fill_zero(*result, 0, input.size() * sizeof(std::uint32_t));
+    struct Push { std::uint32_t count, offset0, offset1, offset2; };
+    Push push{u32(input.front().numel()), u32(byte_offset(input[0])),
+        input.size() > 1 ? u32(byte_offset(input[1])) : 0,
+        input.size() > 2 ? u32(byte_offset(input[2])) : 0};
+    const std::array<BufferBinding, 4> bindings{bind(input[0]),
+        input.size() > 1 ? bind(input[1]) : dummy_binding(),
+        input.size() > 2 ? bind(input[2]) : dummy_binding(), result->binding()};
+    ctx.dispatch(ShaderId::CountMasks, bindings, &push, sizeof(push), groups_for(push.count), u32(input.size()));
+    std::array<std::uint32_t, 3> host{};
+    ctx.download(*result, 0, host.data(), input.size() * sizeof(std::uint32_t));
+    return std::vector<std::size_t>(host.begin(), host.begin() + input.size());
+}
+
 std::size_t count_nonzero(const Tensor& src) {
     Tensor input = prepared(src);
-    if (input.numel() == 0) {
-        return 0;
-    }
-    auto& ctx = Context::get();
-    const std::uint32_t count = u32(input.numel());
-    auto flags = ctx.alloc(count * 4U);
-    auto scan = ctx.alloc(count * 4U);
-    struct MaskPush {
-        std::uint32_t count;
-        std::uint32_t dtype;
-        std::uint32_t src_offset;
-        std::uint32_t dst_offset;
-    } mask{count, static_cast<std::uint32_t>(input.dtype()), u32(byte_offset(input)), 0};
-    std::array<BufferBinding, 2> mask_bindings{bind(input), flags->binding()};
-    ctx.dispatch(ShaderId::MaskFlags, mask_bindings, &mask, sizeof(mask), groups_for(count));
-    exclusive_or_inclusive_scan(*flags, 0, *scan, 0, count, false, true);
-    std::uint32_t last_scan = 0;
-    std::uint32_t last_flag = 0;
-    ctx.download(*scan, (count - 1U) * 4U, &last_scan, 4);
-    ctx.download(*flags, (count - 1U) * 4U, &last_flag, 4);
-    return static_cast<std::size_t>(last_scan + last_flag);
+    if (input.numel() == 0) return 0;
+    auto mask = input.dtype() == DataType::Bool ? input : input.ne(0.F);
+    return count_masks({mask}).front();
 }
 
 Tensor nonzero(const Tensor& src) {
+    return nonzero(src, count_nonzero(src));
+}
+
+Tensor nonzero(const Tensor& src, const std::size_t found) {
     Tensor input = prepared(src);
-    const std::size_t found = count_nonzero(input);
+    if (found > input.numel()) throw std::invalid_argument("Vulkan nonzero count exceeds input size");
     const std::size_t ndim = std::max<std::size_t>(input.ndim(), 1);
     if (found == 0) {
         return TensorStorage::empty(TensorShape{std::size_t{0}, ndim}, DataType::Int64);
@@ -1539,11 +1552,90 @@ std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending) {
             current_indices.slice(0, 0, count)};
 }
 
+Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
+                         const Tensor& added, const std::size_t added_rows) {
+    if (src.device() != Device::Vulkan || src.ndim() == 0)
+        throw std::invalid_argument("Vulkan remap_append requires a row tensor");
+    auto input = prepared(src);
+    auto keep = indices.is_valid() ? prepared(indices) : Tensor{};
+    auto append = added.is_valid() ? prepared(added) : Tensor{};
+    const std::size_t retained = keep.is_valid() ? keep.numel() : src.size(0);
+    if (keep.is_valid() && (keep.device() != Device::Vulkan || keep.dtype() != DataType::Int32 || keep.ndim() != 1))
+        throw std::invalid_argument("Vulkan remap_append requires Int32 row indices");
+    auto dimensions = src.shape().dims();
+    std::size_t row_width = 1;
+    for (std::size_t i = 1; i < dimensions.size(); ++i) row_width *= dimensions[i];
+    if (append.is_valid()) {
+        auto added_dimensions = dimensions;
+        added_dimensions[0] = added_rows;
+        if (append.device() != Device::Vulkan || append.dtype() != src.dtype() ||
+            append.shape() != TensorShape(added_dimensions))
+            throw std::invalid_argument("Vulkan remap_append added rows must match source layout");
+    }
+    dimensions[0] = retained + added_rows;
+    Tensor out = TensorStorage::empty(TensorShape(dimensions), src.dtype());
+    if (out.numel() == 0) return out;
+    if (out.numel() > std::numeric_limits<std::uint32_t>::max() / dtype_size(src.dtype()))
+        throw std::invalid_argument("Vulkan remap_append output exceeds addressable size");
+    struct Push {
+        std::uint32_t count, row_width, retained, elem_size;
+        std::uint32_t src_offset, indices_offset, added_offset, dst_offset;
+        std::uint32_t has_indices, has_added;
+    } push{u32(out.numel()), u32(row_width), u32(retained), u32(dtype_size(src.dtype())),
+        u32(byte_offset(input)), keep.is_valid() ? u32(byte_offset(keep)) : 0,
+        append.is_valid() ? u32(byte_offset(append)) : 0, u32(byte_offset(out)),
+        keep.is_valid(), append.is_valid()};
+    // Packed SH moments can be copied as whole words rather than issuing an
+    // atomic byte/halfword store for every coefficient.
+    const std::size_t row_bytes = row_width * dtype_size(src.dtype());
+    if (row_bytes % 4 == 0 && push.src_offset % 4 == 0 && push.added_offset % 4 == 0) {
+        push.count = u32(out.numel() * dtype_size(src.dtype()) / 4);
+        push.row_width = u32(row_bytes / 4);
+        push.elem_size = 4;
+    }
+    const std::array<BufferBinding, 4> bindings{bind(input),
+        keep.is_valid() ? bind(keep) : dummy_binding(),
+        append.is_valid() ? bind(append) : dummy_binding(), bind(out)};
+    Context::get().dispatch(ShaderId::RemapAppend, bindings, &push, sizeof(push), groups_for(push.count));
+    return out;
+}
+
+std::array<float, 6> quantile_bounds(const Tensor& means, const float percentile) {
+    if (means.device() != Device::Vulkan || means.dtype() != DataType::Float32 ||
+        means.shape().rank() != 2 || means.shape()[1] != 3 ||
+        means.shape()[0] > std::numeric_limits<std::uint32_t>::max() / 12U)
+        throw std::invalid_argument("Vulkan bounds require float32 [N,3] means");
+    if (means.shape()[0] == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
+    auto input = prepared(means);
+    auto& ctx = Context::get();
+    auto bins = ctx.alloc(6 * 256 * sizeof(std::uint32_t));
+    auto state = ctx.alloc(6 * 4 * sizeof(std::uint32_t));
+    auto result = ctx.alloc(6 * sizeof(float));
+    ctx.fill_zero(*state, 0, 6 * 4 * sizeof(std::uint32_t));
+    struct Push { std::uint32_t count, src_offset, pass, mode; float percentile; };
+    static_assert(sizeof(Push) == 20);
+    Push push{u32(input.shape()[0]), u32(byte_offset(input)), 0, 0,
+        std::clamp(percentile, 0.F, 1.F)};
+    const std::array<BufferBinding, 4> bindings{
+        bind(input), bins->binding(), state->binding(), result->binding()};
+    for (std::uint32_t pass = 0; pass < 4; ++pass) {
+        ctx.fill_zero(*bins, 0, 6 * 256 * sizeof(std::uint32_t));
+        push.pass = pass; push.mode = 0;
+        ctx.dispatch(ShaderId::QuantileBounds, bindings, &push, sizeof(push), groups_for(push.count), pass == 0 ? 3 : 6);
+        push.mode = 1;
+        ctx.dispatch(ShaderId::QuantileBounds, bindings, &push, sizeof(push), 1, 6);
+    }
+    push.mode = 2;
+    ctx.dispatch(ShaderId::QuantileBounds, bindings, &push, sizeof(push), 1);
+    std::array<float, 6> host{};
+    ctx.download(*result, 0, host.data(), sizeof(host));
+    return host;
+}
+
 namespace {
 
-// Two 16-bit digits cover the whole 32-bit key, so a selection costs two
-// histogram passes and one emit pass no matter how large the row count is.
-// The bins stay device-local; only the 256 KiB histogram crosses to the host.
+// Two 16-bit digits resolve a value, four resolve float/index tie ordering.
+// Histogram thresholds stay device-local; only the final result is read back.
 constexpr std::uint32_t kSelectBinCount = 1U << 16;
 
 struct SelectPush {
@@ -1553,16 +1645,12 @@ struct SelectPush {
     std::uint32_t has_mask;
     std::uint32_t bins_offset;
     std::uint32_t dst_offset;
-    std::uint32_t prefix_hi;
-    std::uint32_t prefix_lo;
     std::uint32_t prefix_bits;
     std::uint32_t limit;
     std::uint32_t descending;
     std::uint32_t mode;
-    std::uint32_t threshold_hi;
-    std::uint32_t threshold_lo;
 };
-static_assert(sizeof(SelectPush) == 56);
+static_assert(sizeof(SelectPush) == 40);
 
 // Host twin of the shader's key transform, used to turn the resolved key back
 // into the value it came from without a third pass.
@@ -1575,169 +1663,84 @@ float value_of_select_key(std::uint32_t select_key, bool descending) {
     return value;
 }
 
-// Resolves the exact key of the `rank`-th row (1-based) in the requested
-// direction among the rows `mask` selects, and reports how many rows hold a
-// strictly smaller key. The key is 64 bits wide in effect - the value's
-// transform in the high half, the row index in the low half - which is what
-// makes ties resolve by row index exactly as the sort did.
-bool select_resolve_rank(const Tensor& values, Buffer& bins, const Tensor& mask,
-                         const std::uint32_t rank, const bool descending,
-                         std::uint32_t* key_hi, std::uint32_t* key_lo,
-                         std::uint64_t* below) {
-    const std::size_t rows = values.numel();
-    if (rows == 0 || rank == 0) {
-        return false;
-    }
-    const bool masked = mask.is_valid();
-    if (masked && mask.numel() != rows) {
-        throw std::invalid_argument("Vulkan select mask must match the values");
-    }
+// Queue all histogram/threshold passes before the single result readback.
+std::shared_ptr<Buffer> select_resolve_rank(const Tensor& values, Buffer& bins,
+    const Tensor& mask, const std::uint32_t rank, const bool descending,
+    const bool resolve_indices) {
+    if (mask.is_valid() && (mask.numel() != values.numel() || mask.dtype() != DataType::Bool))
+        throw std::invalid_argument("Vulkan select requires a matching Bool mask");
+    if (values.dtype() != DataType::Float32)
+        throw std::invalid_argument("Vulkan select requires Float32 values");
     auto& ctx = Context::get();
-    std::array<BufferBinding, 4> bindings{
-        bind(values), masked ? bind(mask) : dummy_binding(), bins.binding(),
-        dummy_binding()};
+    auto state = ctx.alloc(5 * sizeof(std::uint32_t));
+    ctx.fill_zero(*state, 0, 5 * sizeof(std::uint32_t));
+    const std::array<BufferBinding, 5> bindings{
+        bind(values), mask.is_valid() ? bind(mask) : dummy_binding(),
+        bins.binding(), dummy_binding(), state->binding()};
     SelectPush push{};
-    push.count = u32(rows);
+    push.count = u32(values.numel());
     push.src_offset = u32(byte_offset(values));
-    push.mask_offset = masked ? u32(byte_offset(mask)) : 0U;
-    push.has_mask = masked ? 1U : 0U;
-    push.bins_offset = 0U;
-    push.descending = descending ? 1U : 0U;
-    push.mode = 0U;
-
-    std::vector<std::uint32_t> histogram(kSelectBinCount);
-    std::uint32_t prefix_hi = 0;
-    std::uint32_t prefix_lo = 0;
-    std::uint64_t below_total = 0;
-    std::uint64_t remaining = rank;
-    for (std::uint32_t pass = 0; pass < 4U; ++pass) {
+    push.mask_offset = mask.is_valid() ? u32(byte_offset(mask)) : 0;
+    push.has_mask = mask.is_valid();
+    push.limit = rank;
+    push.descending = descending;
+    for (std::uint32_t pass = 0; pass < (resolve_indices ? 4U : 2U); ++pass) {
         ctx.fill_zero(bins, 0, kSelectBinCount * sizeof(std::uint32_t));
-        push.prefix_hi = prefix_hi;
-        push.prefix_lo = prefix_lo;
-        push.prefix_bits = pass * 16U;
-        ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), groups_for(rows));
-        ctx.download(bins, 0, histogram.data(), kSelectBinCount * sizeof(std::uint32_t));
-
-        // Ascending walk: the first bin whose running total reaches the
-        // remaining rank holds the answer, and every row counted before it
-        // sorts strictly below the answer.
-        std::uint32_t chosen = 0;
-        bool found = false;
-        std::uint64_t running = 0;
-        for (std::uint32_t bin = 0; bin < kSelectBinCount; ++bin) {
-            const std::uint64_t next = running + histogram[bin];
-            if (next >= remaining) {
-                chosen = bin;
-                found = true;
-                break;
-            }
-            running = next;
-        }
-        if (!found) {
-            // Fewer rows qualify than the caller asked for. Taking the
-            // highest key instead of the rank-th gives the caller exactly
-            // those rows, which is what a sort-and-truncate would have
-            // returned; only an empty selection is a genuine failure.
-            if (running == 0) {
-                return false;
-            }
-            remaining = running;
-            for (std::uint32_t bin = kSelectBinCount; bin-- > 0;) {
-                if (histogram[bin] != 0) {
-                    chosen = bin;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                return false;
-            }
-            running -= histogram[chosen];
-        }
-        below_total += running;
-        remaining -= running;
-        if (pass < 2U) {
-            prefix_hi = (prefix_hi << 16U) | chosen;
-        } else {
-            prefix_lo = (prefix_lo << 16U) | chosen;
-        }
+        push.prefix_bits = pass * 16;
+        push.mode = 0;
+        ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), groups_for(values.numel()));
+        push.mode = 2;
+        ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), 1);
     }
-    *key_hi = prefix_hi;
-    *key_lo = prefix_lo;
-    *below = below_total;
-    return true;
+    return state;
 }
 
-}  // namespace
+} // namespace
 
 bool select_nth_value(const Tensor& values, const Tensor& mask, const std::uint32_t rank,
                       const bool descending, float* value) {
-    if (value == nullptr) {
-        return false;
-    }
+    if (value == nullptr || rank == 0 || values.numel() == 0) return false;
     Tensor input = prepared(values);
     Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
-    auto bins = Context::get().alloc(kSelectBinCount * sizeof(std::uint32_t));
-    std::uint32_t key_hi = 0;
-    std::uint32_t key_lo = 0;
-    std::uint64_t below = 0;
-    if (!select_resolve_rank(input, *bins, selector, rank, descending, &key_hi, &key_lo,
-                             &below)) {
-        return false;
-    }
-    *value = value_of_select_key(key_hi, descending);
+    auto& ctx = Context::get();
+    auto bins = ctx.alloc(kSelectBinCount * sizeof(std::uint32_t));
+    auto state = select_resolve_rank(input, *bins, selector, rank, descending, false);
+    std::array<std::uint32_t, 4> host{};
+    ctx.download(*state, 0, host.data(), sizeof(host));
+    if (host[3] == 0) return false;
+    *value = value_of_select_key(host[0], descending);
     return true;
 }
 
 Tensor select_topk_indices(const Tensor& values, const Tensor& mask, const std::uint32_t count,
                            const bool descending, std::uint32_t* emitted) {
-    if (emitted != nullptr) {
-        *emitted = 0;
-    }
-    if (count == 0) {
-        return {};
-    }
+    if (emitted != nullptr) *emitted = 0;
+    if (count == 0 || values.numel() == 0) return {};
     Tensor input = prepared(values);
     Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
     auto& ctx = Context::get();
     auto bins = ctx.alloc(kSelectBinCount * sizeof(std::uint32_t));
-    std::uint32_t key_hi = 0;
-    std::uint32_t key_lo = 0;
-    std::uint64_t below = 0;
-    if (!select_resolve_rank(input, *bins, selector, count, descending, &key_hi, &key_lo,
-                             &below)) {
-        return {};
-    }
-    // The histogram passes are done with the bins; the first one becomes the
-    // emit ticket, which is also where the caller reads the written count.
-    Tensor out = TensorStorage::empty(TensorShape{count}, DataType::Int32);
-    const bool masked = selector.is_valid();
-    ctx.fill_zero(*bins, 0, sizeof(std::uint32_t));
+    auto state = select_resolve_rank(input, *bins, selector, count, descending, true);
+    const std::uint32_t limit = std::min(count, u32(input.numel()));
+    Tensor out = TensorStorage::empty(TensorShape{limit}, DataType::Int32);
     SelectPush push{};
     push.count = u32(input.numel());
     push.src_offset = u32(byte_offset(input));
-    push.mask_offset = masked ? u32(byte_offset(selector)) : 0U;
-    push.has_mask = masked ? 1U : 0U;
-    push.bins_offset = 0U;
+    push.mask_offset = selector.is_valid() ? u32(byte_offset(selector)) : 0;
+    push.has_mask = selector.is_valid();
     push.dst_offset = u32(byte_offset(out));
-    push.limit = count;
-    push.descending = descending ? 1U : 0U;
-    push.mode = 1U;
-    push.threshold_hi = key_hi;
-    push.threshold_lo = key_lo;
-    std::array<BufferBinding, 4> bindings{
-        bind(input), masked ? bind(selector) : dummy_binding(), bins->binding(), bind(out)};
-    ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push),
-                 groups_for(input.numel()));
+    push.limit = limit;
+    push.descending = descending;
+    push.mode = 1;
+    const std::array<BufferBinding, 5> bindings{
+        bind(input), selector.is_valid() ? bind(selector) : dummy_binding(),
+        bins->binding(), bind(out), state->binding()};
+    ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), groups_for(input.numel()));
     std::uint32_t written = 0;
-    ctx.download(*bins, 0, &written, sizeof(written));
-    if (written == 0) {
-        return {};
-    }
-    const std::size_t keep = std::min<std::size_t>(written, count);
-    if (emitted != nullptr) {
-        *emitted = u32(keep);
-    }
+    ctx.download(*state, 16, &written, sizeof(written));
+    if (written == 0) return {};
+    const std::size_t keep = std::min<std::size_t>(written, limit);
+    if (emitted != nullptr) *emitted = u32(keep);
     return out.slice(0, 0, keep);
 }
 

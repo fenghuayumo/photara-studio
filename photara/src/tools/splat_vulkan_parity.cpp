@@ -5,13 +5,17 @@
 #include "splat/rasterizer.hpp"
 #include "splat/trainer.hpp"
 #include "../splat/optimizer.hpp"
+#include "../splat/sh_adam_quant.hpp"
 #include "../splat/photometric_loss.hpp"
+#include "../splat/cuda_ops.hpp"
+#include "../splat/geometry_vulkan.hpp"
 #include "../splat/training_data_loader.hpp"
 #include "../splat/densification.hpp"
 #include "sfm/asfm.hpp"
 
 #include "splat_drender/vulkan_api.h"
 #include "vulkan/backend.hpp"
+#include "internal/size_bucketed_pool.hpp"
 
 #include <cuda_runtime.h>
 
@@ -739,6 +743,9 @@ int run_benchmark(int argc, char** argv) {
     return 0;
 }
 
+#include "splat_geometry_benchmark.hpp"
+#include "splat_rgb_benchmark.hpp"
+
 // A deliberately small optimizer smoke test over one real training image.
 // It keeps the full Gaussian model and CUDA-compatible Vulkan backward, but
 // updates only activated opacity. Backtracking makes this a deterministic test
@@ -911,6 +918,12 @@ int run_train_smoke(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--bench") return run_benchmark(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--bench-rgb")
+            return run_rgb_benchmark(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--eval-rgb")
+            return run_rgb_evaluation(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--bench-geometry")
+            return run_geometry_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--train-smoke")
             return run_train_smoke(argc, argv);
         if (argc < 4 || argc > 12)

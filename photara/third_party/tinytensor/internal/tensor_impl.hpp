@@ -259,6 +259,8 @@ namespace tinytensor {
         static RandomGenerator& instance();
         void manual_seed(uint64_t seed);
         uint64_t get_seed() const { return seed_; }
+        uint64_t checkpoint_counter() const;
+        void restore_checkpoint_counter(uint64_t counter);
         void* get_generator(Device device);
         uint64_t get_next_cuda_seed();
         uint64_t get_next_cuda_offset(); // Get next offset for cuRAND generator

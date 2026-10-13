@@ -1,4 +1,7 @@
 #include "pam_cuda.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "pam_vulkan.hpp"
+#endif
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -30,11 +33,12 @@ __device__ void sift_down(float* distances, int* indices, int count) {
     }
 }
 
+template <int HeapSize>
 __device__ float3 field_gradient(
     const int* nodes, const float* values, const float* bounds, int root,
     float3 query, int neighbors) {
-    float distances[pam_gpu_max_neighbors];
-    int indices[pam_gpu_max_neighbors];
+    float distances[HeapSize];
+    int indices[HeapSize];
     int count = 0;
     // A balanced tree with int node indices has depth at most 32. Deferred
     // far branches are tested AFTER the near subtree, just like CPU search.
@@ -75,7 +79,7 @@ __device__ float3 field_gradient(
                 int i = indices[parent]; indices[parent] = indices[position]; indices[position] = i;
                 position = parent;
             }
-        } else if (distance < distances[0]) {
+        } else if (greater(distances[0], indices[0], distance, point)) {
             distances[0] = distance; indices[0] = point;
             sift_down(distances, indices, count);
         }
@@ -85,7 +89,7 @@ __device__ float3 field_gradient(
         if (far_child >= 0) { pending[size] = far_child; planes[size++] = delta * delta; }
         if (near_child >= 0) { pending[size] = near_child; planes[size++] = -1.F; }
     }
-    int ordered[pam_gpu_max_neighbors];
+    int ordered[HeapSize];
     const int found = count;
     while (count) {
         ordered[count - 1] = indices[0];
@@ -114,23 +118,25 @@ __device__ float3 field_gradient(
     return result;
 }
 
+template <int HeapSize>
 __global__ void gradient_kernel(
     const int* nodes, const float* values, const float* bounds, int root, const float* points,
     float* gradients, std::size_t count, int neighbors) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
-    const float3 g = field_gradient(nodes, values, bounds, root,
+    const float3 g = field_gradient<HeapSize>(nodes, values, bounds, root,
         make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
     gradients[3*i] = g.x; gradients[3*i+1] = g.y; gradients[3*i+2] = g.z;
 }
 
+template <int HeapSize>
 __global__ void refine_kernel(
     const int* nodes, const float* values, const float* bounds, int root, float* points,
     const float* occupancy, std::size_t count, int neighbors,
     float iso_value, float minimum_norm_squared, float step) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
-    const float3 g = field_gradient(nodes, values, bounds, root,
+    const float3 g = field_gradient<HeapSize>(nodes, values, bounds, root,
         make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
     const float norm = g.x*g.x + (g.y*g.y + g.z*g.z);
     if (!(norm > minimum_norm_squared)) return;
@@ -145,6 +151,17 @@ void check(cudaError_t error) {
         throw std::runtime_error(std::string("PAM CUDA field: ") + cudaGetErrorString(error));
 }
 
+__global__ void accumulate_occupancy_kernel(
+    float* occupancy, bool* observed, const float* values, const bool* foreground,
+    const bool* background, const bool* visibility, std::size_t count) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        if (foreground[i]) occupancy[i] = fminf(occupancy[i], values[i]);
+        else if (background && background[i]) occupancy[i] = 0.F;
+        if (visibility[i]) observed[i] = true;
+    }
+}
+
 int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigned neighbors) {
     if (!points.is_valid() || points.device() != tinytensor::Device::CUDA ||
         !points.is_contiguous() || points.dtype() != tinytensor::DataType::Float32 ||
@@ -157,16 +174,48 @@ int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigne
 
 }  // namespace
 
+void pam_accumulate_occupancy_cuda(
+    tinytensor::Tensor& occupancy, tinytensor::Tensor& observed,
+    const tinytensor::Tensor& values, const tinytensor::Tensor& foreground,
+    const tinytensor::Tensor& background, const tinytensor::Tensor& visibility) {
+    const auto valid = [&](const tinytensor::Tensor& t, tinytensor::DataType dtype) {
+        return t.is_valid() && t.device() == tinytensor::Device::CUDA &&
+            t.dtype() == dtype && t.is_contiguous() && t.shape() == occupancy.shape();
+    };
+    if (!valid(occupancy, tinytensor::DataType::Float32) || occupancy.shape().rank() != 1 ||
+        !valid(values, tinytensor::DataType::Float32) ||
+        !valid(observed, tinytensor::DataType::Bool) || !valid(foreground, tinytensor::DataType::Bool) ||
+        (background.is_valid() && !valid(background, tinytensor::DataType::Bool)) ||
+        (visibility.is_valid() && !valid(visibility, tinytensor::DataType::Bool)))
+        throw std::invalid_argument("Invalid PAM CUDA occupancy accumulation");
+    if (!occupancy.numel()) return;
+    accumulate_occupancy_kernel<<<(occupancy.numel() + 255) / 256, 256>>>(
+        occupancy.ptr<float>(), observed.ptr<bool>(), values.ptr<float>(), foreground.ptr<bool>(),
+        background.is_valid() ? background.ptr<bool>() : nullptr,
+        visibility.is_valid() ? visibility.ptr<bool>() : foreground.ptr<bool>(),
+        occupancy.numel());
+    check(cudaGetLastError());
+}
+
 tinytensor::Tensor pam_field_gradients(
     const PamGpuField& field, const tinytensor::Tensor& points, unsigned neighbors) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if(points.device()==tinytensor::Device::Vulkan)
+        return pam_field_gradients_vulkan(field,points,neighbors);
+#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     auto gradients = tinytensor::Tensor::empty({count, std::size_t{3}}, tinytensor::Device::CUDA);
     for (std::size_t begin = 0; begin < count; begin += query_chunk) {
         const std::size_t size = std::min(query_chunk, count - begin);
-        gradient_kernel<<<(size + block_size - 1) / block_size, block_size>>>(
-            field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
-            points.ptr<float>() + 3*begin, gradients.ptr<float>() + 3*begin, size, k);
+        const auto launch = [&]<int HeapSize>() {
+            gradient_kernel<HeapSize><<<(size + block_size - 1) / block_size, block_size>>>(
+                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
+                points.ptr<float>() + 3*begin, gradients.ptr<float>() + 3*begin, size, k);
+        };
+        if (k <= 32) launch.template operator()<32>();
+        else if (k <= 48) launch.template operator()<48>();
+        else launch.template operator()<64>();
         check(cudaGetLastError());
     }
     return gradients;
@@ -176,6 +225,12 @@ void pam_refine_points(
     const PamGpuField& field, tinytensor::Tensor& points,
     const tinytensor::Tensor& occupancy, unsigned neighbors,
     float iso_value, float minimum_gradient_norm_squared, float step) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if(points.device()==tinytensor::Device::Vulkan) {
+        pam_refine_points_vulkan(field,points,occupancy,neighbors,iso_value,minimum_gradient_norm_squared,step);
+        return;
+    }
+#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     if (!occupancy.is_valid() || occupancy.device() != tinytensor::Device::CUDA ||
@@ -184,10 +239,15 @@ void pam_refine_points(
         throw std::invalid_argument("Invalid PAM CUDA occupancy");
     for (std::size_t begin = 0; begin < count; begin += query_chunk) {
         const std::size_t size = std::min(query_chunk, count - begin);
-        refine_kernel<<<(size + block_size - 1) / block_size, block_size>>>(
-            field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
-            points.ptr<float>() + 3*begin, occupancy.ptr<float>() + begin, size, k,
-            iso_value, minimum_gradient_norm_squared, step);
+        const auto launch = [&]<int HeapSize>() {
+            refine_kernel<HeapSize><<<(size + block_size - 1) / block_size, block_size>>>(
+                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
+                points.ptr<float>() + 3*begin, occupancy.ptr<float>() + begin, size, k,
+                iso_value, minimum_gradient_norm_squared, step);
+        };
+        if (k <= 32) launch.template operator()<32>();
+        else if (k <= 48) launch.template operator()<48>();
+        else launch.template operator()<64>();
         check(cudaGetLastError());
     }
 }

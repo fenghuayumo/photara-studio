@@ -193,6 +193,8 @@ void build_dock_space(App& app) {
 
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
+    // Direct keyboard shortcuts do not inherit ImGui's disabled widget state.
+    if (app.pending_train_prepare.valid()) return action;
     const bool busy = app.job.running();
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&
@@ -208,7 +210,7 @@ Action draw_menu_bar(App& app) {
         select_project_folder(app);
     }
     if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) &&
-        !busy) {
+        (!busy || (app.active_job == JobKind::train && !io.KeyShift))) {
         if (io.KeyShift) save_project_as(app);
         else save_project(app);
     }
@@ -245,7 +247,7 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem(tr("Open Project..."), "Ctrl+Shift+O", false, !busy)) {
             select_project_folder(app);
         }
-        if (ImGui::MenuItem(tr("Save Project"), "Ctrl+S", false, !busy)) {
+        if (ImGui::MenuItem(tr("Save Project"), "Ctrl+S", false, !app.saving_training && (!busy || app.active_job == JobKind::train))) {
             save_project(app);
         }
         if (ImGui::MenuItem(tr("Save Project As..."), "Ctrl+Shift+S", false, !busy)) {
@@ -304,6 +306,9 @@ Action draw_menu_bar(App& app) {
                 !busy && (app.settings.images_dir[0] != '\0' ||
                           has_external_dataset(app))))
             action = Action::train;
+        if (!busy && app.training_checkpoint_info &&
+            ImGui::MenuItem(tr("Resume Training")))
+            action = Action::continue_training;
         if (ImGui::MenuItem(
                 tr("Extract Mesh"), nullptr, false,
                 !busy && alignment_ready(app)))
@@ -324,7 +329,7 @@ Action draw_menu_bar(App& app) {
             app.show_clear_results = true;
         ImGui::Separator();
         if (app.job.paused()) {
-            if (ImGui::MenuItem(tr("Resume Job"), "Esc", false, busy))
+            if (ImGui::MenuItem(resume_job_label(app.active_job), "Esc", false, busy))
                 action = Action::resume;
         } else if (ImGui::MenuItem(tr("Pause Job"), "Esc", false, busy)) {
             action = Action::pause;
@@ -703,7 +708,9 @@ Action draw_toolbar(App& app) {
             action = Action::train;
         }
         if (ImGui::IsItemHovered()) {
-            if (external_dataset)
+            if (app.training_checkpoint_info)
+                ImGui::SetTooltip("%s", tr("Start a new training run and replace the previous checkpoint. Use Resume Training to resume instead."));
+            else if (external_dataset)
                 ImGui::SetTooltip(
                     "%s", tr("Train directly from the imported cameras. SfM is skipped."));
             else if (!app.has_sparse)
@@ -715,6 +722,20 @@ Action draw_toolbar(App& app) {
                 ImGui::SetTooltip(
                     "%s",
                     tr("Start 3DGS from the current aligned cameras and sparse cloud."));
+        }
+    }
+    if ((!busy && app.training_checkpoint_info) || (training && app.job.paused())) {
+        ImGui::SameLine();
+        if (icons::labeled_button("##resume_training", icons::Icon::play,
+                tr("Resume Training"), {150.F, 32.F}, icons::ButtonStyle::normal, true))
+            action = training ? Action::resume : Action::continue_training;
+        if (ImGui::IsItemHovered()) {
+            if (training) ImGui::SetTooltip("%s", tr("Continue the paused reconstruction."));
+            else {
+                const auto& info = *app.training_checkpoint_info;
+                ImGui::SetTooltip("%s: %u / %u", tr("Saved Training Progress"),
+                    info.iteration, info.total_iterations);
+            }
         }
     }
     ImGui::SameLine();
@@ -743,18 +764,20 @@ Action draw_toolbar(App& app) {
             app.layout.root.has_filename()))
         action = Action::reveal;
     if (busy) {
-        ImGui::SameLine();
-        if (app.job.paused()) {
+        if (app.job.paused() && !training) {
+            ImGui::SameLine();
             if (icons::labeled_button(
-                    "##resume", icons::Icon::play, tr("Resume"), {96.F, 32.F},
+                    "##resume", icons::Icon::play, resume_job_label(app.active_job), {150.F, 32.F},
                     icons::ButtonStyle::primary, true, false,
                     tr("Continue the paused reconstruction.")))
                 action = Action::resume;
-        } else if (icons::labeled_button(
+        } else if (!app.job.paused()) {
+            ImGui::SameLine();
+            if (icons::labeled_button(
                        "##pause", icons::Icon::pause, tr("Pause"), {96.F, 32.F},
                        icons::ButtonStyle::normal, true, false,
-                       tr(k_pause_job_tooltip))) {
-            action = Action::pause;
+                       tr(k_pause_job_tooltip)))
+                action = Action::pause;
         }
         ImGui::SameLine();
         if (icons::labeled_button(
@@ -1090,6 +1113,52 @@ void draw_status_bar(App& app) {
 
     ImGui::End();
     ImGui::PopStyleColor();
+}
+
+
+void draw_project_lifecycle_modals(App& app) {
+    if (app.show_close_confirmation) {
+        app.show_close_confirmation = false;
+        ImGui::OpenPopup(tr("Save before closing?"));
+    }
+    ImGui::SetNextWindowSize({560.F, 0.F}, ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal(tr("Save before closing?"), nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (app.saving_training) {
+            ImGui::TextWrapped("%s", tr("Saving project and training progress. Please wait."));
+            const double seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - app.checkpoint_save_started).count();
+            if (seconds > 15)
+                ImGui::TextWrapped("%s", tr("Waiting for the current iteration or checkpoint write to finish. You can cancel and keep working."));
+        } else {
+            ImGui::TextWrapped("%s", tr(app.job.running() && app.active_job == JobKind::train
+                ? "Save this project and its current training progress? You can continue training when you open it again."
+                : app.job.running()
+                ? "Save the project before closing? The running task will stop; only 3DGS training supports restoring iteration progress."
+                : "Save the project before closing?"));
+        }
+        if (!app.checkpoint_save_error.empty()) {
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", app.checkpoint_save_error.c_str());
+        }
+        ImGui::Spacing();
+        ImGui::BeginDisabled(app.saving_training);
+        if (ImGui::Button(tr("Save and Exit"), {160.F, 32.F})) request_project_save(app, true);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Exit Without Saving"), {185.F, 32.F})) {
+            cancel_project_save(app);
+            app.close_approved = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Cancel"), {100.F, 32.F})) {
+            cancel_project_save(app);
+            app.checkpoint_save_error.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 }  // namespace editor

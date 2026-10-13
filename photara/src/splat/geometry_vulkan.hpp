@@ -4,6 +4,14 @@
 
 namespace photara::splat::detail {
 
+tinytensor::Tensor normal_features_to_normals_vulkan(const tinytensor::Tensor& features);
+tinytensor::Tensor normal_features_from_smallest_axis_vulkan(const GaussianModel& model);
+tinytensor::Tensor normal_features_backward_vulkan(
+    const tinytensor::Tensor& features, const tinytensor::Tensor& gradient);
+LossGradients compute_normal_field_loss_vulkan(
+    const RenderResult& rendered, const Camera& camera, float weight,
+    bool collect_scalar_terms);
+
 // These passes use the shared TinyTensor Vulkan device. Only optional reduced
 // logging terms cross to the host; images and parameter gradients stay resident.
 void add_depth_normal_loss_vulkan(

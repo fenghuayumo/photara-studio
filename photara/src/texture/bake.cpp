@@ -616,6 +616,18 @@ TexturedMesh bake_mesh_texture(
         projections, bake_opts);
     bake_stage.finish();
 
+    if (options.atlas_fill_unobserved && options.atlas_fill_maximum_distance == 0) {
+        core::StageScope fill_stage("texture.surface_fill");
+        auto topology_indices = unwrapped.indices;
+        for (auto& index : topology_indices) index = unwrapped.vertex_remap.at(index);
+        const auto fill = photara_drender::fill_texture_on_surface(baked, topology_indices);
+        core::Logger::instance().info(
+            "texture surface fill: measured_faces=", fill.measured_faces,
+            " propagated_faces=", fill.propagated_faces,
+            " filled=", fill.filled_texels, " remaining=", fill.remaining_texels);
+        fill_stage.finish();
+    }
+
     // Guard-band fill: extend measured texels into the chart gutter and give
     // rasterized texels that never received a sample a plausible colour. Without
     // it filtered sampling shows black cracks and unseen surfaces stay black.
@@ -625,7 +637,10 @@ TexturedMesh bake_mesh_texture(
         photara_drender::TexturePaddingOptions padding_options;
         padding_options.margin =
             options.atlas_padding ? options.atlas_padding_margin : 0U;
-        padding_options.fill_unobserved = options.atlas_fill_unobserved;
+        // Unlimited fill follows mesh topology. Do not fill unobserved isolated
+        // components from unrelated UV neighbours during the gutter pass.
+        padding_options.fill_unobserved = options.atlas_fill_unobserved &&
+            options.atlas_fill_maximum_distance != 0;
         padding_options.maximum_fill_distance =
             options.atlas_fill_maximum_distance;
         padding_stats =

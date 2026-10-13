@@ -3,6 +3,7 @@
 #include "vulkan/ops.hpp"
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -529,6 +530,79 @@ void test_fused_scale_ratio_adam() {
                         1e-6F, "fused scale Adam first moments");
 }
 
+void test_radix_selection_and_remap() {
+    using namespace tinytensor;
+    for (const std::size_t n : {1U, 19U, 257U, 65539U}) {
+        std::vector<float> values(n);
+        std::vector<int> flags(n);
+        std::vector<std::size_t> ordered;
+        for (std::size_t i = 0; i < n; ++i) {
+            values[i] = float((i * 73) % 37) - 18.F;
+            flags[i] = i % 3 != 0;
+            if (flags[i]) ordered.push_back(i);
+        }
+        auto input = Tensor::from_vector(values, {n}, Device::Vulkan);
+        auto mask = Tensor::from_vector(flags, {n}, Device::Vulkan).to(DataType::Bool);
+        const auto counts = vulkan::count_masks({mask, mask.logical_not(), mask});
+        require(counts == std::vector<std::size_t>{ordered.size(), n - ordered.size(), ordered.size()},
+            "batched mask counts");
+        for (const bool descending : {false, true}) {
+            std::sort(ordered.begin(), ordered.end(), [&](auto a, auto b) {
+                if (values[a] == values[b]) return a < b;
+                return descending ? values[a] > values[b] : values[a] < values[b];
+            });
+            for (const auto k : {1U, 7U, 65540U}) {
+                std::uint32_t emitted = 0;
+                auto picked = vulkan::select_topk_indices(input, mask, k, descending, &emitted);
+                const auto expected_count = std::min<std::size_t>(k, ordered.size());
+                require(emitted == expected_count, "radix selection count");
+                if (expected_count) {
+                    auto got = picked.to_vector_int();
+                    std::vector<int> expected(ordered.begin(), ordered.begin() + expected_count);
+                    std::sort(got.begin(), got.end()); std::sort(expected.begin(), expected.end());
+                    require(got == expected, "radix threshold/tie selection");
+                }
+                float nth = 0.F;
+                const auto found = vulkan::select_nth_value(input, mask, k, descending, &nth);
+                require(found == !ordered.empty(), "radix nth empty mask");
+                if (found) require(nth == values[ordered[expected_count - 1]], "radix nth value");
+            }
+        }
+        auto empty_mask = Tensor::zeros_bool({n}, Device::Vulkan);
+        require(!vulkan::select_topk_indices(input, empty_mask, 7, true).is_valid(), "radix empty topk");
+    }
+    auto src = Tensor::from_vector(std::vector<float>{1,2,3,4,5,6}, {3,2}, Device::Vulkan);
+    auto indices = Tensor::from_vector(std::vector<int>{2,0}, {2}, Device::Vulkan);
+    auto added = Tensor::from_vector(std::vector<float>{7,8}, {1,2}, Device::Vulkan);
+    const auto raw_bytes = [](const std::vector<std::uint8_t>& values, const TensorShape& shape) {
+        auto host = Tensor::empty(shape, Device::CPU, DataType::UInt8);
+        std::copy(values.begin(), values.end(), host.ptr<std::uint8_t>());
+        return host.to(Device::Vulkan);
+    };
+    const auto check = [&](const Tensor& result, const std::vector<float>& expected, const char* message) {
+        if (result.dtype() == DataType::UInt8) {
+            const auto host = result.to(Device::CPU);
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                require(host.ptr<std::uint8_t>()[i] == std::uint8_t(expected[i]), message);
+        } else require_vector_near(result.to(DataType::Float32).to_vector(), expected, 0, message);
+    };
+    for (const auto dtype : {DataType::Float32, DataType::Float16, DataType::UInt8}) {
+        auto typed = dtype == DataType::UInt8
+            ? raw_bytes({1,2,3,4,5,6}, {3,2}) : src.to(dtype);
+        auto typed_added = dtype == DataType::UInt8
+            ? raw_bytes({7,8}, {1,2}) : added.to(dtype);
+        const auto result = vulkan::remap_append_rows(typed, indices, typed_added, 1);
+        check(result, {5,6,1,2,7,8}, "fused remap/append values");
+        const auto moments = vulkan::remap_append_rows(typed, indices, {}, 1);
+        check(moments, {5,6,1,2,0,0}, "fused remap/zero moments");
+        const auto identity = vulkan::remap_append_rows(typed, {}, {}, 1);
+        check(identity, {1,2,3,4,5,6,0,0}, "identity append");
+    }
+    auto sparse = raw_bytes({1,3,5}, {3,1});
+    const auto one_byte_rows = vulkan::remap_append_rows(sparse, indices, {}, 1);
+    check(one_byte_rows, {5,1,0}, "unaligned packed rows");
+}
+
 } // namespace
 
 int main() {
@@ -559,6 +633,7 @@ int main() {
         run("matmul_cat_and_indexing", test_matmul_cat_and_indexing);
         run("mask_factory_and_pool", test_mask_factory_and_pool);
         run("sort_1d", test_sort_1d);
+        run("radix_selection_and_remap", test_radix_selection_and_remap);
         run("panorama_sizes", test_panorama_sizes);
         run("constrain_scale_ratio", test_constrain_scale_ratio);
         run("fused_scale_ratio_adam", test_fused_scale_ratio_adam);

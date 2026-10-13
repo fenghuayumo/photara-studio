@@ -78,8 +78,8 @@ double device_busy_ms() {
 }
 
 // "Sort `values` in the requested order and keep the front `count` of the rows
-// `mask` selects." Vulkan resolves it with radix selection - three dispatches
-// and no sort - which returns the same set the bitonic sort produced and caps
+// `mask` selects." Vulkan resolves ranks and thresholds on the GPU, with one
+// final count readback and no sort. It preserves the bitonic-selected set and caps
 // itself at the number of qualifying rows, so the caller never needs a
 // separate count. Every other backend keeps the host sort it has always used,
 // because that is the rule the CUDA path selects its parents with.
@@ -90,10 +90,7 @@ tinytensor::Tensor select_front(
     if (selected != nullptr) *selected = 0;
     if (count == 0 || values.numel() == 0) return {};
 #ifdef TINYTENSOR_HAS_VULKAN
-    // SPLAT_IGS_LEGACY_SELECT=1 forces the sort path the radix selection
-    // replaced, so an A/B on one binary can prove the replacement exact.
-    if (values.device() == tinytensor::Device::Vulkan &&
-        std::getenv("SPLAT_IGS_LEGACY_SELECT") == nullptr) {
+    if (values.device() == tinytensor::Device::Vulkan) {
         std::uint32_t emitted = 0;
         auto picked = tinytensor::vulkan::select_topk_indices(
             values, mask, static_cast<std::uint32_t>(count), descending, &emitted);
@@ -118,7 +115,6 @@ bool device_select_nth(
     const tinytensor::Tensor& values, const tinytensor::Tensor& mask,
     const std::size_t rank, const bool descending, float* value) {
     if (values.device() != tinytensor::Device::Vulkan || rank == 0) return false;
-    if (std::getenv("SPLAT_IGS_LEGACY_SELECT") != nullptr) return false;
 #ifdef TINYTENSOR_HAS_VULKAN
     return tinytensor::vulkan::select_nth_value(
         values, mask, static_cast<std::uint32_t>(rank), descending, value);
@@ -138,8 +134,8 @@ float positive_upper_median(
     const std::size_t positive_count) {
     if (positive_count == 0) return 0.F;
     // Order statistic, not a sort: the device radix select resolves the exact
-    // (middle + 1)-th smallest positive value in three dispatches where the
-    // bitonic sort took two hundred.
+    // (middle + 1)-th smallest positive value without sorting or downloading
+    // histogram bins.
     float selected = 0.F;
     if (device_select_nth(values, positive, positive_count / 2 + 1, false,
                           &selected)) {
@@ -325,16 +321,10 @@ RefinementCounts IgsStrategy::refine(
         }
     }
 
-    // The strongest row survives unless it is itself hard-pruned. Ties keep
-    // the lowest row index, like the host scan; the maximum crosses to the
-    // host because the device argmax is not usable here.
-    const auto maximum_values = masks.opacities
-        .max().to(tinytensor::Device::CPU).to_vector();
-    const float maximum_opacity =
-        maximum_values.empty() ? -1.F : maximum_values.front();
-    const auto best = masks.opacities.ge(maximum_opacity)
-        .nonzero().squeeze(1).slice(0, 0, 1)
-        .to(tinytensor::DataType::Int32);
+    // Argmax stays on the device and resolves opacity ties by lowest index.
+    const auto best = masks.opacities.masked_fill(
+        masks.opacities.isfinite().logical_not(), -std::numeric_limits<float>::infinity())
+        .argmax().reshape({1}).to(tinytensor::DataType::Int32);
     auto best_mask = tinytensor::Tensor::zeros_bool(
         {old_count}, model.means.device());
     if (best.numel() != 0) best_mask.index_fill_(0, best, 1.F);
@@ -352,26 +342,39 @@ RefinementCounts IgsStrategy::refine(
         auto clamped = select_front(masks.opacities, removable,
                                     retained - options.densification_cap, false,
                                     &remove);
-        if (remove != 0) keep.index_fill_(0, clamped, 0.F);
+        if (remove != 0) {
+            keep.index_fill_(0, clamped, 0.F);
+            retained -= remove;
+        }
     }
 
-    auto keep_indices = keep.nonzero().squeeze(1).to(
-        tinytensor::DataType::Int32);
-    retained = keep_indices.numel();
+    // A zero-prune refinement keeps storage order unchanged. When pruning,
+    // compact only the row map now; defer model/Adam copies until append.
+    tinytensor::Tensor keep_indices;
+    if (retained != old_count) {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (model.means.device() == tinytensor::Device::Vulkan)
+            keep_indices = tinytensor::vulkan::nonzero(keep, retained).squeeze(1).to(tinytensor::DataType::Int32);
+        else
+#endif
+            keep_indices = keep.nonzero().squeeze(1).to(tinytensor::DataType::Int32);
+    }
     const std::size_t pruned = old_count - retained;
-    const auto retained_screen =
-        stats.max_screen_radius.index_select(0, keep_indices);
+    const auto retain = [&](const tinytensor::Tensor& tensor) {
+        return keep_indices.is_valid() ? tensor.index_select(0, keep_indices) : tensor;
+    };
+    const auto retained_screen = retain(stats.max_screen_radius);
     const double prune_ms = profile_refine ? phase_ms() : 0.0;
     const double prune_gpu = phase_gpu();
-    gpu_detail::select_training_rows_gpu(model, keep_indices, states);
+    // Deferred model/Adam copies are accounted for in growth_ms below.
     const double remap_ms = profile_refine ? phase_ms() : 0.0;
     const double remap_gpu = phase_gpu();
 
     const std::size_t growth_cap = stats.growth_cap == 0
         ? options.densification_cap
         : std::min(options.densification_cap, std::max(old_count, stats.growth_cap));
-    const std::size_t capacity = growth_cap > model.size()
-        ? growth_cap - model.size()
+    const std::size_t capacity = growth_cap > retained
+        ? growth_cap - retained
         : 0;
     const float remaining_progress = 1.F -
         static_cast<float>(iteration) /
@@ -383,21 +386,42 @@ RefinementCounts IgsStrategy::refine(
             options.scale_decay * std::max(remaining_progress, 0.F));
     };
     if (capacity == 0) {
+        if (keep_indices.is_valid())
+            gpu_detail::select_training_rows_gpu(model, keep_indices, states);
         decay_adc();
         stats = detail::make_densification_stats(
             model.size(), model.means.device());
         return {0, pruned};
     }
 
-    const auto retained_count = stats.count.index_select(0, keep_indices);
-    const auto retained_gradient = stats.gradient.index_select(0, keep_indices);
-    const auto retained_priority = stats.priority.index_select(0, keep_indices);
-    const auto retained_opacity = masks.opacities.index_select(0, keep_indices);
+    const auto retained_count = retain(stats.count);
+    const auto retained_gradient = retain(stats.gradient);
+    const auto retained_priority = retain(stats.priority);
+    const auto retained_opacity = retain(masks.opacities);
     const auto candidate = retained_count.gt(0.F);
     // Persistent oversize evidence per contributing observation.
     const auto priority = retained_priority.div(retained_count.clamp_min(1.F));
     const auto positive = candidate.logical_and(priority.gt(0.F));
-    const std::size_t positive_count = positive.count_nonzero();
+    const bool allow_growth = iteration < grow_stop_iteration(options);
+    const auto oversized = candidate.logical_and(retained_screen.gt(options.densify_screen_threshold));
+    const auto growth_mask = candidate.logical_and(retained_gradient.gt(options.densify_gradient_threshold));
+    std::size_t positive_count = 0, growth_candidates = 0, oversized_count = 0;
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (model.means.device() == tinytensor::Device::Vulkan) {
+        const auto counts = tinytensor::vulkan::count_masks(allow_growth
+            ? std::vector<tinytensor::Tensor>{positive, growth_mask, oversized}
+            : std::vector<tinytensor::Tensor>{positive});
+        positive_count = counts[0];
+        if (allow_growth) { growth_candidates = counts[1]; oversized_count = counts[2]; }
+    } else
+#endif
+    {
+        positive_count = positive.count_nonzero();
+        if (allow_growth) {
+            growth_candidates = growth_mask.count_nonzero();
+            oversized_count = oversized.count_nonzero();
+        }
+    }
     const double stats_ms = profile_refine ? phase_ms() : 0.0;
     const double stats_gpu = phase_gpu();
     float priority_median = 1.F;
@@ -413,20 +437,13 @@ RefinementCounts IgsStrategy::refine(
         .mul(0.25F)
         .add(1.F);
 
-    const bool allow_growth = iteration < grow_stop_iteration(options);
-    const auto oversized = candidate.logical_and(
-        retained_screen.gt(options.densify_screen_threshold));
     // Replacement parents: opacity x edge evidence over every candidate.
     const auto replacement_weights = retained_opacity.mul(edge_factor)
         .masked_fill(candidate.logical_not(), 0.F);
 
     tinytensor::Tensor growth_weights;
     std::size_t desired_growth = 0;
-    std::size_t growth_candidates = 0;
     if (allow_growth) {
-        const auto growth_mask = candidate.logical_and(
-            retained_gradient.gt(options.densify_gradient_threshold));
-        growth_candidates = growth_mask.count_nonzero();
         // On-screen oversize rows are sampled twice as often as the rest.
         const auto screen_factor = tinytensor::Tensor::full(
             {retained}, 1.F, model.means.device())
@@ -439,8 +456,6 @@ RefinementCounts IgsStrategy::refine(
             static_cast<double>(options.densify_select_fraction)));
     }
 
-    const std::size_t oversized_count =
-        allow_growth ? oversized.count_nonzero() : 0;
     const auto oversize_scores = allow_growth
         ? retained_screen.mul(edge_factor).masked_fill(oversized.logical_not(), 0.F)
         : tinytensor::Tensor{};
@@ -455,7 +470,7 @@ RefinementCounts IgsStrategy::refine(
     const double selection_ms = profile_refine ? phase_ms() : 0.0;
     const double selection_gpu = phase_gpu();
     gpu_detail::grow_igs_random_gpu(
-        model, split_parents, retained_screen, options, random, states);
+        model, split_parents, retained_screen, options, random, states, keep_indices);
     decay_adc();
     stats = detail::make_densification_stats(
         model.size(), model.means.device());

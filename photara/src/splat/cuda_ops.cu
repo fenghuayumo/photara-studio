@@ -1,5 +1,6 @@
 #include "cuda_ops.hpp"
 #include "geometry_vulkan.hpp"
+#include "adc_backends.hpp"
 #include "rasterizer_vulkan.hpp"
 #include "fused_ssim.hpp"
 #include "optimizer_backends.hpp"
@@ -374,10 +375,12 @@ __global__ void compute_3d_filter_distance_kernel(
             const float height = camera[19];
             const float fx = camera[16];
             const float fy = camera[17];
-            const float boundary_x = width / fx * 0.575F;
-            const float boundary_y = height / fy * 0.575F;
-            if (fabsf(camera_x / camera_z) > boundary_x ||
-                fabsf(camera_y / camera_z) > boundary_y) continue;
+            // GW admits a 15% image-width/height margin on each side.
+            // Use the calibrated principal point rather than assuming center.
+            const float px = fx * camera_x / camera_z + camera[21];
+            const float py = fy * camera_y / camera_z + camera[22];
+            if (px < -0.15F * width || px > 1.15F * width ||
+                py < -0.15F * height || py > 1.15F * height) continue;
             minimum_distance = fminf(minimum_distance, camera_z);
         }
     }
@@ -2108,60 +2111,11 @@ std::array<float, 6> percentile_bounds(
     const std::size_t count = means.shape()[0];
     if (count == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
     if (means.device() == tinytensor::Device::Vulkan) {
-        // Finite coordinates sort ahead of the +inf padding, so two small
-        // readbacks (three finite counts and six quantiles) replace the full
-        // means download plus three host nth_element sweeps the Vulkan
-        // trainer used to pay after every refinement.
-        const float p = std::clamp(percentile, 0.F, 1.F);
-        const auto device = tinytensor::Device::Vulkan;
-        std::array<tinytensor::Tensor, 3> sorted_axes{};
-        std::array<tinytensor::Tensor, 3> finite_counts{};
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const auto column = means.slice(
-                1, static_cast<int>(axis), static_cast<int>(axis) + 1)
-                .reshape({static_cast<int>(count)});
-            const auto finite = column.isfinite();
-            finite_counts[axis] = finite
-                .to(tinytensor::DataType::Float32).sum(0, true);
-            sorted_axes[axis] = column.masked_fill(
-                finite.logical_not(),
-                std::numeric_limits<float>::infinity())
-                .sort(0, false).first;
-        }
-        const auto host_counts = tinytensor::Tensor::cat(
-            {finite_counts[0], finite_counts[1], finite_counts[2]}, 0)
-            .to_vector();
-        std::array<std::size_t, 3> sizes{};
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            sizes[axis] = host_counts.size() > axis
-                ? static_cast<std::size_t>(host_counts[axis]) : 0;
-        if (sizes[0] == 0 || sizes[1] == 0 || sizes[2] == 0)
-            return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
-        std::vector<int> picks;
-        picks.reserve(6);
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const std::size_t size = sizes[axis];
-            const std::size_t low = static_cast<std::size_t>(
-                (1.F - p) * 0.5F * static_cast<float>(size));
-            const std::size_t high_candidate = static_cast<std::size_t>(
-                (1.F + p) * 0.5F * static_cast<float>(size));
-            const std::size_t high =
-                high_candidate < size ? high_candidate : size - 1;
-            picks.push_back(static_cast<int>(low));
-            picks.push_back(static_cast<int>(high));
-        }
-        auto gathered = tinytensor::Tensor::cat({
-            sorted_axes[0].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[0], picks[1]}, {std::size_t{2}}, device)),
-            sorted_axes[1].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[2], picks[3]}, {std::size_t{2}}, device)),
-            sorted_axes[2].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[4], picks[5]}, {std::size_t{2}}, device))}, 0);
-        const auto host_bounds = gathered.to_vector();
-        std::array<float, 6> result{};
-        for (std::size_t index = 0; index < result.size(); ++index)
-            result[index] = index < host_bounds.size() ? host_bounds[index] : 0.F;
-        return result;
+#ifdef TINYTENSOR_HAS_VULKAN
+        return tinytensor::vulkan::quantile_bounds(means, percentile);
+#else
+        throw std::invalid_argument("Vulkan percentile bounds are not compiled");
+#endif
     }
     auto axes = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto sorted = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
@@ -2209,6 +2163,10 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
 
 tinytensor::Tensor normal_features_to_normals(
     const tinytensor::Tensor& normal_features) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
+        return normal_features_to_normals_vulkan(normal_features);
+#endif
     if (!normal_features.is_valid() ||
         normal_features.device() != tinytensor::Device::CUDA ||
         normal_features.dtype() != tinytensor::DataType::Float32 ||
@@ -2231,6 +2189,10 @@ tinytensor::Tensor normal_features_to_normals(
 tinytensor::Tensor normal_features_backward(
     const tinytensor::Tensor& normal_features,
     const tinytensor::Tensor& grad_normals) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
+        return normal_features_backward_vulkan(normal_features, grad_normals);
+#endif
     if (!grad_normals.is_valid() || grad_normals.shape().rank() != 2 ||
         grad_normals.shape()[0] != normal_features.shape()[0] ||
         grad_normals.shape()[1] != 3)
@@ -2712,6 +2674,12 @@ void add_model_gradients(
             destination_tensor.shape() != source_tensor.shape())
             throw std::invalid_argument(
                 "Cannot merge incompatible GGGS model gradients");
+        if (destination_tensor.device() == tinytensor::Device::Vulkan) {
+            if (source_tensor.device() != destination_tensor.device())
+                throw std::invalid_argument("Cannot merge model gradients across devices");
+            destination_tensor.copy_from(destination_tensor.add(source_tensor));
+            return;
+        }
         const std::size_t count = destination_tensor.numel();
         add_tensor_in_place_kernel<<<
             (count + k_threads - 1) / k_threads, k_threads>>>(
@@ -2861,6 +2829,10 @@ LossGradients compute_training_loss(
 LossGradients compute_normal_field_loss(
     const RenderResult& rendered, const Camera& camera, const float weight,
     const bool collect_scalar_terms) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (rendered.color.device() == tinytensor::Device::Vulkan)
+        return compute_normal_field_loss_vulkan(rendered, camera, weight, collect_scalar_terms);
+#endif
     LossGradients result{
         tinytensor::Tensor::zeros_like(rendered.color),
         tinytensor::Tensor::zeros_like(rendered.alpha),
@@ -3054,20 +3026,6 @@ void constrain_scale_ratio_cuda(
     check_cuda(cudaGetLastError(), "constrain GGGS scale ratio");
 }
 
-DensificationStats make_densification_stats(
-    const std::size_t count, const tinytensor::Device device) {
-    return {
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device).to(
-            tinytensor::DataType::Int32),
-        tinytensor::Tensor::zeros({count}, device),
-        tinytensor::Tensor::zeros({count}, device)};
-}
-
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, const float weight) {
     if (!(weight > 0.F) || sh.numel() == 0 || sh.shape()[1] <= 1) return;
@@ -3096,73 +3054,26 @@ void add_geometry_regularization(const GaussianModel& model,
     check_cuda(cudaGetLastError(), "regularize Gaussian opacity and log scale");
 }
 
-void accumulate_densification_stats(
+void accumulate_densification_stats_cuda(
     const tinytensor::Tensor& refine_weight,
     const tinytensor::Tensor& visibility,
     const tinytensor::Tensor& radii,
     DensificationStats& stats,
-    const std::uint32_t width,
-    const std::uint32_t height,
-    const bool use_maximum,
-    const bool require_contribution_visibility,
-    const float step_score_power, const float oversize_screen_threshold,
-    const tinytensor::Tensor& geometry_gradient, const int view_index,
+    const AdcStatsOptions& options,
+    const tinytensor::Tensor& geometry_gradient,
     const tinytensor::Tensor& image_error,
     const tinytensor::Tensor& normalized_size) {
-    const std::size_t count = refine_weight.numel();
-    if (count == 0) return;
-    const float inverse_resolution = 1.F /
-        static_cast<float>(std::max<std::uint32_t>(1, std::min(width, height)));
-    if (refine_weight.device() == tinytensor::Device::Vulkan) {
-        auto eligible = radii.gt(0).logical_and(
-            require_contribution_visibility ? visibility.gt(0.F)
-                                            : radii.gt(0));
-        auto weight = refine_weight.masked_fill(
-            refine_weight.isfinite().logical_not(), 0.F).clamp_min(0.F);
-        if (step_score_power != 1.F) weight = weight.pow(step_score_power);
-        weight = weight.masked_fill(eligible.logical_not(), 0.F);
-        stats.gradient = use_maximum
-            ? stats.gradient.maximum(weight)
-            : stats.gradient.add(weight);
-        const auto eligible_float = eligible.to(tinytensor::DataType::Float32);
-        stats.count = stats.count.add(eligible_float);
-        auto screen = normalized_size.is_valid()
-            ? normalized_size
-            : radii.to(tinytensor::DataType::Float32).mul(inverse_resolution);
-        screen = screen.masked_fill(eligible.logical_not(), 0.F);
-        stats.max_screen_radius = stats.max_screen_radius.maximum(screen);
-        auto priority_step = oversize_screen_threshold > 0.F
-            ? screen.div(oversize_screen_threshold).clamp_min(1.F).log2()
-            : weight.mul(screen.add(1.F));
-        stats.priority = stats.priority.add(
-            priority_step.masked_fill(eligible.logical_not(), 0.F));
-        if (geometry_gradient.is_valid()) {
-            auto geometry = geometry_gradient.masked_fill(
-                geometry_gradient.isfinite().logical_not(), 0.F)
-                .masked_fill(eligible.logical_not(), 0.F);
-            stats.geometry_gradient = stats.geometry_gradient.maximum(geometry);
-        }
-        if (image_error.is_valid()) {
-            auto error = image_error.masked_fill(
-                image_error.isfinite().logical_not(), 0.F).clamp_min(0.F)
-                .masked_fill(eligible.logical_not(), 0.F);
-            stats.image_error = stats.image_error.add(error);
-        }
-        // Distinct-view support is not consumed by ADC-IGS.  Other Vulkan
-        // strategies remain rejected by Trainer until their backend kernels
-        // are wired.
-        return;
-    }
+    const auto count = options.count;
     accumulate_densification_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
         refine_weight.ptr<float>(), visibility.ptr<float>(), radii.ptr<int>(),
         stats.gradient.ptr<float>(), stats.count.ptr<float>(),
         stats.max_screen_radius.ptr<float>(), stats.priority.ptr<float>(),
-        count, inverse_resolution, use_maximum,
-        require_contribution_visibility, step_score_power, oversize_screen_threshold,
+        count, options.inverse_resolution, options.use_maximum,
+        options.require_contribution_visibility, options.step_score_power, options.oversize_screen_threshold,
         geometry_gradient.is_valid() ? geometry_gradient.ptr<float>() : nullptr,
         stats.geometry_gradient.ptr<float>(), stats.first_view.ptr<int>(),
-        stats.view_support.ptr<float>(), view_index,
+        stats.view_support.ptr<float>(), options.view_index,
         image_error.is_valid() ? image_error.ptr<float>() : nullptr,
         stats.image_error.ptr<float>(),
         normalized_size.is_valid() ? normalized_size.ptr<float>() : nullptr);
@@ -3587,58 +3498,27 @@ tinytensor::Tensor adc_plus_footprint_weights(
     return weights;
 }
 
-void inject_adc_noise(
+void inject_adc_noise_cuda(
     GaussianModel& model,
     const tinytensor::Tensor& visibility,
-    const float standard_deviation,
-    const float maximum_noise,
-    const unsigned seed,
     const tinytensor::Tensor& radii,
-    const bool revised) {
-    if (model.size() == 0 || standard_deviation <= 0.F) return;
-    if (model.means.device() == tinytensor::Device::Vulkan) {
-        if (revised)
-            throw std::invalid_argument(
-                "Vulkan ADC revised-noise primitive is not implemented");
-        auto noise = tinytensor::Tensor::empty(
-            model.means.shape(), tinytensor::Device::Vulkan);
-        tinytensor::vulkan::random_normal(noise, 0.F, 1.F, seed);
-        // TinyTensor's Vulkan broadcast path currently treats [N, 3] x
-        // [N, 1] as an outer product. Materialize the three columns so this
-        // remains an elementwise update and cannot inflate the model to
-        // [N, N, 3].
-        auto weight_column = model.opacity_logits.sigmoid().mul(-1.F).add(1.F)
-            .pow(150.F).mul(standard_deviation).reshape(
-                {static_cast<int>(model.size()), 1});
-        auto weight = tinytensor::Tensor::cat(
-            {weight_column, weight_column, weight_column}, 1);
-        auto update = noise.mul(weight).clamp(
-            -std::max(maximum_noise, 0.F), std::max(maximum_noise, 0.F));
-        auto visibility_column = visibility.gt(0.F)
-            .to(tinytensor::DataType::Float32)
-            .reshape({static_cast<int>(model.size()), 1});
-        auto visible = tinytensor::Tensor::cat(
-            {visibility_column, visibility_column, visibility_column}, 1);
-        update = update.mul(visible);
-        model.means = model.means.add(update);
-        return;
-    }
-    if (revised) {
+    const AdcNoiseOptions& options) {
+    if (options.revised) {
         inject_revised_noise_kernel<<<
             (model.size() + k_threads - 1) / k_threads, k_threads>>>(
             model.means.ptr<float>(), model.log_scales.ptr<float>(),
             model.quaternions.ptr<float>(), model.opacity_logits.ptr<float>(),
             visibility.ptr<float>(),
             radii.is_valid() ? radii.ptr<int>() : nullptr,
-            model.size(), standard_deviation, seed);
+            model.size(), options.standard_deviation, options.seed);
         check_cuda(cudaGetLastError(), "inject revised exploration noise");
         return;
     }
     inject_adc_noise_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.opacity_logits.ptr<float>(),
-        visibility.ptr<float>(), model.size(), standard_deviation,
-        std::max(maximum_noise, 0.F), seed);
+        visibility.ptr<float>(), model.size(), options.standard_deviation,
+        options.maximum_noise, options.seed);
     check_cuda(cudaGetLastError(), "inject ADC exploration noise");
 }
 

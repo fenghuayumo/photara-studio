@@ -17,6 +17,8 @@
 #include <system_error>
 #include <vector>
 
+#include "mvs/mesh_postprocess.hpp"
+
 namespace editor {
 
 // Alignment is the shared product of internal SfM or an imported camera
@@ -275,7 +277,10 @@ struct ProjectSettings {
     int video_rotate = 0;
 
     bool scene_mode = false;
+    bool focus_region = false;
     int iterations = 30'000;
+    // Editor preference, independent of a project's numerical training settings.
+    int training_autosave_seconds = 120;
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
     bool speedy_pruning = false;
@@ -305,10 +310,16 @@ struct ProjectSettings {
     int mesh_source = 0;
     int mesh_method = 0;  // auto, tsdf, delaunay, pam
     int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High; extraction only.
+    int mesh_postprocess_quality = 1;
+    bool mesh_simplify = false;
+    std::uint64_t mesh_target_faces = 1'000'000;
+    bool mesh_remesh = false;
+    std::uint64_t mesh_remesh_target_faces = 1'000'000;
+    int mesh_remesh_smooth_iterations = 1;
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
-    int geometry_from_iter = 3'000;
+    int geometry_from_iter = 7'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance
@@ -323,6 +334,8 @@ struct ProjectSettings {
     int atlas_resolution = 2048;
     bool texture_delight = false;
     bool texture_optimize = true;
+    int texture_photometric_steps = 3000;
+    int texture_seam_steps = 60;
     // false = sRGB blend (matches photographs). true = scene-linear blend.
     bool texture_blend_linear = false;
 };
@@ -362,6 +375,8 @@ struct ProjectLayout {
     // The editor writes the number of preview frames it has copied out of the
     // shared image here, so the trainer can skip a preview instead of waiting.
     std::filesystem::path preview_ack_file;
+    std::filesystem::path training_checkpoint;
+    std::filesystem::path training_control;
     std::filesystem::path working_sfm;
     std::filesystem::path align_live;
     std::filesystem::path align_preview;
@@ -451,6 +466,13 @@ inline bool mesh_from_mvs(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 1;
 }
 
+inline void apply_mesh_postprocess_preset(ProjectSettings& settings) {
+    const auto preset = photara::mvs::mesh_postprocess_preset(settings.mesh_postprocess_quality);
+    settings.mesh_target_faces = preset.target_faces;
+    settings.mesh_remesh_target_faces = preset.target_faces;
+    settings.mesh_remesh_smooth_iterations = preset.smooth_iterations;
+}
+
 inline std::filesystem::path textured_obj_path(
     const std::filesystem::path& stem) {
     auto path = stem;
@@ -484,22 +506,26 @@ inline void apply_texture_quality_preset(ProjectSettings& settings) {
         case 0:
             settings.atlas_resolution = 1024;
             settings.texture_optimize = false;
+            settings.texture_photometric_steps = 1000;
+            settings.texture_seam_steps = 30;
             break;
         case 2:
             settings.atlas_resolution = 4096;
             settings.texture_optimize = true;
+            settings.texture_photometric_steps = 6000;
+            settings.texture_seam_steps = 120;
             break;
         default:
             settings.atlas_resolution = 2048;
             settings.texture_optimize = true;
+            settings.texture_photometric_steps = 3000;
+            settings.texture_seam_steps = 60;
             break;
     }
 }
 
 inline int texture_optimize_steps(const ProjectSettings& settings) {
-    if (settings.texture_quality == 0) return 400;
-    if (settings.texture_quality == 2) return 2000;
-    return 1000;
+    return std::max(1, settings.texture_photometric_steps);
 }
 
 // Folder of stills SfM/training actually reads. Equals images_dir for a photo

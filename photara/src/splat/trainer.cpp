@@ -3,6 +3,7 @@
 #include "splat/visualize.hpp"
 
 #include "bilateral_grid.hpp"
+#include "checkpoint.hpp"
 #include "cuda_ops.hpp"
 #include "geometry_vulkan.hpp"
 #include "focus_mask.hpp"
@@ -855,6 +856,10 @@ void write_float(std::ofstream& stream, const float value) {
 
 tinytensor::Tensor normal_features_from_smallest_axis(
     const GaussianModel& model) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::normal_features_from_smallest_axis_vulkan(model);
+#endif
     const detail::ActivatedParameters activated =
         detail::activate_parameters(model);
     const auto scales = activated.scales.to_vector();
@@ -1129,19 +1134,51 @@ GaussianModel Trainer::train(
         if (options_.densify_revised_noise)
             throw std::invalid_argument(
                 "Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_normal_field ||
-            options_.use_mvs_depth || options_.use_mvs_normals ||
+        if (options_.use_mvs_depth || options_.use_mvs_normals ||
             options_.alpha_mode == AlphaMode::transparent)
             throw std::invalid_argument(
-                "Vulkan training does not yet support normal fields, external "
-                "MVS depth/normal targets, or transparent alpha supervision");
+                "Vulkan training does not yet support external "
+                "MVS depth/normal targets or transparent alpha supervision");
         core::Logger::instance().info(
             "splat training backend=vulkan orchestration=shared");
     } else {
         core::Logger::instance().info(
             "splat training backend=cuda orchestration=shared");
     }
+    if (options_.resume_checkpoint && options_.checkpoint_path.empty())
+        throw std::invalid_argument("Resume requires a training checkpoint path");
+    detail::TrainingCheckpointLease checkpoint_lease(options_.checkpoint_path);
+    const std::uint64_t checkpoint_fingerprint = options_.checkpoint_path.empty()
+        ? 0 : detail::training_fingerprint(scene, options_);
+    std::optional<detail::TrainingCheckpoint> restored;
+    if (options_.resume_checkpoint)
+        restored = detail::load_training_checkpoint(options_.checkpoint_path,
+            checkpoint_fingerprint, training_device(options_));
     GaussianModel model = [&] {
+        if (restored) {
+            if (restored->tensors.size() < 7)
+                throw std::runtime_error("Incomplete training checkpoint model");
+            GaussianModel loaded;
+            loaded.sh_degree = options_.sh_degree;
+            std::array<tinytensor::Tensor*, 7> tensors{&loaded.means,
+                &loaded.log_scales, &loaded.quaternions, &loaded.opacity_logits,
+                &loaded.sh, &loaded.normal_features, &loaded.filter_3d};
+            for (std::size_t i = 0; i < tensors.size(); ++i)
+                *tensors[i] = std::move(restored->tensors[i]);
+            const auto rows = restored->info.gaussian_count;
+            const std::array<std::vector<std::size_t>, 5> shapes{
+                std::vector<std::size_t>{rows, 3}, {rows, 3}, {rows, 4},
+                {rows, 1}, {rows, std::size_t(options_.sh_degree + 1) * (options_.sh_degree + 1), 3}};
+            for (std::size_t i = 0; i < shapes.size(); ++i)
+                if (!tensors[i]->is_valid() || tensors[i]->dtype() != tinytensor::DataType::Float32 ||
+                    tensors[i]->shape().dims() != shapes[i])
+                    throw std::runtime_error("Invalid checkpoint Gaussian shape");
+            if (loaded.normal_features.is_valid() &&
+                (loaded.normal_features.dtype() != tinytensor::DataType::Float32 ||
+                 loaded.normal_features.shape().dims() != std::vector<std::size_t>{rows, 4}))
+                throw std::runtime_error("Invalid checkpoint normal features");
+            return loaded;
+        }
         tinytensor::VramScope scope("model.initialize");
         return initialize_from_dense_cloud(scene, options_);
     }();
@@ -1155,7 +1192,7 @@ GaussianModel Trainer::train(
         throw std::invalid_argument(
             "Splat evaluation split left no training views");
     float active_resolution_scale =
-        data::progressive_resolution_scale(1, options_);
+        data::progressive_resolution_scale(restored ? std::max(1U, restored->info.iteration) : 1, options_);
     data::TrainingDataLoader view_cache(
         scene.views, options_, active_resolution_scale);
     if (options_.use_mask) {
@@ -1196,8 +1233,11 @@ GaussianModel Trainer::train(
     // their geometry-only Mip filter disabled as well: otherwise every
     // refresh scans all Gaussian/camera pairs without active supervision.
     const bool use_3d_filter = !native_non_pinhole &&
-        options_.use_depth_normal_loss &&
-        options_.depth_normal_weight > 0.F;
+        options_.use_3d_filter.value_or(
+            (options_.use_depth_normal_loss && options_.depth_normal_weight > 0.F) ||
+            (options_.use_normal_field && options_.normal_field_weight > 0.F) ||
+            options_.multi_view_geo_weight > 0.F ||
+            options_.multi_view_ncc_weight > 0.F);
     std::vector<Camera> filter_cameras;
     std::vector<Camera> full_resolution_filter_cameras;
     if (use_3d_filter) {
@@ -1220,7 +1260,7 @@ GaussianModel Trainer::train(
     // The filter is applied only while rasterizing and recomputed after
     // topology changes; repeatedly baking it into scale/opacity causes a
     // cumulative opacity loss.
-    if (use_3d_filter)
+    if (use_3d_filter && !restored)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, splat_filter);
     if (native_non_pinhole) {
@@ -1255,7 +1295,8 @@ GaussianModel Trainer::train(
     const unsigned multi_view_tail_interval =
         std::max(1U, options_.multi_view_tail_interval);
     const bool adaptive_multi_view =
-        use_multi_view && options_.multi_view_adaptive_frequency &&
+        use_multi_view &&
+        options_.multi_view_adaptive_frequency &&
         options_.multi_view_adaptive_max_interval > 1;
     detail::MultiViewStabilityScheduler multi_view_scheduler(options_);
     TrainingOptions tail_multi_view_options = options_;
@@ -1316,6 +1357,7 @@ GaussianModel Trainer::train(
         " groups=dc,rest bytes_per_gaussian=", sh_quant.stride * 3 + 16);
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
+    unsigned normal_features_updates = 0;
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state, &normal_features_state, &sh_quant};
@@ -1394,6 +1436,7 @@ GaussianModel Trainer::train(
                 model.sh.device());
             normal_features_state = detail::make_adam_state(
                 model.normal_features);
+            normal_features_updates = 0;
             if (use_3d_filter)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras,
@@ -1460,9 +1503,203 @@ GaussianModel Trainer::train(
                   fixed_maximum_scale_fraction * scene_extent, 1e-6F))
             : std::numeric_limits<float>::infinity();
 
+    // The order is part of checkpoint schema v2. Scratch images and gradients
+    // are reconstructed; every persistent optimizer/refinement tensor is saved.
+    std::vector<tinytensor::Tensor*> checkpoint_tensors{
+        &model.means, &model.log_scales, &model.quaternions, &model.opacity_logits,
+        &model.sh, &model.normal_features, &model.filter_3d};
+    for (auto* adam : adam_states) {
+        checkpoint_tensors.push_back(&adam->first);
+        checkpoint_tensors.push_back(&adam->second);
+    }
+    for (auto* tensor : {&sh_quant.first, &sh_quant.packed, &sh_quant.bounds,
+        &densification_stats.gradient, &densification_stats.count,
+        &densification_stats.max_screen_radius, &densification_stats.priority,
+        &densification_stats.geometry_gradient, &densification_stats.first_view,
+        &densification_stats.view_support, &densification_stats.image_error,
+        &ppisp_state.parameters, &ppisp_state.adam.first, &ppisp_state.adam.second,
+        &bilagrid_state.grids, &bilagrid_state.adam.first, &bilagrid_state.adam.second,
+        &multi_view_stability_accumulator}) checkpoint_tensors.push_back(tensor);
+    unsigned completed_iteration = 0;
+    const auto write_runtime = [&] {
+        detail::CheckpointWriter writer;
+        writer.pod(normal_features_updates);
+        writer.pod(std::uint64_t(initial_gaussian_count));
+        writer.pod(std::uint64_t(densification_stats.growth_cap));
+        writer.pod(std::uint64_t(shuffled_view_cursor));
+        writer.pod(std::uint64_t(shuffled_views.size()));
+        for (auto index : shuffled_views) writer.pod(std::uint64_t(index));
+        std::ostringstream cpu_random; cpu_random << random;
+        writer.string(cpu_random.str());
+        auto& generator = tinytensor::RandomGenerator::instance();
+        writer.pod(generator.get_seed()); writer.pod(generator.checkpoint_counter());
+        std::ostringstream tensor_random;
+        tensor_random << *static_cast<std::mt19937_64*>(generator.get_generator(tinytensor::Device::CPU));
+        writer.string(tensor_random.str());
+        writer.pod(focus_bounds.valid);
+        writer.raw(focus_bounds.center.data(), sizeof(float) * 3);
+        writer.raw(focus_bounds.axes.data(), sizeof(float) * 9);
+        writer.raw(focus_bounds.half_extent.data(), sizeof(float) * 3);
+        for (const auto* geometry : {&scene_geometry, &refinement_geometry}) {
+            writer.pod(geometry->scale); writer.pod(geometry->maximum_extent);
+            writer.raw(geometry->center.data(), sizeof(float) * 3);
+        }
+        writer.pod(means_learning_rate_scale);
+        writer.pod(minimum_log_scale); writer.pod(maximum_log_scale);
+        const auto scheduler = multi_view_scheduler.checkpoint_state();
+        writer.pod(scheduler.interval); writer.pod(scheduler.stable_refinements);
+        writer.pod(scheduler.has_previous);
+        writer.pod(std::uint64_t(scheduler.previous.gaussian_count));
+        writer.pod(std::uint64_t(scheduler.previous.grown));
+        writer.pod(std::uint64_t(scheduler.previous.pruned));
+        writer.pod(scheduler.previous.depth_consistency);
+        const auto& d = scheduler.previous.distribution;
+        for (float value : {d.opacity_mean, d.opacity_stddev, d.log_scale_mean,
+            d.log_scale_stddev, d.log_anisotropy_mean, d.log_anisotropy_stddev}) writer.pod(value);
+        return writer.bytes;
+    };
+    if (restored) {
+        if (restored->tensors.size() != checkpoint_tensors.size())
+            throw std::runtime_error("Incomplete training checkpoint state");
+        // Validate persistent tensor shapes against the reconstructed runtime.
+        for (std::size_t i = 7; i < checkpoint_tensors.size(); ++i) {
+            const auto& actual = restored->tensors[i];
+            const auto& expected = *checkpoint_tensors[i];
+            if (actual.is_valid() != expected.is_valid() ||
+                (actual.is_valid() && (actual.shape().dims() != expected.shape().dims() ||
+                                      actual.dtype() != expected.dtype())))
+                throw std::runtime_error("Invalid checkpoint optimizer/refinement shape");
+            *checkpoint_tensors[i] = std::move(restored->tensors[i]);
+        }
+        detail::CheckpointReader reader(restored->runtime);
+        normal_features_updates = reader.pod<unsigned>();
+        initial_gaussian_count = reader.pod<std::uint64_t>();
+        densification_stats.growth_cap = reader.pod<std::uint64_t>();
+        shuffled_view_cursor = reader.pod<std::uint64_t>();
+        const auto view_count = reader.pod<std::uint64_t>();
+        if (view_count != view_indices.size() || shuffled_view_cursor > view_count)
+            throw std::runtime_error("Invalid checkpoint camera sampling state");
+        shuffled_views.resize(view_count);
+        for (auto& index : shuffled_views) index = reader.pod<std::uint64_t>();
+        auto sorted = shuffled_views; std::sort(sorted.begin(), sorted.end());
+        if (sorted != view_indices) throw std::runtime_error("Invalid checkpoint camera order");
+        std::istringstream cpu_random(reader.string());
+        if (!(cpu_random >> random)) throw std::runtime_error("Invalid checkpoint random state");
+        const auto seed = reader.pod<std::uint64_t>();
+        const auto counter = reader.pod<std::uint64_t>();
+        auto& generator = tinytensor::RandomGenerator::instance();
+        generator.manual_seed(seed); generator.restore_checkpoint_counter(counter);
+        std::istringstream tensor_random(reader.string());
+        if (!(tensor_random >> *static_cast<std::mt19937_64*>(generator.get_generator(tinytensor::Device::CPU))))
+            throw std::runtime_error("Invalid checkpoint tensor random state");
+        focus_bounds.valid = reader.pod<bool>();
+        const auto read_floats = [&](float* data, std::size_t count) {
+            const auto bytes = reader.take(count * sizeof(float));
+            std::memcpy(data, bytes.data(), bytes.size());
+        };
+        read_floats(focus_bounds.center.data(), 3); read_floats(focus_bounds.axes.data(), 9);
+        read_floats(focus_bounds.half_extent.data(), 3);
+        for (auto* geometry : {&scene_geometry, &refinement_geometry}) {
+            geometry->scale = reader.pod<float>(); geometry->maximum_extent = reader.pod<float>();
+            read_floats(geometry->center.data(), 3);
+        }
+        scene_extent = scene_geometry.scale; scene_center = scene_geometry.center;
+        means_learning_rate_scale = reader.pod<float>();
+        minimum_log_scale = reader.pod<float>(); maximum_log_scale = reader.pod<float>();
+        detail::MultiViewStabilityScheduler::CheckpointState scheduler;
+        scheduler.interval = reader.pod<unsigned>(); scheduler.stable_refinements = reader.pod<unsigned>();
+        scheduler.has_previous = reader.pod<bool>();
+        scheduler.previous.gaussian_count = reader.pod<std::uint64_t>();
+        scheduler.previous.grown = reader.pod<std::uint64_t>();
+        scheduler.previous.pruned = reader.pod<std::uint64_t>();
+        scheduler.previous.depth_consistency = reader.pod<float>();
+        auto& d = scheduler.previous.distribution;
+        for (auto* value : {&d.opacity_mean, &d.opacity_stddev, &d.log_scale_mean,
+            &d.log_scale_stddev, &d.log_anisotropy_mean, &d.log_anisotropy_stddev}) *value = reader.pod<float>();
+        reader.finish(); multi_view_scheduler.restore_checkpoint_state(scheduler);
+        adaptive_multi_view_options.multi_view_geo_weight *= static_cast<float>(scheduler.interval);
+        adaptive_multi_view_options.multi_view_ncc_weight *= static_cast<float>(scheduler.interval);
+        // A restored, unchanged bounds sidecar must not re-run the geometry
+        // update and reset the learned scene/LR bounds on the first resumed step.
+        if (!options_.live_subject_bounds_file.empty()) {
+            mvs::OrientedBoundingBox published;
+            std::error_code error;
+            if (mvs::load_subject_bounds(published, options_.live_subject_bounds_file) &&
+                published.valid == focus_bounds.valid &&
+                published.center.isApprox(focus_bounds.center, 1e-6F) &&
+                published.half_extent.isApprox(focus_bounds.half_extent, 1e-6F) &&
+                published.axes.isApprox(focus_bounds.axes, 1e-6F)) {
+                focus_file_stamp = std::filesystem::last_write_time(options_.live_subject_bounds_file, error);
+                has_focus_file_stamp = !error;
+            }
+        }
+        completed_iteration = restored->info.iteration;
+        view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
+        restored.reset();
+        core::Logger::instance().info("splat_checkpoint_resumed iteration=", completed_iteration,
+            " total=", options_.iterations, " gaussians=", model.size());
+    }
+    auto last_checkpoint_time = std::chrono::steady_clock::now();
+    std::string last_control_request;
+    auto next_control_poll = std::chrono::steady_clock::time_point::min();
+    const auto checkpoint_step = [&](unsigned iteration, bool stopping) {
+        if (options_.checkpoint_path.empty()) return;
+        const auto now = std::chrono::steady_clock::now();
+        std::string request;
+        if (!options_.checkpoint_control_file.empty() && now >= next_control_poll) {
+            std::ifstream input(options_.checkpoint_control_file);
+            std::getline(input, request);
+            if (request == last_control_request) request.clear();
+            next_control_poll = now + std::chrono::milliseconds(100);
+        }
+        const bool scheduled = iteration == 1 || iteration == options_.iterations || stopping ||
+            (options_.checkpoint_interval_iterations && iteration % options_.checkpoint_interval_iterations == 0) ||
+            (options_.checkpoint_interval_seconds && now - last_checkpoint_time >=
+                std::chrono::seconds(options_.checkpoint_interval_seconds));
+        if (request.empty() && !scheduled) return;
+        std::string response;
+        try {
+            detail::save_training_checkpoint(options_.checkpoint_path,
+                {iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds},
+                write_runtime(), checkpoint_tensors,
+                options_.checkpoint_project_settings, options_.checkpoint_project_sfm);
+            last_checkpoint_time = std::chrono::steady_clock::now();
+            response = "saved " + std::to_string(iteration);
+            core::Logger::instance().info("splat_checkpoint_saved iteration=", iteration,
+                " path=", options_.checkpoint_path);
+        } catch (const std::exception& error) {
+            response = std::string("error ") + error.what();
+            core::Logger::instance().warning("Training checkpoint save failed: ", error.what());
+        }
+        last_checkpoint_time = std::chrono::steady_clock::now();
+        if (!request.empty()) {
+            last_control_request = request;
+            auto reply = options_.checkpoint_control_file; reply += ".reply";
+            auto staged = reply; staged += ".tmp";
+            {
+                std::ofstream output(staged, std::ios::trunc);
+                output << request << '\n' << response << '\n'; output.close();
+                if (!output) throw std::runtime_error("Cannot acknowledge training checkpoint");
+            }
+            std::error_code error; std::filesystem::remove(reply, error);
+            std::filesystem::rename(staged, reply);
+            // A save request freezes at an iteration boundary until the editor
+            // cancels it or terminates this process after saving the project.
+            if (response.starts_with("saved ")) {
+                while (true) {
+                    std::string current;
+                    { std::ifstream input(options_.checkpoint_control_file); std::getline(input, current); }
+                    if (current != request) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            }
+        }
+    };
+
     auto interval_started = std::chrono::steady_clock::now();
     const auto optimization_started = interval_started;
-    unsigned last_progress_iteration = 0;
+    const unsigned first_training_iteration = completed_iteration + 1;
+    unsigned last_progress_iteration = completed_iteration;
     double ema_step_ms = 0.0;
     auto next_preview_poll = std::chrono::steady_clock::time_point::min();
     auto next_extra_preview = std::chrono::steady_clock::time_point::min();
@@ -1486,7 +1723,7 @@ GaussianModel Trainer::train(
     const bool preview_has_sidecars = !options_.preview_camera_file.empty() ||
         !options_.preview_view_file.empty() || !options_.preview_vis_file.empty();
 
-    for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
+    for (unsigned iteration = completed_iteration + 1; iteration <= options_.iterations; ++iteration) {
         cuda_profiler.begin_iteration(iteration, model.size());
         if (!options_.live_subject_bounds_file.empty()) {
             std::error_code stamp_error;
@@ -1560,7 +1797,7 @@ GaussianModel Trainer::train(
             }
         }
         const bool report_progress = progress &&
-            (iteration == 1 || iteration == options_.iterations ||
+            (iteration == first_training_iteration || iteration == options_.iterations ||
              (options_.log_interval != 0 &&
               iteration % options_.log_interval == 0));
         if (shuffled_view_cursor == shuffled_views.size()) {
@@ -1668,8 +1905,9 @@ GaussianModel Trainer::train(
             active_multi_view_interval == 1U ||
             (adaptive_multi_view
                 ? iteration % active_multi_view_interval == 0
-                : (iteration - grow_stop_iteration(options_)) %
-                        active_multi_view_interval == 0);
+                : detail::tail_multi_view_scheduled(
+                    iteration, grow_stop_iteration(options_),
+                    active_multi_view_interval));
         const bool multi_view_active =
             multi_view_eligible && multi_view_scheduled;
         std::size_t multi_view_neighbour_index = 0;
@@ -1946,6 +2184,7 @@ GaussianModel Trainer::train(
                 normal_features_from_smallest_axis(model);
             normal_features_state =
                 detail::make_adam_state(model.normal_features);
+            normal_features_updates = 0;
         }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;
@@ -2106,10 +2345,13 @@ GaussianModel Trainer::train(
         // Auxiliary normal-field / multi-view merges retain the resident
         // gradient path. Empty renders also use the standalone optimizer
         // for zero-gradient decay.
-        const bool fused_sh = options_.fuse_sh_adam &&
-            !normal_field_active &&
+        // Fuse whenever the current workload permits it; standalone SH Adam
+        // is needed only for auxiliary gradient merges or empty renders.
+        const bool fused_sh = !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
-        const bool fused_structure = !vulkan_backend && !normal_field_active &&
+        const bool fused_structure = (!vulkan_backend ||
+            (fused_sh && options_.shape_scale_reg <= 0.F && options_.shape_erank_reg <= 0.F &&
+             options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F)) && !normal_field_active &&
             !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
@@ -2147,7 +2389,7 @@ GaussianModel Trainer::train(
             options_.shape_erank_reg * inverse_count,
             options_.shape_erank_s3_reg * inverse_count,
             options_.shape_quat_norm_reg * inverse_count,
-            report_progress};
+            report_progress && !vulkan_backend};
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map, fused_sh ? &sh_update : nullptr,
@@ -2167,7 +2409,12 @@ GaussianModel Trainer::train(
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
+            normal_options.reuse_projection = vulkan_backend;
             normal_options.require_depth = true;
+            // The primary fused RGB pass may omit owned attachments. The
+            // field loss needs the signed color and alpha of this render.
+            normal_options.copy_attachments = true;
+            normal_options.copy_color_only = false;
             const RenderResult normal_field_render = rasterizer.forward(
                 model, target.camera, normal_options);
             const auto normal_field_loss = detail::compute_normal_field_loss(
@@ -2287,12 +2534,16 @@ GaussianModel Trainer::train(
                 1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
                 options_.adam_epsilon, vulkan_sh_regularization);
         }
-        if (normal_field_active)
+        if (normal_field_active) {
+            // This optimizer starts late; its bias correction counts actual
+            // normal-feature updates rather than earlier RGB-only iterations.
+            ++normal_features_updates;
             detail::adam_step(
                 model.normal_features,
                 normal_field_gradients.normal_features,
                 normal_features_state, options_.normal_features_lr,
-                iteration, options_);
+                normal_features_updates, options_);
+        }
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&
@@ -2513,39 +2764,17 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::refinement);
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
-        // Refresh immediately after topology changes and periodically while
-        // the means continue to move.
+        // Match GaussianWrapping: refresh after refinement/pruning, then
+        // periodically only after densification ends, excluding the last interval.
         bool filter_refreshed = false;
         if (use_3d_filter) {
-            const bool adc_plus_refine =
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus &&
-                refine::is_refinement_iteration(iteration, options_);
-            const float training_progress =
-                static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options_.iterations));
-            // Recompute after every ADC+ topology update through 95%, then
-            // periodically while the fixed-topology tail continues moving
-            // Gaussian means.
-            const bool adc_plus_refresh =
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus &&
-                (adc_plus_refine ||
-                 (training_progress > 0.95F &&
-                  options_.filter_3d_update_interval != 0 &&
-                  iteration % options_.filter_3d_update_interval == 0 &&
-                  iteration + options_.filter_3d_update_interval <
-                      options_.iterations));
-            const bool other_refresh =
-                options_.densification_strategy !=
-                    DensificationStrategy::adc_plus &&
-                (latest_refinement.grown != 0 ||
-                 latest_refinement.pruned != 0 ||
-                 (options_.filter_3d_update_interval != 0 &&
-                  iteration % options_.filter_3d_update_interval == 0 &&
-                  iteration + options_.filter_3d_update_interval <
-                      options_.iterations));
-            filter_refreshed = adc_plus_refresh || other_refresh;
+            const bool periodic_refresh =
+                iteration > grow_stop_iteration(options_) &&
+                options_.filter_3d_update_interval != 0 &&
+                iteration % options_.filter_3d_update_interval == 0 &&
+                iteration + options_.filter_3d_update_interval <
+                    options_.iterations;
+            filter_refreshed = refinement_happened || periodic_refresh;
             if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
@@ -2599,6 +2828,8 @@ GaussianModel Trainer::train(
             interval_started = now;
             last_progress_iteration = iteration;
         }
+        completed_iteration = iteration;
+        checkpoint_step(iteration, !continue_training);
         if (!continue_training) break;
         if (evaluate &&
             std::find(
@@ -3043,6 +3274,20 @@ GaussianModel load_gaussians_ply(
             normal_features[4U * gaussian + 3U] = 1.F;
         }
     }
+    // GW can serialize inverse_sigmoid(1) as +inf (or 0 as -inf).
+    // These are valid saturated opacities, unlike NaNs or non-finite geometry.
+    // +/-104 produces exactly the same float32 sigmoid endpoints while
+    // keeping Photara's model/save invariants finite.
+    std::size_t saturated_opacities = 0;
+    for (float& logit : opacities) {
+        if (std::isinf(logit)) {
+            logit = std::copysign(104.F, logit);
+            ++saturated_opacities;
+        }
+    }
+    if (saturated_opacities)
+        core::Logger::instance().info("Gaussian PLY saturated opacity logits=",
+            saturated_opacities, " canonicalized to finite float32 endpoints");
     const auto finite = [](const std::vector<float>& values) {
         return std::all_of(
             values.begin(), values.end(),

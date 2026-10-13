@@ -19,6 +19,8 @@
 #include "splat_pruning_scores_subgroup.hlsl.embedded.hpp"
 #include "splat_pruning_scores_atomic.hlsl.embedded.hpp"
 #include "splat_blend_backward.hlsl.embedded.hpp"
+#include "splat_blend_backward_geometry_subgroup.hlsl.embedded.hpp"
+#include "splat_blend_backward_geometry_atomic.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_subgroup.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_atomic.hlsl.embedded.hpp"
@@ -31,6 +33,8 @@
 #include "splat_pack_rgba.hlsl.embedded.hpp"
 #include "splat_project_backward.hlsl.embedded.hpp"
 #include "splat_project_backward_sh_adam.hlsl.embedded.hpp"
+#include "splat_project_backward_structure_adam.hlsl.embedded.hpp"
+#include "splat_project_backward_pinhole_rgb_adam.hlsl.embedded.hpp"
 #include "splat_preprocess.hlsl.embedded.hpp"
 #include "splat_radix_hist.hlsl.embedded.hpp"
 #include "splat_radix_hist_indirect.hlsl.embedded.hpp"
@@ -39,7 +43,13 @@
 #include "splat_ranges.hlsl.embedded.hpp"
 #include "splat_ranges_indirect.hlsl.embedded.hpp"
 #include "splat_sample_depth.hlsl.embedded.hpp"
+#include "splat_occupancy.hlsl.embedded.hpp"
+#include "splat_sample_depth_group.hlsl.embedded.hpp"
+#include "splat_sample_depth_tiled.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward.hlsl.embedded.hpp"
+#include "splat_sample_depth_backward_tiled.hlsl.embedded.hpp"
+#include "splat_sample_depth_backward_tiled_atomic.hlsl.embedded.hpp"
+#include "splat_sample_depth_backward_atomic.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
 #include "splat_ssim.hlsl.embedded.hpp"
 #include "splat_loss_reduce.hlsl.embedded.hpp"
@@ -137,6 +147,16 @@ std::optional<std::filesystem::path> shader_directory_override() {
 }
 
 std::span<const std::byte> embedded_shader(const std::string& shader_name) {
+    if (shader_name == "splat_project_backward_pinhole_rgb_adam.hlsl.spv")
+        return std::as_bytes(std::span{splat_project_backward_pinhole_rgb_adam_hlsl_spv});
+    if (shader_name == "splat_sample_depth_group.hlsl.spv")
+        return std::as_bytes(std::span{splat_sample_depth_group_hlsl_spv});
+    if (shader_name == "splat_sample_depth_tiled.hlsl.spv")
+        return std::as_bytes(std::span{splat_sample_depth_tiled_hlsl_spv});
+    if (shader_name == "splat_blend_backward_geometry_subgroup.hlsl.spv")
+        return std::as_bytes(std::span{splat_blend_backward_geometry_subgroup_hlsl_spv});
+    if (shader_name == "splat_blend_backward_geometry_atomic.hlsl.spv")
+        return std::as_bytes(std::span{splat_blend_backward_geometry_atomic_hlsl_spv});
     if (shader_name == "splat_preprocess.hlsl.spv") {
         return std::as_bytes(std::span{splat_preprocess_hlsl_spv});
     }
@@ -208,11 +228,23 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_median_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_median_backward_hlsl_spv});
     }
+    if (shader_name == "splat_occupancy.hlsl.spv") {
+        return std::as_bytes(std::span{splat_occupancy_hlsl_spv});
+    }
     if (shader_name == "splat_sample_depth.hlsl.spv") {
         return std::as_bytes(std::span{splat_sample_depth_hlsl_spv});
     }
+    if (shader_name == "splat_sample_depth_backward_tiled.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_backward_tiled_hlsl_spv});
+    }
+    if (shader_name == "splat_sample_depth_backward_tiled_atomic.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_backward_tiled_atomic_hlsl_spv});
+    }
     if (shader_name == "splat_sample_depth_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_sample_depth_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_sample_depth_backward_atomic.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_backward_atomic_hlsl_spv});
     }
     if (shader_name == "splat_multi_view.hlsl.spv") {
         return std::as_bytes(std::span{splat_multi_view_hlsl_spv});
@@ -234,6 +266,9 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_pack_rgba.hlsl.spv") {
         return std::as_bytes(std::span{splat_pack_rgba_hlsl_spv});
+    }
+    if (shader_name == "splat_project_backward_structure_adam.hlsl.spv") {
+        return std::as_bytes(std::span{splat_project_backward_structure_adam_hlsl_spv});
     }
     if (shader_name == "splat_project_backward_sh_adam.hlsl.spv") {
         return std::as_bytes(std::span{splat_project_backward_sh_adam_hlsl_spv});

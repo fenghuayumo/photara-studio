@@ -574,6 +574,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
+            src/splat/adc_ops.cpp
             src/splat/optimizer.cpp
             src/splat/bilateral_grid.cu
             src/splat/ppisp.cu
@@ -619,6 +620,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
+            src/splat/checkpoint.cpp
             src/splat/trainer.cpp)
         add_library(Photara::Splat ALIAS photara_splat)
         target_include_directories(photara_splat
@@ -641,6 +643,8 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
                 src/splat/geometry_vulkan.cpp
+                src/splat/pam_vulkan.cpp
+                src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
@@ -654,6 +658,9 @@ if(PHOTARA_ENABLE_FEATURES)
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
                     ENV vulkan1.2
                     INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
@@ -904,6 +911,12 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
                 ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp)
             if(WIN32)
+                # Launch Studio as a GUI application without allocating a console.
+                set_target_properties(photara_studio PROPERTIES WIN32_EXECUTABLE TRUE)
+                if(MSVC)
+                    # Keep the existing main(argc, argv) and CRT argument handling.
+                    target_link_options(photara_studio PRIVATE /ENTRY:mainCRTStartup)
+                endif()
                 get_filename_component(_photara_studio_icon
                     "${CMAKE_CURRENT_SOURCE_DIR}/../apps/icons/icon.ico"
                     ABSOLUTE)
@@ -1124,6 +1137,19 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     target_link_libraries(photara_logging_test PRIVATE Photara::BA)
     add_test(NAME photara.core.logging COMMAND photara_logging_test)
     if(TARGET photara_splat)
+        add_executable(photara_splat_checkpoint_test tests/splat_checkpoint_test.cpp)
+        target_link_libraries(photara_splat_checkpoint_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.checkpoint COMMAND photara_splat_checkpoint_test)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND AND TARGET photara)
+            add_test(NAME photara.splat.process_resume
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_resume_process_test.py"
+                    $<TARGET_FILE:photara>)
+            set_tests_properties(photara.splat.process_resume PROPERTIES TIMEOUT 150)
+        endif()
+        if(PHOTARA_ENABLE_VULKAN_COMPUTE)
+            add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
+        endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
         add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
@@ -1132,6 +1158,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)
+            add_test(NAME photara.splat.vulkan_pam
+                COMMAND photara_splat_test --pam-vulkan-only)
             add_test(NAME photara.splat.vulkan_rings_preview
                 COMMAND photara_splat_test --vulkan-rings-only)
         endif()
@@ -1248,6 +1276,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_ba_test
         photara_thread_pool_test
         photara_logging_test
+        photara_splat_checkpoint_test
         photara_splat_test
         photara_splat_quality_eval
         photara_splat_vulkan_forward_test
