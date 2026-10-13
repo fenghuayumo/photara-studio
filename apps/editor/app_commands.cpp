@@ -1396,6 +1396,7 @@ std::filesystem::path suggested_splat_export_path(
         case 2: path += ".spz"; break;
         case 3: path += ".glb"; break;
         case 4: path += "_lod"; break;
+        case 5: path += "_collision"; break;
         default: path += ".ply"; break;
     }
     return path;
@@ -1414,7 +1415,7 @@ void sync_splat_export_path(App& app, const bool force) {
         auto current_stem = current.stem();
         if (app.splat_export.path_format >= 4) {
             auto name = current.filename().wstring();
-            const std::wstring suffix = L"_lod";
+            const std::wstring suffix = app.splat_export.path_format == 4 ? L"_lod" : L"_collision";
             if (name.ends_with(suffix)) name.resize(name.size() - suffix.size());
             current_stem = name;
         }
@@ -1661,15 +1662,19 @@ void export_trained_model(App& app) {
             auto cancel = std::make_shared<std::atomic<bool>>(false);
             auto progress = std::make_shared<std::atomic<float>>(0.F);
             auto lod = app.splat_export.lod;
-            lod.cancelled = [cancel] { return cancel->load(); };
-            lod.progress = [progress](float p) { progress->store(p); };
+            auto collision = app.splat_export.collision;
+            collision.fill = static_cast<photara::splat::CollisionOptions::Fill>(app.splat_export.fill_mode);
+            lod.cancelled = collision.cancelled = [cancel] { return cancel->load(); };
+            lod.progress = collision.progress = [progress](float p) { progress->store(p); };
             app.splat_export.cancel = cancel;
             app.splat_export.progress = progress;
             app.splat_export.output = std::filesystem::absolute(out);
             app.splat_export.error.clear();
+            const bool mesh = app.splat_export.format == 5;
             app.splat_export.job = std::async(std::launch::async,
-                [model = std::move(model), out = app.splat_export.output, lod] {
-                    photara::splat::export_streamed_sog(model, out, lod);
+                [model = std::move(model), out = app.splat_export.output, lod, collision, mesh] {
+                    if (mesh) photara::splat::export_collision(model, out, collision);
+                    else photara::splat::export_streamed_sog(model, out, lod);
                 });
             app.splat_export.show = true;
             set_message(app, "Processing splat assets on Vulkan...", theme::success);

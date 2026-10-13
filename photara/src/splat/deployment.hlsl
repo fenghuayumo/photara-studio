@@ -58,5 +58,24 @@ void main(uint3 id:SV_DispatchThreadID) {
         float kb=0.5f*(tb+dot(db,mul(inv,db))-3+logdet-values[b+10]);
         float3 color=vec(a+11)-vec(b+11);
         output[i]=ma*ka+mb*kb+8*dot(color,color);
+    } else { // Gaussian density occupancy over spatially binned candidates.
+        uint voxel=pc.first+i;
+        uint x=voxel%pc.nx,y=(voxel/pc.nx)%pc.ny,z=voxel/(pc.nx*pc.ny);
+        uint bx=(pc.nx+7)/8,by=(pc.ny+7)/8;
+        uint block=x/8+bx*(y/8+by*(z/8));
+        float3 p=float3(pc.ox,pc.oy,pc.oz)+(float3(x,y,z)+0.5f)*pc.size;
+        float transmittance=1;
+        [loop] for(int j=offsets[block];j<offsets[block+1];++j) {
+            uint g=16u*uint(indices[j]);
+            float3 d=p-vec(g);
+            float3 local=float3(dot(vec(g+4),d),dot(vec(g+8),d),dot(vec(g+12),d));
+            float d2=dot(local,local);
+            if(d2>9) continue;
+            float alpha=values[g+3]*exp(-0.5f*d2);
+            if(alpha<1.0f/255.0f) continue;
+            transmittance*=1-alpha;
+            if(1-transmittance>=pc.threshold) break;
+        }
+        output[i]=1-transmittance;
     }
 }

@@ -224,6 +224,8 @@ struct App {
         int sh_degree{3};
         std::array<char, 1024> path{};
         photara::splat::LodOptions lod;
+        photara::splat::CollisionOptions collision;
+        int fill_mode{};
         std::future<void> job;
         std::shared_ptr<std::atomic<bool>> cancel;
         std::shared_ptr<std::atomic<float>> progress;

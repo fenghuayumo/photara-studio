@@ -1,7 +1,7 @@
 # Native Gaussian deployment processing
 
-Studio's **Export Splat** dialog includes **LOD Streaming (Vulkan)**.
-Processing runs native C++ code in a background job. There
+Studio's **Export Splat** dialog includes **LOD Streaming (Vulkan)** and
+**Collision Mesh (Vulkan)**. Both run native C++ code in a background job. There
 is no Node.js, subprocess, or splat-transform runtime dependency.
 
 Choose a new output folder. Browse selects its parent. Existing destinations
@@ -34,16 +34,52 @@ LOD heuristics. Loading this dataset in a PlayCanvas application enables runtime
 streaming; Studio currently generates the dataset but does not render streamed
 SOG inside its own viewport.
 
+## Collision
+
+`voxelize_gaussians` bins Gaussian ellipsoids into 8-voxel spatial blocks.
+Vulkan evaluates voxel centers against only the candidate ellipsoids in that
+block, including rotation, anisotropic scales, and opacity. Contributions use
+`1 - product(1 - alpha)` with a three-sigma cutoff and minimum contribution of
+1/255. This is a Gaussian density occupancy approximation, not a reconstruction
+from rendered camera depth.
+Candidate buffers remain resident on the GPU while voxel batches run.
+
+The outputs are:
+
+- `scene.voxel.json`: voxel bounds, resolution, and octree statistics;
+- `scene.voxel.bin`: little-endian Laine–Karras nodes and 4×4×4 leaf masks;
+- `scene.collision.glb`: triangles on exposed voxel faces, with shared corners
+  and outward winding.
+
+The default coordinate conversion rotates 180 degrees about Z (flips X and Y),
+matching the PlayCanvas splat import transform. Both collision outputs use this
+frame and the voxel header is version 1.1. Disable **PlayCanvas coordinates**
+for Photara's model frame; the header then uses version 1.0. Ground fill assumes
+Y up in the chosen output frame.
+
+Optional host fills close enclosed solid-object cavities by boundary flood fill,
+or fill below the first occupied voxel in each XZ column. Cavity fill is not the
+reference tool's room-navigation exterior-fill mode. Capsule carving, connected
+cluster filtering, and a smooth marching-cubes collision surface are not
+implemented in this version. Collision meshes use the voxel-faces mode.
+
+The current compute workspace is a bounded dense grid (default 16 million
+voxels); the exported octree is sparse. Oversized grids or candidate lists fail
+with a request to increase voxel size. This is not yet an out-of-core voxelizer
+for city-scale scenes. WebP encoding and octree/mesh assembly run on the CPU.
+
 ## Build and validation
 
 The existing `splat_drender::vulkan` / TinyTensor Vulkan configuration compiles
-`deployment.hlsl` to embedded SPIR-V with DXC. Vulkan is the default for the
-export API; a build without it reports an error, with no silent backend switch.
+`deployment.hlsl` to embedded SPIR-V with DXC. Vulkan is the default for both
+export APIs; a build without it reports an error, with no silent backend switch.
 Set options' `vulkan = false` to use the CPU reference path.
 
 Build `photara_splat_deployment_test`, then run CTest with
 `-R photara.splat.deployment`. The Vulkan test exercises the real GPU and compares
-merge costs against an Eigen reference, reads every LOD chunk, and checks
-cancellation/output protection.
+occupancy against CPU and analytic rotated-Gaussian results, decodes the emitted
+octree, reads every LOD chunk, and checks cancellation/output protection.
 
-Reference: [Streamed SOG specification](https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/streamed-sog/).
+References: [Streamed SOG specification](https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/streamed-sog/),
+[voxel format specification](https://developer.playcanvas.com/user-manual/splat-transform/voxel-format/),
+and [collision generation](https://developer.playcanvas.com/user-manual/splat-transform/collision/).

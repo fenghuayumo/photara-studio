@@ -114,6 +114,45 @@ void verify_gpu_costs(const GaussianModel &m) {
     throw std::runtime_error("Vulkan tests require the Vulkan build");
 #endif
 }
+std::vector<unsigned> read_words(const std::filesystem::path &p) {
+    std::ifstream in(p, std::ios::binary);
+    std::vector<unsigned> out;
+    char b[4];
+    while (in.read(b, 4)) {
+        unsigned v = 0;
+        for (unsigned k = 0; k < 4; ++k)
+            v |= unsigned(static_cast<unsigned char>(b[k])) << (8 * k);
+        out.push_back(v);
+    }
+    return out;
+}
+bool query_octree(const std::vector<unsigned> &words, unsigned node_count, unsigned depth,
+                  unsigned x, unsigned y, unsigned z) {
+    if (!node_count)
+        return false;
+    unsigned index = 0;
+    for (unsigned level = 0;; ++level) {
+        require(index < node_count, "Octree pointer out of range");
+        unsigned word = words[index];
+        if (word == 0xFF000000u)
+            return true;
+        if ((word >> 24) == 0) {
+            require(level == depth, "Mixed leaf at wrong depth");
+            unsigned bit = x % 4 + 4 * (y % 4) + 16 * (z % 4);
+            auto at = node_count + 2 * word + bit / 32;
+            require(at < words.size(), "Invalid mixed leaf data");
+            return (words[at] >> (bit % 32)) & 1;
+        }
+        require(level < depth, "Interior node too deep");
+        unsigned shift = depth - level - 1;
+        unsigned oct = ((x / 4 >> shift) & 1) | (((y / 4 >> shift) & 1) << 1) |
+                       (((z / 4 >> shift) & 1) << 2),
+                 mask = word >> 24;
+        if (!(mask & (1u << oct)))
+            return false;
+        index = (word & 0xFFFFFFu) + std::popcount(mask & ((1u << oct) - 1));
+    }
+}
 void verify_lod(const std::filesystem::path &folder, unsigned source_count) {
     auto meta = read_json(folder / "lod-meta.json");
     require(meta.get<unsigned>("version") == 1, "LOD version");
@@ -170,7 +209,84 @@ int main(int argc, char **argv) {
             }
         } cleanup{root};
         auto source = model(32);
-        if (gpu) verify_gpu_costs(source);
+        CollisionOptions options;
+        options.vulkan = false;
+        options.voxel_size = .05F;
+        options.opacity = .2F;
+        auto cpu = voxelize_gaussians(source, options);
+        require(std::count(cpu.solid.begin(), cpu.solid.end(), 1) > 0, "Empty occupancy");
+        require(cpu.scene_max[0] < 0 && cpu.scene_max[1] < 0,
+                "PlayCanvas coordinate transform missing");
+        if (gpu) {
+            verify_gpu_costs(source);
+            options.vulkan = true;
+            auto actual = voxelize_gaussians(source, options);
+            if (actual.solid != cpu.solid)
+                std::cerr << "CPU/GPU occupied voxels: " << std::count(cpu.solid.begin(),cpu.solid.end(),1)
+                          << " / " << std::count(actual.solid.begin(),actual.solid.end(),1) << '\n';
+            require(actual.dimensions == cpu.dimensions && actual.solid == cpu.solid,
+                    "CPU/Vulkan voxel mismatch");
+        }
+        // For one rotated anisotropic Gaussian, compare every voxel to its analytic density.
+        auto one = model(1);
+        auto grid = voxelize_gaussians(one, options);
+        auto inverse = Eigen::Quaternionf(Eigen::AngleAxisf(.7F, Eigen::Vector3f::UnitZ()))
+                           .toRotationMatrix()
+                           .transpose()
+                           .eval();
+        for (unsigned z = 0; z < grid.dimensions[2]; ++z)
+            for (unsigned y = 0; y < grid.dimensions[1]; ++y)
+                for (unsigned x = 0; x < grid.dimensions[0]; ++x) {
+                    Eigen::Vector3f p(grid.origin[0] + (x + .5F) * grid.voxel_size,
+                                      grid.origin[1] + (y + .5F) * grid.voxel_size,
+                                      grid.origin[2] + (z + .5F) * grid.voxel_size);
+                    p.x() = -p.x();
+                    p.y() = -p.y();
+                    Eigen::Vector3f local = inverse * (p - Eigen::Vector3f(1, .5F, 0));
+                    local = local.cwiseQuotient(Eigen::Vector3f(.16F, .06F, .1F));
+                    bool solid = .5F * std::exp(-.5F * local.squaredNorm()) >= options.opacity;
+                    require(
+                        bool(grid.solid[x + grid.dimensions[0] * (y + grid.dimensions[1] * z)]) ==
+                            solid,
+                        "Analytic anisotropic occupancy mismatch");
+                }
+        // A single solid cell must be a closed outward-oriented cube.
+        CollisionGrid cube;
+        cube.dimensions = {1, 1, 1};
+        cube.voxel_size = 1;
+        cube.solid = {1};
+        auto mesh = collision_mesh(cube);
+        require(mesh.vertices.size() == 8 && mesh.faces.size() == 12, "Cube topology");
+        std::map<std::pair<int, int>, int> edges;
+        float volume = 0;
+        for (const auto &face : mesh.faces) {
+            volume +=
+                mesh.vertices[face[0]].dot(mesh.vertices[face[1]].cross(mesh.vertices[face[2]])) /
+                6;
+            for (unsigned k = 0; k < 3; ++k) {
+                int a = face[k], b = face[(k + 1) % 3];
+                ++edges[{std::min(a, b), std::max(a, b)}];
+            }
+        }
+        require(std::abs(volume - 1) < 1e-5F, "Inward mesh winding");
+        for (auto [edge, count] : edges)
+            require(count == 2, "Open collision mesh");
+        export_collision(source, root / "collision", options);
+        auto meta = read_json(root / "collision/scene.voxel.json");
+        auto words = read_words(root / "collision/scene.voxel.bin");
+        require(words.size() ==
+                    meta.get<unsigned>("nodeCount") + meta.get<unsigned>("leafDataCount"),
+                "Voxel binary size");
+        for (unsigned z = 0; z < cpu.dimensions[2]; ++z)
+            for (unsigned y = 0; y < cpu.dimensions[1]; ++y)
+                for (unsigned x = 0; x < cpu.dimensions[0]; ++x)
+                    require(
+                        query_octree(words, meta.get<unsigned>("nodeCount"),
+                                     meta.get<unsigned>("treeDepth"), x, y, z) ==
+                            bool(cpu.solid[x + cpu.dimensions[0] * (y + cpu.dimensions[1] * z)]),
+                        "Octree changed occupancy");
+        require(std::filesystem::file_size(root / "collision/scene.collision.glb") > 20,
+                "GLB missing");
         LodOptions lod;
         lod.vulkan = gpu;
         lod.levels = 3;
@@ -207,6 +323,16 @@ int main(int argc, char **argv) {
         }
         require(rejected && !std::filesystem::exists(root / "cancelled"),
                 "Cancelled output published");
+        CollisionOptions limited;
+        limited.vulkan = false;
+        limited.max_voxels = 64;
+        rejected = false;
+        try {
+            voxelize_gaussians(source, limited);
+        } catch (const std::exception &) {
+            rejected = true;
+        }
+        require(rejected, "Voxel budget ignored");
         std::cout << (gpu ? "Vulkan" : "CPU") << " deployment tests passed\n";
         return 0;
     } catch (const std::exception &e) {

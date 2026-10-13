@@ -1,5 +1,6 @@
 #include "splat/deployment.hpp"
 #include "deployment_vulkan.hpp"
+#include "io/mesh.hpp"
 #include "splat/formats.hpp"
 #include "splat/simplify.hpp"
 #include <Eigen/Geometry>
@@ -164,6 +165,176 @@ struct LodNode {
     std::vector<unsigned> ids;
     std::vector<std::pair<unsigned, unsigned>> lods;
 };
+std::size_t grid_index(const CollisionGrid &g, unsigned x, unsigned y, unsigned z) {
+    return x + std::size_t(g.dimensions[0]) * (y + std::size_t(g.dimensions[1]) * z);
+}
+bool occupied(const CollisionGrid &g, int x, int y, int z) {
+    return x >= 0 && y >= 0 && z >= 0 && unsigned(x) < g.dimensions[0] &&
+           unsigned(y) < g.dimensions[1] && unsigned(z) < g.dimensions[2] &&
+           g.solid[grid_index(g, x, y, z)];
+}
+
+void fill_grid(CollisionGrid &g, const CollisionOptions &o) {
+    auto nx = g.dimensions[0], ny = g.dimensions[1], nz = g.dimensions[2];
+    if (o.fill == CollisionOptions::Fill::ground) {
+        for (unsigned z = 0; z < nz; ++z) {
+            check(o);
+            for (unsigned x = 0; x < nx; ++x)
+                for (unsigned y = 0; y < ny; ++y)
+                    if (occupied(g, x, y, z)) {
+                        for (unsigned j = 0; j < y; ++j)
+                            g.solid[grid_index(g, x, j, z)] = 1;
+                        break;
+                    }
+        }
+    } else if (o.fill == CollisionOptions::Fill::interior) {
+        // Close enclosed cavities by boundary flood fill. Open shells are left open.
+        std::vector<std::uint8_t> exterior(g.solid.size());
+        std::vector<unsigned> queue;
+        auto add = [&](unsigned x, unsigned y, unsigned z) {
+            auto i = grid_index(g, x, y, z);
+            if (!g.solid[i] && !exterior[i]) {
+                exterior[i] = 1;
+                queue.push_back(static_cast<unsigned>(i));
+            }
+        };
+        for (unsigned z = 0; z < nz; ++z)
+            for (unsigned y = 0; y < ny; ++y) {
+                add(0, y, z);
+                add(nx - 1, y, z);
+            }
+        for (unsigned z = 0; z < nz; ++z)
+            for (unsigned x = 0; x < nx; ++x) {
+                add(x, 0, z);
+                add(x, ny - 1, z);
+            }
+        for (unsigned y = 0; y < ny; ++y)
+            for (unsigned x = 0; x < nx; ++x) {
+                add(x, y, 0);
+                add(x, y, nz - 1);
+            }
+        for (std::size_t j = 0; j < queue.size(); ++j) {
+            if (j % 65536 == 0)
+                check(o);
+            auto i = queue[j];
+            unsigned x = i % nx, y = (i / nx) % ny, z = i / (nx * ny);
+            if (x)
+                add(x - 1, y, z);
+            if (x + 1 < nx)
+                add(x + 1, y, z);
+            if (y)
+                add(x, y - 1, z);
+            if (y + 1 < ny)
+                add(x, y + 1, z);
+            if (z)
+                add(x, y, z - 1);
+            if (z + 1 < nz)
+                add(x, y, z + 1);
+        }
+        for (std::size_t i = 0; i < g.solid.size(); ++i)
+            if (!exterior[i])
+                g.solid[i] = 1;
+    }
+}
+void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
+    std::map<std::array<unsigned, 3>, std::uint64_t> blocks;
+    for (unsigned z = 0; z < g.dimensions[2]; ++z)
+        for (unsigned y = 0; y < g.dimensions[1]; ++y)
+            for (unsigned x = 0; x < g.dimensions[0]; ++x)
+                if (occupied(g, x, y, z))
+                    blocks[{x / 4, y / 4, z / 4}] |= std::uint64_t{1}
+                                                     << ((x % 4) + 4 * (y % 4) + 16 * (z % 4));
+    unsigned depth = 1;
+    while ((1u << depth) < (std::max({g.dimensions[0], g.dimensions[1], g.dimensions[2]}) + 3) / 4)
+        ++depth;
+    std::vector<std::uint32_t> nodes, leaves;
+    struct Region {
+        std::array<unsigned, 3> at;
+        unsigned size;
+        std::vector<decltype(blocks)::const_iterator> blocks;
+    };
+    std::vector<Region> queue;
+    if (!blocks.empty()) {
+        Region root{{0, 0, 0}, 1u << depth, {}};
+        for (auto it = blocks.begin(); it != blocks.end(); ++it)
+            root.blocks.push_back(it);
+        queue.push_back(std::move(root));
+        nodes.push_back(0);
+    }
+    unsigned interior = 0, mixed = 0;
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+        auto region = std::move(queue[i]);
+        if (region.size == 1) {
+            auto mask = region.blocks[0]->second;
+            if (mask == ~std::uint64_t{0})
+                nodes[i] = 0xFF000000u;
+            else {
+                nodes[i] = static_cast<std::uint32_t>(leaves.size() / 2);
+                leaves.push_back(static_cast<std::uint32_t>(mask));
+                leaves.push_back(static_cast<std::uint32_t>(mask >> 32));
+                ++mixed;
+            }
+            continue;
+        }
+        std::array<Region, 8> children;
+        auto half = region.size / 2;
+        for (unsigned oct = 0; oct < 8; ++oct) {
+            children[oct].size = half;
+            for (unsigned axis = 0; axis < 3; ++axis)
+                children[oct].at[axis] = region.at[axis] + ((oct >> axis) & 1) * half;
+        }
+        for (auto it : region.blocks) {
+            unsigned oct = 0;
+            for (unsigned axis = 0; axis < 3; ++axis)
+                if (it->first[axis] >= region.at[axis] + half)
+                    oct |= 1u << axis;
+            children[oct].blocks.push_back(it);
+        }
+        if (nodes.size() >= 0x1000000u)
+            throw std::runtime_error("Voxel octree exceeds format limit");
+        unsigned mask = 0, first = static_cast<unsigned>(nodes.size());
+        for (unsigned oct = 0; oct < 8; ++oct)
+            if (!children[oct].blocks.empty()) {
+                mask |= 1u << oct;
+                queue.push_back(std::move(children[oct]));
+                nodes.push_back(0);
+            }
+        nodes[i] = (mask << 24) | first;
+        ++interior;
+    }
+    if (nodes.size() >= 0x1000000u || leaves.size() / 2 >= 0x1000000u)
+        throw std::runtime_error("Voxel octree exceeds format limit");
+    std::ofstream bin(folder / "scene.voxel.bin", std::ios::binary);
+    for (const auto *words : {&nodes, &leaves})
+        for (auto word : *words) {
+            char bytes[4];
+            for (unsigned b = 0; b < 4; ++b)
+                bytes[b] = static_cast<char>(word >> (b * 8));
+            bin.write(bytes, 4);
+        }
+    if (!bin)
+        throw std::runtime_error("Cannot write voxel data");
+    Bounds grid, scene;
+    for (unsigned k = 0; k < 3; ++k) {
+        grid.low[k] = g.origin[k];
+        grid.high[k] = g.origin[k] + g.voxel_size * g.dimensions[k];
+        scene.low[k] = g.scene_min[k];
+        scene.high[k] = g.scene_max[k];
+    }
+    std::ofstream json(folder / "scene.voxel.json");
+    json.imbue(std::locale::classic());
+    json.precision(9);
+    json << "{\"version\":\"" << (g.playcanvas_coordinates ? "1.1" : "1.0")
+         << "\",\"asset\":{\"generator\":\"Photara C++\"},\"gridBounds\":";
+    bound_json(json, grid);
+    json << ",\"sceneBounds\":";
+    bound_json(json, scene);
+    json << ",\"voxelResolution\":" << g.voxel_size << ",\"leafSize\":4,\"treeDepth\":" << depth
+         << ",\"numInteriorNodes\":" << interior << ",\"numMixedLeaves\":" << mixed
+         << ",\"nodeCount\":" << nodes.size() << ",\"leafDataCount\":" << leaves.size() << '}';
+    if (!json)
+        throw std::runtime_error("Cannot write voxel metadata");
+}
 } // namespace
 
 void export_streamed_sog(const GaussianModel &model, const std::filesystem::path &folder,
@@ -299,4 +470,218 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
         o.progress(1);
 }
 
+CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOptions &o) {
+    if (!std::isfinite(o.voxel_size) || o.voxel_size <= 0 || !std::isfinite(o.opacity) ||
+        o.opacity <= 0 || o.opacity > 1 || o.max_voxels < 64)
+        throw std::invalid_argument("Invalid collision settings");
+    Host h(model);
+    if (h.n > std::size_t(std::numeric_limits<std::int32_t>::max()))
+        throw std::invalid_argument("Collision model exceeds candidate index limit");
+    std::vector<unsigned> ids(h.n);
+    std::iota(ids.begin(), ids.end(), 0u);
+    CollisionGrid g;
+    g.voxel_size = o.voxel_size;
+    g.playcanvas_coordinates = o.playcanvas_coordinates;
+    auto b = bounds(h, ids);
+    if (o.playcanvas_coordinates) {
+        float lx = b.low.x(), ly = b.low.y();
+        b.low.x() = -b.high.x();
+        b.high.x() = -lx;
+        b.low.y() = -b.high.y();
+        b.high.y() = -ly;
+    }
+    std::size_t count = 1;
+    for (unsigned k = 0; k < 3; ++k) {
+        g.scene_min[k] = b.low[k];
+        g.scene_max[k] = b.high[k];
+        double block = 4.0 * o.voxel_size;
+        double lo = std::floor(double(b.low[k]) / block) * block - block;
+        double hi = std::ceil(double(b.high[k]) / block) * block + block;
+        double dim = std::round((hi - lo) / o.voxel_size);
+        if (!std::isfinite(dim) || dim > o.max_voxels || dim < 4)
+            throw std::runtime_error("Collision grid too large; increase voxel size");
+        g.origin[k] = static_cast<float>(lo);
+        g.dimensions[k] = static_cast<unsigned>(dim);
+        if (count > o.max_voxels / g.dimensions[k])
+            throw std::runtime_error("Collision grid exceeds voxel budget; increase voxel size");
+        count *= g.dimensions[k];
+    }
+    const auto nx = g.dimensions[0], ny = g.dimensions[1], nz = g.dimensions[2];
+    unsigned bx = (nx + 7) / 8, by = (ny + 7) / 8, bz = (nz + 7) / 8;
+    std::vector<std::vector<std::int32_t>> bins(std::size_t(bx) * by * bz);
+    std::vector<float> values(h.n * 16, 0);
+    Eigen::Matrix3f transform = Eigen::Matrix3f::Identity();
+    if (o.playcanvas_coordinates) {
+        transform(0, 0) = -1;
+        transform(1, 1) = -1;
+    }
+    std::size_t references = 0;
+    for (std::size_t i = 0; i < h.n; ++i) {
+        if (i % 4096 == 0)
+            check(o);
+        V p = transform * h.mean(i);
+        Eigen::Matrix3f r = transform * h.rotation(i);
+        V s = h.scales(i);
+        float *row = values.data() + i * 16;
+        for (unsigned k = 0; k < 3; ++k)
+            row[k] = p[k];
+        row[3] = 1.F / (1.F + std::exp(-std::clamp(h.opacity[i], -80.F, 80.F)));
+        if (row[3] < 1.F / 255.F)
+            continue;
+        Eigen::Matrix3f inverse = s.cwiseInverse().asDiagonal() * r.transpose();
+        for (unsigned k = 0; k < 3; ++k)
+            for (unsigned j = 0; j < 3; ++j)
+                row[4 + k * 4 + j] = inverse(k, j);
+        Eigen::Matrix3f rs = r * s.asDiagonal();
+        V extent = 3.F * rs.cwiseProduct(rs).rowwise().sum().cwiseSqrt();
+        unsigned low[3], high[3];
+        const unsigned bd[] = {bx, by, bz};
+        for (unsigned k = 0; k < 3; ++k) {
+            low[k] = static_cast<unsigned>(
+                std::clamp(std::floor((p[k] - extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
+                           float(bd[k] - 1)));
+            high[k] = static_cast<unsigned>(
+                std::clamp(std::floor((p[k] + extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
+                           float(bd[k] - 1)));
+        }
+        for (unsigned z = low[2]; z <= high[2]; ++z)
+            for (unsigned y = low[1]; y <= high[1]; ++y)
+                for (unsigned x = low[0]; x <= high[0]; ++x) {
+                    if (++references > 64000000)
+                        throw std::runtime_error(
+                            "Collision candidate budget exceeded; increase voxel size");
+                    bins[x + bx * (y + by * z)].push_back(static_cast<std::int32_t>(i));
+                }
+    }
+    std::vector<std::int32_t> offsets{0}, indices;
+    indices.reserve(references);
+    for (const auto &bin : bins) {
+        indices.insert(indices.end(), bin.begin(), bin.end());
+        offsets.push_back(static_cast<std::int32_t>(indices.size()));
+    }
+    bins.clear();
+    g.solid.resize(count);
+    report(o, 0.15F);
+    std::function<std::vector<float>(unsigned, unsigned)> gpu_query;
+    if (o.vulkan) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+        gpu_query = detail::prepare_voxel_field_vulkan(values, offsets, indices, g.dimensions,
+                                                       g.origin, o.voxel_size, o.opacity);
+#else
+        throw std::runtime_error("Vulkan collision processing was not compiled");
+#endif
+    }
+    constexpr unsigned batch = 262144;
+    for (std::size_t start = 0; start < count; start += batch) {
+        check(o);
+        unsigned take = static_cast<unsigned>(std::min<std::size_t>(batch, count - start));
+        std::vector<float> field;
+        if (o.vulkan) {
+            field = gpu_query(static_cast<unsigned>(start), take);
+        } else {
+            field.resize(take);
+            for (unsigned j = 0; j < take; ++j) {
+                unsigned index = static_cast<unsigned>(start) + j, x = index % nx,
+                         y = (index / nx) % ny, z = index / (nx * ny),
+                         bin = x / 8 + bx * (y / 8 + by * (z / 8));
+                V p(g.origin[0] + (x + .5F) * o.voxel_size, g.origin[1] + (y + .5F) * o.voxel_size,
+                    g.origin[2] + (z + .5F) * o.voxel_size);
+                float t = 1;
+                for (int ref = offsets[bin]; ref < offsets[bin + 1]; ++ref) {
+                    const float *row = values.data() + indices[ref] * 16;
+                    V d = p - V(row[0], row[1], row[2]);
+                    V local(V(row[4], row[5], row[6]).dot(d), V(row[8], row[9], row[10]).dot(d),
+                            V(row[12], row[13], row[14]).dot(d));
+                    float q = local.squaredNorm();
+                    if (q > 9)
+                        continue;
+                    float a = row[3] * std::exp(-.5F * q);
+                    if (a < 1.F / 255.F)
+                        continue;
+                    t *= 1 - a;
+                    if (1 - t >= o.opacity)
+                        break;
+                }
+                field[j] = 1 - t;
+            }
+        }
+        for (unsigned j = 0; j < take; ++j)
+            g.solid[start + j] = field[j] >= o.opacity;
+        report(o, .15F + .65F * float(start + take) / float(count));
+    }
+    fill_grid(g, o);
+    report(o, .85F);
+    return g;
+}
+
+mvs::Mesh collision_mesh(const CollisionGrid &g) {
+    if (g.solid.size() != std::size_t(g.dimensions[0]) * g.dimensions[1] * g.dimensions[2] ||
+        g.voxel_size <= 0)
+        throw std::invalid_argument("Invalid collision grid");
+    mvs::Mesh mesh;
+    std::unordered_map<std::uint64_t, int> corners;
+    auto vertex = [&](unsigned x, unsigned y, unsigned z) {
+        std::uint64_t key =
+            x + std::uint64_t(g.dimensions[0] + 1) * (y + std::uint64_t(g.dimensions[1] + 1) * z);
+        auto found = corners.find(key);
+        if (found != corners.end())
+            return found->second;
+        if (mesh.vertices.size() >= 50000000)
+            throw std::runtime_error("Collision mesh vertex budget exceeded");
+        int id = static_cast<int>(mesh.vertices.size());
+        corners.emplace(key, id);
+        mesh.vertices.emplace_back(g.origin[0] + x * g.voxel_size, g.origin[1] + y * g.voxel_size,
+                                   g.origin[2] + z * g.voxel_size);
+        return id;
+    };
+    // Faces along each axis; cyclic axes form a right-handed basis.
+    for (unsigned z = 0; z < g.dimensions[2]; ++z)
+        for (unsigned y = 0; y < g.dimensions[1]; ++y)
+            for (unsigned x = 0; x < g.dimensions[0]; ++x)
+                if (occupied(g, x, y, z)) {
+                    for (unsigned axis = 0; axis < 3; ++axis)
+                        for (int sign : {-1, 1}) {
+                            int neighbor[] = {int(x), int(y), int(z)};
+                            neighbor[axis] += sign;
+                            if (occupied(g, neighbor[0], neighbor[1], neighbor[2]))
+                                continue;
+                            unsigned at[] = {x, y, z};
+                            if (sign > 0)
+                                ++at[axis];
+                            unsigned u = (axis + 1) % 3, v = (axis + 2) % 3;
+                            int ids[4];
+                            for (unsigned k = 0; k < 4; ++k) {
+                                unsigned p[] = {at[0], at[1], at[2]};
+                                p[u] += (k == 1 || k == 2);
+                                p[v] += (k >= 2);
+                                ids[k] = vertex(p[0], p[1], p[2]);
+                            }
+                            if (sign > 0) {
+                                mesh.faces.emplace_back(ids[0], ids[1], ids[2]);
+                                mesh.faces.emplace_back(ids[0], ids[2], ids[3]);
+                            } else {
+                                mesh.faces.emplace_back(ids[0], ids[2], ids[1]);
+                                mesh.faces.emplace_back(ids[0], ids[3], ids[2]);
+                            }
+                        }
+                }
+    return mesh;
+}
+
+void export_collision(const GaussianModel &model, const std::filesystem::path &folder,
+                      const CollisionOptions &o) {
+    Staging staging(folder);
+    auto grid = voxelize_gaussians(model, o);
+    check(o);
+    save_octree(grid, staging.work);
+    auto mesh = collision_mesh(grid);
+    check(o);
+    if (mesh.faces.empty())
+        throw std::runtime_error("No collision surface; lower the opacity threshold or voxel size");
+    io::save_mesh_glb(mesh, staging.work / "scene.collision.glb");
+    check(o);
+    staging.publish();
+    if (o.progress)
+        o.progress(1);
+}
 } // namespace photara::splat
