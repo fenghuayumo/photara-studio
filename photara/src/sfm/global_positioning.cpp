@@ -25,6 +25,31 @@ namespace {
 
 using Matrix3dRowMajor = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
 
+void log_cpu_positioning_pass(const char* attempt, unsigned pass,
+    const ceres::Solver::Options& options, const ceres::Solver::Summary& summary) {
+    // Ceres counts iteration zero as successful although it only evaluates
+    // the starting point. Report accepted parameter updates separately.
+    std::size_t accepted_updates = 0;
+    for (const auto& iteration : summary.iterations)
+        if (iteration.iteration > 0 && iteration.step_is_successful) ++accepted_updates;
+    core::Logger::instance().debug(
+        "global positioning CPU pass timing: attempt=", attempt, " pass=", pass,
+        " budget_s=", options.max_solver_time_in_seconds,
+        " iteration_limit=", options.max_num_iterations,
+        " iterations=", summary.iterations.size(),
+        " accepted=", summary.num_successful_steps,
+        " accepted_updates=", accepted_updates,
+        " rejected=", summary.num_unsuccessful_steps,
+        " total_s=", summary.total_time_in_seconds,
+        " preprocess_s=", summary.preprocessor_time_in_seconds,
+        " linear_s=", summary.linear_solver_time_in_seconds,
+        " residual_s=", summary.residual_evaluation_time_in_seconds,
+        " jacobian_s=", summary.jacobian_evaluation_time_in_seconds,
+        " cost_initial=", summary.initial_cost, " cost_final=", summary.final_cost,
+        " termination=", ceres::TerminationTypeToString(summary.termination_type),
+        " message=", summary.message);
+}
+
 struct PairwiseDirectionCostAnalytic : ceres::SizedCostFunction<3, 3, 3, 1> {
     explicit PairwiseDirectionCostAnalytic(const Vec3& direction)
         : direction(direction) {}
@@ -1315,8 +1340,10 @@ GlobalPositioningSummary refine_only_points_bearings(
             }
         }
 #endif
-        if (!solved_on_gpu)
+        if (!solved_on_gpu) {
             ceres::Solve(solver_options, &problem, &pass_summary);
+            log_cpu_positioning_pass("only_points/bearing_schur", pass, solver_options, pass_summary);
+        }
         total_solve_seconds += pass_summary.total_time_in_seconds;
         result.iterations +=
             static_cast<unsigned>(pass_summary.iterations.size());
@@ -1481,6 +1508,7 @@ bool attempt_positioning(
 
         ceres::Solver::Summary pass_summary;
         ceres::Solve(solver_options, &built.problem, &pass_summary);
+        log_cpu_positioning_pass(attempt.label, pass, solver_options, pass_summary);
         total_solve_seconds += pass_summary.total_time_in_seconds;
         result.iterations +=
             static_cast<unsigned>(pass_summary.iterations.size());
