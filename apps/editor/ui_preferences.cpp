@@ -186,6 +186,23 @@ void draw_compute_page(App& app) {
 
 void draw_storage_page(App& app) {
     const bool busy = app.job.running();
+    preference_heading("Training autosave");
+    ImGui::PushTextWrapPos(0.F);
+    theme::caption("Save training progress inside the project at this time interval.");
+    ImGui::PopTextWrapPos();
+    ImGui::BeginDisabled(busy);
+    ImGui::SetNextItemWidth(130.F);
+    if (ImGui::InputInt("##training_autosave_seconds", &app.settings.training_autosave_seconds, 30, 120))
+        app.settings.training_autosave_seconds = std::clamp(app.settings.training_autosave_seconds, 0, 86400);
+    if (ImGui::IsItemDeactivatedAfterEdit()) store_editor_preferences(app);
+    ImGui::SameLine(0.F, 8.F);
+    theme::caption("seconds (0 disables periodic autosave)");
+    ImGui::EndDisabled();
+    theme::caption("Manual saves and first/final iteration checkpoints remain enabled.");
+    if (busy) theme::caption("Stop training before changing the autosave interval.");
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
     preference_heading("Cache folder");
     ImGui::PushTextWrapPos(0.F);
     theme::caption(

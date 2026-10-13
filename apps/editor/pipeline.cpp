@@ -1384,7 +1384,8 @@ std::string build_train_command(
     }
 
     command << " --splat-checkpoint " << quote(layout.training_checkpoint)
-            << " --splat-checkpoint-control " << quote(layout.training_control);
+            << " --splat-checkpoint-control " << quote(layout.training_control)
+            << " --splat-checkpoint-seconds " << std::clamp(settings.training_autosave_seconds, 0, 86400);
     command << " --splat --backend " << training_backend_flag(settings)
             << " --capture-mode "
             << (settings.scene_mode ? "scene" : "object")

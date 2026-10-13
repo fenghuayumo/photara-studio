@@ -279,6 +279,8 @@ struct ProjectSettings {
     bool scene_mode = false;
     bool focus_region = false;
     int iterations = 30'000;
+    // Editor preference, independent of a project's numerical training settings.
+    int training_autosave_seconds = 120;
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
     bool speedy_pruning = false;

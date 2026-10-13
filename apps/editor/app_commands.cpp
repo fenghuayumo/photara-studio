@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -813,12 +814,14 @@ void new_project(App& app) {
     const int training_backend = app.settings.training_backend;
     const int alignment_backend = app.settings.alignment_backend;
     const int sam_backend = app.settings.sam_backend;
+    const int training_autosave_seconds = app.settings.training_autosave_seconds;
     app.settings = {};
     app.settings.cache_dir = cache_dir;
     app.settings.cache_retention_days = cache_retention_days;
     app.settings.training_backend = training_backend;
     app.settings.alignment_backend = alignment_backend;
     app.settings.sam_backend = sam_backend;
+    app.settings.training_autosave_seconds = training_autosave_seconds;
     app.layout = {};
     app.has_sparse = false;
     app.has_asfm = false;
@@ -923,7 +926,12 @@ void load_editor_preferences(App& app) {
         if (equals == std::string::npos) continue;
         const std::string key = line.substr(0, equals);
         const std::string value = line.substr(equals + 1);
-        if (key == "training") {
+        if (key == "training_autosave_seconds") {
+            int seconds{};
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), seconds);
+            if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && seconds >= 0 && seconds <= 86400)
+                app.settings.training_autosave_seconds = seconds;
+        } else if (key == "training") {
             static const char* tokens[] = {"cuda", "vulkan"};
             const int choice = preference_choice(value, tokens, 2);
             if (choice >= 0) app.settings.training_backend = choice;
@@ -963,7 +971,8 @@ void store_editor_preferences(const App& app) {
         : app.settings.sam_backend == 2 ? "vulkan" : "auto";
     output << "training=" << training << '\n'
            << "alignment=" << alignment << '\n'
-           << "sam=" << sam << '\n';
+           << "sam=" << sam << '\n'
+           << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n';
 }
 
 void store_editor_cache_dir(const App& app) {
