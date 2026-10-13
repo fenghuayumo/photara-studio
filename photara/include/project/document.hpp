@@ -84,7 +84,7 @@ struct Settings {
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
-    int geometry_from_iter = 3'000;
+    int geometry_from_iter = 7'000;
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance
     // drift: ppisp_layout 0 = off, nonzero = PPISP on. Legacy value 2

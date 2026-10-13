@@ -207,7 +207,7 @@ struct ReconstructCli {
     bool splat_normal_field{false};
     float splat_normal_field_weight{0.05F};
     float splat_normal_field_depth_ratio{0.6F};
-    unsigned splat_normal_field_from_iter{8'001};
+    unsigned splat_normal_field_from_iter{20'001};
     float splat_multi_view_geo_weight{0.02F};
     float splat_multi_view_ncc_weight{0.6F};
     float splat_multi_view_depth_bracket{0.F};
@@ -223,7 +223,7 @@ struct ReconstructCli {
     float splat_multi_view_min_depth_consistency{0.5F};
     float splat_multi_view_stable_distribution_threshold{0.025F};
     float splat_multi_view_pixel_noise{1.F};
-    unsigned splat_geometry_from_iter{3'000};
+    unsigned splat_geometry_from_iter{7'000};
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
     float splat_max_scale_ratio{0.F};
@@ -461,7 +461,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
               << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
               << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
-              << "  --splat-normal-field-from-iter N  start normal-field loss (default 8001)\n"
+              << "  --splat-normal-field-from-iter N  start normal-field loss (default 20001)\n"
               << "  --splat-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --splat-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --splat-mv-neighbors N  nearest camera candidates (default 8)\n"
@@ -471,7 +471,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
               << "  --splat-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
               << "  --splat-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
-              << "  --splat-geometry-from-iter N  start geometry loss (default 3000)\n"
+              << "  --splat-geometry-from-iter N  start geometry loss (default 7000)\n"
               << "  --splat-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --splat-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
               << "  --splat-max-scale-ratio R  hard anisotropy clamp (default 0 = no limit)\n"
@@ -890,7 +890,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Median-depth fraction of normal-field alignment",
          cxxopts::value<float>()->default_value("0.6"))
         ("splat-normal-field-from-iter", "Iteration to start normal-field loss",
-         cxxopts::value<unsigned>()->default_value("8001"))
+         cxxopts::value<unsigned>()->default_value("20001"))
         ("splat-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
         ("splat-mv-depth-bracket",
@@ -937,7 +937,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
          cxxopts::value<float>()->default_value("1"))
         ("splat-geometry-from-iter", "Iteration to start splat geometry loss",
-         cxxopts::value<unsigned>()->default_value("3000"))
+         cxxopts::value<unsigned>()->default_value("7000"))
         ("splat-min-scale-fraction", "Minimum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.0001"))
         ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
@@ -3518,7 +3518,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         cli.splat_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.splat_geometry_from_iter;
     // Keep structural parameters trainable while GGGS geometry supervision is
-    // active. The 3k schedule now matches pygsplat's complete loss stack.
+    // active, starting at step 7000 by default as in GaussianWrapping.
     if ((options.use_depth_normal_loss ||
          options.multi_view_geo_weight > 0.F ||
          options.multi_view_ncc_weight > 0.F) && dense_input)

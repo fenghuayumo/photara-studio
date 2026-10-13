@@ -258,7 +258,7 @@ struct TrainingOptions {
     bool use_normal_field{false};
     float normal_field_weight{0.05F};
     float normal_field_depth_ratio{0.6F};
-    unsigned normal_field_from_iter{8'001};
+    unsigned normal_field_from_iter{20'001};
     float normal_features_lr{0.025F};
     // Depth-normal geometry training implicitly enables the reference
     // GGGS/Mip-Splatting low-pass filter refresh interval. The auto mode

@@ -2534,39 +2534,17 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::refinement);
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
-        // Refresh immediately after topology changes and periodically while
-        // the means continue to move.
+        // Match GaussianWrapping: refresh after refinement/pruning, then
+        // periodically only after densification ends, excluding the last interval.
         bool filter_refreshed = false;
         if (use_3d_filter) {
-            const bool adc_plus_refine =
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus &&
-                refine::is_refinement_iteration(iteration, options_);
-            const float training_progress =
-                static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options_.iterations));
-            // Recompute after every ADC+ topology update through 95%, then
-            // periodically while the fixed-topology tail continues moving
-            // Gaussian means.
-            const bool adc_plus_refresh =
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus &&
-                (adc_plus_refine ||
-                 (training_progress > 0.95F &&
-                  options_.filter_3d_update_interval != 0 &&
-                  iteration % options_.filter_3d_update_interval == 0 &&
-                  iteration + options_.filter_3d_update_interval <
-                      options_.iterations));
-            const bool other_refresh =
-                options_.densification_strategy !=
-                    DensificationStrategy::adc_plus &&
-                (latest_refinement.grown != 0 ||
-                 latest_refinement.pruned != 0 ||
-                 (options_.filter_3d_update_interval != 0 &&
-                  iteration % options_.filter_3d_update_interval == 0 &&
-                  iteration + options_.filter_3d_update_interval <
-                      options_.iterations));
-            filter_refreshed = adc_plus_refresh || other_refresh;
+            const bool periodic_refresh =
+                iteration > grow_stop_iteration(options_) &&
+                options_.filter_3d_update_interval != 0 &&
+                iteration % options_.filter_3d_update_interval == 0 &&
+                iteration + options_.filter_3d_update_interval <
+                    options_.iterations;
+            filter_refreshed = refinement_happened || periodic_refresh;
             if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,

@@ -308,7 +308,7 @@ struct ProjectSettings {
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
-    int geometry_from_iter = 3'000;
+    int geometry_from_iter = 7'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance
