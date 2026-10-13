@@ -1,5 +1,7 @@
 # 全景数据集全局定位分析（2026-10-13）
 
+后续四组数据集及 Berlin 预算控制结果见 [相机热启动与 CUDA bearing 扩展验证](SFM_BEARING_VALIDATION.md)。
+
 ## 结论
 
 375 张全景图默认没有达到 camera_warm_start_min_images=512，因此使用 CPU primary/sparse_schur。降低热启动门槛的实验可以先求解相机中心，再进入 scale-free bearing refinement；在这份数据上，定位结构改进和 CUDA 求解都带来明显收益。

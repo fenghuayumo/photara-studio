@@ -4,6 +4,7 @@
 #include "sfm/reconstruct.hpp"
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 
@@ -18,6 +19,16 @@ unsigned parse_unsigned(const char *text, const char *name) {
     return value;
 }
 
+double parse_solver_time(const char* text) {
+    const std::string_view input(text);
+    double value = 0;
+    const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), value);
+    if (error != std::errc{} || end != input.data() + input.size() ||
+        !std::isfinite(value) || value < 0)
+        throw std::invalid_argument("solver_time_seconds must be finite and nonnegative (0 disables the shared attempt budget)");
+    return value;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -28,10 +39,11 @@ int main(int argc, char **argv) {
             ? photara::core::parse_log_level(configured_level, photara::core::LogLevel::info)
             : photara::core::LogLevel::info;
         photara::core::Logger::instance().configure({}, "photara", console_level);
-        if (argc < 4 || argc > 7)
+        if (argc < 4 || argc > 8)
             throw std::invalid_argument("Usage: photara_sfm_positioning_benchmark tracks-HEX.bin "
                                         "cpu|cuda|vulkan NEW_OUTPUT.asfm [tracks_per_image] "
-                                        "[warm_start_min_images] [automatic|cpu|cuda|vulkan BA]");
+                                        "[warm_start_min_images] [automatic|cpu|cuda|vulkan BA] "
+                                        "[solver_time_seconds (0 disables shared attempt budget)]");
         const std::filesystem::path input(argv[1]), output(argv[3]);
         if (std::filesystem::exists(output))
             throw std::invalid_argument("Output already exists");
@@ -74,6 +86,8 @@ int main(int argc, char **argv) {
             else
                 throw std::invalid_argument("Unknown bundle backend");
         }
+        if (argc >= 8)
+            positioning.max_solver_time_sec = parse_solver_time(argv[7]);
         const auto start = std::chrono::steady_clock::now();
         auto result = run_global_mapping(scene, {}, positioning, {});
         std::cout << "mapping_seconds="
