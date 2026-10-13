@@ -164,6 +164,15 @@ not use TSDF:
    field.
 6. Tetrahedralize again and extract the occupied/free boundary.
 
+PAM follows the model device: CUDA and Vulkan both provide integrated occupancy
+queries and exact KD-tree vector-field projection (up to 64 neighbours). Vulkan
+keeps the model and refinement points on its device; KD-tree construction and
+CGAL tetrahedralization remain CPU stages. `--splat-mesh-only --backend vulkan`
+loads the saved model directly on Vulkan. Disabling GPU refinement moves the
+vector-field projection to CPU while occupancy queries stay on the model device.
+GW PLY opacity logits of positive/negative infinity are loaded as finite logits
+with the same saturated float32 sigmoid values; NaNs remain rejected.
+
 Foreground mask views contribute occupancy; explicit background votes empty;
 views outside the frustum abstain. PAM processes the full scene and does not
 apply camera focus, automatic ROI, `SubjectBounds`, or an external convex-hull

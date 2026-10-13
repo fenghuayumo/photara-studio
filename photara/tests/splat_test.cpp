@@ -8025,6 +8025,7 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 }
 
 #include "splat_geometry_vulkan.hpp"
+#include "pam_vulkan_test.hpp"
 #include "splat_rings_vulkan.hpp"
 
 int main(int argc, char** argv) {
@@ -8076,6 +8077,14 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--speedy-vulkan-only") {
             test_speedy_vulkan();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--pam-vulkan-only") {
+#ifdef TINYTENSOR_HAS_VULKAN
+            test_pam_vulkan();
+#else
+            throw std::runtime_error("PAM Vulkan is not compiled");
+#endif
             return 0;
         }
         int device_count = 0;

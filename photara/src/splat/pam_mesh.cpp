@@ -3,6 +3,9 @@
 #include "core/logging.hpp"
 #include "cuda_ops.hpp"
 #include "pam_cuda.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "rasterizer_vulkan.hpp"
+#endif
 
 #include <Eigen/Geometry>
 #include <algorithm>
@@ -52,7 +55,7 @@ public:
         return result;
     }
 
-    [[nodiscard]] tinytensor::Tensor upload_nodes() const {
+    [[nodiscard]] tinytensor::Tensor upload_nodes(tinytensor::Device device) const {
         std::vector<int> packed;
         packed.reserve(nodes_.size() * 4);
         for (const auto& node : nodes_) {
@@ -62,12 +65,12 @@ public:
             packed.push_back(node.axis);
         }
         return tinytensor::Tensor::from_vector(
-            packed, {nodes_.size(), std::size_t{4}}, tinytensor::Device::CUDA);
+            packed, {nodes_.size(), std::size_t{4}}, device);
     }
 
     [[nodiscard]] int root() const { return root_; }
 
-    [[nodiscard]] tinytensor::Tensor upload_bounds() const {
+    [[nodiscard]] tinytensor::Tensor upload_bounds(tinytensor::Device device) const {
         std::vector<float> packed;
         packed.reserve(nodes_.size() * 6);
         for (const auto& node : nodes_) {
@@ -75,7 +78,7 @@ public:
             packed.insert(packed.end(), node.maximum.data(), node.maximum.data() + 3);
         }
         return tinytensor::Tensor::from_vector(
-            packed, {nodes_.size(), std::size_t{6}}, tinytensor::Device::CUDA);
+            packed, {nodes_.size(), std::size_t{6}}, device);
     }
 
 private:
@@ -124,7 +127,8 @@ private:
         const float distance2 = (query - point).squaredNorm();
         if (best.size() < requested)
             best.emplace(distance2, node.point);
-        else if (distance2 < best.top().first) {
+        else if (distance2 < best.top().first ||
+                 (distance2 == best.top().first && node.point < best.top().second)) {
             best.pop();
             best.emplace(distance2, node.point);
         }
@@ -156,11 +160,37 @@ struct HostGaussianField {
           scales(model.size()), inverse_variances(model.size()), rotations(model.size()),
           opacities(model.size()), tree(means) {
         const auto features = model.normal_features.to_vector();
-        const detail::ActivatedParameters activated =
-            detail::activate_parameters(model);
-        const auto scales = activated.scales.to_vector();
-        const auto quaternions = activated.quaternions.to_vector();
-        opacities = activated.opacities.to_vector();
+        std::vector<float> scales, quaternions;
+        if (model.means.device() == tinytensor::Device::Vulkan) {
+            // KD-tree/pivot generation is a host stage. Activate the downloaded
+            // parameters here without constructing any CUDA tensors/context.
+            scales = model.log_scales.to_vector();
+            quaternions = model.quaternions.to_vector();
+            opacities = model.opacity_logits.to_vector();
+            const auto filter = model.filter_3d.is_valid()
+                ? model.filter_3d.to_vector() : std::vector<float>{};
+            for (std::size_t i=0;i<model.size();++i) {
+                const float f2=filter.empty()?0.F:filter[i]*filter[i];
+                float ratio=1.F;
+                for (unsigned axis=0;axis<3;++axis) {
+                    const float raw=std::exp(scales[3*i+axis]);
+                    scales[3*i+axis]=std::sqrt(raw*raw+f2);
+                    ratio*=raw/scales[3*i+axis];
+                }
+                float norm=0.F;
+                for (unsigned j=0;j<4;++j) norm+=quaternions[4*i+j]*quaternions[4*i+j];
+                const float inv=1.F/std::sqrt(std::max(norm,1e-20F));
+                for (unsigned j=0;j<4;++j) quaternions[4*i+j]*=inv;
+                const float v=opacities[i];
+                const float e=std::exp(-std::abs(v));
+                opacities[i]=(v>=0.F?1.F/(1.F+e):e/(1.F+e))*ratio;
+            }
+        } else {
+            const auto activated=detail::activate_parameters(model);
+            scales=activated.scales.to_vector();
+            quaternions=activated.quaternions.to_vector();
+            opacities=activated.opacities.to_vector();
+        }
         for (std::size_t index = 0; index < model.size(); ++index) {
             mvs::Vec3f direction{
                 features[4 * index], features[4 * index + 1],
@@ -210,7 +240,7 @@ struct HostGaussianField {
         return result;
     }
 
-    [[nodiscard]] detail::PamGpuField upload() const {
+    [[nodiscard]] detail::PamGpuField upload(tinytensor::Device device) const {
         std::vector<float> packed;
         packed.reserve(means.size() * 19);
         for (std::size_t i = 0; i < means.size(); ++i) {
@@ -219,9 +249,9 @@ struct HostGaussianField {
             packed.insert(packed.end(), rotations[i].data(), rotations[i].data() + 9);
             packed.push_back(opacities[i]);
         }
-        return {tree.upload_nodes(), tinytensor::Tensor::from_vector(
-            packed, {means.size(), std::size_t{19}}, tinytensor::Device::CUDA),
-            tree.root(), tree.upload_bounds()};
+        return {tree.upload_nodes(device), tinytensor::Tensor::from_vector(
+            packed, {means.size(), std::size_t{19}}, device),
+            tree.root(), tree.upload_bounds(device)};
     }
 
 private:
@@ -237,13 +267,13 @@ private:
     }
 };
 
-tinytensor::Tensor upload_points(std::span<const mvs::Vec3f> points) {
+tinytensor::Tensor upload_points(std::span<const mvs::Vec3f> points, tinytensor::Device device) {
     std::vector<float> packed;
     packed.reserve(points.size() * 3);
     for (const auto& point : points)
         packed.insert(packed.end(), point.data(), point.data() + 3);
     return tinytensor::Tensor::from_vector(
-        packed, {points.size(), std::size_t{3}}, tinytensor::Device::CUDA);
+        packed, {points.size(), std::size_t{3}}, device);
 }
 
 tinytensor::Tensor evaluate_global_occupancy_device(
@@ -253,7 +283,9 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     const std::size_t chunk_size, const float mask_background_threshold,
     OccupancyCache* cache = nullptr) {
     const std::size_t point_count = points.shape()[0];
-    auto result = tinytensor::Tensor::empty({point_count}, tinytensor::Device::CUDA);
+    const auto device=model.means.device();
+    std::shared_ptr<void> local_backend;
+    auto result = tinytensor::Tensor::empty({point_count}, device);
     Rasterizer rasterizer;
     RasterizeOptions raster_options;
     raster_options.kernel_size = training_options.kernel_size;
@@ -264,13 +296,20 @@ tinytensor::Tensor evaluate_global_occupancy_device(
         const auto query = points.slice(0, begin, begin + count);
         std::vector<float> host_query;
         auto occupancy = tinytensor::Tensor::ones(
-            {count}, tinytensor::Device::CUDA);
+            {count}, device);
         auto observed = tinytensor::Tensor::zeros(
-            {count}, tinytensor::Device::CUDA,
+            {count}, device,
             tinytensor::DataType::Bool);
         for (std::size_t view_index = 0; view_index < scene.views.size(); ++view_index) {
             const mvs::MvsView& view = scene.views[view_index];
-            const OccupancyResult view_result = cache
+            OccupancyResult view_result;
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (device==tinytensor::Device::Vulkan) {
+                view_result=detail::vulkan_occupancy(cache?cache->state:local_backend,
+                    model,query,camera_from_mvs_view(view),raster_options);
+            } else
+#endif
+            view_result = cache
                 ? rasterizer.evaluate_occupancy(*cache, view_index, query)
                 : rasterizer.evaluate_occupancy(
                     model, query, camera_from_mvs_view(view), raster_options);
@@ -322,7 +361,7 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                               tx * alpha(x1, y1));
                 }
                 auto mask = tinytensor::Tensor::from_vector(
-                    sampled_mask, {count}, tinytensor::Device::CUDA);
+                    sampled_mask, {count}, device);
                 possibly_foreground = view_result.inside.logical_and(
                     mask.ge(mask_background_threshold));
                 definitely_background = view_result.inside.logical_and(
@@ -358,7 +397,7 @@ std::vector<float> evaluate_global_occupancy(
     for (std::size_t begin = 0; begin < points.size(); begin += capacity) {
         const std::size_t count = std::min(capacity, points.size() - begin);
         const auto values = evaluate_global_occupancy_device(
-            model, scene, upload_points(all_points.subspan(begin, count)),
+            model, scene, upload_points(all_points.subspan(begin, count),model.means.device()),
             training_options, chunk_size, mask_background_threshold, cache).to_vector();
         std::copy(values.begin(), values.end(), result.begin() + begin);
     }
@@ -680,7 +719,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
 }  // namespace
 
 detail::PamGpuField detail::make_pam_gpu_field(const GaussianModel& model) {
-    return HostGaussianField(model).upload();
+    return HostGaussianField(model).upload(model.means.device());
 }
 
 std::vector<float> detail::pam_field_gradients_reference(
@@ -740,8 +779,11 @@ PamMeshResult extract_pam_mesh(
     HostGaussianField field(model);
     const bool use_gpu = options.gpu_refinement &&
         options.vector_field_neighbors <= detail::pam_gpu_max_neighbors;
-    const detail::PamGpuField gpu_field = use_gpu ? field.upload() : detail::PamGpuField{};
-    core::Logger::instance().info("splat PAM field backend=", use_gpu ? "cuda" : "cpu");
+    const auto device=model.means.device();
+    const bool vulkan=device==tinytensor::Device::Vulkan;
+    const detail::PamGpuField gpu_field = use_gpu ? field.upload(device) : detail::PamGpuField{};
+    core::Logger::instance().info("splat PAM field backend=", use_gpu ? (vulkan?"vulkan":"cuda") : "cpu",
+        " occupancy_backend=", vulkan?"vulkan":"cuda");
     std::vector<Camera> occupancy_cameras;
     occupancy_cameras.reserve(scene.views.size());
     for (const auto& view : scene.views)
@@ -749,7 +791,9 @@ PamMeshResult extract_pam_mesh(
     RasterizeOptions occupancy_options;
     occupancy_options.kernel_size = training_options.kernel_size;
     occupancy_options.scale_modifier = training_options.scale_modifier;
-    auto occupancy_cache = Rasterizer().prepare_occupancy_cache(
+    // CUDA caches per-view projections; Vulkan keeps one bounded raster
+    // workspace reused across views/chunks rather than retaining N*V buffers.
+    auto occupancy_cache = vulkan ? OccupancyCache{} : Rasterizer().prepare_occupancy_cache(
         model, occupancy_cameras, occupancy_options);
     std::mt19937 random(options.seed);
     mvs::Mesh generated_seed_mesh;
@@ -766,11 +810,11 @@ PamMeshResult extract_pam_mesh(
             if (sampled.empty()) return;
             core::StageScope refinement_stage("splat.pam.refinement");
             if (use_gpu) {
-                auto points = upload_points(sampled);
+                auto points = upload_points(sampled,device);
                 for (unsigned step = 0; step < options.refinement_steps; ++step) {
                     core::Logger::instance().info(
                         "splat PAM refinement: step=", step + 1, '/', options.refinement_steps,
-                        " samples=", sampled.size(), " backend=cuda");
+                        " samples=", sampled.size(), " backend=", vulkan?"vulkan":"cuda");
                     const auto occupancy = evaluate_global_occupancy_device(
                         model, scene, points, training_options, options.occupancy_chunk_size,
                         options.mask_background_threshold, &occupancy_cache);
@@ -1027,7 +1071,7 @@ PamMeshResult extract_pam_mesh(
         soup_points.size() - vertices_before_orientation;
     compute_vertex_normals(result.mesh);
     const std::vector<float> candidate_gradients = use_gpu
-        ? detail::pam_field_gradients(gpu_field, upload_points(candidates),
+        ? detail::pam_field_gradients(gpu_field, upload_points(candidates,device),
             options.vector_field_neighbors).to_vector()
         : std::vector<float>{};
     result.candidate_cloud.points.reserve(candidates.size());
@@ -1050,14 +1094,21 @@ PamMeshResult extract_pam_mesh(
         " vertices=", result.mesh.vertices.size(),
         " faces=", result.mesh.faces.size(),
         " topology_duplicated_vertices=", topology_duplicated_vertices);
-    const auto cache_stats = Rasterizer().occupancy_cache_stats(occupancy_cache);
-    core::Logger::instance().info(
-        "splat PAM occupancy cache: prepared_views=", cache_stats.prepared_views,
-        " queries=", cache_stats.queries,
-        " device_bytes=", cache_stats.device_bytes,
-        " host_bytes=", cache_stats.host_bytes);
-    core::Logger::instance().info(
-        "splat PAM occupancy preparations=", cache_stats.preparations);
+    if (vulkan) {
+        // Vulkan state owns a raster workspace, not a CUDA OccupancyCacheImpl.
+        // Never reinterpret it through the CUDA cache statistics accessor.
+        core::Logger::instance().info(
+            "splat PAM occupancy workspace: backend=vulkan strategy=single_view");
+    } else {
+        const auto cache_stats = Rasterizer().occupancy_cache_stats(occupancy_cache);
+        core::Logger::instance().info(
+            "splat PAM occupancy cache: prepared_views=", cache_stats.prepared_views,
+            " queries=", cache_stats.queries,
+            " device_bytes=", cache_stats.device_bytes,
+            " host_bytes=", cache_stats.host_bytes);
+        core::Logger::instance().info(
+            "splat PAM occupancy preparations=", cache_stats.preparations);
+    }
     stage.finish();
     return result;
 #endif

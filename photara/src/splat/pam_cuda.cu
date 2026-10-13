@@ -1,4 +1,7 @@
 #include "pam_cuda.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "pam_vulkan.hpp"
+#endif
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -75,7 +78,7 @@ __device__ float3 field_gradient(
                 int i = indices[parent]; indices[parent] = indices[position]; indices[position] = i;
                 position = parent;
             }
-        } else if (distance < distances[0]) {
+        } else if (greater(distances[0], indices[0], distance, point)) {
             distances[0] = distance; indices[0] = point;
             sift_down(distances, indices, count);
         }
@@ -159,6 +162,10 @@ int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigne
 
 tinytensor::Tensor pam_field_gradients(
     const PamGpuField& field, const tinytensor::Tensor& points, unsigned neighbors) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if(points.device()==tinytensor::Device::Vulkan)
+        return pam_field_gradients_vulkan(field,points,neighbors);
+#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     auto gradients = tinytensor::Tensor::empty({count, std::size_t{3}}, tinytensor::Device::CUDA);
@@ -176,6 +183,12 @@ void pam_refine_points(
     const PamGpuField& field, tinytensor::Tensor& points,
     const tinytensor::Tensor& occupancy, unsigned neighbors,
     float iso_value, float minimum_gradient_norm_squared, float step) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if(points.device()==tinytensor::Device::Vulkan) {
+        pam_refine_points_vulkan(field,points,occupancy,neighbors,iso_value,minimum_gradient_norm_squared,step);
+        return;
+    }
+#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     if (!occupancy.is_valid() || occupancy.device() != tinytensor::Device::CUDA ||

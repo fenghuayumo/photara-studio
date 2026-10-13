@@ -641,6 +641,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
                 src/splat/geometry_vulkan.cpp
+                src/splat/pam_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
@@ -655,6 +656,7 @@ if(PHOTARA_ENABLE_FEATURES)
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
@@ -1135,6 +1137,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)
+            add_test(NAME photara.splat.vulkan_pam
+                COMMAND photara_splat_test --pam-vulkan-only)
             add_test(NAME photara.splat.vulkan_rings_preview
                 COMMAND photara_splat_test --vulkan-rings-only)
         endif()

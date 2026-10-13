@@ -1030,7 +1030,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
          cxxopts::value<unsigned>()->default_value("32"))
-        ("pam-gpu-refinement", "Use exact CUDA nearest-neighbor field refinement (up to 64 neighbors)",
+        ("pam-gpu-refinement", "Use exact CUDA/Vulkan nearest-neighbor field refinement (up to 64 neighbors)",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("pam-occupancy-chunk-size", "PAM query batch size; larger batches amortize camera preparation",
          cxxopts::value<std::uint64_t>()->default_value("4000000"))
@@ -2183,6 +2183,8 @@ void run_splat_view(
 
 photara::splat::GaussianModel load_trained_gaussians(
     const ReconstructCli& cli, photara::project::Archive* archive) {
+    const auto device=cli.backend=="vulkan" && cli.mesh_method=="pam"
+        ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
     std::error_code exists_error;
     std::vector<std::filesystem::path> candidates;
     if (!cli.working_splat.empty())
@@ -2199,7 +2201,7 @@ photara::splat::GaussianModel load_trained_gaussians(
     candidates.push_back(parent / (stem + ".ply"));
     for (const auto& candidate : candidates) {
         if (!std::filesystem::exists(candidate, exists_error)) continue;
-        auto model = photara::splat::load_gaussians(candidate);
+        auto model = photara::splat::load_gaussians(candidate,device);
         if (model.size() == 0) continue;
         photara::core::Logger::instance().info(
             "splat_mesh_model=", candidate, " gaussians=", model.size());
@@ -2208,7 +2210,7 @@ photara::splat::GaussianModel load_trained_gaussians(
     if (archive != nullptr &&
         archive->has(photara::project::ChunkType::gaussians)) {
         auto model = photara::splat::decode_gaussians(
-            archive->chunk(photara::project::ChunkType::gaussians));
+            archive->chunk(photara::project::ChunkType::gaussians),device);
         if (model.size() != 0) {
             photara::core::Logger::instance().info(
                 "splat_mesh_model=ascan gaussians=", model.size());

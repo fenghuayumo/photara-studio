@@ -162,6 +162,7 @@ public:
                   "splat_blend_backward_no_geometry_subgroup.hlsl.spv",
                   12, sizeof(Push))),
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
+          occupancy_(context.create_pipeline("splat_occupancy.hlsl.spv", 7, sizeof(Push))),
           sample_depth_group_(context.create_pipeline("splat_sample_depth_group.hlsl.spv", 9, sizeof(Push))),
           sample_depth_tiled_(context.create_pipeline("splat_sample_depth_tiled.hlsl.spv", 8, sizeof(Push))),
           sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
@@ -1408,6 +1409,34 @@ public:
     std::uint64_t sample_gradient_float_count(const bool omit_appearance) const noexcept {
         return omit_appearance ? static_cast<std::uint64_t>(count_) *
             (has_scales_ ? 20 : 26) : model_gradient_float_count();
+    }
+
+    void occupancy_device(
+        const SplatBufferView& points, std::uint32_t count,
+        const SplatCamera& camera, SplatSettings settings,
+        const SplatBufferView& occupancy, const SplatBufferView& inside) {
+        require(count > 0 && points.buffer != VK_NULL_HANDLE && points.bytes >= count*12ull &&
+            occupancy.buffer != VK_NULL_HANDLE && occupancy.bytes >= count*4ull &&
+            inside.buffer != VK_NULL_HANDLE && inside.bytes >= count*4ull,
+            "invalid device occupancy buffers");
+        settings.need_depth = true;
+        settings.pixel_snapshots = false;
+        (void)record_frame(camera, settings, false, nullptr, true);
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Push push{};
+        push.u[0]=count; push.u[1]=last_width_; push.u[2]=last_height_;
+        push.u[3]=last_grid_x_; push.u[4]=last_mode_;
+        set_float(push,6,last_fx_); set_float(push,7,last_fy_);
+        set_float(push,8,last_cx_); set_float(push,9,last_cy_);
+        set_float(push,10,last_k1_); set_float(push,11,last_k2_);
+        set_float(push,12,last_k3_); set_float(push,13,last_k4_);
+        const auto groups=div_up(count,64);
+        dispatch_infos(occupancy_, {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+            descriptor(gauss_f_), descriptor(*frame_camera_), descriptor(points,count*12ull),
+            descriptor(occupancy,count*4ull), descriptor(inside,count*4ull)},
+            push, std::min(groups,65535u), div_up(groups,65535u));
+        sample_live_ = false;
+        submit_batch(false);
     }
 
     void sample_depth_device(
@@ -3149,6 +3178,7 @@ private:
     // pipeline creation on the missing capability.
     ComputePipeline blend_backward_no_geometry_atomic_;
     ComputePipeline sample_depth_;
+    ComputePipeline occupancy_;
     ComputePipeline sample_depth_group_;
     ComputePipeline sample_depth_tiled_;
     ComputePipeline sample_depth_backward_tiled_;
@@ -3425,6 +3455,13 @@ SplatDepthSamples SplatRasterizer::sample_depth(
 SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
     const std::span<const float> dL_camera_points) {
     return impl_->sample_depth_backward(dL_camera_points);
+}
+
+void SplatRasterizer::occupancy_device(
+    const SplatBufferView& points, std::uint32_t count,
+    const SplatCamera& camera, const SplatSettings& settings,
+    const SplatBufferView& occupancy, const SplatBufferView& inside) {
+    impl_->occupancy_device(points,count,camera,settings,occupancy,inside);
 }
 
 void SplatRasterizer::sample_depth_device(

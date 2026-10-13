@@ -43,6 +43,7 @@
 #include "splat_ranges.hlsl.embedded.hpp"
 #include "splat_ranges_indirect.hlsl.embedded.hpp"
 #include "splat_sample_depth.hlsl.embedded.hpp"
+#include "splat_occupancy.hlsl.embedded.hpp"
 #include "splat_sample_depth_group.hlsl.embedded.hpp"
 #include "splat_sample_depth_tiled.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward.hlsl.embedded.hpp"
@@ -226,6 +227,9 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_median_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_median_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_occupancy.hlsl.spv") {
+        return std::as_bytes(std::span{splat_occupancy_hlsl_spv});
     }
     if (shader_name == "splat_sample_depth.hlsl.spv") {
         return std::as_bytes(std::span{splat_sample_depth_hlsl_spv});

@@ -3042,6 +3042,20 @@ GaussianModel load_gaussians_ply(
             normal_features[4U * gaussian + 3U] = 1.F;
         }
     }
+    // GW can serialize inverse_sigmoid(1) as +inf (or 0 as -inf).
+    // These are valid saturated opacities, unlike NaNs or non-finite geometry.
+    // +/-104 produces exactly the same float32 sigmoid endpoints while
+    // keeping Photara's model/save invariants finite.
+    std::size_t saturated_opacities = 0;
+    for (float& logit : opacities) {
+        if (std::isinf(logit)) {
+            logit = std::copysign(104.F, logit);
+            ++saturated_opacities;
+        }
+    }
+    if (saturated_opacities)
+        core::Logger::instance().info("Gaussian PLY saturated opacity logits=",
+            saturated_opacities, " canonicalized to finite float32 endpoints");
     const auto finite = [](const std::vector<float>& values) {
         return std::all_of(
             values.begin(), values.end(),

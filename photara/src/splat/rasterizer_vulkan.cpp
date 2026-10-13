@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 
 namespace photara::splat::detail {
@@ -515,6 +516,31 @@ ModelGradients vulkan_raster_backward(
     if (context->backend->profile_stages)
         context->backend->record_backward(elapsed_ms(profile_start));
     return gradients;
+}
+
+OccupancyResult vulkan_occupancy(
+    std::shared_ptr<void>& backend_value, const GaussianModel& model,
+    const tinytensor::Tensor& points, const Camera& camera,
+    const RasterizeOptions& options) {
+    if (!points.is_valid() || points.device()!=tinytensor::Device::Vulkan ||
+        points.dtype()!=tinytensor::DataType::Float32 || !points.is_contiguous() ||
+        points.shape().rank()!=2 || points.shape()[1]!=3 ||
+        points.shape()[0]>std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument("Vulkan occupancy requires float32 [P,3] points");
+    OccupancyResult result;
+    result.occupancy=tinytensor::Tensor::empty({points.shape()[0]},tinytensor::Device::Vulkan);
+    auto inside=tinytensor::Tensor::empty({points.shape()[0]},tinytensor::Device::Vulkan,
+        tinytensor::DataType::Int32);
+    if(points.shape()[0]) {
+        auto backend=get_backend(backend_value);
+        tinytensor::vulkan::submit_async();
+        backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
+        backend->rasterizer.occupancy_device(buffer_view(points),
+            static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(options),
+            buffer_view(result.occupancy),buffer_view(inside));
+    }
+    result.inside=inside.gt(0);
+    return result;
 }
 
 DepthSampleResult vulkan_sample_depth(
