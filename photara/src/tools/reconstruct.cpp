@@ -9,6 +9,7 @@
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "splat/training_preset.hpp"
+#include "mvs/mesh_postprocess.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
@@ -255,6 +256,10 @@ struct ReconstructCli {
     std::uint64_t mesh_max_points{2'000'000};
     std::uint64_t mesh_target_faces{0};
     bool mesh_remesh{true};
+    std::string mesh_postprocess_quality{"standard"};
+    std::uint64_t mesh_remesh_target_faces{0};
+    int mesh_remesh_smooth_iterations{2};
+    bool mesh_postprocess_requested{false};
     float mesh_tsdf_voxel_scale{-1.F};
     float mesh_tsdf_bounds_padding{2.F};
     unsigned mesh_tsdf_pixel_step{4};
@@ -529,6 +534,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
               << "  --mesh-target-faces N  optional decimation target (default 0; baking still repairs manifold topology)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (bake-only false; otherwise true)\n"
+              << "  --mesh-postprocess-quality fast|standard|high  postprocess budgets, independent of extraction\n"
+              << "  --mesh-remesh-target-faces N  remesh triangle budget (0 follows reduction target or input)\n"
+              << "  --mesh-remesh-smooth-iterations N  remesh smoothing passes (0-10)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
               << "  --mesh-tsdf-pixel-step N  sparse allocation stride (1 preserves thin wires; default 4)\n"
@@ -1106,6 +1114,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("mesh-postprocess-quality", "Optional mesh postprocessing preset: fast, standard, high",
+         cxxopts::value<std::string>()->default_value("standard"))
+        ("mesh-remesh-target-faces", "Independent remesh triangle budget (0 follows reduction target or input)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("mesh-remesh-smooth-iterations", "Remesh smoothing passes (0-10)",
+         cxxopts::value<int>()->default_value("2"))
         ("mesh-tsdf-voxel-scale",
          "Automatic TSDF voxel multiplier (-1 = gs2mesh default 1x)",
          cxxopts::value<float>()->default_value("-1"))
@@ -1714,6 +1728,23 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_target_faces =
         result["mesh-target-faces"].as<std::uint64_t>();
     cli.mesh_remesh = result["mesh-remesh"].as<bool>();
+    cli.mesh_postprocess_quality = result["mesh-postprocess-quality"].as<std::string>();
+    if (cli.mesh_postprocess_quality != "fast" && cli.mesh_postprocess_quality != "standard" &&
+        cli.mesh_postprocess_quality != "high")
+        throw std::invalid_argument("--mesh-postprocess-quality must be fast, standard, or high");
+    cli.mesh_remesh_target_faces = result["mesh-remesh-target-faces"].as<std::uint64_t>();
+    cli.mesh_remesh_smooth_iterations = result["mesh-remesh-smooth-iterations"].as<int>();
+    if (result.count("mesh-postprocess-quality") != 0) {
+        const auto preset = photara::mvs::mesh_postprocess_preset(
+            cli.mesh_postprocess_quality == "fast" ? 0 : cli.mesh_postprocess_quality == "high" ? 2 : 1);
+        if (result.count("mesh-target-faces") == 0) cli.mesh_target_faces = preset.target_faces;
+        if (result.count("mesh-remesh-target-faces") == 0) cli.mesh_remesh_target_faces = preset.target_faces;
+        if (result.count("mesh-remesh-smooth-iterations") == 0)
+            cli.mesh_remesh_smooth_iterations = preset.smooth_iterations;
+        if (result.count("mesh-remesh") == 0) cli.mesh_remesh = false;
+    }
+    cli.mesh_postprocess_requested = cli.mesh_target_faces > 0 ||
+        (cli.mesh_remesh && result.count("mesh-remesh") != 0);
     cli.mesh_tsdf_voxel_scale =
         result["mesh-tsdf-voxel-scale"].as<float>();
     cli.mesh_tsdf_bounds_padding =
@@ -2040,6 +2071,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_target_faces > 0 && cli.mesh_target_faces < 4)
         throw std::invalid_argument(
             "--mesh-target-faces must be 0 or at least 4");
+    if (cli.mesh_remesh_target_faces > 0 && cli.mesh_remesh_target_faces < 4)
+        throw std::invalid_argument("--mesh-remesh-target-faces must be 0 or at least 4");
+    if (cli.mesh_remesh_smooth_iterations < 0 || cli.mesh_remesh_smooth_iterations > 10)
+        throw std::invalid_argument("--mesh-remesh-smooth-iterations must be within [0,10]");
     if (cli.mesh_tsdf_voxel_scale != -1.F &&
         (!(cli.mesh_tsdf_voxel_scale > 0.F) ||
          !std::isfinite(cli.mesh_tsdf_voxel_scale)))
@@ -2534,6 +2569,15 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.sam_max_size = cli.sam_max_size;
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
+    settings.mesh_postprocess_quality = cli.mesh_postprocess_quality == "fast" ? 0 :
+        cli.mesh_postprocess_quality == "high" ? 2 : 1;
+    const auto postprocess_preset = photara::mvs::mesh_postprocess_preset(settings.mesh_postprocess_quality);
+    settings.mesh_simplify = cli.mesh_target_faces > 0;
+    settings.mesh_target_faces = cli.mesh_target_faces > 0 ? cli.mesh_target_faces : postprocess_preset.target_faces;
+    settings.mesh_remesh = cli.mesh_remesh && cli.mesh_postprocess_requested;
+    settings.mesh_remesh_target_faces = cli.mesh_remesh_target_faces > 0 ?
+        cli.mesh_remesh_target_faces : settings.mesh_target_faces;
+    settings.mesh_remesh_smooth_iterations = cli.mesh_remesh_smooth_iterations;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
     else if (cli.mesh_method == "delaunay") settings.mesh_method = 2;
     else if (cli.mesh_method == "pam") settings.mesh_method = 3;
@@ -2629,7 +2673,8 @@ void write_mesh_artifact(
 #if defined(PHOTARA_HAS_MESH_TOOLS)
 bool repair_and_decimate_mesh(
     photara::mvs::Mesh& mesh, std::uint64_t target_faces,
-    bool use_instant_remesh, bool preserve_components);
+    bool use_instant_remesh, std::uint64_t remesh_target_faces,
+    int smooth_iterations, bool preserve_components);
 #endif
 
 photara::texture::TextureOptions texture_options_from_cli(
@@ -2745,10 +2790,11 @@ void bake_texture_only(
     const auto parent = cli.output.parent_path().empty()
         ? std::filesystem::current_path()
         : cli.output.parent_path();
-    if (cli.mesh_target_faces > 0) {
+    if (cli.mesh_postprocess_requested) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
         if (repair_and_decimate_mesh(
-                scene.mesh, cli.mesh_target_faces, cli.mesh_remesh, true)) {
+                scene.mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true)) {
             const auto processed_path = parent /
                 (cli.output.stem().string() + "_bake_mesh.ply");
             const auto aliases_source = [&](const std::filesystem::path& source) {
@@ -2769,7 +2815,7 @@ void bake_texture_only(
 #else
         throw std::runtime_error(
             "Bake Texture mesh postprocessing requires CGAL mesh tools; "
-            "use --mesh-target-faces 0 to disable it");
+            "disable simplification and remeshing to skip it");
 #endif
     }
     write_texture_artifact(
@@ -3273,9 +3319,10 @@ void retain_largest_edge_component(
 
 bool repair_and_decimate_mesh(
     photara::mvs::Mesh& mesh, const std::uint64_t target_faces,
-    const bool use_instant_remesh, const bool preserve_components = false) {
-    if (target_faces == 0 || mesh.faces.empty()) return false;
-    if (mesh.faces.size() <= target_faces) {
+    const bool use_instant_remesh, const std::uint64_t remesh_target_faces,
+    const int smooth_iterations, const bool preserve_components) {
+    if (mesh.faces.empty() || (target_faces == 0 && !use_instant_remesh)) return false;
+    if (!use_instant_remesh && mesh.faces.size() <= target_faces) {
         photara::core::Logger::instance().info(
             "mesh target postprocess skipped: input_faces=", mesh.faces.size(),
             " target_faces=", target_faces);
@@ -3311,12 +3358,18 @@ bool repair_and_decimate_mesh(
         photara_mesh::RemeshOptions remesh_options;
         // PoSy=4 produces approximately one quad per requested face; the
         // binding triangulates each regular quad for the downstream pipeline.
+        const std::uint64_t remesh_budget = remesh_target_faces > 0 ? remesh_target_faces :
+            target_faces > 0 ? target_faces : indices.size() / 3;
         const std::uint64_t instant_faces =
-            (std::max<std::uint64_t>)(4, (target_faces + 1) / 2);
+            (std::max<std::uint64_t>)(4, remesh_budget / 2 + remesh_budget % 2);
         remesh_options.face_count = static_cast<int>(std::min<std::uint64_t>(
             instant_faces,
             static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
         remesh_options.deterministic = true;
+        remesh_options.smooth_iterations = smooth_iterations;
+        photara::core::Logger::instance().info(
+            "instant mesh config: target_triangles=", remesh_budget,
+            " smooth_iterations=", smooth_iterations);
         try {
             auto remeshed = photara_mesh::remesh_field_aligned(
                 positions, indices, remesh_options);
@@ -3342,7 +3395,7 @@ bool repair_and_decimate_mesh(
     auto result = photara_mesh::repair_and_decimate(
         positions, indices,
         photara_mesh::DecimateOptions{
-            static_cast<std::size_t>(target_faces), false});
+            static_cast<std::size_t>(target_faces > 0 ? target_faces : indices.size() / 3), false});
     // A scene can contain useful disconnected objects. The largest component
     // may be the surrounding surface rather than the subject being textured.
     if (!preserve_components)
@@ -4483,9 +4536,10 @@ int main(int argc, char** argv) {
                 write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     repair_and_decimate_mesh(
-                        *mesh, cli.mesh_target_faces, cli.mesh_remesh);
+                        *mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                        cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
 #endif
                 const auto mesh_path = cli.output.parent_path() /
                     (cli.output.stem().string() + "_splat_mesh.ply");
@@ -4812,9 +4866,10 @@ int main(int argc, char** argv) {
                 write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     repair_and_decimate_mesh(
-                        *mesh, cli.mesh_target_faces, cli.mesh_remesh);
+                        *mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                        cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
 #endif
                 splat_scene.mesh = std::move(*mesh);
                 const auto mesh_path =
@@ -4997,11 +5052,11 @@ int main(int argc, char** argv) {
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.splat && cli.mesh_target_faces > 0) {
+                if (cli.mesh_postprocess_requested) {
                     try {
                         repair_and_decimate_mesh(
-                            mvs_scene.mesh, cli.mesh_target_faces,
-                            cli.mesh_remesh);
+                            mvs_scene.mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                            cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
                     } catch (const std::exception& error) {
                         photara::core::Logger::instance().warning(
                             "photara mesh postprocess failed; retaining cleaned "
@@ -5009,7 +5064,7 @@ int main(int argc, char** argv) {
                     }
                 }
 #else
-                if (cli.splat && cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     photara::core::Logger::instance().warning(
                         "photara mesh postprocess unavailable (CGAL mesh tools "
                         "were not built); retaining cleaned mesh");

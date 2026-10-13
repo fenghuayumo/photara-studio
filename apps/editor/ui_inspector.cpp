@@ -759,6 +759,45 @@ Action draw_inspector(App& app) {
                 "Appearance-only. Train 3DGS without extracting a surface.");
             ImGui::PopTextWrapPos();
         }
+        ImGui::Spacing();
+        if (ImGui::TreeNodeEx(tr("Mesh postprocessing"),
+                ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            ImGui::PushTextWrapPos(0.F);
+            theme::caption("Applied during mesh extraction and texture baking. Manifold repair runs before UV unwrapping.");
+            ImGui::PopTextWrapPos();
+            theme::caption("Postprocessing quality");
+            const char* qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::Combo("##mesh_post_quality", &app.settings.mesh_postprocess_quality,
+                    qualities, 3))
+                apply_mesh_postprocess_preset(app.settings);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Fast: 500,000 faces, no remesh smoothing.\nStandard: 1,000,000 faces, 1 smoothing iteration.\nHigh: 2,000,000 faces, 2 smoothing iterations.\nPresets set budgets; enable simplification or remeshing separately."));
+            ImGui::Checkbox(tr("Simplify mesh"), &app.settings.mesh_simplify);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Reduce faces only when the mesh exceeds the target. Keep useful disconnected components."));
+            ImGui::BeginDisabled(!app.settings.mesh_simplify);
+            theme::caption("Target triangle count");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputScalar("##mesh_target", ImGuiDataType_U64, &app.settings.mesh_target_faces))
+                app.settings.mesh_target_faces = std::max<std::uint64_t>(4, app.settings.mesh_target_faces);
+            ImGui::EndDisabled();
+            ImGui::Checkbox(tr("Remesh surface"), &app.settings.mesh_remesh);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Rebuild triangle layout with Instant Meshes. Changes geometry and can affect thin structures. Runs independently of simplification."));
+            if (app.settings.mesh_remesh) {
+                theme::caption("Remesh triangle budget");
+                ImGui::SetNextItemWidth(-1.F);
+                if (ImGui::InputScalar("##mesh_remesh_target", ImGuiDataType_U64,
+                        &app.settings.mesh_remesh_target_faces))
+                    app.settings.mesh_remesh_target_faces = std::max<std::uint64_t>(4, app.settings.mesh_remesh_target_faces);
+                theme::caption("Remesh smoothing iterations");
+                ImGui::SetNextItemWidth(-1.F);
+                if (ImGui::InputInt("##mesh_remesh_smooth", &app.settings.mesh_remesh_smooth_iterations))
+                    app.settings.mesh_remesh_smooth_iterations = std::clamp(app.settings.mesh_remesh_smooth_iterations, 0, 10);
+            }
+            ImGui::TreePop();
+        }
         ImGui::EndDisabled();
         if (theme::toolbar_button(
                 "Export Mesh", {-1.F, 28.F},

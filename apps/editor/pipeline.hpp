@@ -17,6 +17,8 @@
 #include <system_error>
 #include <vector>
 
+#include "mvs/mesh_postprocess.hpp"
+
 namespace editor {
 
 // Alignment is the shared product of internal SfM or an imported camera
@@ -306,6 +308,12 @@ struct ProjectSettings {
     int mesh_source = 0;
     int mesh_method = 0;  // auto, tsdf, delaunay, pam
     int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High; extraction only.
+    int mesh_postprocess_quality = 1;
+    bool mesh_simplify = false;
+    std::uint64_t mesh_target_faces = 1'000'000;
+    bool mesh_remesh = false;
+    std::uint64_t mesh_remesh_target_faces = 1'000'000;
+    int mesh_remesh_smooth_iterations = 1;
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
@@ -454,6 +462,13 @@ inline MeshQualityPreset mesh_quality_preset(const int quality) {
 
 inline bool mesh_from_mvs(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 1;
+}
+
+inline void apply_mesh_postprocess_preset(ProjectSettings& settings) {
+    const auto preset = photara::mvs::mesh_postprocess_preset(settings.mesh_postprocess_quality);
+    settings.mesh_target_faces = preset.target_faces;
+    settings.mesh_remesh_target_faces = preset.target_faces;
+    settings.mesh_remesh_smooth_iterations = preset.smooth_iterations;
 }
 
 inline std::filesystem::path textured_obj_path(

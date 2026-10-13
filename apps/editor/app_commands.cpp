@@ -427,6 +427,12 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
     settings.mesh_quality = app.settings.mesh_quality;
+    settings.mesh_postprocess_quality = app.settings.mesh_postprocess_quality;
+    settings.mesh_simplify = app.settings.mesh_simplify;
+    settings.mesh_target_faces = app.settings.mesh_target_faces;
+    settings.mesh_remesh = app.settings.mesh_remesh;
+    settings.mesh_remesh_target_faces = app.settings.mesh_remesh_target_faces;
+    settings.mesh_remesh_smooth_iterations = app.settings.mesh_remesh_smooth_iterations;
     settings.depth_normal_weight = app.settings.depth_normal_weight;
     settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
     settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
@@ -509,6 +515,12 @@ void apply_project_settings(
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
     app.settings.mesh_quality = settings.mesh_quality;
+    app.settings.mesh_postprocess_quality = std::clamp(settings.mesh_postprocess_quality, 0, 2);
+    app.settings.mesh_simplify = settings.mesh_simplify;
+    app.settings.mesh_target_faces = std::max<std::uint64_t>(4, settings.mesh_target_faces);
+    app.settings.mesh_remesh = settings.mesh_remesh;
+    app.settings.mesh_remesh_target_faces = std::max<std::uint64_t>(4, settings.mesh_remesh_target_faces);
+    app.settings.mesh_remesh_smooth_iterations = std::clamp(settings.mesh_remesh_smooth_iterations, 0, 10);
     app.settings.depth_normal_weight = settings.depth_normal_weight;
     app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
