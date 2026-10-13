@@ -47,10 +47,12 @@ void grow_parents_gpu(
 
 // Grow through SplitMode::igs_random. The random split offsets stay on the
 // host (one normal per local axis, exactly like the host grow path that this
-// replaces); everything downstream of them runs on the device.
+// replaces). Optional retained indices defer compaction until the split; the
+// Vulkan path writes retained/child model and optimizer rows in one output.
 void grow_igs_random_gpu(
     GaussianModel& model, const tinytensor::Tensor& parents,
     const tinytensor::Tensor& screen_sizes, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states);
+    std::mt19937& random, const AdamStates& states,
+    const tinytensor::Tensor& retained_indices = {});
 
 }  // namespace photara::splat::densification::gpu_detail

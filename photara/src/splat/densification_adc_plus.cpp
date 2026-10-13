@@ -3,6 +3,9 @@
 #include "core/logging.hpp"
 #include "densification_internal.hpp"
 #include "sh_adam_quant.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/ops.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -95,9 +98,14 @@ tinytensor::Tensor weighted_sample_without_replacement(
 void grow_igs_random_gpu(
     GaussianModel& model, const tinytensor::Tensor& parents,
     const tinytensor::Tensor& screen_sizes, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states) {
+    std::mt19937& random, const AdamStates& states,
+    const tinytensor::Tensor& retained_indices) {
     const std::size_t count = parents.numel();
-    if (count == 0) return;
+    if (count == 0) {
+        if (retained_indices.is_valid())
+            select_training_rows_gpu(model, retained_indices, states);
+        return;
+    }
     // One normal per local axis: the random-axis split direction, sampled on
     // the host exactly like the legacy grow path it replaces.
     std::vector<float> samples(3 * count);
@@ -105,6 +113,44 @@ void grow_igs_random_gpu(
     for (float& value : samples) value = normal(random);
     const auto random_tensor = tinytensor::Tensor::from_vector(
         samples, {count, std::size_t{3}}, model.means.device());
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (model.means.device() == tinytensor::Device::Vulkan) {
+        // Split original parents before the single final gather/append. No
+        // full retained model or optimizer copy is materialized first.
+        const auto source_parents = retained_indices.is_valid()
+            ? retained_indices.index_select(0, parents) : parents;
+        auto children = select_model_rows(model, source_parents);
+        const auto selected_screen = screen_sizes.index_select(0, parents);
+        detail::split_gaussians(model, children, source_parents, random_tensor,
+            selected_screen, detail::SplitMode::igs_random, options.prune_opacity, 0.F);
+        detail::zero_adam_rows(source_parents, states.values);
+        if (states.sh_quant)
+            detail::sh_adam_quant_zero_rows(*states.sh_quant, source_parents);
+        const auto merge = [&](tinytensor::Tensor& original, const tinytensor::Tensor& added) {
+            original = tinytensor::vulkan::remap_append_rows(original, retained_indices, added, count);
+        };
+        merge(model.means, children.means);
+        merge(model.log_scales, children.log_scales);
+        merge(model.quaternions, children.quaternions);
+        merge(model.opacity_logits, children.opacity_logits);
+        merge(model.sh, children.sh);
+        if (model.normal_features.is_valid()) merge(model.normal_features, children.normal_features);
+        model.filter_3d = {};
+        for (auto* state : states) {
+            if (!state->first.is_valid() || !state->second.is_valid()) continue;
+            merge(state->first, {});
+            merge(state->second, {});
+        }
+        if (states.sh_quant && states.sh_quant->active()) {
+            merge(states.sh_quant->first, {});
+            merge(states.sh_quant->packed, {});
+            merge(states.sh_quant->bounds, {});
+        }
+        return;
+    }
+#endif
+    if (retained_indices.is_valid())
+        select_training_rows_gpu(model, retained_indices, states);
     grow_parents_gpu(
         model, parents, screen_sizes, detail::SplitMode::igs_random,
         random_tensor, options.prune_opacity, 0.F, false, states);

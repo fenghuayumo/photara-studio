@@ -2111,60 +2111,11 @@ std::array<float, 6> percentile_bounds(
     const std::size_t count = means.shape()[0];
     if (count == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
     if (means.device() == tinytensor::Device::Vulkan) {
-        // Finite coordinates sort ahead of the +inf padding, so two small
-        // readbacks (three finite counts and six quantiles) replace the full
-        // means download plus three host nth_element sweeps the Vulkan
-        // trainer used to pay after every refinement.
-        const float p = std::clamp(percentile, 0.F, 1.F);
-        const auto device = tinytensor::Device::Vulkan;
-        std::array<tinytensor::Tensor, 3> sorted_axes{};
-        std::array<tinytensor::Tensor, 3> finite_counts{};
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const auto column = means.slice(
-                1, static_cast<int>(axis), static_cast<int>(axis) + 1)
-                .reshape({static_cast<int>(count)});
-            const auto finite = column.isfinite();
-            finite_counts[axis] = finite
-                .to(tinytensor::DataType::Float32).sum(0, true);
-            sorted_axes[axis] = column.masked_fill(
-                finite.logical_not(),
-                std::numeric_limits<float>::infinity())
-                .sort(0, false).first;
-        }
-        const auto host_counts = tinytensor::Tensor::cat(
-            {finite_counts[0], finite_counts[1], finite_counts[2]}, 0)
-            .to_vector();
-        std::array<std::size_t, 3> sizes{};
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            sizes[axis] = host_counts.size() > axis
-                ? static_cast<std::size_t>(host_counts[axis]) : 0;
-        if (sizes[0] == 0 || sizes[1] == 0 || sizes[2] == 0)
-            return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
-        std::vector<int> picks;
-        picks.reserve(6);
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const std::size_t size = sizes[axis];
-            const std::size_t low = static_cast<std::size_t>(
-                (1.F - p) * 0.5F * static_cast<float>(size));
-            const std::size_t high_candidate = static_cast<std::size_t>(
-                (1.F + p) * 0.5F * static_cast<float>(size));
-            const std::size_t high =
-                high_candidate < size ? high_candidate : size - 1;
-            picks.push_back(static_cast<int>(low));
-            picks.push_back(static_cast<int>(high));
-        }
-        auto gathered = tinytensor::Tensor::cat({
-            sorted_axes[0].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[0], picks[1]}, {std::size_t{2}}, device)),
-            sorted_axes[1].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[2], picks[3]}, {std::size_t{2}}, device)),
-            sorted_axes[2].index_select(0, tinytensor::Tensor::from_vector(
-                std::vector<int>{picks[4], picks[5]}, {std::size_t{2}}, device))}, 0);
-        const auto host_bounds = gathered.to_vector();
-        std::array<float, 6> result{};
-        for (std::size_t index = 0; index < result.size(); ++index)
-            result[index] = index < host_bounds.size() ? host_bounds[index] : 0.F;
-        return result;
+#ifdef TINYTENSOR_HAS_VULKAN
+        return tinytensor::vulkan::quantile_bounds(means, percentile);
+#else
+        throw std::invalid_argument("Vulkan percentile bounds are not compiled");
+#endif
     }
     auto axes = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto sorted = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);

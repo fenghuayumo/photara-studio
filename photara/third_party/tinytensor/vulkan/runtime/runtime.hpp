@@ -49,6 +49,9 @@ enum class ShaderId : std::uint32_t {
     CumsumScan,
     ConstrainScaleRatio,
     ShAdamQuant,
+    QuantileBounds,
+    CountMasks,
+    RemapAppend,
     Count
 };
 

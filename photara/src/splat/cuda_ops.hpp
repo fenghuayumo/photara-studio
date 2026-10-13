@@ -89,7 +89,7 @@ struct OpacityProgressStats {
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
 // Exact per-axis finite quantiles, returned as min.xyz/max.xyz. Only six
-// floats cross to the CPU; the full position array stays on CUDA.
+// floats cross to the CPU; the full position array stays on the device.
 std::array<float, 6> percentile_bounds(
     const tinytensor::Tensor& means, float percentile);
 

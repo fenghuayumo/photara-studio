@@ -5099,6 +5099,15 @@ void test_splat_quantile_selection() {
             require(actual.center == device.center && actual.scale == device.scale &&
                     actual.maximum_extent == device.maximum_extent,
                     "GPU ADC quantiles differ from finite CPU order statistics");
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (tinytensor::vulkan::available()) {
+                const auto vk = splat::densification::splat_scene_geometry_device(
+                    tinytensor::Tensor::from_vector(xyz, {count, 3}, tinytensor::Device::Vulkan), p);
+                require(actual.center == vk.center && actual.scale == vk.scale &&
+                        actual.maximum_extent == vk.maximum_extent,
+                        "Vulkan ADC quantiles differ from finite CPU order statistics");
+            }
+#endif
             const mvs::Vec3f half = 0.5F * (high - low);
             std::array<float, 3> extents{half.x(), half.y(), half.z()};
             std::sort(extents.begin(), extents.end());
@@ -5117,6 +5126,14 @@ void test_splat_quantile_selection() {
         require(actual.center.isZero() && actual.scale == 2.F &&
                 actual.maximum_extent == 1.F,
                 "GPU ADC quantiles lost the empty/non-finite fallback");
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (tinytensor::vulkan::available()) {
+            const auto vk = splat::densification::splat_scene_geometry_device(
+                tinytensor::Tensor::from_vector(xyz, {xyz.size() / 3, 3}, tinytensor::Device::Vulkan));
+            require(vk.center.isZero() && vk.scale == 2.F && vk.maximum_extent == 1.F,
+                    "Vulkan ADC quantiles lost the empty/non-finite fallback");
+        }
+#endif
     }
 }
 
@@ -6217,9 +6234,14 @@ void test_dense_adaptive_still_prunes_nonfinite_geometry() {
 void test_igs_refinement_decisions() {
     using namespace photara::splat;
     using tinytensor::Tensor;
-    constexpr auto gpu = tinytensor::Device::CUDA;
+    for (const auto gpu : {tinytensor::Device::CUDA, tinytensor::Device::Vulkan}) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (gpu == tinytensor::Device::Vulkan && !tinytensor::vulkan::available()) continue;
+#else
+    if (gpu == tinytensor::Device::Vulkan) continue;
+#endif
 
-    const auto build_model = [](
+    const auto build_model = [gpu](
         const std::vector<float>& opacity_logits,
         const std::vector<float>& means) {
         const std::size_t count = opacity_logits.size();
@@ -6266,7 +6288,7 @@ void test_igs_refinement_decisions() {
                          const std::size_t growth_cap = 0) {
         Arm result;
         result.harness = make_refine_harness(densification::clone_model(seed));
-        auto stats = detail::make_densification_stats(count);
+        auto stats = detail::make_densification_stats(count, gpu);
         stats.growth_cap = growth_cap;
         stats.gradient = Tensor::full({count}, 1.F, gpu);
         stats.count = Tensor::full({count}, 10.F, gpu);
@@ -6351,6 +6373,54 @@ void test_igs_refinement_decisions() {
         require_finite(
             arm.harness.model.log_scales, "ADC-IGS produced non-finite scales");
     }
+    {
+        auto harness = make_refine_harness(build_model(std::vector<float>(6, 0.F), indexed_means(6)));
+        auto stats = detail::make_densification_stats(6, gpu);
+        auto stationary = options;
+        stationary.dense_recycle_fraction = 0.F;
+        stationary.densification_cap = 6;
+        const auto means_owner = harness.model.means.storage_ptr();
+        const auto moment_owner = harness.means.first.storage_ptr();
+        std::mt19937 random(42);
+        const auto counts = densification::refine_gaussians(harness.model, stats, 100, 1.F,
+            photara::mvs::Vec3f::Zero(), stationary, random, harness.states());
+        require(counts.pruned == 0 && counts.grown == 0 &&
+                harness.model.means.storage_ptr() == means_owner &&
+                harness.means.first.storage_ptr() == moment_owner,
+            "Zero-prune IGS needlessly remapped model/Adam storage");
+    }
+    {
+        auto harness = make_refine_harness(build_model(
+            {-8.F,-7.F,-6.F,-1.F,0.F,1.F,2.F,3.F}, indexed_means(8, 5)));
+        for (auto* state : harness.states()) {
+            state->first = Tensor::full(state->first.shape(), 1.F, gpu);
+            state->second = Tensor::full(state->second.shape(), 2.F, gpu);
+        }
+        auto stats = detail::make_densification_stats(8, gpu);
+        stats.count = Tensor::full({8}, 10.F, gpu);
+        stats.priority = Tensor::full({8}, 10.F, gpu);
+        stats.max_screen_radius = Tensor::full({8}, 0.01F, gpu);
+        auto recycling = options;
+        recycling.prune_opacity = 0.05F;
+        recycling.dense_recycle_fraction = 0.25F;
+        recycling.densification_cap = 8;
+        recycling.grow_stop_iter = 0;
+        std::mt19937 random(42);
+        const auto counts = densification::refine_gaussians(harness.model, stats, 100, 1.F,
+            photara::mvs::Vec3f::Zero(), recycling, random, harness.states());
+        require(counts.pruned == 2 && counts.grown == 2 && harness.model.size() == 8,
+            "Fused IGS prune/append lost its replacement budget");
+        for (auto* state : harness.states()) {
+            const auto values = state->first.to_vector();
+            const auto width = values.size() / 8;
+            require(std::count(values.begin(), values.end(), 0.F) == 4 * width,
+                "Fused IGS remap did not clear both parent and child moments");
+            require(std::all_of(values.end() - 2 * width, values.end(), [](float v) { return v == 0.F; }),
+                "Fused IGS append did not zero child moments");
+        }
+    }
+    }
+
 }
 
 void test_igs_budgeted_selection_and_panorama_sizes() {
