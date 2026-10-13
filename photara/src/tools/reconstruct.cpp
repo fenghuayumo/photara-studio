@@ -146,7 +146,7 @@ struct ReconstructCli {
     float splat_simplify_merge_cap{0.5F};
     int splat_simplify_sh{-1};
     std::string capture_mode{"object"};
-    bool splat_focus_region = true;
+    bool splat_focus_region = false;
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
@@ -788,7 +788,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-focus-region",
          "Constrain splat training to the SubjectBounds focus region "
-         "(default: true)",
+         "(default: false)",
          cxxopts::value<bool>()->implicit_value("true"))
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
@@ -1432,7 +1432,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_simplify_sh = result["splat-simplify-sh"].as<int>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
-    // Independent of --capture-mode: absent means the struct default (on).
+    // Independent of --capture-mode: absent means the struct default (off).
     if (result.count("splat-focus-region") != 0)
         cli.splat_focus_region = result["splat-focus-region"].as<bool>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")

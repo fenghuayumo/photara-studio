@@ -245,7 +245,7 @@ Settings decode_settings(
     if (settings.texture_seam_steps < 0)
         settings.texture_seam_steps = 60;
     // Focus Region is independent of capture mode; projects saved before the
-    // field existed simply default it on (Settings::focus_region).
+    // field existed default it off (Settings::focus_region).
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.focus_region = reader.value<std::uint8_t>() != 0;
     return settings;

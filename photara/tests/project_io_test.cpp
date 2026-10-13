@@ -185,6 +185,7 @@ int main() {
            "asfm pinhole default");
 
     Settings settings;
+    expect(!settings.focus_region, "new projects default focus region off");
     expect(settings.iterations == 30'000 && settings.densification_cap == 3'000'000 &&
            settings.training_mode == 1 && !settings.speedy_pruning,
            "new projects default to standard 3DGS training");
@@ -398,8 +399,19 @@ int main() {
         auto pre_region = encode_settings(toggled, ascan_path);
         pre_region.resize(pre_region.size() - sizeof(std::uint8_t));
         const Settings legacy_region = decode_settings(pre_region, ascan_path);
-        expect(legacy_region.scene_mode && legacy_region.focus_region,
-               "projects saved before focus region default it on");
+        expect(legacy_region.scene_mode && !legacy_region.focus_region,
+               "projects saved before focus region default it off");
+        for (bool scene_mode : {false, true}) {
+            toggled.scene_mode = scene_mode;
+            toggled.focus_region = true;
+            expect(decode_settings(encode_settings(toggled, ascan_path), ascan_path)
+                       .focus_region,
+                   "explicit focus region opt-in survives project roundtrip");
+            auto legacy = encode_settings(toggled, ascan_path);
+            legacy.pop_back();
+            expect(!decode_settings(legacy, ascan_path).focus_region,
+                   "legacy capture modes do not implicitly enable focus region");
+        }
     }
     settings_bytes.insert(settings_bytes.end(), {0x11, 0x22, 0x33, 0x44});
     const Settings additive = decode_settings(settings_bytes, ascan_path);
