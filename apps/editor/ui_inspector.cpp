@@ -824,20 +824,20 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Photometric + seam optimization in photara_drender after the "
                 "projective bake. Off is faster; on cleans view seams.");
-        ImGui::BeginDisabled(!app.settings.texture_optimize);
-        theme::caption("Photometric iterations");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::InputInt("##tex_photo_steps", &app.settings.texture_photometric_steps, 100, 1000))
-            app.settings.texture_photometric_steps = std::max(1, app.settings.texture_photometric_steps);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Iterations to fit the atlas colors to the photographs."));
-        theme::caption("Seam iterations");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::InputInt("##tex_seam_steps", &app.settings.texture_seam_steps, 10, 100))
-            app.settings.texture_seam_steps = std::max(0, app.settings.texture_seam_steps);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Iterations to match colors across UV seams. Set to 0 to skip."));
-        ImGui::EndDisabled();
+        if (app.settings.texture_optimize) {
+            theme::caption("Photometric iterations");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputInt("##tex_photo_steps", &app.settings.texture_photometric_steps, 100, 1000))
+                app.settings.texture_photometric_steps = std::max(1, app.settings.texture_photometric_steps);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Iterations to fit the atlas colors to the photographs."));
+            theme::caption("Seam iterations");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputInt("##tex_seam_steps", &app.settings.texture_seam_steps, 10, 100))
+                app.settings.texture_seam_steps = std::max(0, app.settings.texture_seam_steps);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Iterations to match colors across UV seams. Set to 0 to skip."));
+        }
         ImGui::EndDisabled();
         if (app.has_texture) {
             ImGui::Spacing();

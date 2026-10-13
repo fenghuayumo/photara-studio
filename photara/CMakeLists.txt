@@ -909,6 +909,12 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
                 ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp)
             if(WIN32)
+                # Launch Studio as a GUI application without allocating a console.
+                set_target_properties(photara_studio PROPERTIES WIN32_EXECUTABLE TRUE)
+                if(MSVC)
+                    # Keep the existing main(argc, argv) and CRT argument handling.
+                    target_link_options(photara_studio PRIVATE /ENTRY:mainCRTStartup)
+                endif()
                 get_filename_component(_photara_studio_icon
                     "${CMAKE_CURRENT_SOURCE_DIR}/../apps/icons/icon.ico"
                     ABSOLUTE)
