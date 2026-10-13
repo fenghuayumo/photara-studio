@@ -480,7 +480,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --splat-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --splat-mv-neighbors N  nearest camera candidates (default 8)\n"
-              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default 1;\n"
+              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default fast=2, others=1;\n"
               << "                              N>1 lowers geometry/mesh quality - previews only)\n"
               << "  --splat-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
               << "  --splat-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
@@ -946,7 +946,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-mv-tail-interval",
-         "Multi-view sampling interval after ADC growth stops (N>1 lowers geometry/mesh quality; "
+         "Multi-view sampling interval after ADC growth stops (default fast=2, others=1; N>1 lowers geometry/mesh quality; "
          "keep 1 when meshing)",
          cxxopts::value<unsigned>()->default_value("1"))
         ("splat-mv-adaptive",
@@ -1571,8 +1571,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_multi_view_ncc_weight =
         result["splat-mv-ncc-weight"].as<float>();
     cli.splat_multi_view_num = result["splat-mv-neighbors"].as<unsigned>();
-    cli.splat_multi_view_tail_interval =
-        result["splat-mv-tail-interval"].as<unsigned>();
+    cli.splat_multi_view_tail_interval = result.count("splat-mv-tail-interval")
+        ? result["splat-mv-tail-interval"].as<unsigned>()
+        : splat_preset.multi_view_tail_interval;
     cli.splat_multi_view_adaptive =
         result["splat-mv-adaptive"].as<bool>();
     cli.splat_multi_view_adaptive_max_interval =
@@ -3634,8 +3635,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.multi_view_depth_bracket = cli.splat_multi_view_depth_bracket;
     options.multi_view_depth_tolerance = cli.splat_multi_view_depth_tolerance;
     options.multi_view_num = cli.splat_multi_view_num;
-    options.multi_view_interval =
-        photara::splat::training_preset(cli.splat_mode).multi_view_interval;
     options.multi_view_tail_interval =
         cli.splat_multi_view_tail_interval;
     if (cli.mesh && cli.splat_multi_view_tail_interval > 1)
@@ -3643,7 +3642,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
             "splat_mv_tail_interval=", cli.splat_multi_view_tail_interval,
             " meshing=1: multi-view geometry supervision runs every ",
             cli.splat_multi_view_tail_interval,
-            " steps, which lowers TSDF mesh quality. Keep interval=1 when the "
+            " steps after ADC growth stops, which lowers TSDF mesh quality. Keep interval=1 when the "
             "mesh is the deliverable.");
     options.multi_view_adaptive_frequency =
         cli.splat_multi_view_adaptive;
@@ -3760,7 +3759,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " multi_view_depth_bracket=", options.multi_view_depth_bracket,
         " multi_view_depth_tolerance=", options.multi_view_depth_tolerance,
         " multi_view_neighbours=", options.multi_view_num,
-        " multi_view_interval=", options.multi_view_interval,
         " multi_view_tail_interval=", options.multi_view_tail_interval,
         " multi_view_adaptive=",
         options.multi_view_adaptive_frequency,

@@ -10,11 +10,11 @@
 
 namespace photara::splat::detail {
 
-[[nodiscard]] constexpr bool fixed_multi_view_scheduled(
-    const unsigned iteration, const unsigned from_iteration,
+[[nodiscard]] constexpr bool tail_multi_view_scheduled(
+    const unsigned iteration, const unsigned grow_stop_iteration,
     const unsigned interval) noexcept {
-    return iteration >= from_iteration &&
-        (iteration - from_iteration) % std::max(1U, interval) == 0;
+    return iteration <= grow_stop_iteration ||
+        (iteration - grow_stop_iteration) % std::max(1U, interval) == 0;
 }
 
 struct GeometryStabilitySample {

@@ -426,7 +426,9 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.multi_view_depth_bracket);
     hash.append(options.multi_view_depth_tolerance);
     hash.append(options.multi_view_num);
-    hash.append(options.multi_view_interval);
+    // Preserve signatures of checkpoints that used every-step supervision
+    // before the tail gate; the retired fixed cadence is now always one.
+    hash.append(1U);
     hash.append(options.multi_view_tail_interval);
     hash.append(options.multi_view_adaptive_frequency);
     hash.append(options.multi_view_adaptive_max_interval);

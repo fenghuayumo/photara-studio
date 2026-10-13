@@ -57,22 +57,21 @@
 namespace {
 
 static_assert(photara::splat::training_preset(
-    photara::splat::TrainingMode::fast).multi_view_interval == 2);
+    photara::splat::TrainingMode::fast).multi_view_tail_interval == 2);
 static_assert(photara::splat::training_preset(
-    photara::splat::TrainingMode::standard).multi_view_interval == 1);
+    photara::splat::TrainingMode::standard).multi_view_tail_interval == 1);
 static_assert(photara::splat::training_preset(
-    photara::splat::TrainingMode::high_quality).multi_view_interval == 1);
-static_assert(!photara::splat::detail::fixed_multi_view_scheduled(6999, 7000, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(7000, 7000, 2));
-static_assert(!photara::splat::detail::fixed_multi_view_scheduled(7001, 7000, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(7002, 7000, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(7001, 7001, 2));
-static_assert(!photara::splat::detail::fixed_multi_view_scheduled(7002, 7001, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(7003, 7001, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(15000, 7000, 2));
-static_assert(!photara::splat::detail::fixed_multi_view_scheduled(15001, 7000, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(15002, 7000, 2));
-static_assert(photara::splat::detail::fixed_multi_view_scheduled(7001, 7000, 1));
+    photara::splat::TrainingMode::high_quality).multi_view_tail_interval == 1);
+static_assert(photara::splat::detail::tail_multi_view_scheduled(7000, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(7001, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(14999, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15000, 15000, 2));
+static_assert(!photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15002, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 1));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 0));
+static_assert(!photara::splat::detail::tail_multi_view_scheduled(12002, 12001, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(12003, 12001, 2));
 
 void require(const bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);

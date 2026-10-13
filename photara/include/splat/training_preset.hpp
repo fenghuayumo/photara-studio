@@ -12,7 +12,7 @@ struct TrainingPreset {
     unsigned iterations;
     std::size_t gaussian_cap;
     bool speedy_pruning;
-    unsigned multi_view_interval;
+    unsigned multi_view_tail_interval;
 };
 
 [[nodiscard]] constexpr TrainingPreset training_preset(TrainingMode mode) {

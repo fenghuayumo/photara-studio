@@ -38,6 +38,7 @@ struct TrainingProgress {
     std::uint32_t image_width{};
     std::uint32_t image_height{};
     unsigned active_sh_degree{};
+    // Actual cadence at this step (tail or adaptive scheduling).
     unsigned multi_view_interval{1};
     float multi_view_depth_consistency{};
     // Device-wide dedicated VRAM at this sample (cudaMemGetInfo on CUDA,

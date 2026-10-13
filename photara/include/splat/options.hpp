@@ -287,9 +287,6 @@ struct TrainingOptions {
     // default (<= 0) uses all eight refinements to preserve median gradients.
     float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
-    // Fixed cadence from geometry-loss activation. Values > 1 take priority
-    // over tail/adaptive scheduling; active-step weights scale by the interval.
-    unsigned multi_view_interval{1};
     // Subsample the expensive multi-view objective after ADC growth stops.
     // Active-step weights are multiplied by this interval so the stochastic
     // objective remains unchanged in expectation.
