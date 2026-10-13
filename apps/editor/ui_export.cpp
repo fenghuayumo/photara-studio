@@ -278,8 +278,8 @@ void draw_splat_export_modal(App& app) {
     auto& state = app.splat_export;
     const bool running = state.job.valid();
     ImGui::BeginDisabled(running);
-    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)")};
-    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 5))
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)"), tr("Collision Mesh (Vulkan)")};
+    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 6))
         sync_splat_export_path(app, true);
     if (app.splat_export.format == 1)
         theme::caption("PlayCanvas compressed Gaussians.");
@@ -289,6 +289,8 @@ void draw_splat_export_modal(App& app) {
         theme::caption("Khronos KHR_gaussian_splatting GLB.");
     else if (state.format == 4)
         theme::caption("Streamed SOG: lod-meta.json and spatial LOD chunks.");
+    else if (state.format == 5)
+        theme::caption("Gaussian voxelization, sparse octree, and collision GLB.");
     else
         theme::caption("Standard 3DGS PLY.");
 
@@ -307,6 +309,14 @@ void draw_splat_export_modal(App& app) {
         int count = static_cast<int>(state.lod.chunk_count / 1000);
         if (ImGui::InputInt(tr("Chunk splats (K)"), &count)) state.lod.chunk_count = static_cast<unsigned>(std::clamp(count, 1, 2048)) * 1000;
         ImGui::InputFloat(tr("Chunk extent"), &state.lod.chunk_extent);
+    } else if (state.format == 5) {
+        ImGui::InputFloat(tr("Voxel size"), &state.collision.voxel_size, .01F, .1F, "%.3f");
+        ImGui::SliderFloat(tr("Voxel opacity"), &state.collision.opacity, .001F, 1.F, "%.3f");
+        const char* fills[] = {tr("No fill"), tr("Fill enclosed cavities"), tr("Fill below ground")};
+        ImGui::Combo(tr("Fill mode"), &state.fill_mode, fills, 3);
+        ImGui::Checkbox(tr("PlayCanvas coordinates"), &state.collision.playcanvas_coordinates);
+        theme::caption("PlayCanvas flips X/Y. Mesh and voxel data share that frame.");
+        theme::caption("Voxel faces mesh. Increase voxel size for large scenes.");
     }
 
     ImGui::Spacing();
@@ -331,6 +341,9 @@ void draw_splat_export_modal(App& app) {
     if (state.format == 4) {
         ImGui::TextUnformatted("lod-meta.json + unbundled SOG chunks");
         ImGui::TextUnformatted(tr("Browse selects the parent of a new folder."));
+    } else if (state.format == 5) {
+        ImGui::TextUnformatted("scene.voxel.json + scene.voxel.bin");
+        ImGui::TextUnformatted("scene.collision.glb");
     } else ImGui::TextUnformatted(
         path_to_utf8(out.filename().empty() ? std::filesystem::path("splat")
                                             : out.filename())
