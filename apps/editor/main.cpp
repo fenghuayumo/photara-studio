@@ -36,8 +36,10 @@ std::string g_editor_ini;
 int main(const int argc, char** argv) {
     App app;
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
+    const bool stop_smoke = smoke_arg == "--interop-stop-smoke" ||
+                            smoke_arg == "--interop-stop-smoke-vulkan";
     app.smoke_mode = smoke_arg == "--interop-smoke" ||
-                     smoke_arg == "--interop-smoke-vulkan";
+                     smoke_arg == "--interop-smoke-vulkan" || stop_smoke;
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
@@ -51,8 +53,9 @@ int main(const int argc, char** argv) {
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
             "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\cuda_vulkan_smoke");
-        app.settings.iterations = 100;
-        if (smoke_arg == "--interop-smoke-vulkan")
+        app.settings.iterations = stop_smoke ? 30'000 : 100;
+        if (smoke_arg == "--interop-smoke-vulkan" ||
+            smoke_arg == "--interop-stop-smoke-vulkan")
             app.settings.training_backend = 1;
     }
 
@@ -166,11 +169,14 @@ int main(const int argc, char** argv) {
             if (!app.smoke_started && !app.job.running()) {
                 app.smoke_started = true;
                 editor::start_train(app, true);
-                glfwIconifyWindow(window);
+                if (!stop_smoke) glfwIconifyWindow(window);
             } else if (
                 app.smoke_started && !app.job.running() &&
-                editor::gpu::consumed_timeline_value() >= 3) {
-                app.smoke_success = app.job.exit_code() == 0;
+                (stop_smoke || editor::gpu::consumed_timeline_value() >= 3)) {
+                app.smoke_success = stop_smoke
+                    ? app.job.exit_code() == 2 && !app.preview.display.descriptor &&
+                          app.active_job == editor::JobKind::none
+                    : app.job.exit_code() == 0;
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else if (
                 std::chrono::steady_clock::now() - smoke_begin >
@@ -241,6 +247,13 @@ int main(const int argc, char** argv) {
         if (action == Action::none) action = inspector_action;
         editor::draw_status_bar(app);
 
+        // Exercise the same action as the Stop button after the viewport has
+        // added a live preview texture to this frame's draw list.
+        if (stop_smoke && app.job.running() &&
+            editor::gpu::consumed_timeline_value() >= 3)
+            action = Action::stop;
+
+        bool stop_requested = false;
         switch (action) {
             case Action::align:
                 if (!app.smoke_mode) editor::start_align(app);
@@ -282,15 +295,7 @@ int main(const int argc, char** argv) {
                 }
                 break;
             case Action::stop:
-                app.job.stop();
-                if (app.job.consume_completion())
-                    editor::on_job_finished(app);
-                else
-                    editor::set_message(
-                        app,
-                        "Stopped. You can change images, video, or parameters "
-                        "and run again.",
-                        editor::theme::warning);
+                stop_requested = true;
                 break;
             case Action::reveal:
                 editor::reveal_in_explorer(app.layout.root);
@@ -314,6 +319,21 @@ int main(const int argc, char** argv) {
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             editor::gpu::present(draw_data, editor::theme::surface_0);
         editor::publish_preview_ack(app);
+
+        // Finish submitting the draw list and acknowledging its shared image
+        // before terminating the producer. on_job_finished() destroys the
+        // preview texture; queue idle cannot protect an unsubmitted draw list.
+        if (stop_requested) {
+            app.job.stop();
+            if (app.job.consume_completion())
+                editor::on_job_finished(app);
+            else
+                editor::set_message(
+                    app,
+                    "Stopped. You can change images, video, or parameters "
+                    "and run again.",
+                    editor::theme::warning);
+        }
 
         if (app.pending_align_viewport_clear) {
             app.pending_align_viewport_clear = false;
