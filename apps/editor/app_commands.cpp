@@ -120,9 +120,9 @@ std::filesystem::path existing_splat_model(const App& app) {
     std::error_code error;
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
-    const std::array<std::filesystem::path, 6> candidates = {
+    const std::array<std::filesystem::path, 7> candidates = {
         app.layout.working_splat, app.layout.splat_model, app.layout.splat_ply,
-        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb};
+        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc};
     for (const auto& candidate : candidates)
         if (std::filesystem::exists(candidate, error)) return candidate;
     return {};
@@ -396,7 +396,8 @@ photara::project::Settings collect_project_settings(const App& app) {
         : app.settings.splat_format == 2
             ? "sog"
             : app.settings.splat_format == 3 ? "spz"
-            : app.settings.splat_format == 4 ? "glb" : "auto";
+            : app.settings.splat_format == 4 ? "glb"
+            : app.settings.splat_format == 5 ? "usdc" : "auto";
     settings.camera_model = app.settings.camera_model;
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
@@ -474,6 +475,8 @@ void apply_project_settings(
         app.settings.splat_format = 3;
     else if (settings.splat_output_format == "glb")
         app.settings.splat_format = 4;
+    else if (settings.splat_output_format == "usdc")
+        app.settings.splat_format = 5;
     else
         app.settings.splat_format = 0;
     app.settings.camera_model = settings.camera_model;
@@ -709,7 +712,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                      splat == app.layout.splat_model ||
                      splat == app.layout.splat_sog ||
                      splat == app.layout.splat_spz ||
-                     splat == app.layout.splat_glb);
+                     splat == app.layout.splat_glb || splat == app.layout.splat_usdc);
                 if (project_owned)
                     photara::splat::save_gaussians(edited, splat);
             }
@@ -1353,6 +1356,7 @@ photara::splat::GaussianFormat splat_export_format(const App& app) {
         case 1: return photara::splat::GaussianFormat::sog;
         case 2: return photara::splat::GaussianFormat::spz;
         case 3: return photara::splat::GaussianFormat::glb;
+        case 6: return photara::splat::GaussianFormat::usdc;
         default: return photara::splat::GaussianFormat::ply;
     }
 }
@@ -1362,6 +1366,7 @@ const wchar_t* splat_export_extension_wide(const App& app) {
         case 1: return L"sog";
         case 2: return L"spz";
         case 3: return L"glb";
+        case 6: return L"usdc";
         default: return L"ply";
     }
 }
@@ -1371,6 +1376,12 @@ int splat_export_format_from_settings(const int settings_format) {
         case 2: return 1;
         case 3: return 2;
         case 4: return 3;
+        case 5:
+#ifdef PHOTARA_HAS_USDC
+            return 6;
+#else
+            return 0;
+#endif
         default: return 0;
     }
 }
@@ -1380,6 +1391,7 @@ int splat_settings_format_from_export(const int export_format) {
         case 1: return 2;
         case 2: return 3;
         case 3: return 4;
+        case 6: return 5;
         default: return 1;
     }
 }
@@ -1397,6 +1409,7 @@ std::filesystem::path suggested_splat_export_path(
         case 3: path += ".glb"; break;
         case 4: path += "_lod"; break;
         case 5: path += "_collision"; break;
+        case 6: path += ".usdc"; break;
         default: path += ".ply"; break;
     }
     return path;
@@ -1413,7 +1426,7 @@ void sync_splat_export_path(App& app, const bool force) {
         auto parent = current.parent_path();
         if (!parent.empty()) directory = parent;
         auto current_stem = current.stem();
-        if (app.splat_export.path_format >= 4) {
+        if (app.splat_export.path_format == 4 || app.splat_export.path_format == 5) {
             auto name = current.filename().wstring();
             const std::wstring suffix = app.splat_export.path_format == 4 ? L"_lod" : L"_collision";
             if (name.ends_with(suffix)) name.resize(name.size() - suffix.size());
@@ -1434,7 +1447,7 @@ void sync_splat_export_path(App& app, const bool force) {
 
 bool browse_splat_export_path(App& app) {
     sync_splat_export_path(app, false);
-    if (app.splat_export.format >= 4) {
+    if (app.splat_export.format == 4 || app.splat_export.format == 5) {
         std::array<char, 1024> folder{};
         if (!pick_folder(L"Choose parent folder for export", folder)) return false;
         const auto current = path_from_utf8_field(app.splat_export.path.data());
@@ -1633,7 +1646,7 @@ void export_trained_model(App& app) {
         out = path_from_utf8_field(app.splat_export.path.data());
     }
     if (out.empty()) return;
-    if (app.splat_export.format < 4 && out.extension().empty()) {
+    if (app.splat_export.format != 4 && app.splat_export.format != 5 && out.extension().empty()) {
         out += ".";
         out += std::filesystem::path(extension);
         store_path_field(app.splat_export.path, out);
@@ -1657,7 +1670,7 @@ void export_trained_model(App& app) {
         const unsigned export_degree =
             std::min(model.sh_degree,
                      static_cast<unsigned>(app.splat_export.sh_degree));
-        if (app.splat_export.format >= 4) {
+        if (app.splat_export.format == 4 || app.splat_export.format == 5) {
             photara::splat::restrict_sh_degree(model, export_degree);
             auto cancel = std::make_shared<std::atomic<bool>>(false);
             auto progress = std::make_shared<std::atomic<float>>(0.F);
@@ -2427,10 +2440,10 @@ void delete_reconstruction_results(App& app) {
 
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 24> generated_files = {
+    const std::array<std::filesystem::path, 25> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
-        app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
+        app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc, app.layout.mesh_ply,
         app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
         app.layout.dense_ply, app.layout.working_splat, app.layout.working_mesh,
         app.layout.working_dense, textured_obj_path(app.layout.working_texture),

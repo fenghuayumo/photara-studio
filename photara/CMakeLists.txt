@@ -616,6 +616,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_glb.cpp
+            src/splat/formats_usdc.cpp
             src/splat/simplify.cpp
             src/splat/deployment.cpp
             src/splat/mesh.cpp
@@ -624,6 +625,11 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/checkpoint.cpp
             src/splat/trainer.cpp)
         add_library(Photara::Splat ALIAS photara_splat)
+        if(PHOTARA_ENABLE_USDC)
+            include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PhotaraUsd.cmake")
+            target_link_libraries(photara_splat PRIVATE lightusd::next)
+            target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_USDC=1)
+        endif()
         target_include_directories(photara_splat
             PUBLIC
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -1154,6 +1160,17 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
         endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
+        if(PHOTARA_ENABLE_USDC)
+            add_executable(photara_splat_usdc_test tests/splat_usdc_test.cpp)
+            target_link_libraries(photara_splat_usdc_test PRIVATE Photara::Splat)
+            add_test(NAME photara.splat.usdc COMMAND photara_splat_usdc_test)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_usdc_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_splat_usdc_test>
+                        $<TARGET_FILE_DIR:photara_splat_usdc_test> COMMAND_EXPAND_LISTS)
+            endif()
+        endif()
         add_executable(photara_splat_deployment_test tests/splat_deployment_test.cpp)
         target_link_libraries(photara_splat_deployment_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.deployment COMMAND photara_splat_deployment_test)
@@ -1293,6 +1310,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_logging_test
         photara_splat_checkpoint_test
         photara_splat_test
+        photara_splat_usdc_test
         photara_splat_deployment_test
         photara_splat_quality_eval
         photara_splat_vulkan_forward_test

@@ -111,13 +111,15 @@ bool pick_file(
             {L"Point cloud (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC splat_model_filters[] = {
-            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
+            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb;*.usdc)", L"*.ply;*.sog;*.spz;*.glb;*.usdc"},
             {L"All files (*.*)", L"*.*"}};
         if (kind == FilePickKind::splat_model && default_extension != nullptr) {
             if (std::wcscmp(default_extension, L"sog") == 0) {
                 splat_model_filters[0] = {L"PlayCanvas SOG (*.sog)", L"*.sog"};
             } else if (std::wcscmp(default_extension, L"spz") == 0) {
                 splat_model_filters[0] = {L"Niantic SPZ (*.spz)", L"*.spz"};
+            } else if (std::wcscmp(default_extension, L"usdc") == 0) {
+                splat_model_filters[0] = {L"OpenUSD Gaussian (*.usdc)", L"*.usdc"};
             } else if (std::wcscmp(default_extension, L"glb") == 0) {
                 splat_model_filters[0] = {
                     L"Khronos Gaussian GLB (*.glb)", L"*.glb"};
@@ -346,12 +348,13 @@ Filter filters_for(
         if (extension == "sog")
             return {"PlayCanvas SOG (*.sog)", "*.sog"};
         if (extension == "spz") return {"Niantic SPZ (*.spz)", "*.spz"};
+        if (extension == "usdc") return {"OpenUSD Gaussian (*.usdc)", "*.usdc"};
         if (extension == "glb")
             return {"Khronos Gaussian GLB (*.glb)", "*.glb"};
         if (extension == "ply") return {"Gaussian PLY (*.ply)", "*.ply"};
         return {
-            "Gaussian splat (*.ply *.sog *.spz *.glb)",
-            "*.ply *.sog *.spz *.glb"};
+            "Gaussian splat (*.ply *.sog *.spz *.glb *.usdc)",
+            "*.ply *.sog *.spz *.glb *.usdc"};
     }
     if (kind == FilePickKind::mesh) {
         if (extension == "obj") return {"Wavefront OBJ (*.obj)", "*.obj"};

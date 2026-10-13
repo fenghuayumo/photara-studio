@@ -1,6 +1,7 @@
 #include "splat/formats.hpp"
 
 #include "formats_glb.hpp"
+#include "formats_usdc.hpp"
 #include "splat/trainer.hpp"
 
 #include <webp/decode.h>
@@ -1400,9 +1401,10 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
     if (normalized == "sog") return GaussianFormat::sog;
     if (normalized == "spz") return GaussianFormat::spz;
     if (normalized == "glb") return GaussianFormat::glb;
+    if (normalized == "usdc") return GaussianFormat::usdc;
     throw std::invalid_argument(
         "Unknown splat output format '" + std::string(value) +
-        "' (expected auto, ply, sog, spz, or glb)");
+        "' (expected auto, ply, sog, spz, glb, or usdc)");
 }
 
 GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noexcept {
@@ -1410,6 +1412,7 @@ GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noex
     if (extension == ".sog") return GaussianFormat::sog;
     if (extension == ".spz") return GaussianFormat::spz;
     if (extension == ".glb") return GaussianFormat::glb;
+    if (extension == ".usdc") return GaussianFormat::usdc;
     return GaussianFormat::ply;
 }
 
@@ -1420,6 +1423,7 @@ const char* gaussian_format_name(const GaussianFormat format) noexcept {
         case GaussianFormat::sog: return "sog";
         case GaussianFormat::spz: return "spz";
         case GaussianFormat::glb: return "glb";
+        case GaussianFormat::usdc: return "usdc";
     }
     return "auto";
 }
@@ -1431,6 +1435,7 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
         case GaussianFormat::sog: return "sog";
         case GaussianFormat::spz: return "spz";
         case GaussianFormat::glb: return "glb";
+        case GaussianFormat::usdc: return "usdc";
     }
     return "";
 }
@@ -1472,6 +1477,9 @@ void save_gaussians(
         case GaussianFormat::glb:
             write_file(path, detail::save_glb(model));
             return;
+        case GaussianFormat::usdc:
+            write_file(path, detail::save_usdc(model));
+            return;
         case GaussianFormat::auto_detect:
             break;
     }
@@ -1497,6 +1505,7 @@ GaussianModel load_gaussians(
                 decoded.log_scales, decoded.rotations,
                 decoded.opacity_logits, decoded.sh, device);
         }
+        case GaussianFormat::usdc: return detail::load_usdc(read_file(path), device);
         case GaussianFormat::auto_detect: break;
     }
     throw std::runtime_error("Invalid Gaussian input format");

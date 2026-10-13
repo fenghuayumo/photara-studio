@@ -53,7 +53,7 @@ The implementation currently includes:
   instance selection when the bundled SAM component and a compatible
   checkpoint are available;
 - `.ascan` project archives and exports for OpenMVS, COLMAP, Nerfstudio, PLY,
-  OBJ, GLB, SOG, and SPZ, depending on the selected stage.
+  OBJ, GLB, SOG, SPZ, and [USDC](docs/splat-usdc.md), depending on the selected stage.
 - native C++ [Streamed SOG LOD and voxel collision exports](docs/splat-deployment.md),
   with Vulkan merge-cost evaluation and Gaussian voxelization.
 
