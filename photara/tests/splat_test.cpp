@@ -12,6 +12,7 @@
 #include "../src/splat/focus_mask_frame.hpp"
 #include "splat/simplify.hpp"
 #include "../src/splat/pam_cuda.hpp"
+#include "pam_reference_test.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
@@ -2602,6 +2603,20 @@ void test_normal_field_parameterization_and_occupancy() {
                         "PAM fused occupancy changed view votes or slice boundaries");
             }
         }
+        {
+            const auto mask = [](std::vector<float> bits) {
+                return tinytensor::Tensor::from_vector(bits, {bits.size()}, tinytensor::Device::CUDA).gt(0.F);
+            };
+            auto occupancy = tinytensor::Tensor::ones({6}, tinytensor::Device::CUDA);
+            auto observed = mask({0, 0, 0, 0, 0, 0});
+            const auto values = tinytensor::Tensor::from_vector(
+                std::vector<float>{.2F, .3F, .4F, .5F, .6F, .7F}, {6}, tinytensor::Device::CUDA);
+            detail::pam_accumulate_occupancy_cuda(occupancy, observed, values,
+                mask({1, 0, 0, 1, 0, 0}), mask({1, 1, 0, 0, 0, 1}), mask({1, 1, 1, 0, 0, 0}));
+            require(occupancy.to_vector() == std::vector<float>{.2F, 0.F, 1.F, .5F, 1.F, 0.F} &&
+                    observed.to_vector_bool() == std::vector<bool>{true, true, true, false, false, false},
+                "PAM fused mask votes changed foreground precedence, background or visibility");
+        }
         const auto stats = rasterizer.occupancy_cache_stats(cache);
         require(stats.prepared_views == 2 && stats.queries == 6,
                 "PAM occupancy cache repeated draw preparation");
@@ -2988,7 +3003,6 @@ void test_pam_smoke() {
     options.occupancy_iso_value = 0.05F;
     options.vacancy_threshold = 1.F;
     options.occupancy_chunk_size = 512;
-    options.gpu_refinement = false;
     const auto result = splat::extract_pam_mesh(
         model, scene, seed, splat::TrainingOptions{}, options);
     require(
@@ -3017,8 +3031,7 @@ void test_pam_smoke() {
         begin = end;
     }
 #if defined(PHOTARA_HAS_OPENMP)
-    // Exercise both parallel loops and ensure scheduling does not change the
-    // random surface sampling or the per-point refinement result.
+    // Ensure host sampling scheduling does not change the optimized extraction.
     auto parallel_seed = seed;
     for (int level = 0; level < 5; ++level) {
         std::vector<Eigen::Vector3i> faces;
@@ -3056,34 +3069,24 @@ void test_pam_smoke() {
     require(serial.mesh.vertices.size() == parallel.mesh.vertices.size() &&
                 serial.mesh.faces.size() == parallel.mesh.faces.size(),
             "PAM parallel refinement changed mesh topology size");
-    options.gpu_refinement = true;
-    const auto gpu = splat::extract_pam_mesh(
-        model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    require(gpu.candidate_cloud.points.size() == serial.candidate_cloud.points.size(),
-        "PAM CUDA extraction changed candidate count");
-    for (std::size_t i = 0; i < serial.candidate_cloud.points.size(); ++i)
-        require((serial.candidate_cloud.points[i].position -
-                 gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
-            "PAM CUDA extraction changed refined candidate geometry");
     // Cover device slices, accumulated updates and the CPU mask projection.
     scene.views[0].foreground_mask.assign(64 * 64, 255);
     for (std::size_t y = 0; y < 64; ++y)
         for (std::size_t x = 0; x < 24; ++x)
             scene.views[0].foreground_mask[64*y+x] = 0;
     options.refinement_steps = 3;
+    options.occupancy_chunk_size = 4096;
+    const auto masked_reference = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
     options.occupancy_chunk_size = 257;
-    options.gpu_refinement = false;
-    const auto masked_cpu = splat::extract_pam_mesh(
+    const auto masked_chunked = splat::extract_pam_mesh(
         model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    options.gpu_refinement = true;
-    const auto masked_gpu = splat::extract_pam_mesh(
-        model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    require(!masked_cpu.candidate_cloud.points.empty() &&
-            masked_cpu.candidate_cloud.points.size() == masked_gpu.candidate_cloud.points.size(),
+    require(!masked_reference.candidate_cloud.points.empty() &&
+            masked_reference.candidate_cloud.points.size() == masked_chunked.candidate_cloud.points.size(),
         "PAM masked CUDA extraction changed candidate count");
-    for (std::size_t i = 0; i < masked_cpu.candidate_cloud.points.size(); ++i)
-        require((masked_cpu.candidate_cloud.points[i].position -
-                 masked_gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
+    for (std::size_t i = 0; i < masked_reference.candidate_cloud.points.size(); ++i)
+        require((masked_reference.candidate_cloud.points[i].position -
+                 masked_chunked.candidate_cloud.points[i].position).norm() < 2e-5F,
             "PAM masked CUDA extraction changed refined candidate geometry");
 #endif
 #endif

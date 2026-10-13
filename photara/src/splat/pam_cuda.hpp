@@ -4,7 +4,7 @@
 
 namespace photara::splat::detail {
 
-// Same balanced KD tree and activated field used by the CPU reference.
+// Balanced KD tree and activated Gaussian field for device projection.
 // Nodes: [point, left, right, axis]. Field rows: mean(3), normal(3),
 // inverse variance(3), column-major rotation(9), opacity(1).
 struct PamGpuField {
@@ -18,10 +18,6 @@ inline constexpr unsigned pam_gpu_max_neighbors = 64;
 
 PamGpuField make_pam_gpu_field(const GaussianModel& model);
 
-// CPU reference used to validate exact search and anisotropic field math.
-std::vector<float> pam_field_gradients_reference(
-    const GaussianModel& model, const std::vector<float>& points, unsigned neighbors);
-
 tinytensor::Tensor pam_field_gradients(
     const PamGpuField& field, const tinytensor::Tensor& points,
     unsigned neighbors);
@@ -31,10 +27,12 @@ void pam_refine_points(
     const tinytensor::Tensor& occupancy, unsigned neighbors,
     float iso_value, float minimum_gradient_norm_squared, float step);
 
-// Reduce an unmasked view directly into initialized occupancy/visibility
-// accumulators, preserving frustum abstentions and the exact min operation.
+// Reduce a view into initialized occupancy/visibility accumulators. Foreground
+// votes min occupancy; explicit background votes zero. Missing background means
+// no background votes; missing visibility uses the foreground/frustum mask.
 void pam_accumulate_occupancy_cuda(
     tinytensor::Tensor& occupancy, tinytensor::Tensor& observed,
-    const tinytensor::Tensor& view_occupancy, const tinytensor::Tensor& inside);
+    const tinytensor::Tensor& view_occupancy, const tinytensor::Tensor& foreground,
+    const tinytensor::Tensor& background = {}, const tinytensor::Tensor& visibility = {});
 
 }  // namespace photara::splat::detail

@@ -152,12 +152,13 @@ void check(cudaError_t error) {
 }
 
 __global__ void accumulate_occupancy_kernel(
-    float* occupancy, bool* observed, const float* values, const bool* inside,
-    std::size_t count) {
+    float* occupancy, bool* observed, const float* values, const bool* foreground,
+    const bool* background, const bool* visibility, std::size_t count) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < count && inside[i]) {
-        occupancy[i] = fminf(occupancy[i], values[i]);
-        observed[i] = true;
+    if (i < count) {
+        if (foreground[i]) occupancy[i] = fminf(occupancy[i], values[i]);
+        else if (background && background[i]) occupancy[i] = 0.F;
+        if (visibility[i]) observed[i] = true;
     }
 }
 
@@ -175,18 +176,23 @@ int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigne
 
 void pam_accumulate_occupancy_cuda(
     tinytensor::Tensor& occupancy, tinytensor::Tensor& observed,
-    const tinytensor::Tensor& values, const tinytensor::Tensor& inside) {
+    const tinytensor::Tensor& values, const tinytensor::Tensor& foreground,
+    const tinytensor::Tensor& background, const tinytensor::Tensor& visibility) {
     const auto valid = [&](const tinytensor::Tensor& t, tinytensor::DataType dtype) {
         return t.is_valid() && t.device() == tinytensor::Device::CUDA &&
             t.dtype() == dtype && t.is_contiguous() && t.shape() == occupancy.shape();
     };
     if (!valid(occupancy, tinytensor::DataType::Float32) || occupancy.shape().rank() != 1 ||
         !valid(values, tinytensor::DataType::Float32) ||
-        !valid(observed, tinytensor::DataType::Bool) || !valid(inside, tinytensor::DataType::Bool))
+        !valid(observed, tinytensor::DataType::Bool) || !valid(foreground, tinytensor::DataType::Bool) ||
+        (background.is_valid() && !valid(background, tinytensor::DataType::Bool)) ||
+        (visibility.is_valid() && !valid(visibility, tinytensor::DataType::Bool)))
         throw std::invalid_argument("Invalid PAM CUDA occupancy accumulation");
     if (!occupancy.numel()) return;
     accumulate_occupancy_kernel<<<(occupancy.numel() + 255) / 256, 256>>>(
-        occupancy.ptr<float>(), observed.ptr<bool>(), values.ptr<float>(), inside.ptr<bool>(),
+        occupancy.ptr<float>(), observed.ptr<bool>(), values.ptr<float>(), foreground.ptr<bool>(),
+        background.is_valid() ? background.ptr<bool>() : nullptr,
+        visibility.is_valid() ? visibility.ptr<bool>() : foreground.ptr<bool>(),
         occupancy.numel());
     check(cudaGetLastError());
 }

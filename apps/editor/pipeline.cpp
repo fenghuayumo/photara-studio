@@ -462,7 +462,7 @@ void append_mesh_quality_flags(
                 << " --pam-refinement-steps " << preset.pam_steps
                 << " --pam-neighbors " << preset.pam_neighbors
                 << " --pam-points-per-tetrahedron " << preset.pam_cell_samples
-                << " --pam-gpu-refinement=true --pam-occupancy-chunk-size 4000000";
+                << " --pam-occupancy-chunk-size 4000000";
     } else {
         command << " --mesh-max-points " << preset.mesh_points;
         if (method != 2)

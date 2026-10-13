@@ -254,9 +254,7 @@ void test_pam_vulkan() {
         auto shifted_view = scene.views[0];
         shifted_view.pose.C.x() += .25;
         chunk_scene.views.push_back(shifted_view);
-        options.gpu_refinement = has_cuda;
         auto a = extract_pam_mesh(cpu, chunk_scene, seed, {}, options);
-        options.gpu_refinement = true;
         auto b = extract_pam_mesh(vk, chunk_scene, seed, {}, options);
         require(!b.mesh.faces.empty() &&
                     a.candidate_cloud.points.size() == b.candidate_cloud.points.size(),

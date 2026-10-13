@@ -15,7 +15,6 @@
 #include <fstream>
 #include <limits>
 #include <numeric>
-#include <queue>
 #include <random>
 #include <span>
 #include <sstream>
@@ -79,19 +78,6 @@ public:
         root_ = build(0, order_.size());
     }
 
-    [[nodiscard]] std::vector<std::size_t> nearest(
-        const mvs::Vec3f& query, const std::size_t requested) const {
-        using Entry = std::pair<float, std::size_t>;
-        std::priority_queue<Entry> best;
-        search(root_, query, std::max<std::size_t>(requested, 1), best);
-        std::vector<std::size_t> result(best.size());
-        for (std::size_t i = best.size(); i != 0; --i) {
-            result[i - 1] = best.top().second;
-            best.pop();
-        }
-        return result;
-    }
-
     [[nodiscard]] tinytensor::Tensor upload_nodes(tinytensor::Device device) const {
         std::vector<int> packed;
         packed.reserve(nodes_.size() * 4);
@@ -152,29 +138,6 @@ private:
         nodes_[static_cast<std::size_t>(node)].right =
             build(middle + 1, end);
         return node;
-    }
-
-    void search(
-        const int node_index, const mvs::Vec3f& query,
-        const std::size_t requested,
-        std::priority_queue<std::pair<float, std::size_t>>& best) const {
-        if (node_index < 0) return;
-        const Node& node = nodes_[static_cast<std::size_t>(node_index)];
-        const mvs::Vec3f& point = points_[node.point];
-        const float distance2 = (query - point).squaredNorm();
-        if (best.size() < requested)
-            best.emplace(distance2, node.point);
-        else if (distance2 < best.top().first ||
-                 (distance2 == best.top().first && node.point < best.top().second)) {
-            best.pop();
-            best.emplace(distance2, node.point);
-        }
-        const float delta = query(node.axis) - point(node.axis);
-        const int near = delta < 0.F ? node.left : node.right;
-        const int far = delta < 0.F ? node.right : node.left;
-        search(near, query, requested, best);
-        if (best.size() < requested || delta * delta <= best.top().first)
-            search(far, query, requested, best);
     }
 
     std::vector<mvs::Vec3f> points_;
@@ -257,26 +220,6 @@ struct HostGaussianField {
         }
     }
 
-    [[nodiscard]] mvs::Vec3f gradient(
-        const mvs::Vec3f& point, const std::size_t neighbors) const {
-        mvs::Vec3f result = mvs::Vec3f::Zero();
-        for (const std::size_t index : tree.nearest(point, neighbors)) {
-            const mvs::Vec3f delta = point - means[index];
-            if (normals[index].dot(delta) < 0.F) continue;
-            const mvs::Vec3f local = rotations[index].transpose() * delta;
-            const float exponent = -0.5F *
-                (local.array().square() *
-                 inverse_variances[index].array()).sum();
-            const float gaussian = std::clamp(
-                opacities[index] * std::exp(exponent), 0.F, 1.F - 1e-7F);
-            const mvs::Vec3f sigma_inverse_delta = rotations[index] *
-                (inverse_variances[index].array() * local.array()).matrix();
-            result += gaussian / (1.F - gaussian + 1e-8F) *
-                      sigma_inverse_delta;
-        }
-        return result;
-    }
-
     [[nodiscard]] detail::PamGpuField upload(tinytensor::Device device) const {
         std::vector<float> packed;
         packed.reserve(means.size() * 19);
@@ -318,10 +261,9 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     const tinytensor::Tensor& points,
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache = nullptr, bool pivot_mask = false) {
+    OccupancyCache* cache, bool pivot_mask = false) {
     const std::size_t point_count = points.shape()[0];
     const auto device=model.means.device();
-    std::shared_ptr<void> local_backend;
     auto result = tinytensor::Tensor::ones({point_count}, device);
     Rasterizer rasterizer;
     RasterizeOptions raster_options;
@@ -349,28 +291,13 @@ tinytensor::Tensor evaluate_global_occupancy_device(
             OccupancyResult view_result;
 #ifdef TINYTENSOR_HAS_VULKAN
             if (device==tinytensor::Device::Vulkan) {
-                view_result=detail::vulkan_occupancy(cache?cache->state:local_backend,
+                view_result=detail::vulkan_occupancy(cache->state,
                     model,query,camera_from_mvs_view(view),raster_options,begin != 0);
             } else
 #endif
-            view_result = cache
-                ? rasterizer.evaluate_occupancy(*cache, view_index, query)
-                : rasterizer.evaluate_occupancy(
-                    model, query, camera_from_mvs_view(view), raster_options);
-            if (device == tinytensor::Device::CUDA && !has_masks) {
-                auto occupancy = result.slice(0, begin, begin + count);
-                auto observed = all_observed.slice(0, begin, begin + count);
-                detail::pam_accumulate_occupancy_cuda(
-                    occupancy, observed, view_result.occupancy, view_result.inside);
-                continue;
-            }
-            // Use owned chunk storage during the ternary reductions; sliced
-            // accumulators are copied back only after the view vote is ready.
-            auto occupancy = result.slice(0, begin, begin + count).clone();
-            auto observed = all_observed.slice(0, begin, begin + count).clone();
+            view_result = rasterizer.evaluate_occupancy(*cache, view_index, query);
             tinytensor::Tensor possibly_foreground = view_result.inside;
-            tinytensor::Tensor definitely_background =
-                tinytensor::Tensor::zeros_like(view_result.inside);
+            tinytensor::Tensor definitely_background;
             const std::size_t mask_pixels =
                 static_cast<std::size_t>(view.width) * view.height;
             if (view.foreground_mask.size() == mask_pixels) {
@@ -422,6 +349,19 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                     definitely_background = view_result.inside.logical_and(
                         mask.lt(mask_background_threshold));
             }
+            if (device == tinytensor::Device::CUDA) {
+                auto occupancy = result.slice(0, begin, begin + count);
+                auto observed = all_observed.slice(0, begin, begin + count);
+                detail::pam_accumulate_occupancy_cuda(occupancy, observed, view_result.occupancy,
+                    possibly_foreground, definitely_background,
+                    pivot_mask ? possibly_foreground : view_result.inside);
+                continue;
+            }
+            // Vulkan merges its view votes using device tensor operations.
+            auto occupancy = result.slice(0, begin, begin + count).clone();
+            auto observed = all_observed.slice(0, begin, begin + count).clone();
+            if (!definitely_background.is_valid())
+                definitely_background = tinytensor::Tensor::zeros_like(view_result.inside);
             occupancy = tinytensor::Tensor::where(
                 possibly_foreground,
                 occupancy.minimum(view_result.occupancy),
@@ -442,7 +382,7 @@ std::vector<float> evaluate_global_occupancy(
     const std::vector<mvs::Vec3f>& points,
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache = nullptr, bool pivot_mask = false) {
+    OccupancyCache* cache, bool pivot_mask = false) {
     // Stage bounded batches so several dispatch chunks share each
     // view preparation. Four million queries need 48 MiB of point storage;
     // never upload all tens of millions of tetrahedral samples at once.
@@ -862,20 +802,6 @@ detail::PamGpuField detail::make_pam_gpu_field(const GaussianModel& model) {
     return HostGaussianField(model).upload(model.means.device());
 }
 
-std::vector<float> detail::pam_field_gradients_reference(
-    const GaussianModel& model, const std::vector<float>& points, unsigned neighbors) {
-    if (points.size() % 3 != 0 || neighbors == 0)
-        throw std::invalid_argument("Invalid PAM reference query");
-    HostGaussianField field(model);
-    std::vector<float> result;
-    result.reserve(points.size());
-    for (std::size_t i = 0; i < points.size(); i += 3) {
-        const auto gradient = field.gradient(mvs::Vec3f(points[i], points[i+1], points[i+2]), neighbors);
-        result.insert(result.end(), gradient.data(), gradient.data() + 3);
-    }
-    return result;
-}
-
 PamMeshResult extract_pam_mesh(
     const GaussianModel& model, const mvs::MvsScene& source_scene,
     const mvs::Mesh& seed_mesh,
@@ -912,6 +838,7 @@ PamMeshResult extract_pam_mesh(
             "PAM seed mesh must be complete or entirely omitted");
     if (options.max_points < 4 || (options.pivot_max_points != 0 && options.pivot_max_points < 4) ||
         options.vector_field_neighbors == 0 ||
+        options.vector_field_neighbors > detail::pam_gpu_max_neighbors ||
         options.points_per_tetrahedron == 0 ||
         !std::isfinite(options.pivot_std_factor) ||
         !(options.pivot_std_factor > 0.F) ||
@@ -928,12 +855,10 @@ PamMeshResult extract_pam_mesh(
     core::Logger::instance().info("splat PAM cameras: training=", scene.views.size(),
         " held_out=", source_scene.views.size() - scene.views.size());
     HostGaussianField field(model);
-    const bool use_gpu = options.gpu_refinement &&
-        options.vector_field_neighbors <= detail::pam_gpu_max_neighbors;
     const auto device=model.means.device();
     const bool vulkan=device==tinytensor::Device::Vulkan;
-    const detail::PamGpuField gpu_field = use_gpu ? field.upload(device) : detail::PamGpuField{};
-    core::Logger::instance().info("splat PAM field backend=", use_gpu ? (vulkan?"vulkan":"cuda") : "cpu",
+    const detail::PamGpuField gpu_field = field.upload(device);
+    core::Logger::instance().info("splat PAM field backend=", vulkan ? "vulkan" : "cuda",
         " occupancy_backend=", vulkan?"vulkan":"cuda");
     std::vector<Camera> occupancy_cameras;
     occupancy_cameras.reserve(scene.views.size());
@@ -973,67 +898,26 @@ PamMeshResult extract_pam_mesh(
         [&](std::vector<mvs::Vec3f> sampled) {
             if (sampled.empty()) return;
             core::StageScope refinement_stage("splat.pam.refinement");
-            if (use_gpu) {
-                auto points = upload_points(sampled,device);
-                for (unsigned step = 0; step < options.refinement_steps; ++step) {
-                    core::Logger::instance().info(
-                        "splat PAM refinement: step=", step + 1, '/', options.refinement_steps,
-                        " samples=", sampled.size(), " backend=", vulkan?"vulkan":"cuda");
-                    const auto occupancy = evaluate_global_occupancy_device(
-                        model, scene, points, training_options, options.occupancy_chunk_size,
-                        options.mask_background_threshold, &occupancy_cache);
-                    detail::pam_refine_points(gpu_field, points, occupancy,
-                        options.vector_field_neighbors, options.occupancy_iso_value,
-                        options.minimum_gradient_norm_squared, options.refinement_step);
-                }
-                const auto occupancy = evaluate_global_occupancy_device(
-                    model, scene, points, training_options, options.occupancy_chunk_size,
-                    options.mask_background_threshold, &occupancy_cache).to_vector();
-                const auto host_points = points.to_vector();
-                for (std::size_t i = 0; i < sampled.size() && candidates.size() < options.max_points; ++i)
-                    if (std::abs(occupancy[i] - options.occupancy_iso_value) <= options.vacancy_threshold)
-                        candidates.emplace_back(host_points[3*i], host_points[3*i+1], host_points[3*i+2]);
-                return;
-            }
-            const auto sample_count = static_cast<std::ptrdiff_t>(sampled.size());
+            auto points = upload_points(sampled,device);
             for (unsigned step = 0; step < options.refinement_steps; ++step) {
                 core::Logger::instance().info(
-                    "splat PAM refinement: step=", step + 1, '/',
-                    options.refinement_steps, " samples=", sampled.size());
-                const std::vector<float> occupancy = evaluate_global_occupancy(
-                    model, scene, sampled, training_options,
-                    options.occupancy_chunk_size,
+                    "splat PAM refinement: step=", step + 1, '/', options.refinement_steps,
+                    " samples=", sampled.size(), " backend=", vulkan?"vulkan":"cuda");
+                const auto occupancy = evaluate_global_occupancy_device(
+                    model, scene, points, training_options, options.occupancy_chunk_size,
                     options.mask_background_threshold, &occupancy_cache);
-#if defined(PHOTARA_HAS_OPENMP)
-#pragma omp parallel for schedule(dynamic, 256) if(sample_count >= 1024)
-#endif
-                for (std::ptrdiff_t index = 0; index < sample_count; ++index) {
-                    const mvs::Vec3f gradient = field.gradient(
-                        sampled[index], options.vector_field_neighbors);
-                    const float norm_squared = gradient.squaredNorm();
-                    if (!(norm_squared >
-                          options.minimum_gradient_norm_squared))
-                        continue;
-                    const float alpha = std::clamp(
-                        (occupancy[index] - options.occupancy_iso_value) /
-                            norm_squared,
-                        -1.F, 1.F);
-                    sampled[index] +=
-                        options.refinement_step * alpha * gradient;
-                }
+                detail::pam_refine_points(gpu_field, points, occupancy,
+                    options.vector_field_neighbors, options.occupancy_iso_value,
+                    options.minimum_gradient_norm_squared, options.refinement_step);
             }
-            const std::vector<float> occupancy = evaluate_global_occupancy(
-                model, scene, sampled, training_options,
-                options.occupancy_chunk_size,
-                options.mask_background_threshold, &occupancy_cache);
-            for (std::size_t index = 0;
-                 index < sampled.size() &&
-                 candidates.size() < options.max_points;
-                 ++index)
-                if (std::abs(
-                        occupancy[index] - options.occupancy_iso_value) <=
-                        options.vacancy_threshold)
-                    candidates.push_back(sampled[index]);
+            const auto occupancy = evaluate_global_occupancy_device(
+                model, scene, points, training_options, options.occupancy_chunk_size,
+                options.mask_background_threshold, &occupancy_cache).to_vector();
+            const auto host_points = points.to_vector();
+            for (std::size_t i = 0; i < sampled.size() && candidates.size() < options.max_points; ++i)
+                if (std::abs(occupancy[i] - options.occupancy_iso_value) <= options.vacancy_threshold)
+                    candidates.emplace_back(host_points[3*i], host_points[3*i+1], host_points[3*i+2]);
+            return;
         };
 
     const std::size_t gaussian_seed_count =
@@ -1249,18 +1133,15 @@ PamMeshResult extract_pam_mesh(
             soup_points.size() - vertices_before_orientation;
     }
     compute_vertex_normals(result.mesh);
-    const std::vector<float> candidate_gradients = use_gpu
-        ? detail::pam_field_gradients(gpu_field, upload_points(candidates,device),
-            options.vector_field_neighbors).to_vector()
-        : std::vector<float>{};
+    const auto candidate_gradients = detail::pam_field_gradients(
+        gpu_field, upload_points(candidates,device), options.vector_field_neighbors).to_vector();
     result.candidate_cloud.points.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& point = candidates[i];
         mvs::DensePoint dense;
         dense.position = point;
-        const mvs::Vec3f gradient = use_gpu
-            ? mvs::Vec3f(candidate_gradients[3*i], candidate_gradients[3*i+1], candidate_gradients[3*i+2])
-            : field.gradient(point, options.vector_field_neighbors);
+        const mvs::Vec3f gradient(candidate_gradients[3*i], candidate_gradients[3*i+1],
+                                  candidate_gradients[3*i+2]);
         if (gradient.squaredNorm() > 1e-20F)
             dense.normal = gradient.normalized();
         dense.weight = 1.F;

@@ -170,8 +170,8 @@ PAM follows the model device: CUDA and Vulkan both provide integrated occupancy
 queries and exact KD-tree vector-field projection (up to 64 neighbours). Vulkan
 keeps the model and refinement points on its device; KD-tree construction and
 CGAL tetrahedralization remain CPU stages. `--splat-mesh-only --backend vulkan`
-loads the saved model directly on Vulkan. Disabling GPU refinement moves the
-vector-field projection to CPU while occupancy queries stay on the model device.
+loads the saved model directly on Vulkan. Both backends always use device
+vector-field projection; the CPU numerical oracle is confined to tests.
 CUDA reuses the active view's draw list across consecutive point chunks, including
 host-spilled and uncached views. PAM selects a pageable host cache from available
 RAM, leaving 4 GiB plus half the remaining headroom for staging, Delaunay and other

@@ -275,7 +275,6 @@ struct ReconstructCli {
     float pam_gaussian_seed_fraction{0.F};
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
-    bool pam_gpu_refinement{true};
     std::uint64_t pam_occupancy_chunk_size{4'000'000};
     std::uint64_t pam_occupancy_host_cache_mb{0};
     unsigned pam_points_per_tetrahedron{10};
@@ -513,7 +512,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --pam-max-resample-rounds N  candidate sampling rounds (default 0 = fill budget)\n"
               << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
               << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
-              << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
+              << "  --pam-neighbors N  Gaussian neighbors in the PAM field (1-64; default 32)\n"
               << "  --pam-occupancy-host-cache-mb N  CUDA host cache MiB (0 = auto, up to 8 GiB)\n"
               << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
@@ -1062,8 +1061,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
          cxxopts::value<unsigned>()->default_value("32"))
-        ("pam-gpu-refinement", "Use exact CUDA/Vulkan nearest-neighbor field refinement (up to 64 neighbors)",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("pam-occupancy-chunk-size", "PAM query batch size; larger batches amortize camera preparation",
          cxxopts::value<std::uint64_t>()->default_value("4000000"))
         ("pam-occupancy-host-cache-mb", "CUDA PAM host draw-list cache MiB (0 = automatic, at most 8 GiB)",
@@ -1670,7 +1667,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.pam_refinement_steps =
         result["pam-refinement-steps"].as<unsigned>();
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
-    cli.pam_gpu_refinement = result["pam-gpu-refinement"].as<bool>();
     cli.pam_occupancy_chunk_size = result["pam-occupancy-chunk-size"].as<std::uint64_t>();
     cli.pam_occupancy_host_cache_mb = result["pam-occupancy-host-cache-mb"].as<std::uint64_t>();
     cli.pam_points_per_tetrahedron =
@@ -1969,7 +1965,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--mesh-method pam requires splat training");
     if (cli.pam_max_points < 4 || (cli.pam_pivot_max_points != 0 && cli.pam_pivot_max_points < 4) ||
-        cli.pam_neighbors == 0 ||
+        cli.pam_neighbors == 0 || cli.pam_neighbors > 64 ||
         cli.pam_occupancy_chunk_size == 0 ||
         cli.pam_occupancy_chunk_size > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) ||
         cli.pam_occupancy_host_cache_mb > (std::numeric_limits<std::size_t>::max)() / (1024 * 1024) ||
@@ -3990,7 +3986,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
             cli.pam_gaussian_seed_fraction;
         pam_options.refinement_steps = cli.pam_refinement_steps;
         pam_options.vector_field_neighbors = cli.pam_neighbors;
-        pam_options.gpu_refinement = cli.pam_gpu_refinement;
         pam_options.occupancy_chunk_size = static_cast<std::size_t>(cli.pam_occupancy_chunk_size);
         pam_options.occupancy_cache_host_budget =
             static_cast<std::size_t>(cli.pam_occupancy_host_cache_mb) * 1024 * 1024;
