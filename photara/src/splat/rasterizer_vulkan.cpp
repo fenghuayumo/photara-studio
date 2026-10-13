@@ -556,11 +556,11 @@ DepthSampleGradients vulkan_sample_depth_backward(const GaussianModel& model,
         throw std::invalid_argument("Vulkan sample gradient must have shape [P,3]");
     auto& rasterizer = context->backend->rasterizer;
     auto packed = tinytensor::Tensor::empty(
-        {rasterizer.model_gradient_float_count()}, tinytensor::Device::Vulkan);
+        {rasterizer.sample_gradient_float_count(true)}, tinytensor::Device::Vulkan);
     DepthSampleGradients result;
     result.points = tinytensor::Tensor::empty(context->points.shape(), tinytensor::Device::Vulkan);
     tinytensor::vulkan::submit_async();
-    rasterizer.sample_depth_backward_device(buffer_view(gradient), buffer_view(packed), buffer_view(result.points));
+    rasterizer.sample_depth_backward_device(buffer_view(gradient), buffer_view(packed), buffer_view(result.points), true);
     const auto count = model.size();
     std::size_t offset = 0;
     const auto take = [&](std::size_t size, const tinytensor::TensorShape& shape) {
@@ -569,9 +569,8 @@ DepthSampleGradients vulkan_sample_depth_backward(const GaussianModel& model,
         return value;
     };
     result.model.means = take(count * 3, model.means.shape());
-    // The sample objective has no appearance derivative, but preserve the full
-    // public ModelGradients layout for callers and regression comparisons.
-    result.model.sh = take(model.sh.numel(), model.sh.shape());
+    // Depth queries have no appearance derivative. Keep that field absent
+    // instead of allocating/writing a full zero SH gradient for every row.
     offset += count * 8; // activated opacity, scales, and rotation
     result.model.log_scales = take(count * 3, model.log_scales.shape());
     result.model.quaternions = take(count * 4, model.quaternions.shape());

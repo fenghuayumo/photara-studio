@@ -188,7 +188,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
             bool first = refine == 0;
             uint probe_begin = first ? 0u : 1u;
             uint probe_end = first ? 9u : 8u;
-            [unroll] for (uint probe_fill = probe_begin; probe_fill < probe_end; ++probe_fill) probe[probe_fill] = 1.0f;
+            [unroll] for (uint probe_fill = 0u; probe_fill < 9u; ++probe_fill)
+                if (probe_fill >= probe_begin && probe_fill < probe_end) probe[probe_fill] = 1.0f;
             float interval = (depth_max - depth_min) * (1.0f / float(kDepthSplit));
             bool local_done = !in_range;
             uint todo_depth = block_max;
@@ -223,7 +224,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                     float peak = splane[dj].x * delta_d.x + splane[dj].y * delta_d.y + splane[dj].z;
                     float rsigma = splane[dj].w;
                     bool ball = rsigma > 0.0f;
-                    [unroll] for (uint sample = probe_begin; sample < probe_end; ++sample) {
+                    [unroll] for (uint sample = 0u; sample < 9u; ++sample) {
+                        if (sample < probe_begin || sample >= probe_end) continue;
                         float ts = depth_min + interval * float(sample);
                         float delta_t = (ts - peak) * rsigma;
                         float response = ball ? exp(-0.5f * delta_t * delta_t) : 0.0f;
@@ -240,8 +242,17 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
             }
             float next_max = depth_min + float(start_id + 1u) * interval;
             float next_min = depth_min + float(start_id) * interval;
-            probe[0] = probe[start_id];
-            probe[kDepthSplit] = probe[start_id + 1u];
+            // Constant subscripts expose the bracket probes to scalarization
+            // instead of requiring dynamically indexed private storage.
+            float next_probe_min = probe[0], next_probe_max = probe[1];
+            [unroll] for (uint pick = 1u; pick < uint(kDepthSplit); ++pick) {
+                if (start_id == pick) {
+                    next_probe_min = probe[pick];
+                    next_probe_max = probe[pick + 1u];
+                }
+            }
+            probe[0] = next_probe_min;
+            probe[kDepthSplit] = next_probe_max;
             depth_max = next_max;
             depth_min = next_min;
         }

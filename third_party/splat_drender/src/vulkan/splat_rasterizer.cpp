@@ -1405,6 +1405,11 @@ public:
             (has_scales_ ? 20 : 26);
     }
 
+    std::uint64_t sample_gradient_float_count(const bool omit_appearance) const noexcept {
+        return omit_appearance ? static_cast<std::uint64_t>(count_) *
+            (has_scales_ ? 20 : 26) : model_gradient_float_count();
+    }
+
     void sample_depth_device(
         const SplatBufferView& world_points, std::uint32_t point_count,
         const SplatCamera& camera, SplatSettings settings,
@@ -1445,11 +1450,11 @@ public:
 
     void sample_depth_backward_device(
         const SplatBufferView& loss, const SplatBufferView& gradient,
-        const SplatBufferView& point_gradient) {
+        const SplatBufferView& point_gradient, const bool omit_appearance) {
         require(sample_live_, "device sample backward requires a live query");
         require(loss.buffer != VK_NULL_HANDLE && loss.bytes >= sample_point_count_ * 12ull &&
                     point_gradient.buffer != VK_NULL_HANDLE && point_gradient.bytes >= sample_point_count_ * 12ull &&
-                    gradient.buffer != VK_NULL_HANDLE && gradient.bytes >= model_gradient_float_count() * sizeof(float),
+                    gradient.buffer != VK_NULL_HANDLE && gradient.bytes >= sample_gradient_float_count(omit_appearance) * sizeof(float),
                 "device sample backward buffers are too small");
         const std::scoped_lock lock(context_.dispatch_mutex);
         const auto bytes = blend_gradient_float_count() * sizeof(float);
@@ -1476,7 +1481,8 @@ public:
         project_push.u[0] = count_;
         project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
                             (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u) |
-                            (last_frame_has_geometry_ ? 16u : 0u);
+                            (last_frame_has_geometry_ ? 16u : 0u) |
+                            (omit_appearance ? 32u : 0u);
         project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
         project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
         project_push.u[6] = sh_bases_;
@@ -1493,7 +1499,7 @@ public:
              descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
              descriptor(blend_gradient), model_log_scales(),
              model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
-             descriptor(gradient, model_gradient_float_count() * sizeof(float))},
+             descriptor(gradient, sample_gradient_float_count(omit_appearance) * sizeof(float))},
             project_push, div_up(count_, 256));
         sample_live_ = false;
         submit_batch(false);
@@ -3427,8 +3433,12 @@ void SplatRasterizer::sample_depth_device(
     impl_->sample_depth_device(points, count, camera, settings, camera_points, inside);
 }
 void SplatRasterizer::sample_depth_backward_device(
-    const SplatBufferView& loss, const SplatBufferView& model, const SplatBufferView& points) {
-    impl_->sample_depth_backward_device(loss, model, points);
+    const SplatBufferView& loss, const SplatBufferView& model, const SplatBufferView& points,
+    const bool omit_appearance) {
+    impl_->sample_depth_backward_device(loss, model, points, omit_appearance);
+}
+std::uint64_t SplatRasterizer::sample_gradient_float_count(const bool omit_appearance) const noexcept {
+    return impl_->sample_gradient_float_count(omit_appearance);
 }
 void SplatRasterizer::multi_view_loss_device(
     const SplatDeviceMultiViewInput& input, const SplatDeviceMultiViewOutput& output) {

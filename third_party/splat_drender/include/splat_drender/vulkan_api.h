@@ -470,7 +470,12 @@ public:
     void sample_depth_backward_device(
         const SplatBufferView& dL_camera_points,
         const SplatBufferView& packed_model_gradients,
-        const SplatBufferView& point_gradients);
+        const SplatBufferView& point_gradients,
+        bool omit_appearance_gradients = false);
+    // Depth queries have zero appearance derivatives. The optional layout
+    // removes the SH/color section and otherwise preserves the model layout.
+    [[nodiscard]] std::uint64_t sample_gradient_float_count(
+        bool omit_appearance_gradients = false) const noexcept;
     void multi_view_loss_device(
         const SplatDeviceMultiViewInput& input,
         const SplatDeviceMultiViewOutput& output);

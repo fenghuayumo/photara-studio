@@ -471,6 +471,7 @@ void project_backward(uint3 dispatch_id) {
     const bool raw_chain = true;
     const bool compact_raw_gradients = true;
     const bool geometry = false;
+    const bool omit_appearance = false;
 #else
     uint mode = pc.u2;
     bool has_sh = (flags & 1u) != 0u;
@@ -482,6 +483,7 @@ void project_backward(uint3 dispatch_id) {
     // legacy layout so its download adapter remains unchanged.
     bool compact_raw_gradients = (flags & 8u) != 0u;
     bool geometry = (flags & 16u) != 0u;
+    bool omit_appearance = (flags & 32u) != 0u;
 #endif
     uint width = pc.u3;
     uint height = pc.u4;
@@ -497,7 +499,7 @@ void project_backward(uint3 dispatch_id) {
     float k4 = asfloat(pc.u14);
     float kernel = asfloat(pc.u15);
     float scale_modifier = asfloat(pc.u16);
-    uint feature_count = has_sh ? count * bases * 3u : count * 3u;
+    uint feature_count = omit_appearance ? 0u : (has_sh ? count * bases * 3u : count * 3u);
 #ifdef SPLAT_FUSED_SH_ADAM
     feature_count = 0u;
 #endif
@@ -519,7 +521,7 @@ void project_backward(uint3 dispatch_id) {
 
     [unroll] for (uint component = 0u; component < 3u; ++component)
         model_grad[3u * gradient_index + component] = 0.0f;
-    uint feature_components = has_sh ? bases * 3u : 3u;
+    uint feature_components = omit_appearance ? 0u : (has_sh ? bases * 3u : 3u);
     for (uint feature = 0u; feature < feature_components; ++feature)
         write_sh_gradient(index * feature_components + feature, 0.0f);
     model_grad[opacity_base + gradient_index] = 0.0f;
@@ -732,12 +734,12 @@ void project_backward(uint3 dispatch_id) {
         blend_grad[color_grad_base],
         blend_grad[color_grad_base + 1u],
         blend_grad[color_grad_base + 2u]);
-    if (has_sh) {
+    if (!omit_appearance && has_sh) {
         gm += sh_backward(
             index, degree, bases, mean,
             float3(camera[16], camera[17], camera[18]),
             gcolor, gauss_f[(geometry ? 7u : 5u) * index + (geometry ? 6u : 4u)].xyz, feature_base);
-    } else {
+    } else if (!omit_appearance) {
         uint fo = feature_base + 3u * index;
         model_grad[fo] = gcolor.x;
         model_grad[fo + 1u] = gcolor.y;

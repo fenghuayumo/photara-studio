@@ -135,7 +135,14 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
                     [unroll] for (uint s3=1u;s3<8u;++s3)
                         if (probes[s3]>=0.5f) sid=s3;
                     float nlo=lo+float(sid)*interval, nhi=lo+float(sid+1u)*interval;
-                    probes[0]=probes[sid]; probes[8]=probes[sid+1u];
+                    // Constant subscripts let the compiler scalarize probes.
+                    // Dynamic private-array indexing can require scratch memory
+                    // even though the bracket has only eight possibilities.
+                    float next_lo=probes[0], next_hi=probes[1];
+                    [unroll] for (uint pick=1u;pick<8u;++pick) {
+                        if (sid==pick) { next_lo=probes[pick]; next_hi=probes[pick+1u]; }
+                    }
+                    probes[0]=next_lo; probes[8]=next_hi;
                     lo=nlo; hi=nhi;
                     if (tolerance>0.0f && hi-lo<=tolerance) refining=false;
                 }

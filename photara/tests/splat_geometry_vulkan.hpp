@@ -208,6 +208,9 @@ void test_vulkan_geometry_chain() {
         require(!collect_terms || (result.loss.geometry_pixels > 0 && result.loss.ncc_pixels > 0),
             "Vulkan geometry chain must have actual MV/NCC support");
         auto sample_grad = rasterizer.sample_depth_backward(model,sampled,upstream);
+        if (device==Device::Vulkan)
+            require(!sample_grad.model.sh.is_valid(),
+                "Vulkan depth queries allocated an unused appearance gradient");
         result.sample = sample_grad.model; result.points = sample_grad.points;
         detail::add_sample_depth_point_gradients(camera,sample_grad.points,image_gradient);
         result.total = rasterizer.backward(model,rendered,image_gradient.color,image_gradient.alpha,
