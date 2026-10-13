@@ -1258,12 +1258,20 @@ GaussianModel Trainer::train(
         !native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||
          options_.multi_view_ncc_weight > 0.F);
+    const unsigned fixed_multi_view_interval =
+        std::max(1U, options_.multi_view_interval);
     const unsigned multi_view_tail_interval =
         std::max(1U, options_.multi_view_tail_interval);
     const bool adaptive_multi_view =
-        use_multi_view && options_.multi_view_adaptive_frequency &&
+        use_multi_view && fixed_multi_view_interval == 1U &&
+        options_.multi_view_adaptive_frequency &&
         options_.multi_view_adaptive_max_interval > 1;
     detail::MultiViewStabilityScheduler multi_view_scheduler(options_);
+    TrainingOptions fixed_multi_view_options = options_;
+    fixed_multi_view_options.multi_view_geo_weight *=
+        static_cast<float>(fixed_multi_view_interval);
+    fixed_multi_view_options.multi_view_ncc_weight *=
+        static_cast<float>(fixed_multi_view_interval);
     TrainingOptions tail_multi_view_options = options_;
     tail_multi_view_options.multi_view_geo_weight *=
         static_cast<float>(multi_view_tail_interval);
@@ -1667,14 +1675,21 @@ GaussianModel Trainer::train(
         const bool multi_view_eligible = use_multi_view &&
             iteration >= options_.depth_normal_from_iter &&
             !multi_view_neighbours[view_index].empty();
-        const bool multi_view_tail = !adaptive_multi_view &&
+        const bool multi_view_tail = fixed_multi_view_interval == 1U &&
+            !adaptive_multi_view &&
             iteration > grow_stop_iteration(options_);
-        const unsigned active_multi_view_interval = adaptive_multi_view
+        const unsigned active_multi_view_interval = fixed_multi_view_interval > 1U
+            ? fixed_multi_view_interval
+            : adaptive_multi_view
             ? multi_view_scheduler.interval()
             : multi_view_tail ? multi_view_tail_interval : 1U;
         const bool multi_view_scheduled =
             active_multi_view_interval == 1U ||
-            (adaptive_multi_view
+            (fixed_multi_view_interval > 1U
+                ? detail::fixed_multi_view_scheduled(
+                    iteration, options_.depth_normal_from_iter,
+                    active_multi_view_interval)
+                : adaptive_multi_view
                 ? iteration % active_multi_view_interval == 0
                 : (iteration - grow_stop_iteration(options_)) %
                         active_multi_view_interval == 0);
@@ -1964,7 +1979,9 @@ GaussianModel Trainer::train(
             const TrainingView neighbour =
                 view_cache.get(multi_view_neighbour_index);
             const TrainingOptions& multi_view_options =
-                adaptive_multi_view
+                fixed_multi_view_interval > 1U
+                ? fixed_multi_view_options
+                : adaptive_multi_view
                 ? adaptive_multi_view_options
                 : multi_view_tail ? tail_multi_view_options : options_;
             const auto world_points = detail::unproject_depth_to_world(

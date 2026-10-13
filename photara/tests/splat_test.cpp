@@ -21,6 +21,8 @@
 #include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/ppisp.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
+#include "splat/training_preset.hpp"
+
 #include "../src/splat/point_query_options.hpp"
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
@@ -53,6 +55,24 @@
 #endif
 
 namespace {
+
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::fast).multi_view_interval == 2);
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::standard).multi_view_interval == 1);
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::high_quality).multi_view_interval == 1);
+static_assert(!photara::splat::detail::fixed_multi_view_scheduled(6999, 7000, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(7000, 7000, 2));
+static_assert(!photara::splat::detail::fixed_multi_view_scheduled(7001, 7000, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(7002, 7000, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(7001, 7001, 2));
+static_assert(!photara::splat::detail::fixed_multi_view_scheduled(7002, 7001, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(7003, 7001, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(15000, 7000, 2));
+static_assert(!photara::splat::detail::fixed_multi_view_scheduled(15001, 7000, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(15002, 7000, 2));
+static_assert(photara::splat::detail::fixed_multi_view_scheduled(7001, 7000, 1));
 
 void require(const bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);

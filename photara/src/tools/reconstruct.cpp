@@ -3553,6 +3553,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.multi_view_depth_bracket = cli.splat_multi_view_depth_bracket;
     options.multi_view_depth_tolerance = cli.splat_multi_view_depth_tolerance;
     options.multi_view_num = cli.splat_multi_view_num;
+    options.multi_view_interval =
+        photara::splat::training_preset(cli.splat_mode).multi_view_interval;
     options.multi_view_tail_interval =
         cli.splat_multi_view_tail_interval;
     if (cli.mesh && cli.splat_multi_view_tail_interval > 1)
@@ -3677,6 +3679,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " multi_view_depth_bracket=", options.multi_view_depth_bracket,
         " multi_view_depth_tolerance=", options.multi_view_depth_tolerance,
         " multi_view_neighbours=", options.multi_view_num,
+        " multi_view_interval=", options.multi_view_interval,
         " multi_view_tail_interval=", options.multi_view_tail_interval,
         " multi_view_adaptive=",
         options.multi_view_adaptive_frequency,

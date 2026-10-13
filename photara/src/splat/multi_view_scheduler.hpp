@@ -9,6 +9,13 @@
 
 namespace photara::splat::detail {
 
+[[nodiscard]] constexpr bool fixed_multi_view_scheduled(
+    const unsigned iteration, const unsigned from_iteration,
+    const unsigned interval) noexcept {
+    return iteration >= from_iteration &&
+        (iteration - from_iteration) % std::max(1U, interval) == 0;
+}
+
 struct GeometryStabilitySample {
     std::size_t gaussian_count{};
     std::size_t grown{};

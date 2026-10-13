@@ -1058,6 +1058,9 @@ NB_MODULE(photara, module) {
         .def_rw(
             "multi_view_num", &splat::TrainingOptions::multi_view_num)
         .def_rw(
+            "multi_view_interval",
+            &splat::TrainingOptions::multi_view_interval)
+        .def_rw(
             "multi_view_tail_interval",
             &splat::TrainingOptions::multi_view_tail_interval)
         .def_rw(
