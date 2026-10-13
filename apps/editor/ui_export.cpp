@@ -275,8 +275,11 @@ void draw_splat_export_modal(App& app) {
 
     theme::caption("Format");
     ImGui::SetNextItemWidth(-1.F);
-    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB"};
-    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 4))
+    auto& state = app.splat_export;
+    const bool running = state.job.valid();
+    ImGui::BeginDisabled(running);
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)")};
+    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 5))
         sync_splat_export_path(app, true);
     if (app.splat_export.format == 1)
         theme::caption("PlayCanvas compressed Gaussians.");
@@ -284,6 +287,8 @@ void draw_splat_export_modal(App& app) {
         theme::caption("Niantic SPZ.");
     else if (app.splat_export.format == 3)
         theme::caption("Khronos KHR_gaussian_splatting GLB.");
+    else if (state.format == 4)
+        theme::caption("Streamed SOG: lod-meta.json and spatial LOD chunks.");
     else
         theme::caption("Standard 3DGS PLY.");
 
@@ -295,8 +300,17 @@ void draw_splat_export_modal(App& app) {
         "##splat_sh_degree", &app.splat_export.sh_degree, degrees, 4);
     theme::caption("0 keeps only base colour. 3 is the training default.");
 
+    if (state.format == 4) {
+        int levels = static_cast<int>(state.lod.levels);
+        if (ImGui::SliderInt(tr("LOD levels"), &levels, 2, 8)) state.lod.levels = static_cast<unsigned>(levels);
+        ImGui::SliderFloat(tr("Keep ratio per level"), &state.lod.keep_ratio, .1F, .9F, "%.2f");
+        int count = static_cast<int>(state.lod.chunk_count / 1000);
+        if (ImGui::InputInt(tr("Chunk splats (K)"), &count)) state.lod.chunk_count = static_cast<unsigned>(std::clamp(count, 1, 2048)) * 1000;
+        ImGui::InputFloat(tr("Chunk extent"), &state.lod.chunk_extent);
+    }
+
     ImGui::Spacing();
-    theme::caption("Location");
+    theme::caption(state.format >= 4 ? "New output folder" : "Location");
     ImGui::SetNextItemWidth(-78.F);
     ImGui::InputText(
         "##splat_path", app.splat_export.path.data(),
@@ -308,19 +322,32 @@ void draw_splat_export_modal(App& app) {
     ImGui::Spacing();
     const auto out = path_from_utf8_field(app.splat_export.path.data());
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
-    const float writes_h = ImGui::GetTextLineHeightWithSpacing() * 2.F + 14.F;
+    const float writes_h = ImGui::GetTextLineHeightWithSpacing() * (state.format >= 4 ? 4.F : 2.F) + 14.F;
     ImGui::BeginChild(
         "##splat_writes", ImVec2(-1.F, writes_h), true,
         ImGuiWindowFlags_NoScrollbar);
     theme::caption("Writes");
     ImGui::PushFont(theme::mono_font());
-    ImGui::TextUnformatted(
+    if (state.format == 4) {
+        ImGui::TextUnformatted("lod-meta.json + unbundled SOG chunks");
+        ImGui::TextUnformatted(tr("Browse selects the parent of a new folder."));
+    } else ImGui::TextUnformatted(
         path_to_utf8(out.filename().empty() ? std::filesystem::path("splat")
                                             : out.filename())
             .c_str());
     ImGui::PopFont();
     ImGui::EndChild();
     ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (running && state.progress) {
+        ImGui::ProgressBar(state.progress->load(), {-1.F, 0.F});
+        if (ImGui::Button(tr("Stop processing")) && state.cancel) state.cancel->store(true);
+    }
+    if (!state.error.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 416.F);
+        ImGui::TextUnformatted(state.error.c_str());
+        ImGui::PopTextWrapPos();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -335,7 +362,7 @@ void draw_splat_export_modal(App& app) {
         ImGui::CloseCurrentPopup();
     ImGui::SameLine(0.F, 8.F);
     if (theme::primary_button(
-            "Export", {export_w, 30.F}, app.splat_export.path[0] != '\0')) {
+            "Export", {export_w, 30.F}, !running && app.splat_export.path[0] != '\0')) {
         ImGui::CloseCurrentPopup();
         export_trained_model(app);
     }

@@ -29,6 +29,15 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"LOD Streaming (Vulkan)", "LOD 流式模型（Vulkan）", "LOD ストリーミング (Vulkan)", "LOD 스트리밍 (Vulkan)"},
+    {"LOD levels", "LOD 级数", "LOD レベル数", "LOD 레벨 수"},
+    {"Keep ratio per level", "每级保留比例", "レベルごとの保持率", "레벨별 유지 비율"},
+    {"Chunk splats (K)", "分块高斯数量（千）", "チャンク点数（千）", "청크 가우시안 수 (천)"},
+    {"Chunk extent", "分块空间大小", "チャンク範囲", "청크 공간 크기"},
+    {"New output folder", "新建输出文件夹", "新しい出力フォルダー", "새 출력 폴더"},
+    {"Stop processing", "停止处理", "処理を停止", "처리 중지"},
+    {"Browse selects the parent of a new folder.", "浏览选择新输出文件夹的父目录。", "参照で新しいフォルダーの親を選択します。", "찾아보기에서 새 폴더의 상위 폴더를 선택합니다."},
+    {"Streamed SOG: lod-meta.json and spatial LOD chunks.", "流式 SOG：lod-meta.json 和空间 LOD 分块。", "Streamed SOG: lod-meta.json と空間 LOD チャンク。", "스트리밍 SOG: lod-meta.json 및 공간 LOD 청크."},
     {"Mesh postprocessing", "网格后处理", "メッシュ後処理", "메시 후처리"},
     {"Postprocessing quality", "后处理质量", "後処理品質", "후처리 품질"},
     {"Simplify mesh", "网格减面", "メッシュ簡略化", "메시 단순화"},

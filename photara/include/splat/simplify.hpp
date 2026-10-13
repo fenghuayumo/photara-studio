@@ -18,6 +18,9 @@ struct SimplifyOptions {
     float merge_cap{0.5F};
     // Negative keeps the incoming SH degree.
     int sh_degree{-1};
+    // Accelerate kNN edge evaluation on Vulkan. Graph construction and
+    // conflict-free moment matching stay on the host.
+    bool vulkan{false};
     std::function<void(float progress)> progress;
     std::function<bool()> cancelled;
 };

@@ -9,6 +9,7 @@
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "splat_edit.hpp"
+#include "splat/deployment.hpp"
 #include "vulkan_backend.hpp"
 #include "splat_render/renderer.hpp"
 
@@ -222,6 +223,12 @@ struct App {
         int path_format{-1};
         int sh_degree{3};
         std::array<char, 1024> path{};
+        photara::splat::LodOptions lod;
+        std::future<void> job;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        std::shared_ptr<std::atomic<float>> progress;
+        std::filesystem::path output;
+        std::string error;
     } splat_export;
 
     struct SplatSimplifyState {
@@ -351,6 +358,7 @@ void open_splat_export_panel(App& app);
 void export_mesh_file(App& app);
 void export_alignment(App& app);
 void export_trained_model(App& app);
+void poll_splat_export(App& app);
 void sync_splat_export_path(App& app, bool force);
 void sync_alignment_export_path(App& app, bool force);
 bool browse_splat_export_path(App& app);
