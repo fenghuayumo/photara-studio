@@ -1585,6 +1585,9 @@ namespace tinytensor {
             return empty({0, ndim()}, device_, DataType::Int64);
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) return vulkan::nonzero(*this);
+#endif
         size_t count = count_nonzero();
 
         if (count == 0) {
@@ -1593,11 +1596,6 @@ namespace tinytensor {
 
         size_t n_dims = ndim();
 
-#ifdef TINYTENSOR_HAS_VULKAN
-        if (device_ == Device::Vulkan) {
-            return vulkan::nonzero(*this);
-        }
-#endif
         // Special case for 1D tensors
         if (n_dims == 1) {
             // Allocate MAXIMUM size to prevent buffer overflow from Thrust/CUB mismatch

@@ -38,6 +38,7 @@ struct TrainingProgress {
     std::uint32_t image_width{};
     std::uint32_t image_height{};
     unsigned active_sh_degree{};
+    // Actual cadence at this step (tail or adaptive scheduling).
     unsigned multi_view_interval{1};
     float multi_view_depth_consistency{};
     // Device-wide dedicated VRAM at this sample (cudaMemGetInfo on CUDA,
@@ -103,23 +104,30 @@ struct PamMeshOptions {
     // Maximum number of Gaussian pivot vertices used by the initial
     // tetra_triangulation stage. Two-pivot extraction uses a Gaussian center
     // and one learned-normal offset per selected Gaussian.
-    std::size_t pivot_max_points{1'000'000};
+    // Zero uses every Gaussian, matching GW's default.
+    std::size_t pivot_max_points{0};
     // GaussianWrapping's default learned-normal pivot displacement.
     float pivot_std_factor{3.F};
+    // Match GW's default edge-intersection binary search; zero uses linear interpolation.
+    unsigned pivot_binary_steps{8};
+    bool pivot_filter_large_edges{false};
+    // GW's scene crop is an origin-centered cube, with half extent equal to
+    // 1.1 * maximum training-camera distance from their mean, times this scale.
+    bool scene_crop{true};
+    float bounding_box_scaling{1.F};
+    // GW preserves the raw tetrahedral boundary by default. Optional splitting
+    // is useful for consumers requiring a combinatorially manifold surface.
+    bool manifold_cleanup{false};
     // Reserve part of the candidate budget for opacity/anisotropy-weighted
     // Gaussian means offset along their learned normal.  Unlike surface-area
     // sampling, this gives sub-pixel wires and other small disconnected
     // structures a chance to enter the Delaunay complex.
     float gaussian_seed_fraction{0.F};
     unsigned oversampling_factor{2};
-    // max_points is an output cap. Accept a smaller converged cloud rather
-    // than repeating the entire refinement just to fill that cap.
-    unsigned max_resample_rounds{1};
+    // Zero fills max_points as in GW; a nonzero value limits sampling rounds.
+    unsigned max_resample_rounds{0};
     unsigned refinement_steps{10};
     unsigned vector_field_neighbors{32};
-    // Exact CUDA KD-tree queries and device-resident refinement. CPU is kept
-    // as a reference and for neighbor counts exceeding the CUDA limit (64).
-    bool gpu_refinement{true};
     unsigned points_per_tetrahedron{10};
     float occupancy_iso_value{0.5F};
     float vacancy_threshold{0.1F};
@@ -128,6 +136,9 @@ struct PamMeshOptions {
     float mask_background_threshold{0.01F};
     // Amortize per-camera Gaussian preparation without reducing samples.
     std::size_t occupancy_chunk_size{4'000'000};
+    // Zero selects a bounded budget from available system memory. Positive
+    // values cap immutable CUDA draw lists on the host (bytes, pageable RAM).
+    std::size_t occupancy_cache_host_budget{0};
     unsigned seed{0};
 };
 

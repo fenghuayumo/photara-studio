@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace photara::splat {
@@ -55,6 +56,16 @@ enum class PpispParamType {
 }
 
 struct TrainingOptions {
+    std::filesystem::path checkpoint_path;
+    std::filesystem::path checkpoint_control_file;
+    // Native project metadata prepared by the CLI before the training writer
+    // acquires its lease. Preserve cameras/settings alongside automatic saves.
+    std::vector<std::uint8_t> checkpoint_project_settings;
+    std::vector<std::uint8_t> checkpoint_project_sfm;
+    bool resume_checkpoint{false};
+    unsigned checkpoint_interval_seconds{120};
+    // Optional iteration cadence, primarily useful for reproducible tests.
+    unsigned checkpoint_interval_iterations{0};
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
@@ -79,9 +90,6 @@ struct TrainingOptions {
     // profiling events. The interval is capped by the trainer to avoid an
     // accidentally unbounded CUDA event pool.
     bool profile_cuda{false};
-    // CUDA/Vulkan projection backward updates quantized SH Adam directly,
-    // omitting the full SH gradient when no auxiliary SH gradient merge is needed.
-    bool fuse_sh_adam{true};
     unsigned cuda_profile_interval{100};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.
@@ -248,6 +256,10 @@ struct TrainingOptions {
     // the rasterized Gaussian normal and the normal differentiated from the
     // rendered median-depth map.
     bool use_depth_normal_loss{false};
+    // nullopt enables filtering for DN, multi-view, or normal-field objectives. Unfiltered thin
+    // splats can make implicit median-depth gradients ill-conditioned.
+    // Explicit on/off separates filtering from losses for controlled runs.
+    std::optional<bool> use_3d_filter;
     float depth_normal_weight{0.05F};
     unsigned depth_normal_from_iter{7'000};
     // GaussianWrapping normal field. Four features per Gaussian encode
@@ -256,13 +268,12 @@ struct TrainingOptions {
     bool use_normal_field{false};
     float normal_field_weight{0.05F};
     float normal_field_depth_ratio{0.6F};
-    unsigned normal_field_from_iter{8'001};
+    unsigned normal_field_from_iter{20'001};
     float normal_features_lr{0.025F};
     // Depth-normal geometry training implicitly enables the reference
-    // GGGS/Mip-Splatting low-pass filter. It is deliberately not an
-    // independent switch: appearance-only 3DGS must keep canonical Gaussian
-    // scale/opacity untouched, while the 3DGS -> mesh path needs stable
-    // sub-pixel coverage.
+    // GGGS/Mip-Splatting low-pass filter refresh interval. The auto mode
+    // leaves appearance-only 3DGS scale/opacity untouched and enables stable
+    // sub-pixel coverage for pinhole geometric supervision.
     unsigned filter_3d_update_interval{100};
     // GGGS multi-view PatchMatch supervision. Geometry uses a differentiable
     // depth round trip through a nearby camera; NCC uses the reference

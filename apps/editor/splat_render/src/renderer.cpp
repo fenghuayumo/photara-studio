@@ -140,7 +140,7 @@ void Renderer::reset() {
     delete ewa_;
 #endif
     ewa_ = nullptr;
-    ewa_opacity_factors_.clear();
+    std::vector<float>{}.swap(ewa_opacity_factors_);
     if (device_ == VK_NULL_HANDLE) {
         ready_ = false;
         count_ = 0;
@@ -537,30 +537,13 @@ bool Renderer::ensure_device() {
 }
 
 void Renderer::clear_model() {
-    if (device_ != VK_NULL_HANDLE && ready_) {
-        wait_gpu();
-        destroy_storage(centers_);
-        destroy_storage(scales_);
-        destroy_storage(rotations_);
-        destroy_storage(harmonics_);
-        destroy_storage(quads_);
-        destroy_storage(keys0_);
-        destroy_storage(keys1_);
-        destroy_storage(vals0_);
-        destroy_storage(vals1_);
-        destroy_storage(wg_counts_);
-        destroy_storage(wg_offsets_);
-        destroy_storage(ranks_);
-        if (set_) write_descriptors();
-    }
-    count_ = 0;
-    source_key_.clear();
-    cache_valid_ = false;
-    ewa_opacity_factors_.clear();
+    // SplatRasterizer::clear_model only unbinds the model; it keeps its large
+    // projection/sort workspaces. Destroy the preview runtime to release them
+    // and the frame targets before a new training process needs the VRAM.
+    const auto runtime = runtime_;
+    reset();
+    if (runtime.valid()) attach(runtime);
     ++generation_;
-#if SPLAT_DRENDER_HAS_VULKAN
-    if (ewa_) ewa_->rasterizer.clear_model();
-#endif
 }
 
 bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_key) {

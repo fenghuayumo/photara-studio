@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace photara::project {
@@ -16,12 +17,17 @@ enum class ChunkType : std::uint32_t {
     gaussians = 3,
     mesh = 4,
     texture = 5,
+    training_checkpoint = 6,
+    training_checkpoint_info = 7,
+    training_checkpoint_previous = 8,
+    training_checkpoint_previous_info = 9,
+    training_checkpoint_history = 10,
 };
 
 [[nodiscard]] inline bool known_chunk_type(const ChunkType type) noexcept {
     const auto id = static_cast<std::uint32_t>(type);
     return id >= static_cast<std::uint32_t>(ChunkType::settings) &&
-           id <= static_cast<std::uint32_t>(ChunkType::texture);
+           id <= static_cast<std::uint32_t>(ChunkType::training_checkpoint_history);
 }
 
 // Chunked single-file Photara project (.ascan). Unread blobs stay on disk
@@ -33,6 +39,8 @@ class Archive {
 public:
     static Archive create();
     static Archive open(const std::filesystem::path& path);
+    static Archive from_bytes(std::span<const std::uint8_t> bytes);
+    [[nodiscard]] std::vector<std::uint8_t> encode() const;
 
     [[nodiscard]] bool has(ChunkType type) const;
     [[nodiscard]] std::vector<std::uint8_t> chunk(ChunkType type) const;
@@ -65,8 +73,8 @@ private:
     Slot* find(ChunkType type);
     [[nodiscard]] const Slot* find(ChunkType type) const;
 
-    std::filesystem::path source_;
-    std::vector<Slot> slots_;
+    mutable std::filesystem::path source_;
+    mutable std::vector<Slot> slots_;
     std::uint32_t writer_version_{k_ascan_version};
     std::uint32_t min_reader_version_{k_ascan_min_reader};
 };

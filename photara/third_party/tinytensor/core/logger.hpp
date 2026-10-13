@@ -10,6 +10,8 @@
 #endif
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <stdexcept>
 #include <utility>
 
 // TinyTensor Logger - Minimal logging for the standalone library

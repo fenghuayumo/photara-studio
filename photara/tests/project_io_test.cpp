@@ -6,6 +6,7 @@
 #include "sfm/export_nerfstudio.hpp"
 #include "sfm/scene.hpp"
 #include "splat/training_preset.hpp"
+#include "mvs/mesh_postprocess.hpp"
 
 #include <cstring>
 #include <cstdint>
@@ -23,6 +24,16 @@ using namespace photara::sfm;
 using namespace photara::project;
 
 int failures = 0;
+std::vector<std::uint8_t> encode_settings_v6(
+    const Settings& settings, const std::filesystem::path& project) {
+    auto bytes = encode_settings(settings, project);
+    // Version 7 appends two ints, two booleans and two uint64 budgets.
+    bytes.resize(bytes.size() - 2 * sizeof(std::int32_t) -
+        2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
+    const std::uint32_t version = 6;
+    std::memcpy(bytes.data(), &version, sizeof(version));
+    return bytes;
+}
 void expect(bool condition, const char* message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << '\n';
@@ -185,6 +196,7 @@ int main() {
            "asfm pinhole default");
 
     Settings settings;
+    expect(!settings.focus_region, "new projects default focus region off");
     expect(settings.iterations == 30'000 && settings.densification_cap == 3'000'000 &&
            settings.training_mode == 1 && !settings.speedy_pruning,
            "new projects default to standard 3DGS training");
@@ -213,11 +225,19 @@ int main() {
     settings.max_features = 4096;
     settings.build_mesh = true;
     settings.mesh_quality = 2;
+    settings.mesh_postprocess_quality = 0;
+    settings.mesh_simplify = true;
+    settings.mesh_target_faces = 730'000;
+    settings.mesh_remesh = true;
+    settings.mesh_remesh_target_faces = 1'500'000;
+    settings.mesh_remesh_smooth_iterations = 3;
     settings.mesh_source = 1;
     settings.texture_quality = 2;
     settings.atlas_resolution = 4096;
     settings.texture_delight = true;
     settings.texture_optimize = false;
+    settings.texture_photometric_steps = 4500;
+    settings.texture_seam_steps = 90;
     settings.texture_blend_linear = true;
     settings.mask_mode = 1;
     settings.sam_masks = true;
@@ -287,8 +307,47 @@ int main() {
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
     expect(round_trip.mesh_quality == 2, "settings mesh quality");
-    auto legacy_settings = encode_settings(settings, ascan_path);
-    legacy_settings.resize(legacy_settings.size() - 2 * sizeof(std::int32_t) - sizeof(std::uint8_t));
+    expect(round_trip.mesh_postprocess_quality == 0 && round_trip.mesh_simplify &&
+        round_trip.mesh_target_faces == 730'000 && round_trip.mesh_remesh &&
+        round_trip.mesh_remesh_target_faces == 1'500'000 &&
+        round_trip.mesh_remesh_smooth_iterations == 3,
+        "independent postprocessing budgets and smoothing survive project roundtrip");
+    const auto old_postprocess = decode_settings(encode_settings_v6(settings, ascan_path), ascan_path);
+    expect(!old_postprocess.mesh_simplify && !old_postprocess.mesh_remesh &&
+        old_postprocess.mesh_target_faces == 1'000'000,
+        "old projects do not automatically simplify or remesh existing geometry");
+    {
+        auto truncated = encode_settings(settings, ascan_path);
+        truncated.pop_back();
+        bool rejected = false;
+        try { (void)decode_settings(truncated, ascan_path); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "truncated version 7 postprocessing settings are rejected");
+        auto invalid = settings;
+        invalid.mesh_postprocess_quality = 10;
+        invalid.mesh_target_faces = 0;
+        invalid.mesh_remesh_target_faces = 3;
+        invalid.mesh_remesh_smooth_iterations = -1;
+        const auto restored = decode_settings(encode_settings(invalid, ascan_path), ascan_path);
+        expect(restored.mesh_postprocess_quality == 1 && restored.mesh_target_faces == 1'000'000 &&
+            restored.mesh_remesh_target_faces == 1'000'000 && restored.mesh_remesh_smooth_iterations == 1,
+            "invalid postprocessing settings receive valid budgets");
+    }
+    for (int quality : {0, 1, 2}) {
+        const auto preset = photara::mvs::mesh_postprocess_preset(quality);
+        auto selected = settings;
+        selected.mesh_postprocess_quality = quality;
+        selected.mesh_target_faces = preset.target_faces;
+        selected.mesh_remesh_target_faces = preset.target_faces;
+        selected.mesh_remesh_smooth_iterations = preset.smooth_iterations;
+        const auto restored = decode_settings(encode_settings(selected, ascan_path), ascan_path);
+        expect(restored.mesh_quality == 2 && restored.mesh_postprocess_quality == quality &&
+            restored.mesh_target_faces == preset.target_faces &&
+            restored.mesh_remesh_smooth_iterations == preset.smooth_iterations,
+            "postprocessing presets stay independent of extraction quality");
+    }
+    auto legacy_settings = encode_settings_v6(settings, ascan_path);
+    legacy_settings.resize(legacy_settings.size() - 4 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
     expect(decode_settings(legacy_settings, ascan_path).mesh_quality == 1,
            "legacy project defaults to standard mesh quality");
     for (int quality : {0, 1, 2}) {
@@ -311,8 +370,8 @@ int main() {
                restored.speedy_pruning == selected.speedy_pruning,
                "3DGS presets survive project roundtrip");
     }
-    auto old_training = encode_settings(settings, ascan_path);
-    old_training.resize(old_training.size() - sizeof(std::int32_t) - sizeof(std::uint8_t));
+    auto old_training = encode_settings_v6(settings, ascan_path);
+    old_training.resize(old_training.size() - 3 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
     const auto old_restored = decode_settings(old_training, ascan_path);
     expect(!old_restored.speedy_pruning && old_restored.densification_cap == 2'500'000,
            "legacy projects preserve their cap without enabling Speedy pruning");
@@ -321,6 +380,29 @@ int main() {
     expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
     expect(round_trip.texture_delight, "settings texture delight");
     expect(!round_trip.texture_optimize, "settings texture optimize");
+    expect(round_trip.texture_photometric_steps == 4500 && round_trip.texture_seam_steps == 90,
+           "custom texture iteration counts survive project roundtrip");
+    for (int quality : {0, 1, 2}) {
+        auto selected = settings;
+        selected.texture_quality = quality;
+        auto old_texture = encode_settings_v6(selected, ascan_path);
+        old_texture.resize(old_texture.size() - 2 * sizeof(std::int32_t) - sizeof(std::uint8_t));
+        const auto restored = decode_settings(old_texture, ascan_path);
+        expect(restored.texture_photometric_steps == (quality == 0 ? 1000 : (quality == 2 ? 6000 : 3000)) &&
+               restored.texture_seam_steps == (quality == 0 ? 30 : (quality == 2 ? 120 : 60)),
+               "old projects receive texture iteration defaults for their quality preset");
+    }
+    {
+        auto selected = settings;
+        selected.texture_seam_steps = 0;
+        expect(decode_settings(encode_settings(selected, ascan_path), ascan_path).texture_seam_steps == 0,
+               "disabled seam optimization survives project roundtrip");
+        selected.texture_photometric_steps = -1;
+        selected.texture_seam_steps = -1;
+        const auto restored = decode_settings(encode_settings(selected, ascan_path), ascan_path);
+        expect(restored.texture_photometric_steps == 3000 && restored.texture_seam_steps == 60,
+               "invalid texture iteration counts receive safe defaults");
+    }
     expect(round_trip.texture_blend_linear, "settings texture blend linear");
     const auto loaded_scene = read_sfm(loaded);
     expect(loaded_scene.has_value(), "read sfm from ascan");
@@ -359,9 +441,10 @@ int main() {
 
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
-        auto legacy_bytes = settings_bytes;
-        // Remove training mode/pruning, mesh quality and SAM alignment opt-in.
-        legacy_bytes.resize(legacy_bytes.size() - 2 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
+        auto legacy_bytes = encode_settings_v6(updated, ascan_path);
+        // Remove texture steps, training mode/pruning, mesh quality, SAM
+        // alignment opt-in, and the Focus Region byte.
+        legacy_bytes.resize(legacy_bytes.size() - 4 * sizeof(std::int32_t) - 3 * sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");
@@ -372,6 +455,31 @@ int main() {
         expect(!decode_settings(encode_settings(disabled, ascan_path), ascan_path)
                     .sam_use_mask_for_sfm,
                "SAM alignment mask opt-out round trip");
+    }
+    {
+        Settings toggled = updated;
+        toggled.scene_mode = true;
+        toggled.focus_region = false;
+        const Settings restored =
+            decode_settings(encode_settings(toggled, ascan_path), ascan_path);
+        expect(restored.scene_mode && !restored.focus_region,
+               "focus region is independent of capture mode and round trips");
+        auto pre_region = encode_settings_v6(toggled, ascan_path);
+        pre_region.resize(pre_region.size() - sizeof(std::uint8_t));
+        const Settings legacy_region = decode_settings(pre_region, ascan_path);
+        expect(legacy_region.scene_mode && !legacy_region.focus_region,
+               "projects saved before focus region default it off");
+        for (bool scene_mode : {false, true}) {
+            toggled.scene_mode = scene_mode;
+            toggled.focus_region = true;
+            expect(decode_settings(encode_settings(toggled, ascan_path), ascan_path)
+                       .focus_region,
+                   "explicit focus region opt-in survives project roundtrip");
+            auto legacy = encode_settings_v6(toggled, ascan_path);
+            legacy.pop_back();
+            expect(!decode_settings(legacy, ascan_path).focus_region,
+                   "legacy capture modes do not implicitly enable focus region");
+        }
     }
     settings_bytes.insert(settings_bytes.end(), {0x11, 0x22, 0x33, 0x44});
     const Settings additive = decode_settings(settings_bytes, ascan_path);
@@ -423,6 +531,26 @@ int main() {
     expect(
         unknown_loaded.chunk(static_cast<ChunkType>(100)).size() == 3,
         "unknown chunk bytes copied");
+    unknown_loaded.set_chunk(ChunkType::training_checkpoint, {1, 2, 3, 4});
+    unknown_loaded.save(ascan_path);
+    expect(
+        unknown_loaded.chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "same-file save refreshes offsets of untouched lazy chunks");
+    unknown_loaded.erase_chunk(ChunkType::training_checkpoint);
+    unknown_loaded.save(ascan_path);
+    expect(
+        Archive::open(ascan_path).chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "sequential stage saves retain untouched chunks");
+    const auto encoded = unknown_loaded.encode();
+    expect(
+        Archive::from_bytes(encoded).chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "in-memory archive round trip preserves optional chunks");
+    auto damaged = encoded;
+    damaged.back() ^= 1;
+    bool checksum_refused = false;
+    try { (void)Archive::from_bytes(damaged); }
+    catch (const std::exception&) { checksum_refused = true; }
+    expect(checksum_refused, "in-memory archive validates payload checksums");
 
     Archive required_unknown = Archive::create();
     write_settings(required_unknown, updated, ascan_path);

@@ -7,10 +7,12 @@
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/geometry_vulkan.hpp"
 #include "../src/splat/focus_mask.hpp"
 #include "../src/splat/focus_mask_frame.hpp"
 #include "splat/simplify.hpp"
 #include "../src/splat/pam_cuda.hpp"
+#include "pam_reference_test.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
@@ -19,6 +21,8 @@
 #include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/ppisp.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
+#include "splat/training_preset.hpp"
+
 #include "../src/splat/point_query_options.hpp"
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
@@ -35,6 +39,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -50,6 +55,23 @@
 #endif
 
 namespace {
+
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::fast).multi_view_tail_interval == 2);
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::standard).multi_view_tail_interval == 1);
+static_assert(photara::splat::training_preset(
+    photara::splat::TrainingMode::high_quality).multi_view_tail_interval == 1);
+static_assert(photara::splat::detail::tail_multi_view_scheduled(7000, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(7001, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(14999, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15000, 15000, 2));
+static_assert(!photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15002, 15000, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 1));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(15001, 15000, 0));
+static_assert(!photara::splat::detail::tail_multi_view_scheduled(12002, 12001, 2));
+static_assert(photara::splat::detail::tail_multi_view_scheduled(12003, 12001, 2));
 
 void require(const bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -156,6 +178,7 @@ void test_gggs_3d_filter() {
     camera.world_to_camera[15] = 1.F;
     camera.fx = camera.fy = 50.F;
     camera.width = camera.height = 100;
+    camera.cx = camera.cy = 50.F;
     const auto means = tinytensor::Tensor::from_vector(
         std::vector<float>{0.F, 0.F, 2.F, 0.F, 0.F, 4.F,
                            100.F, 0.F, 1.F},
@@ -172,6 +195,23 @@ void test_gggs_3d_filter() {
     require(std::abs(detail::compute_3d_filter(invisible, {camera}).to_vector()[0] -
                      unit) < 1e-6F,
             "GPU filter maximum lost the all-invisible fallback");
+
+    // The outer 15% margin is admitted, including off-center intrinsics.
+    Camera edge_camera = camera;
+    edge_camera.fx = edge_camera.fy = 100.F;
+    const auto edge_means = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.2F,0.F,2.F, 0.F,0.F,4.F},
+        {2,3}, tinytensor::Device::CUDA);
+    const auto edge_filter = detail::compute_3d_filter(edge_means,{edge_camera}).to_vector();
+    require(std::abs(edge_filter[0]-2.F*std::sqrt(.2F)/100.F)<1e-6F,
+            "3D filter rejected the 15% screen margin");
+    edge_camera.cx = 20.F;
+    const auto offset_means = tinytensor::Tensor::from_vector(
+        std::vector<float>{-.8F,0.F,2.F, 0.F,0.F,4.F},
+        {2,3}, tinytensor::Device::CUDA);
+    const auto offset_filter = detail::compute_3d_filter(offset_means,{edge_camera}).to_vector();
+    require(std::abs(offset_filter[0]-4.F*std::sqrt(.2F)/100.F)<1e-6F,
+            "3D filter ignored the calibrated principal point");
 
     GaussianModel model;
     model.means = means;
@@ -2137,34 +2177,46 @@ void test_vulkan_fused_sh_adam() {
 #endif
 }
 
-void test_fused_structure_adam() {
+photara::splat::GaussianModel test_fused_structure_adam(
+    tinytensor::Device device = tinytensor::Device::CUDA, unsigned sh_degree = 1,
+    std::size_t storage_bases = 0) {
     using namespace photara::splat;
     using photara::CameraModel;
     using tinytensor::Tensor;
-    constexpr auto device = tinytensor::Device::CUDA;
+    const bool vk = device == tinytensor::Device::Vulkan;
     constexpr std::size_t n = 257;
+    const std::size_t bases = storage_bases ? storage_bases : (sh_degree + 1) * (sh_degree + 1);
+    const std::size_t stride = bases * 3;
     std::vector<float> means(n * 3), rotations(n * 4), log_scales(n * 3),
-        logits(n), coefficients(n * 12);
+        logits(n), coefficients(n * stride);
     for (std::size_t i = 0; i < n; ++i) {
         means[i * 3] = .02F * float(int(i % 11) - 5);
         means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
         means[i * 3 + 2] = 2.F + .001F * i;
-        rotations[i * 4] = 1.F;
+        rotations[i * 4] = 1.03F;
+        rotations[i * 4 + 1] = .08F;
+        rotations[i * 4 + 2] = -.04F;
         log_scales[i * 3] = -.7F;
         log_scales[i * 3 + 1] = -.5F;
         log_scales[i * 3 + 2] = -.9F;
         logits[i] = -3.F + .01F * float(i % 17);
-        for (std::size_t j = 0; j < 12; ++j)
-            coefficients[i * 12 + j] = .04F * std::sin(float(i + j));
+        for (std::size_t j = 0; j < stride; ++j)
+            coefficients[i * stride + j] = .04F * std::sin(float(i + j));
     }
     means[(n - 1) * 3 + 2] = -2.F;
+    // Visible large splats exercise both sides of the pinhole Jacobian clamp.
+    means[0] = -2.2F;
+    means[3] = 2.2F;
+    means[7] = -1.8F;
+    means[10] = 1.8F;
     GaussianModel model;
     model.means = Tensor::from_vector(means, {n, 3}, device);
     model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
     model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
     model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
-    model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
-    model.sh_degree = 1;
+    model.sh = Tensor::from_vector(coefficients, {n, bases, 3}, device);
+    model.sh_degree = sh_degree;
+    model.filter_3d = Tensor::full({n,1}, .04F, device);
     Camera camera;
     camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
     camera.cx = 18; camera.cy = 14;
@@ -2190,8 +2242,8 @@ void test_fused_structure_adam() {
     fused_model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
     fused_model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
     fused_model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
-    fused_model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
-    fused_model.sh_degree = 1;
+    fused_model.sh = Tensor::from_vector(coefficients, {n, bases, 3}, device);
+    fused_model.sh_degree = sh_degree;
     auto means_state = detail::make_adam_state(model.means);
     auto scales_state = detail::make_adam_state(model.log_scales);
     auto rotations_state = detail::make_adam_state(model.quaternions);
@@ -2204,16 +2256,18 @@ void test_fused_structure_adam() {
     means_state.first = Tensor::from_vector(moment, {n, 3}, device);
     fused_means.first = Tensor::from_vector(moment, {n, 3}, device);
     RasterizeOptions options;
-    options.active_sh_degree = 1;
+    options.active_sh_degree = sh_degree;
     options.require_depth = false;
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
     training.log_scale_regularization_weight = .03F;
-    training.max_scale_ratio = 4.F;
+    training.max_scale_ratio = 1.05F;
     training.adam_epsilon = 1e-15F;
+    auto reference_sh = detail::make_sh_adam_quant(n, int(stride), device);
+    auto fused_sh = detail::make_sh_adam_quant(n, int(stride), device);
     for (unsigned step : {7U, 8U, 9U}) {
         const auto ref = rasterizer.forward(model, camera, options);
-        const auto fused = rasterizer.forward(fused_model, camera, options);
+
         auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
         const float inverse = 1.F / float(n);
         StructureAdamUpdate update{
@@ -2224,16 +2278,46 @@ void test_fused_structure_adam() {
             training.beta1, training.beta2,
             1.F - std::pow(training.beta1, float(step)),
             1.F - std::pow(training.beta2, float(step)),
-            training.adam_epsilon, -8.F, 2.F, std::log(training.max_scale_ratio),
+            training.adam_epsilon, -.8F, -.4F, std::log(training.max_scale_ratio),
             training.opacity_regularization_weight * inverse,
             training.log_scale_regularization_weight * inverse / 3.F,
             0.F, 0.F, 0.F, 0.F, true};
+        SHAdamUpdate sh_update;
+        sh_update.first = fused_sh.first; sh_update.packed = fused_sh.packed;
+        sh_update.bounds = fused_sh.bounds;
+        sh_update.lr = training.sh0_lr; sh_update.rest_lr = training.sh_rest_lr;
+        sh_update.beta1 = training.beta1; sh_update.beta2 = training.beta2;
+        sh_update.correction1 = update.correction1; sh_update.correction2 = update.correction2;
+        sh_update.epsilon = training.adam_epsilon;
+        const auto fused = rasterizer.forward(fused_model, camera, options);
         const auto fg = rasterizer.backward(
-            fused_model, fused, color_grad, alpha_grad, {}, {}, {}, nullptr, &update);
+            fused_model, fused, color_grad, alpha_grad, {}, {}, {}, &sh_update, &update);
+        if (vk) {
+            bool rejected = false;
+            try { (void)rasterizer.backward(fused_model, fused, color_grad, alpha_grad, {}, {}); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Fused structure update did not invalidate old backward state");
+        }
         require(!fg.means.is_valid(), "Fused structure backward retained mean gradients");
         require(!fg.log_scales.is_valid(),
             "Fused structure backward retained scale gradients");
-        detail::add_geometry_regularization(
+        if (vk) {
+            // Independent host oracle for the priors.
+            auto opacity_gradient = g.opacity_logits.to_vector();
+            auto scale_gradient = g.log_scales.to_vector();
+            const auto raw_opacity = model.opacity_logits.to_vector();
+            const auto raw_scale = model.log_scales.to_vector();
+            for (std::size_t i = 0; i < n; ++i) {
+                const float alpha = 1.F / (1.F + std::exp(-raw_opacity[i]));
+                opacity_gradient[i] += update.opacity_reg * alpha * (1.F - alpha);
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    scale_gradient[3*i+axis] += update.log_scale_reg * std::exp(raw_scale[3*i+axis]);
+            }
+            // Detach packed views before replacing them: Tensor view assignment copies in place.
+            g.opacity_logits = {}; g.log_scales = {};
+            g.opacity_logits = Tensor::from_vector(opacity_gradient, {n,1}, device);
+            g.log_scales = Tensor::from_vector(scale_gradient, {n,3}, device);
+        } else detail::add_geometry_regularization(
             model, g, training.opacity_regularization_weight,
             training.log_scale_regularization_weight);
         require(fg.opacity_logits.is_valid(),
@@ -2242,7 +2326,10 @@ void test_fused_structure_adam() {
             "Fused structure opacity diagnostic parity");
         detail::adam_step_structure(
             model, g, means_state, scales_state, rotations_state, opacity_state,
-            0.01F, step, training, -8.F, 2.F);
+            0.01F, step, training, -.8F, -.4F);
+        detail::sh_adam_quant_step(model.sh, g.sh, reference_sh, int(stride),
+            training.sh0_lr, training.sh_rest_lr, training.beta1, training.beta2,
+            update.correction1, update.correction2, training.adam_epsilon, 0.F);
         compare(model.means, fused_model.means, "Fused structure mean parity");
         compare(model.log_scales, fused_model.log_scales,
             "Fused structure scale parity");
@@ -2250,12 +2337,19 @@ void test_fused_structure_adam() {
             "Fused structure quaternion parity");
         compare(model.opacity_logits, fused_model.opacity_logits,
             "Fused structure opacity parity");
+        compare(model.sh, fused_model.sh, "Fused structure SH parity");
         compare(means_state.first, fused_means.first, "Fused structure mean m parity");
         compare(scales_state.second, fused_scales.second,
             "Fused structure scale v parity");
+        compare(means_state.second, fused_means.second, "Fused structure mean v parity");
+        compare(scales_state.first, fused_scales.first, "Fused structure scale m parity");
+        compare(rotations_state.first, fused_rotations.first, "Fused structure quaternion m parity");
+        compare(rotations_state.second, fused_rotations.second, "Fused structure quaternion v parity");
+        compare(opacity_state.second, fused_opacity.second, "Fused structure opacity v parity");
         compare(opacity_state.first, fused_opacity.first,
             "Fused structure opacity m parity");
     }
+    return fused_model;
 }
 
 void test_forward_backward() {
@@ -2496,6 +2590,11 @@ void test_normal_field_parameterization_and_occupancy() {
                 std::vector<float>{0.F, 0.F, 2.F, .02F * repeat, 0.F, 2.1F,
                                    100.F, 0.F, 2.F, 0.F, 0.F, -2.F},
                 {4, 3}, tinytensor::Device::CUDA);
+            auto accumulated = tinytensor::Tensor::ones({7}, tinytensor::Device::CUDA);
+            auto observed = tinytensor::Tensor::zeros(
+                {7}, tinytensor::Device::CUDA, tinytensor::DataType::Bool);
+            std::vector<float> expected(7, 1.F);
+            std::vector<bool> expected_observed(7, false);
             for (std::size_t view = 0; view < cache_cameras.size(); ++view) {
                 const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
                 const auto pinned_before = tinytensor::VramProfiler::instance().snapshot().process.pinned_host_used;
@@ -2508,7 +2607,34 @@ void test_normal_field_parameterization_and_occupancy() {
                 require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
                         reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
                         "PAM cached occupancy differs from uncached query");
+                auto values = accumulated.slice(0, 1, 5);
+                auto visible = observed.slice(0, 1, 5);
+                detail::pam_accumulate_occupancy_cuda(values, visible, cached.occupancy, cached.inside);
+                const auto reference_values = reference.occupancy.to_vector();
+                const auto reference_inside = reference.inside.to_vector_bool();
+                for (std::size_t i = 0; i < reference_values.size(); ++i)
+                    if (reference_inside[i]) {
+                        expected[1 + i] = std::min(expected[1 + i], reference_values[i]);
+                        expected_observed[1 + i] = true;
+                    }
+                require(accumulated.to_vector() == expected &&
+                            observed.to_vector_bool() == expected_observed,
+                        "PAM fused occupancy changed view votes or slice boundaries");
             }
+        }
+        {
+            const auto mask = [](std::vector<float> bits) {
+                return tinytensor::Tensor::from_vector(bits, {bits.size()}, tinytensor::Device::CUDA).gt(0.F);
+            };
+            auto occupancy = tinytensor::Tensor::ones({6}, tinytensor::Device::CUDA);
+            auto observed = mask({0, 0, 0, 0, 0, 0});
+            const auto values = tinytensor::Tensor::from_vector(
+                std::vector<float>{.2F, .3F, .4F, .5F, .6F, .7F}, {6}, tinytensor::Device::CUDA);
+            detail::pam_accumulate_occupancy_cuda(occupancy, observed, values,
+                mask({1, 0, 0, 1, 0, 0}), mask({1, 1, 0, 0, 0, 1}), mask({1, 1, 1, 0, 0, 0}));
+            require(occupancy.to_vector() == std::vector<float>{.2F, 0.F, 1.F, .5F, 1.F, 0.F} &&
+                    observed.to_vector_bool() == std::vector<bool>{true, true, true, false, false, false},
+                "PAM fused mask votes changed foreground precedence, background or visibility");
         }
         const auto stats = rasterizer.occupancy_cache_stats(cache);
         require(stats.prepared_views == 2 && stats.queries == 6,
@@ -2538,6 +2664,30 @@ void test_normal_field_parameterization_and_occupancy() {
         require(stats.host_bytes == 0 && stats.device_bytes == 0 &&
                 stats.prepared_views == 2 && stats.preparations == 6,
             "PAM cache exceeded residency budgets");
+    }
+
+    // Keep only the active view when both residency budgets are exhausted.
+    // Changed query points must not reuse previous occupancy values, and a
+    // camera switch must replace the temporary preparation/upload.
+    for (bool host_spill : {false, true}) {
+        Rasterizer rasterizer;
+        auto cache = rasterizer.prepare_occupancy_cache(model, cache_cameras, {},
+            std::numeric_limits<std::size_t>::max(), host_spill ? 1 << 20 : 0);
+        for (std::size_t view : {0U, 0U, 0U, 1U, 0U, 0U}) {
+            const auto queries = tinytensor::Tensor::from_vector(
+                std::vector<float>{0.F, 0.F, 2.F, .02F * float(rasterizer.occupancy_cache_stats(cache).queries),
+                                   0.F, 2.1F}, {2, 3}, tinytensor::Device::CUDA);
+            const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
+            const auto cached = rasterizer.evaluate_occupancy(cache, view, queries);
+            require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
+                        reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
+                    "PAM active-view reuse returned stale query results");
+        }
+        const auto stats = rasterizer.occupancy_cache_stats(cache);
+        require(stats.queries == 6 && stats.prepared_views == 2 &&
+                    stats.preparations == (host_spill ? 2 : 3) &&
+                    stats.uploads == (host_spill ? 3 : 0) && stats.device_bytes == 0,
+                "PAM active-view preparation/upload was not reused");
     }
 
     // Enough overlapping footprints to exercise depth-sort + stable tile-sort,
@@ -2736,7 +2886,7 @@ void test_pam_cuda_field() {
             static_cast<float>(i % 19) * 0.047F, static_cast<float>(i % 11) * 0.061F});
     const auto points = tinytensor::Tensor::from_vector(queries,
         {queries.size()/3, std::size_t{3}}, tinytensor::Device::CUDA);
-    for (unsigned neighbors : {1U, 4U, 32U, 64U}) {
+    for (unsigned neighbors : {1U, 4U, 32U, 33U, 48U, 49U, 64U}) {
         const auto reference = detail::pam_field_gradients_reference(model, queries, neighbors);
         const auto gpu = detail::pam_field_gradients(field, points, neighbors).to_vector();
         for (std::size_t i = 0; i < gpu.size(); ++i) {
@@ -2864,13 +3014,14 @@ void test_pam_smoke() {
     options.max_points = 64;
     options.oversampling_factor = 8;
     options.max_resample_rounds = 4;
+    options.scene_crop = false;
+    options.manifold_cleanup = true;
     options.refinement_steps = 0;
     options.vector_field_neighbors = shell.size();
     options.points_per_tetrahedron = 1;
     options.occupancy_iso_value = 0.05F;
     options.vacancy_threshold = 1.F;
     options.occupancy_chunk_size = 512;
-    options.gpu_refinement = false;
     const auto result = splat::extract_pam_mesh(
         model, scene, seed, splat::TrainingOptions{}, options);
     require(
@@ -2899,8 +3050,7 @@ void test_pam_smoke() {
         begin = end;
     }
 #if defined(PHOTARA_HAS_OPENMP)
-    // Exercise both parallel loops and ensure scheduling does not change the
-    // random surface sampling or the per-point refinement result.
+    // Ensure host sampling scheduling does not change the optimized extraction.
     auto parallel_seed = seed;
     for (int level = 0; level < 5; ++level) {
         std::vector<Eigen::Vector3i> faces;
@@ -2938,34 +3088,24 @@ void test_pam_smoke() {
     require(serial.mesh.vertices.size() == parallel.mesh.vertices.size() &&
                 serial.mesh.faces.size() == parallel.mesh.faces.size(),
             "PAM parallel refinement changed mesh topology size");
-    options.gpu_refinement = true;
-    const auto gpu = splat::extract_pam_mesh(
-        model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    require(gpu.candidate_cloud.points.size() == serial.candidate_cloud.points.size(),
-        "PAM CUDA extraction changed candidate count");
-    for (std::size_t i = 0; i < serial.candidate_cloud.points.size(); ++i)
-        require((serial.candidate_cloud.points[i].position -
-                 gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
-            "PAM CUDA extraction changed refined candidate geometry");
     // Cover device slices, accumulated updates and the CPU mask projection.
     scene.views[0].foreground_mask.assign(64 * 64, 255);
     for (std::size_t y = 0; y < 64; ++y)
         for (std::size_t x = 0; x < 24; ++x)
             scene.views[0].foreground_mask[64*y+x] = 0;
     options.refinement_steps = 3;
+    options.occupancy_chunk_size = 4096;
+    const auto masked_reference = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
     options.occupancy_chunk_size = 257;
-    options.gpu_refinement = false;
-    const auto masked_cpu = splat::extract_pam_mesh(
+    const auto masked_chunked = splat::extract_pam_mesh(
         model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    options.gpu_refinement = true;
-    const auto masked_gpu = splat::extract_pam_mesh(
-        model, scene, parallel_seed, splat::TrainingOptions{}, options);
-    require(!masked_cpu.candidate_cloud.points.empty() &&
-            masked_cpu.candidate_cloud.points.size() == masked_gpu.candidate_cloud.points.size(),
+    require(!masked_reference.candidate_cloud.points.empty() &&
+            masked_reference.candidate_cloud.points.size() == masked_chunked.candidate_cloud.points.size(),
         "PAM masked CUDA extraction changed candidate count");
-    for (std::size_t i = 0; i < masked_cpu.candidate_cloud.points.size(); ++i)
-        require((masked_cpu.candidate_cloud.points[i].position -
-                 masked_gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
+    for (std::size_t i = 0; i < masked_reference.candidate_cloud.points.size(); ++i)
+        require((masked_reference.candidate_cloud.points[i].position -
+                 masked_chunked.candidate_cloud.points[i].position).norm() < 2e-5F,
             "PAM masked CUDA extraction changed refined candidate geometry");
 #endif
 #endif
@@ -5025,6 +5165,15 @@ void test_splat_quantile_selection() {
             require(actual.center == device.center && actual.scale == device.scale &&
                     actual.maximum_extent == device.maximum_extent,
                     "GPU ADC quantiles differ from finite CPU order statistics");
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (tinytensor::vulkan::available()) {
+                const auto vk = splat::densification::splat_scene_geometry_device(
+                    tinytensor::Tensor::from_vector(xyz, {count, 3}, tinytensor::Device::Vulkan), p);
+                require(actual.center == vk.center && actual.scale == vk.scale &&
+                        actual.maximum_extent == vk.maximum_extent,
+                        "Vulkan ADC quantiles differ from finite CPU order statistics");
+            }
+#endif
             const mvs::Vec3f half = 0.5F * (high - low);
             std::array<float, 3> extents{half.x(), half.y(), half.z()};
             std::sort(extents.begin(), extents.end());
@@ -5043,6 +5192,14 @@ void test_splat_quantile_selection() {
         require(actual.center.isZero() && actual.scale == 2.F &&
                 actual.maximum_extent == 1.F,
                 "GPU ADC quantiles lost the empty/non-finite fallback");
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (tinytensor::vulkan::available()) {
+            const auto vk = splat::densification::splat_scene_geometry_device(
+                tinytensor::Tensor::from_vector(xyz, {xyz.size() / 3, 3}, tinytensor::Device::Vulkan));
+            require(vk.center.isZero() && vk.scale == 2.F && vk.maximum_extent == 1.F,
+                    "Vulkan ADC quantiles lost the empty/non-finite fallback");
+        }
+#endif
     }
 }
 
@@ -5643,6 +5800,91 @@ void test_masked_photometric_gradient() {
     }
 }
 
+void test_ssim_metric_large_reduction() {
+    using tinytensor::Device;
+    using tinytensor::Tensor;
+    const std::array<double, 11> weights{
+        0.001028380123898387F, 0.0075987582094967365F,
+        0.036000773310661316F, 0.10936068743467331F,
+        0.21300552785396576F, 0.26601171493530273F,
+        0.21300552785396576F, 0.10936068743467331F,
+        0.036000773310661316F, 0.0075987582094967365F,
+        0.001028380123898387F};
+    for (const bool masked : {false, true}) {
+        const unsigned width = masked ? 191 : 1920;
+        const unsigned height = masked ? 137 : 1276;
+        const std::size_t pixels = std::size_t{width} * height;
+        std::vector<float> prediction(3 * pixels), target(3 * pixels), mask(pixels);
+        for (std::size_t p = 0; p < pixels; ++p) {
+            mask[p] = ((p % width + p / width) % 7 == 0) ? 1.F : 0.F;
+            for (unsigned c = 0; c < 3; ++c) {
+                const float base = .15F + .7F * float((p * 37 + c * 71) % 1021) / 1021.F;
+                target[c * pixels + p] = base;
+                prediction[c * pixels + p] = std::clamp(
+                    base + .13F * std::sin(float(p % width) * .19F + float(p / width) * .11F + c),
+                    0.F, 1.F);
+            }
+        }
+        // Independent host separable convolution and FP64 metric reduction.
+        std::vector<std::array<double, 5>> horizontal(pixels);
+        double reference_sum = 0.0;
+        std::size_t reference_count = 0;
+        for (unsigned c = 0; c < 3; ++c) {
+            for (unsigned y = 0; y < height; ++y) {
+                for (unsigned x = 0; x < width; ++x) {
+                    auto& moments = horizontal[std::size_t{y} * width + x];
+                    moments = {};
+                    for (int d = -5; d <= 5; ++d) {
+                        const int sx = int(x) + d;
+                        if (sx < 0 || sx >= int(width)) continue;
+                        const std::size_t p = std::size_t{y} * width + sx;
+                        const double coverage = masked ? mask[p] : 1.0;
+                        const double a = prediction[c * pixels + p] * coverage;
+                        const double b = target[c * pixels + p] * coverage;
+                        const std::array<double, 5> values{a, a*a, b, b*b, a*b};
+                        for (unsigned k = 0; k < 5; ++k)
+                            moments[k] += weights[d + 5] * values[k];
+                    }
+                }
+            }
+            for (unsigned y = 5; y + 5 < height; ++y) {
+                for (unsigned x = 5; x + 5 < width; ++x) {
+                    if (masked && mask[std::size_t{y} * width + x] == 0.F) continue;
+                    std::array<double, 5> moments{};
+                    for (int d = -5; d <= 5; ++d) {
+                        const auto& row = horizontal[std::size_t(int(y) + d) * width + x];
+                        for (unsigned k = 0; k < 5; ++k)
+                            moments[k] += weights[d + 5] * row[k];
+                    }
+                    const auto [a, aa, b, bb, ab] = moments;
+                    reference_sum += (2*a*b + .0001) * (2*(ab-a*b) + .0009) /
+                        ((a*a + b*b + .0001) * (aa-a*a + bb-b*b + .0009));
+                    ++reference_count;
+                }
+            }
+        }
+        const auto a = Tensor::from_vector(prediction, {3, height, width}, Device::CUDA);
+        const auto b = Tensor::from_vector(target, {3, height, width}, Device::CUDA);
+        auto m = Tensor::from_vector(mask, {height, width}, Device::CUDA);
+        const double reference = reference_sum / reference_count;
+        const auto start = std::chrono::steady_clock::now();
+        const float score = photara::splat::detail::fused_ssim_metric(a, b, m, masked, width, height);
+        const double milliseconds = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        std::cout << "SSIM metric " << width << 'x' << height << " masked=" << masked
+                  << " host=" << reference << " cuda=" << score
+                  << " error=" << std::abs(score-reference) << " ms=" << milliseconds << '\n';
+        require(std::abs(score-reference) < 2e-5, "SSIM metric differs from FP64 host oracle");
+        require(score == photara::splat::detail::fused_ssim_metric(a, b, m, masked, width, height),
+                "SSIM reduction is not deterministic");
+        if (masked) {
+            m = Tensor::zeros({height, width}, Device::CUDA);
+            require(photara::splat::detail::fused_ssim_metric(a, b, m, true, width, height) == 0.F,
+                    "Empty SSIM mask should return zero");
+        }
+    }
+}
+
 void test_ssim_loss_and_scale_constraint() {
     using namespace photara::splat;
     constexpr std::size_t side = 13;
@@ -6058,9 +6300,14 @@ void test_dense_adaptive_still_prunes_nonfinite_geometry() {
 void test_igs_refinement_decisions() {
     using namespace photara::splat;
     using tinytensor::Tensor;
-    constexpr auto gpu = tinytensor::Device::CUDA;
+    for (const auto gpu : {tinytensor::Device::CUDA, tinytensor::Device::Vulkan}) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (gpu == tinytensor::Device::Vulkan && !tinytensor::vulkan::available()) continue;
+#else
+    if (gpu == tinytensor::Device::Vulkan) continue;
+#endif
 
-    const auto build_model = [](
+    const auto build_model = [gpu](
         const std::vector<float>& opacity_logits,
         const std::vector<float>& means) {
         const std::size_t count = opacity_logits.size();
@@ -6107,7 +6354,7 @@ void test_igs_refinement_decisions() {
                          const std::size_t growth_cap = 0) {
         Arm result;
         result.harness = make_refine_harness(densification::clone_model(seed));
-        auto stats = detail::make_densification_stats(count);
+        auto stats = detail::make_densification_stats(count, gpu);
         stats.growth_cap = growth_cap;
         stats.gradient = Tensor::full({count}, 1.F, gpu);
         stats.count = Tensor::full({count}, 10.F, gpu);
@@ -6192,6 +6439,54 @@ void test_igs_refinement_decisions() {
         require_finite(
             arm.harness.model.log_scales, "ADC-IGS produced non-finite scales");
     }
+    {
+        auto harness = make_refine_harness(build_model(std::vector<float>(6, 0.F), indexed_means(6)));
+        auto stats = detail::make_densification_stats(6, gpu);
+        auto stationary = options;
+        stationary.dense_recycle_fraction = 0.F;
+        stationary.densification_cap = 6;
+        const auto means_owner = harness.model.means.storage_ptr();
+        const auto moment_owner = harness.means.first.storage_ptr();
+        std::mt19937 random(42);
+        const auto counts = densification::refine_gaussians(harness.model, stats, 100, 1.F,
+            photara::mvs::Vec3f::Zero(), stationary, random, harness.states());
+        require(counts.pruned == 0 && counts.grown == 0 &&
+                harness.model.means.storage_ptr() == means_owner &&
+                harness.means.first.storage_ptr() == moment_owner,
+            "Zero-prune IGS needlessly remapped model/Adam storage");
+    }
+    {
+        auto harness = make_refine_harness(build_model(
+            {-8.F,-7.F,-6.F,-1.F,0.F,1.F,2.F,3.F}, indexed_means(8, 5)));
+        for (auto* state : harness.states()) {
+            state->first = Tensor::full(state->first.shape(), 1.F, gpu);
+            state->second = Tensor::full(state->second.shape(), 2.F, gpu);
+        }
+        auto stats = detail::make_densification_stats(8, gpu);
+        stats.count = Tensor::full({8}, 10.F, gpu);
+        stats.priority = Tensor::full({8}, 10.F, gpu);
+        stats.max_screen_radius = Tensor::full({8}, 0.01F, gpu);
+        auto recycling = options;
+        recycling.prune_opacity = 0.05F;
+        recycling.dense_recycle_fraction = 0.25F;
+        recycling.densification_cap = 8;
+        recycling.grow_stop_iter = 0;
+        std::mt19937 random(42);
+        const auto counts = densification::refine_gaussians(harness.model, stats, 100, 1.F,
+            photara::mvs::Vec3f::Zero(), recycling, random, harness.states());
+        require(counts.pruned == 2 && counts.grown == 2 && harness.model.size() == 8,
+            "Fused IGS prune/append lost its replacement budget");
+        for (auto* state : harness.states()) {
+            const auto values = state->first.to_vector();
+            const auto width = values.size() / 8;
+            require(std::count(values.begin(), values.end(), 0.F) == 4 * width,
+                "Fused IGS remap did not clear both parent and child moments");
+            require(std::all_of(values.end() - 2 * width, values.end(), [](float v) { return v == 0.F; }),
+                "Fused IGS append did not zero child moments");
+        }
+    }
+    }
+
 }
 
 void test_igs_budgeted_selection_and_panorama_sizes() {
@@ -6793,6 +7088,127 @@ void test_emc_regularizers_match_finite_differences() {
     }
 }
 
+void test_vulkan_adc_fused() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    constexpr std::size_t n = 257;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> refine(n), visible(n), geometry(n), error(n), screen(n);
+    std::vector<int> radii(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        refine[i] = i % 11 == 0 ? nan : i % 13 == 0 ? inf : float(int(i % 17) - 4) * .1F;
+        visible[i] = float(int(i % 3) - 1);
+        radii[i] = int(i % 9) - 2;
+        geometry[i] = i % 7 == 0 ? nan : float(int(i % 19) - 3) * .03F;
+        error[i] = i % 5 == 0 ? inf : float(int(i % 23) - 2) * .01F;
+        screen[i] = float(i % 12) * .09F;
+    }
+    const auto fields = [](detail::DensificationStats& s) {
+        return std::array<Tensor*, 6>{&s.gradient, &s.count, &s.max_screen_radius,
+            &s.priority, &s.geometry_gradient, &s.image_error};
+    };
+    for (unsigned scenario = 0; scenario < 6; ++scenario) {
+        std::array<std::vector<float>, 6> expected;
+        for (unsigned k = 0; k < 6; ++k) expected[k].assign(n, .1F * (k + 1));
+        const bool maximum = scenario % 2 == 0;
+        const bool require_visibility = scenario % 3 != 0;
+        const bool optional = scenario >= 3;
+        const float power = scenario % 3 == 0 ? .5F : scenario % 3 == 1 ? 1.F : 2.F;
+        const float threshold = scenario % 2 == 0 ? .25F : 0.F;
+        constexpr unsigned repeats = 13; // Cross multiple encoder-ring wraps.
+        for (unsigned repeat = 0; repeat < repeats; ++repeat) {
+            for (std::size_t i = 0; i < n; ++i) {
+                if (radii[i] <= 0 || (require_visibility && visible[i] <= 0.F)) continue;
+                const float raw = std::isfinite(refine[i]) ? std::max(refine[i], 0.F) : 0.F;
+                const float weight = power == 1.F ? raw : std::pow(raw, power);
+                expected[0][i] = maximum ? std::max(expected[0][i], weight) : expected[0][i] + weight;
+                expected[1][i] += 1.F;
+                const float size = optional ? screen[i] : radii[i] / 1276.F;
+                expected[2][i] = std::max(expected[2][i], size);
+                expected[3][i] += threshold > 0.F
+                    ? std::log2(std::max(size / threshold, 1.F)) : weight * (1.F + size);
+                if (optional && std::isfinite(geometry[i]))
+                    expected[4][i] = std::max(expected[4][i], geometry[i]);
+                if (optional && std::isfinite(error[i])) expected[5][i] += std::max(error[i], 0.F);
+            }
+        }
+        for (auto device : {Device::CUDA, Device::Vulkan}) {
+            auto stats = detail::make_densification_stats(n, device);
+            auto output = fields(stats);
+            for (unsigned k = 0; k < output.size(); ++k)
+                *output[k] = Tensor::full({n + 6}, .1F * (k + 1), device).slice(0, 3, n + 3);
+            const auto upload = [device]<class T>(const std::vector<T>& values) {
+                std::vector<T> padded(n + 6);
+                std::copy(values.begin(), values.end(), padded.begin() + 3);
+                return Tensor::from_vector(padded, {n + 6}, device).slice(0, 3, n + 3);
+            };
+            const auto r = upload(refine);
+            const auto v = require_visibility || device == Device::CUDA ? upload(visible) : Tensor{};
+            const auto radius = upload(radii);
+            const auto g = optional ? upload(geometry) : Tensor{};
+            const auto e = optional ? upload(error) : Tensor{};
+            const auto s = optional ? upload(screen) : Tensor{};
+            for (unsigned repeat = 0; repeat < repeats; ++repeat)
+                detail::accumulate_densification_stats(r, v, radius, stats,
+                    1920, 1276, maximum, require_visibility, power, threshold, g, -1, e, s);
+            for (unsigned k = 0; k < output.size(); ++k) {
+                const auto actual = output[k]->to_vector();
+                for (std::size_t i = 0; i < n; ++i)
+                    require(std::isfinite(actual[i]) && std::abs(actual[i] - expected[k][i]) <
+                        2e-5F * std::max(1.F, std::abs(expected[k][i])),
+                        "ADC statistics differ from independent host reference");
+            }
+        }
+    }
+    const auto pcg = [](std::uint32_t value) {
+        const std::uint32_t state = value * 747796405u + 2891336453u;
+        const std::uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+        return (word >> 22u) ^ word;
+    };
+    std::vector<float> means((n + 2) * 3, .25F), logits(n), visibility(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        logits[i] = std::array<float, 6>{-12.F, -5.F, -2.F, 0.F, 6.F, 30.F}[i % 6];
+        visibility[i] = i % 11 == 0 ? nan : float(int(i % 3) - 1);
+    }
+    auto storage = Tensor::from_vector(means, {n + 2, 3}, Device::Vulkan);
+    GaussianModel model;
+    model.means = storage.slice(0, 1, n + 1);
+    model.opacity_logits = Tensor::from_vector(logits, {n, 1}, Device::Vulkan);
+    const auto v = Tensor::from_vector(visibility, {n}, Device::Vulkan);
+    const auto original_buffer = tinytensor::vulkan::buffer_view(model.means);
+    for (unsigned step = 0; step < 17; ++step) {
+        const unsigned seed = step == 0 ? 0xffffffffu : 42u + step;
+        const float cap = step == 8 ? 0.F : .03F;
+        detail::inject_adc_noise(model, v, .07F, cap, seed);
+        const auto random01 = [&](std::uint32_t index) {
+            return float(pcg(seed ^ pcg(index + 1u)) >> 8u) / 16777216.F;
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!(visibility[i] > 0.F)) continue;
+            const float opacity = 1.F / (1.F + std::exp(-logits[i]));
+            const float weight = std::pow(1.F - opacity, 150.F) * .07F;
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                const std::uint32_t index = static_cast<std::uint32_t>(3 * i + axis);
+                const float sample = std::sqrt(-2.F * std::log(std::max(random01(index * 2u), 1e-7F))) *
+                    std::cos(6.28318530718F * random01(index * 2u + 1u));
+                means[3 * (i + 1) + axis] += std::clamp(sample * weight, -cap, cap);
+            }
+        }
+    }
+    const auto actual = storage.to_vector();
+    for (std::size_t i = 0; i < actual.size(); ++i)
+        require(std::abs(actual[i] - means[i]) < 2e-5F,
+                "Fused ADC noise differs from PCG host reference or modifies sentinel rows");
+    const auto updated_buffer = tinytensor::vulkan::buffer_view(model.means);
+    require(updated_buffer.buffer == original_buffer.buffer && updated_buffer.offset == original_buffer.offset,
+            "Fused ADC noise replaced the means allocation");
+    std::cout << "CUDA/Vulkan ADC statistics and Vulkan fused noise tests passed\n";
+#endif
+}
+
 void test_densify_statistics_and_oversize_weights() {
     using namespace photara::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -7130,6 +7546,53 @@ void test_densification_strategies_and_dense_bypass() {
 }
 
 }  // namespace
+
+void test_thin_gaussian_sample_depth_precision() {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model;
+    model.means = Tensor::from_vector(std::vector<float>{0.F,0.F,2.F},{1,3},gpu);
+    model.log_scales = Tensor::from_vector(
+        std::vector<float>{std::log(.1F),std::log(.1F),std::log(.00005F)},{1,3},gpu);
+    model.quaternions = Tensor::from_vector(std::vector<float>{1.F,0.F,0.F,0.F},{1,4},gpu);
+    model.opacity_logits = Tensor::from_vector(std::vector<float>{2.F},{1,1},gpu);
+    model.sh = Tensor::zeros({1,1,3},gpu);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0]=camera.world_to_camera[5]=camera.world_to_camera[10]=camera.world_to_camera[15]=1.F;
+    camera.fx=camera.fy=40.F; camera.cx=camera.cy=15.5F;
+    camera.width=camera.height=32;
+    const auto query = Tensor::from_vector(std::vector<float>{0.F,0.F,2.F},{1,3},gpu);
+    const auto upstream = Tensor::from_vector(std::vector<float>{0.F,0.F,1.F},{1,3},gpu);
+    Rasterizer rasterizer;
+    RasterizeOptions options;
+    options.require_depth=true;
+    options.point_depth_bracket=40.F;
+    options.point_depth_tolerance=.02F;
+    const auto coarse=rasterizer.sample_depth(model,query,camera,options);
+    const auto coarse_gradient=rasterizer.sample_depth_backward(model,coarse,upstream);
+    options.point_depth_tolerance=0.F;
+    const auto precise=rasterizer.sample_depth(model,query,camera,options);
+    const auto gradient=rasterizer.sample_depth_backward(model,precise,upstream);
+    const float coarse_z=coarse.camera_points.to_vector()[2];
+    const float precise_z=precise.camera_points.to_vector()[2];
+    const float coarse_opacity=coarse_gradient.model.opacity_logits.to_vector()[0];
+    const float analytic=gradient.model.opacity_logits.to_vector()[0];
+    std::cout<<"thin sample: coarse_z="<<coarse_z<<" precise_z="<<precise_z
+             <<" coarse_opacity_grad="<<coarse_opacity<<" precise_opacity_grad="<<analytic<<'\n';
+    require(std::abs(precise_z-2.F)<.0002F,"Thin Gaussian precise depth missed the surface");
+    require(std::isfinite(analytic) && std::abs(analytic)<.001F,
+            "Thin Gaussian exact-query opacity gradient is unstable");
+    const auto objective=[&](float opacity) {
+        GaussianModel perturbed=model;
+        perturbed.opacity_logits=Tensor::from_vector(std::vector<float>{opacity},{1,1},gpu);
+        return rasterizer.sample_depth(perturbed,query,camera,options).camera_points.to_vector()[2];
+    };
+    const float numerical=(objective(2.01F)-objective(1.99F))/.02F;
+    require(std::abs(analytic-numerical)<.00005F,
+            "Thin Gaussian exact-query opacity gradient differs from finite difference");
+}
 
 void test_nanogs_simplify() {
     using namespace photara::splat;
@@ -7628,10 +8091,37 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 }
 
 #include "splat_geometry_vulkan.hpp"
+#include "pam_vulkan_test.hpp"
 #include "splat_rings_vulkan.hpp"
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
+        try {
+            test_ssim_metric_large_reduction();
+            test_ssim_loss_and_scale_constraint();
+            test_masked_photometric_gradient();
+            std::cout << "SSIM metric tests passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "SSIM metric test failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     try {
+        if (argc > 1 && std::string(argv[1]) == "--adc-fused-only") {
+            test_vulkan_adc_fused();
+            test_densify_statistics_and_oversize_weights();
+            return 0;
+        }
+        if (argc>1 && std::string(argv[1])=="--geometry-audit") {
+            test_gggs_3d_filter();
+            test_gggs_multi_view_geometry_and_ncc();
+            test_gggs_depth_normal_consistency();
+            test_gggs_depth_normal_parameter_gradients();
+            test_thin_gaussian_sample_depth_precision();
+            std::cout<<"CUDA geometry audit tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--vulkan-rings-only") {
             test_vulkan_rings_preview();
             return 0;
@@ -7645,6 +8135,7 @@ int main(int argc, char** argv) {
             test_gggs_multi_view_geometry_and_ncc(tinytensor::Device::Vulkan);
             std::cout << "Vulkan complete MV gradient chain\n";
             test_vulkan_geometry_chain();
+            test_vulkan_normal_field();
             std::cout << "Vulkan geometry trainer and mesh\n";
             test_vulkan_geometry_trainer();
             std::cout << "Vulkan geometry tests passed\n";
@@ -7652,6 +8143,14 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--speedy-vulkan-only") {
             test_speedy_vulkan();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--pam-vulkan-only") {
+#ifdef TINYTENSOR_HAS_VULKAN
+            test_pam_vulkan();
+#else
+            throw std::runtime_error("PAM Vulkan is not compiled");
+#endif
             return 0;
         }
         int device_count = 0;
@@ -7845,11 +8344,38 @@ int main(int argc, char** argv) {
             std::cout << "Geometry tests passed\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--structure-adam-only") {
+            for (unsigned degree : {0U, 2U, 3U})
+                test_fused_structure_adam(tinytensor::Device::Vulkan, degree);
+            // Progressive SH keeps all 16 bases allocated while only a subset
+            // is active; inactive compressed state must retain its semantics.
+            for (unsigned degree : {0U, 1U, 2U})
+                test_fused_structure_adam(tinytensor::Device::Vulkan, degree, 16);
+            const auto cuda = test_fused_structure_adam();
+            const auto vk = test_fused_structure_adam(tinytensor::Device::Vulkan);
+            const std::pair<const tinytensor::Tensor*, const tinytensor::Tensor*> pairs[]{
+                {&cuda.means,&vk.means},{&cuda.log_scales,&vk.log_scales},
+                {&cuda.quaternions,&vk.quaternions},{&cuda.opacity_logits,&vk.opacity_logits},
+                {&cuda.sh,&vk.sh}};
+            for (const auto& [reference,actual] : pairs) {
+                const auto x=reference->to_vector(), y=actual->to_vector();
+                double error=0.,norm=0.;
+                for(std::size_t i=0;i<x.size();++i) {
+                    error+=(x[i]-y[i])*(x[i]-y[i]); norm+=x[i]*x[i];
+                }
+                const auto relative=std::sqrt(error/std::max(norm,1e-16));
+                std::cout << "CUDA/Vulkan fused trajectory relative_l2=" << relative << '\n';
+                require(relative < 2e-3, "CUDA/Vulkan fused structure trajectory mismatch");
+            }
+            std::cout << "Structure Adam tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
             test_vulkan_fused_sh_adam();
             test_fused_structure_adam();
+            test_fused_structure_adam(tinytensor::Device::Vulkan);
             test_training_device_cache();
             std::cout << "Memory optimization tests passed\n";
             return 0;
@@ -7923,6 +8449,7 @@ int main(int argc, char** argv) {
         test_vulkan_sh_adam_quant();
         test_vulkan_fused_sh_adam();
         test_fused_structure_adam();
+        test_fused_structure_adam(tinytensor::Device::Vulkan);
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();
         test_pam_smoke();
@@ -7960,10 +8487,12 @@ int main(int argc, char** argv) {
         test_openmvs_dataset_loading();
         test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
+        test_ssim_metric_large_reduction();
         test_ssim_loss_and_scale_constraint();
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
+        test_thin_gaussian_sample_depth_precision();
         test_adc_plus_split_preserves_covariance();
         test_adc_recycled_capacity_repairs_oversize();
         test_revised_noise_scales_with_scene_units();
@@ -7974,6 +8503,7 @@ int main(int argc, char** argv) {
         test_emc_revised_noise_gates_and_scales();
         test_emc_regularizers_match_finite_differences();
         test_densify_statistics_and_oversize_weights();
+        test_vulkan_adc_fused();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_refinement_decisions();

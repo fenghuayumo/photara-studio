@@ -1,0 +1,2 @@
+#define SPLAT_GEOMETRY_NATIVE_ATOMIC
+#include "splat_blend_backward_geometry_subgroup.hlsl"

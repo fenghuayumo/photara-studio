@@ -59,10 +59,9 @@ struct TextureOptions {
     // staying black.
     bool atlas_padding{true};
     std::uint32_t atlas_padding_margin{4};
-    // Off by default: samples that survive the mask floor and the facing test
-    // already cover everything the photographs show. Only enable this when a
-    // smooth colour extrapolation is preferred over leaving unseen texels black,
-    // and expect flat per-chart fills rather than measured detail.
+    // Off by default. Unlimited fill propagates measured face means over shared
+    // mesh edges, including UV seams. Entirely unseen disconnected components
+    // remain empty. This extrapolates colour, not photographic detail.
     bool atlas_fill_unobserved{false};
     // Optional cap for the in-chart fill distance in texels (0 = unlimited).
     std::uint32_t atlas_fill_maximum_distance{0};
@@ -71,12 +70,12 @@ struct TextureOptions {
     // atlas directly against all calibrated views with photara_drender's native
     // Vulkan/Adam optimizer, followed by seam-only polish.
     bool optimize{true};
-    std::uint32_t optimize_steps{1000};
+    std::uint32_t optimize_steps{3000};
     std::uint32_t optimize_batch_size{4};
     float optimize_learning_rate{5e-3F};
     float optimize_min_learning_rate{2.5e-4F};
     std::uint32_t seam_samples_per_edge{4};
-    std::uint32_t seam_polish_steps{30};
+    std::uint32_t seam_polish_steps{60};
     float seam_learning_rate{1e-3F};
 
     // Optional foreground masks (same basename as source images).

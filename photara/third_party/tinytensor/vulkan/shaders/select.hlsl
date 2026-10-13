@@ -1,33 +1,7 @@
 #include "common.hlsli"
 
-// Exact order-statistic selection over Float32 rows.
-//
-// The sort key is 64 bits: the row's transform of its float in the high half,
-// its row index in the low half. Folding the index in is what makes the
-// selection reproduce a sort exactly rather than merely approximately, the tie
-// rule included: two rows with the same value are ordered by row index, which
-// is what the bitonic comparator this replaces does, and the key is then
-// unique so the emit pass never has to break a tie at the cut.
-//
-// The caller resolves the requested rank one 16-bit digit at a time. Each
-// "histogram" dispatch counts the rows whose remaining key matches the prefix
-// already resolved; the host walks the 65536 bins from the low end to find the
-// bin that holds the rank, folds that bin into the prefix, and calls again.
-// Four passes therefore pin down the exact key of the rank-th row, and the
-// "emit" dispatch writes the row indices at or below that key.
-//
-// This replaces the full bitonic sort IGS selection used to run, five to six
-// times per refinement. Sorting a million rows costs about two hundred
-// dispatches and two hundred barriers to produce at most twelve thousand
-// indices; two histogram passes cost six dispatches and no barriers between
-// rows, and the result is exact rather than distribution dependent.
-//
-// The key is the row's float with its sign bit folded in: IEEE-754 floats
-// compare like sign-magnitude integers once the negatives are complemented.
-// Ties (two rows with the same key at the cut) are impossible for the
-// continuous scores this is used on; when they do occur the emit order inside
-// the tied group is unspecified, which is harmless because every caller treats
-// the result as a set.
+// Exact float/index radix selection. The device resolves each 16-bit digit;
+// histogram bins never cross to the host. Ties select the lowest row indices.
 
 struct PushConstants
 {
@@ -35,22 +9,21 @@ struct PushConstants
     uint src_offset;   // Float32 values
     uint mask_offset;  // one Bool per row; a zero excludes the row
     uint has_mask;
-    uint bins_offset;  // 65536 u32 bins, or the emit counter at offset 0
+    uint bins_offset;  // 65536 u32 histogram bins
     uint dst_offset;   // Int32 indices, emit mode only
-    uint prefix_hi;    // resolved high half of the key, right aligned
-    uint prefix_lo;    // resolved low half of the key, right aligned
     uint prefix_bits;  // 0, 16, 32 or 48
     uint limit;        // emit: at most this many indices
     uint descending;   // 1 selects the largest values instead of the smallest
-    uint mode;         // 0 histogram, 1 emit
-    uint threshold_hi; // emit: the key resolved by the histogram passes
-    uint threshold_lo;
+    uint mode;         // 0 histogram, 1 emit, 2 resolve digit
 };
 
 [[vk::binding(0, 0)]] RWByteAddressBuffer values_buf;
 [[vk::binding(1, 0)]] RWByteAddressBuffer mask_buf;
 [[vk::binding(2, 0)]] RWByteAddressBuffer bins_buf;
 [[vk::binding(3, 0)]] RWByteAddressBuffer out_buf;
+// key_hi, key_lo, remaining rank, qualifying count, emitted count
+[[vk::binding(4, 0)]] RWByteAddressBuffer state_buf;
+groupshared uint block_counts[TT_GROUP_SIZE];
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc;
 
 // Strictly increasing in `value` for every non-NaN float.
@@ -69,8 +42,41 @@ uint select_key(float value)
 }
 
 [numthreads(TT_GROUP_SIZE, 1, 1)]
-void main(uint3 dtid : SV_DispatchThreadID)
+void main(uint3 dtid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
+    if (pc.mode == 2u) {
+        uint subtotal = 0u;
+        for (uint b = 0u; b < 256u; ++b)
+            subtotal += bins_buf.Load(pc.bins_offset + (lane * 256u + b) * 4u);
+        block_counts[lane] = subtotal;
+        GroupMemoryBarrierWithGroupSync();
+        if (lane != 0u) return;
+        uint rank = state_buf.Load(8u);
+        if (pc.prefix_bits == 0u) {
+            uint total = 0u;
+            for (uint b = 0u; b < 256u; ++b) total += block_counts[b];
+            state_buf.Store(12u, total);
+            rank = min(pc.limit, total);
+        }
+        if (rank == 0u) return;
+        uint below = 0u, block = 0u;
+        for (; block < 256u; ++block) {
+            if (below + block_counts[block] >= rank) break;
+            below += block_counts[block];
+        }
+        for (uint b = 0u; b < 256u; ++b) {
+            const uint digit = block * 256u + b;
+            const uint n = bins_buf.Load(pc.bins_offset + digit * 4u);
+            if (below + n >= rank) {
+                const uint offset = pc.prefix_bits < 32u ? 0u : 4u;
+                state_buf.Store(offset, (state_buf.Load(offset) << 16u) | digit);
+                state_buf.Store(8u, rank - below);
+                break;
+            }
+            below += n;
+        }
+        return;
+    }
     const uint index = dtid.x;
     if (index >= pc.count)
     {
@@ -92,7 +98,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
         else if (pc.prefix_bits == 16u)
         {
-            if ((key_hi >> 16u) != pc.prefix_hi)
+            if ((key_hi >> 16u) != state_buf.Load(0u))
             {
                 return;
             }
@@ -100,7 +106,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
         else if (pc.prefix_bits == 32u)
         {
-            if (key_hi != pc.prefix_hi)
+            if (key_hi != state_buf.Load(0u))
             {
                 return;
             }
@@ -108,7 +114,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
         else
         {
-            if (key_hi != pc.prefix_hi || (key_lo >> 16u) != pc.prefix_lo)
+            if (key_hi != state_buf.Load(0u) || (key_lo >> 16u) != state_buf.Load(4u))
             {
                 return;
             }
@@ -119,15 +125,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     // Emit: every masked row at or below the resolved key, capped at `limit`.
-    // The counter lives in the first bin, which the caller clears.
-    const bool past = key_hi > pc.threshold_hi ||
-        (key_hi == pc.threshold_hi && key_lo > pc.threshold_lo);
+    // The emitted count lives beside the resolved threshold in device state.
+    if (state_buf.Load(12u) == 0u) return;
+    const bool past = key_hi > state_buf.Load(0u) ||
+        (key_hi == state_buf.Load(0u) && key_lo > state_buf.Load(4u));
     if (past)
     {
         return;
     }
     uint slot = 0u;
-    bins_buf.InterlockedAdd(pc.bins_offset, 1u, slot);
+    state_buf.InterlockedAdd(16u, 1u, slot);
     if (slot < pc.limit)
     {
         out_buf.Store(pc.dst_offset + slot * 4u, index);

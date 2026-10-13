@@ -107,6 +107,64 @@ splat_drender::vulkan::SplatCamera camera_view(const Camera& camera) {
 }
 }  // namespace
 
+namespace {
+void validate_normal_features(const Tensor& features) {
+    if (!features.is_valid() || features.device() != device ||
+        features.dtype() != tinytensor::DataType::Float32 || !features.is_contiguous() ||
+        features.shape().rank() != 2 || features.shape()[1] != 4)
+        throw std::invalid_argument("Normal features must be contiguous Vulkan float32 [N,4]");
+}
+}
+
+Tensor normal_features_to_normals_vulkan(const Tensor& features) {
+    validate_normal_features(features);
+    auto result = Tensor::zeros({features.shape()[0], std::size_t{3}}, device);
+    Push push; push.mode = 7; push.count = static_cast<std::uint32_t>(features.shape()[0]);
+    launch(push, {features, {}, {}, result, {}, {}});
+    return result;
+}
+
+Tensor normal_features_from_smallest_axis_vulkan(const GaussianModel& model) {
+    auto result = Tensor::empty({model.size(), std::size_t{4}}, device);
+    Push push; push.mode = 10; push.count = static_cast<std::uint32_t>(model.size());
+    push.euclidean = model.filter_3d.is_valid();
+    launch(push, {model.log_scales, model.quaternions, model.filter_3d, result, {}, {}});
+    return result;
+}
+
+Tensor normal_features_backward_vulkan(const Tensor& features, const Tensor& gradient) {
+    validate_normal_features(features);
+    if (!gradient.is_valid() || gradient.device() != device ||
+        gradient.dtype() != tinytensor::DataType::Float32 || !gradient.is_contiguous() ||
+        gradient.shape().rank() != 2 || gradient.shape()[0] != features.shape()[0] ||
+        gradient.shape()[1] != 3)
+        throw std::invalid_argument("Normal feature gradient must be contiguous Vulkan float32 [N,3]");
+    auto result = Tensor::zeros_like(features);
+    Push push; push.mode = 8; push.count = static_cast<std::uint32_t>(features.shape()[0]);
+    launch(push, {features, gradient, {}, result, {}, {}});
+    return result;
+}
+
+LossGradients compute_normal_field_loss_vulkan(const RenderResult& rendered,
+    const Camera& camera, float weight, bool collect_scalar_terms) {
+    auto push = camera_push(9, camera);
+    if (!rendered.median_depth.is_valid() || !rendered.normal.is_valid() ||
+        rendered.median_depth.numel() != push.count || rendered.color.numel() != 3u * push.count)
+        throw std::invalid_argument("Normal field loss requires matching color and depth attachments");
+    LossGradients result{Tensor::zeros_like(rendered.color), Tensor::zeros_like(rendered.alpha),
+        Tensor::zeros_like(rendered.median_depth), Tensor::zeros_like(rendered.normal)};
+    if (!(weight > 0.F)) return result;
+    push.weight = weight;
+    push.camera_count = collect_scalar_terms;
+    auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
+    launch(push, {rendered.median_depth, rendered.color, matrix(camera), result.depth, result.color, terms});
+    if (collect_scalar_terms) {
+        result.normal_value = terms.sum().to_vector()[0];
+        result.total = result.normal_value;
+    }
+    return result;
+}
+
 void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& camera,
     float weight, LossGradients& gradients, bool collect_scalar_terms) {
     if (!rendered.median_depth.is_valid() || !rendered.normal.is_valid()) {
@@ -117,10 +175,11 @@ void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& ca
     if (!(weight > 0.F)) return;
     auto push = camera_push(0, camera);
     push.weight = weight;
-    auto terms = Tensor::zeros({1}, device);
+    push.camera_count = collect_scalar_terms;
+    auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
     launch(push, {rendered.median_depth, rendered.normal, {}, gradients.depth, gradients.normal, terms});
     if (collect_scalar_terms) {
-        const float value = terms.to_vector()[0];
+        const float value = terms.sum().to_vector()[0];
         gradients.normal_value += value;
         gradients.total += value;
     }

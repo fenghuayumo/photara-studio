@@ -9,6 +9,7 @@
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "splat/training_preset.hpp"
+#include "mvs/mesh_postprocess.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
@@ -24,6 +25,7 @@
 #include "splat/formats.hpp"
 #include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
+#include "splat/checkpoint.hpp"
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
 #include "splat_drender/vulkan_api.h"
@@ -145,10 +147,15 @@ struct ReconstructCli {
     float splat_simplify_merge_cap{0.5F};
     int splat_simplify_sh{-1};
     std::string capture_mode{"object"};
+    bool splat_focus_region = false;
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
     std::string backend{"cuda"};
+    std::filesystem::path splat_checkpoint;
+    std::filesystem::path splat_checkpoint_control;
+    bool splat_resume{false};
+    unsigned splat_checkpoint_seconds{120};
     unsigned splat_iterations{30'000};
     photara::splat::TrainingMode splat_mode{photara::splat::TrainingMode::standard};
     unsigned splat_log_interval{100};
@@ -169,7 +176,6 @@ struct ReconstructCli {
     unsigned splat_preview_vk_device_node_mask{};
     std::string splat_preview_vk_device_uuid;
     bool splat_profile_cuda{false};
-    bool splat_fuse_sh_adam{true};
     unsigned splat_profile_interval{100};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
@@ -204,10 +210,11 @@ struct ReconstructCli {
     float splat_opacity_reg{0.F};
     float splat_log_scale_reg{0.F};
     float splat_depth_normal_weight{0.05F};
+    std::string splat_filter_3d{"auto"};
     bool splat_normal_field{false};
     float splat_normal_field_weight{0.05F};
     float splat_normal_field_depth_ratio{0.6F};
-    unsigned splat_normal_field_from_iter{8'001};
+    unsigned splat_normal_field_from_iter{20'001};
     float splat_multi_view_geo_weight{0.02F};
     float splat_multi_view_ncc_weight{0.6F};
     float splat_multi_view_depth_bracket{0.F};
@@ -223,7 +230,7 @@ struct ReconstructCli {
     float splat_multi_view_min_depth_consistency{0.5F};
     float splat_multi_view_stable_distribution_threshold{0.025F};
     float splat_multi_view_pixel_noise{1.F};
-    unsigned splat_geometry_from_iter{3'000};
+    unsigned splat_geometry_from_iter{7'000};
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
     float splat_max_scale_ratio{0.F};
@@ -249,6 +256,10 @@ struct ReconstructCli {
     std::uint64_t mesh_max_points{2'000'000};
     std::uint64_t mesh_target_faces{0};
     bool mesh_remesh{true};
+    std::string mesh_postprocess_quality{"standard"};
+    std::uint64_t mesh_remesh_target_faces{0};
+    int mesh_remesh_smooth_iterations{2};
+    bool mesh_postprocess_requested{false};
     float mesh_tsdf_voxel_scale{-1.F};
     float mesh_tsdf_bounds_padding{2.F};
     unsigned mesh_tsdf_pixel_step{4};
@@ -263,13 +274,20 @@ struct ReconstructCli {
     float mesh_max_edge_scale{4.F};
     float mesh_free_space_quantile{0.95F};
     std::uint64_t pam_max_points{1'000'000};
-    std::uint64_t pam_pivot_max_points{1'000'000};
+    std::uint64_t pam_pivot_max_points{0};
+    std::filesystem::path pam_input_mesh;
+    bool pam_scene_crop{true};
+    float pam_bounding_box_scaling{1.F};
+    bool pam_pivot_filter_large_edges{false};
+    bool pam_manifold_cleanup{false};
     float pam_pivot_std_factor{3.F};
+    unsigned pam_pivot_binary_steps{8};
+    unsigned pam_max_resample_rounds{0};
     float pam_gaussian_seed_fraction{0.F};
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
-    bool pam_gpu_refinement{true};
     std::uint64_t pam_occupancy_chunk_size{4'000'000};
+    std::uint64_t pam_occupancy_host_cache_mb{0};
     unsigned pam_points_per_tetrahedron{10};
     float pam_occupancy_iso_value{0.5F};
     float pam_vacancy_threshold{0.1F};
@@ -305,6 +323,7 @@ struct ReconstructCli {
     // Unset keeps the default atlas size (kDefaultAtlasResolution).
     std::optional<std::uint32_t> atlas_resolution;
     std::uint32_t uv_parallel_partitions{8};
+    float uv_max_stretch{1.F / 3.F};
     bool texture_optimize{true};
     std::string texture_color_space{"srgb"};
     std::string texture_blend{"softmax"};
@@ -312,7 +331,8 @@ struct ReconstructCli {
     bool texture_fill_unobserved{true};
     float texture_mask_floor{0.05F};
     float texture_softmax_scale{0.F};
-    std::uint32_t texture_optimize_steps{1000};
+    std::uint32_t texture_optimize_steps{3000};
+    std::uint32_t texture_seam_steps{60};
     std::uint32_t texture_optimize_batch_size{4};
     std::uint32_t texture_seam_samples{4};
     float video_fps{2.F};
@@ -456,20 +476,21 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
               << "  --splat-log-scale-reg W  per-Gaussian log-scale prior (default 0)\n"
               << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
+              << "  --splat-filter-3d MODE  independent 3D filter: auto, on, off (default auto)\n"
               << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
               << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
               << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
-              << "  --splat-normal-field-from-iter N  start normal-field loss (default 8001)\n"
+              << "  --splat-normal-field-from-iter N  start normal-field loss (default 20001)\n"
               << "  --splat-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --splat-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --splat-mv-neighbors N  nearest camera candidates (default 8)\n"
-              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default 1;\n"
+              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default fast=2, others=1;\n"
               << "                              N>1 lowers geometry/mesh quality - previews only)\n"
               << "  --splat-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
               << "  --splat-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
               << "  --splat-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
               << "  --splat-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
-              << "  --splat-geometry-from-iter N  start geometry loss (default 3000)\n"
+              << "  --splat-geometry-from-iter N  start geometry loss (default 7000)\n"
               << "  --splat-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --splat-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
               << "  --splat-max-scale-ratio R  hard anisotropy clamp (default 0 = no limit)\n"
@@ -491,19 +512,30 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-method auto|tsdf|delaunay|pam\n"
               << "               auto uses TSDF for splats, otherwise the quality preset\n"
               << "  --pam-max-points N  PAM refined surface candidates (default 1000000)\n"
-              << "  --pam-pivot-max-points N  GaussianWrapping pivot vertices before tetra_triangulation\n"
+              << "  --pam-pivot-max-points N  pivot vertex cap (default 0 = all Gaussians)\n"
+              << "  --pam-input-mesh PATH  use an existing GW initial mesh\n"
+              << "  --pam-scene-crop BOOL  GW scene-radius crop (default true)\n"
+              << "  --pam-bounding-box-scaling F  scene crop scale (default 1)\n"
+              << "  --pam-pivot-filter-large-edges BOOL  filter long pivot edges (default false)\n"
+              << "  --pam-manifold-cleanup BOOL  split singular boundary vertices (default false)\n"
               << "  --pam-pivot-std-factor F  learned-normal pivot displacement in sigma (default 3)\n"
+              << "  --pam-pivot-binary-steps N  pivot edge bisection steps (default 8; 0 = linear)\n"
+              << "  --pam-max-resample-rounds N  candidate sampling rounds (default 0 = fill budget)\n"
               << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
               << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
-              << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
+              << "  --pam-neighbors N  Gaussian neighbors in the PAM field (1-64; default 32)\n"
+              << "  --pam-occupancy-host-cache-mb N  CUDA host cache MiB (0 = auto, up to 8 GiB)\n"
               << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
               << "  --mesh-adaptive-sigma BOOL  adapt visibility scale to local point density\n"
               << "  --mesh-max-edge-scale F  reject gap-spanning cut facets (default 4; 0 disables)\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
-              << "  --mesh-target-faces N  photara/CGAL repair + decimate target (0 disables)\n"
-              << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
+              << "  --mesh-target-faces N  optional decimation target (default 0; baking still repairs manifold topology)\n"
+              << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (bake-only false; otherwise true)\n"
+              << "  --mesh-postprocess-quality fast|standard|high  postprocess budgets, independent of extraction\n"
+              << "  --mesh-remesh-target-faces N  remesh triangle budget (0 follows reduction target or input)\n"
+              << "  --mesh-remesh-smooth-iterations N  remesh smoothing passes (0-10)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
               << "  --mesh-tsdf-pixel-step N  sparse allocation stride (1 preserves thin wires; default 4)\n"
@@ -515,9 +547,11 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-resolution-level N  MVS downscale steps; unset follows\n"
                  "                              --dense-quality (0=full, 1~=half)\n"
               << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
-              << "  --capture-mode object|scene  object uses SfM SubjectBounds; with --dense\n"
-              << "               and without --splat this only selects the bounds\n"
-              << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
+              << "  --capture-mode object|scene  SfM/MVS capture type (MVS object\n"
+              << "               mode uses SubjectBounds; scene is unbounded)\n"
+              << "  --splat-focus-region BOOL  constrain splat training to the\n"
+              << "               focus region, independent of capture mode\n"
+              << "  --subject-bounds PATH  load focus region (SubjectBounds txt)\n"
               << "  --masks DIR optional valid-region masks for default SfM/MVS/training; "
                  "black pixels are ignored (auto: sibling masks/)\n"
               << "Texture (Stage B after --mesh; requires Vulkan + UVAtlas):\n"
@@ -526,9 +560,11 @@ void print_help(const cxxopts::Options& options) {
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
+              << "  --uv-max-stretch F  UV distortion budget in [0,1] (default 0.333333)\n"
               << "  --texture-color-space srgb|linear  blend space (default srgb, matches photographs)\n"
               << "  --texture-optimize BOOL  photara_drender photometric + seam optimization (default true)\n"
-              << "  --texture-optimize-steps N  native Vulkan Adam steps (default 1000)\n"
+              << "  --texture-optimize-steps N  native Vulkan Adam steps (default 3000)\n"
+              << "  --texture-seam-steps N  seam polish steps (default 60, 0 disables)\n"
               << "  --texture-optimize-batch-size N  calibrated views per optimizer step (default 4)\n"
               << "  --texture-seam-samples N  samples per UV chart seam edge (default 4)\n"
               << "Output formats:\n"
@@ -753,11 +789,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Extract a mesh from an existing trained splat without running the optimizer",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("capture-mode",
-         "Capture type: object uses SfM SubjectBounds; scene is unbounded",
+         "Capture type for SfM/MVS: object or scene (splat training uses "
+         "--splat-focus-region independently)",
          cxxopts::value<std::string>()->default_value("object"))
         ("subject-bounds",
-         "Load object-mode SubjectBounds / focus region from a text file",
+         "Load SubjectBounds / focus region from a text file",
          cxxopts::value<std::string>()->default_value(""))
+        ("splat-focus-region",
+         "Constrain splat training to the SubjectBounds focus region "
+         "(default: false)",
+         cxxopts::value<bool>()->implicit_value("true"))
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
@@ -765,6 +806,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-mode", "Training preset: fast, standard, high-quality",
          cxxopts::value<std::string>()->default_value("standard"))
+        ("splat-checkpoint", "Training checkpoint file (default: beside output)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-resume", "Resume a compatible saved training checkpoint",
+         cxxopts::value<bool>()->default_value("false"))
+        ("splat-checkpoint-seconds", "Automatic checkpoint interval in seconds (0 disables periodic saves)",
+         cxxopts::value<unsigned>()->default_value("120"))
+        ("splat-checkpoint-control", "Editor save request and acknowledgement sidecar",
+         cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations (overrides preset)",
          cxxopts::value<unsigned>()->default_value("30000"))
         ("splat-log-interval",
@@ -847,8 +896,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-async-upload",
          "Upload decoded splat views without blocking the training thread",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
          "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -879,6 +926,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-depth-normal-weight",
          "Splat median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
+        ("splat-filter-3d", "3D filter independently of geometry losses: auto/on/off",
+         cxxopts::value<std::string>()->default_value("auto"))
         ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -888,7 +937,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Median-depth fraction of normal-field alignment",
          cxxopts::value<float>()->default_value("0.6"))
         ("splat-normal-field-from-iter", "Iteration to start normal-field loss",
-         cxxopts::value<unsigned>()->default_value("8001"))
+         cxxopts::value<unsigned>()->default_value("20001"))
         ("splat-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
         ("splat-mv-depth-bracket",
@@ -904,7 +953,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-mv-tail-interval",
-         "Multi-view sampling interval after ADC growth stops (N>1 lowers geometry/mesh quality; "
+         "Multi-view sampling interval after ADC growth stops (default fast=2, others=1; N>1 lowers geometry/mesh quality; "
          "keep 1 when meshing)",
          cxxopts::value<unsigned>()->default_value("1"))
         ("splat-mv-adaptive",
@@ -935,7 +984,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
          cxxopts::value<float>()->default_value("1"))
         ("splat-geometry-from-iter", "Iteration to start splat geometry loss",
-         cxxopts::value<unsigned>()->default_value("3000"))
+         cxxopts::value<unsigned>()->default_value("7000"))
         ("splat-min-scale-fraction", "Minimum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.0001"))
         ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
@@ -1017,21 +1066,35 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("1000000"))
         ("pam-pivot-max-points",
          "Maximum Gaussian pivot vertices for initial tetra triangulation",
-         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("pam-input-mesh", "Existing GW initial mesh PLY (otherwise generate from Gaussians)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("pam-scene-crop", "Apply GW origin-centered scene-radius crop",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("pam-bounding-box-scaling", "GW scene crop radius multiplier",
+         cxxopts::value<float>()->default_value("1"))
+        ("pam-pivot-filter-large-edges", "Filter pivot edges exceeding summed scales",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("pam-manifold-cleanup", "Split singular tetrahedral boundary vertices",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("pam-pivot-std-factor",
          "Learned-normal Gaussian pivot displacement in sigma",
          cxxopts::value<float>()->default_value("3"))
         ("pam-gaussian-seed-fraction",
          "Fraction of PAM candidates seeded from learned Gaussians",
          cxxopts::value<float>()->default_value("0"))
+        ("pam-pivot-binary-steps", "Pivot edge bisection steps (0 uses linear interpolation)",
+         cxxopts::value<unsigned>()->default_value("8"))
+        ("pam-max-resample-rounds", "Candidate sampling rounds (0 fills the budget)",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("pam-refinement-steps", "PAM occupancy/vector-field refinement steps",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
          cxxopts::value<unsigned>()->default_value("32"))
-        ("pam-gpu-refinement", "Use exact CUDA nearest-neighbor field refinement (up to 64 neighbors)",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("pam-occupancy-chunk-size", "PAM query batch size; larger batches amortize camera preparation",
          cxxopts::value<std::uint64_t>()->default_value("4000000"))
+        ("pam-occupancy-host-cache-mb", "CUDA PAM host draw-list cache MiB (0 = automatic, at most 8 GiB)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
         ("pam-points-per-tetrahedron", "PAM occupancy samples per tetrahedron",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-occupancy-iso-value",
@@ -1046,10 +1109,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
         ("mesh-target-faces",
-         "Optional photara/CGAL repair and decimation target (0 disables)",
+         "Optional photara/CGAL decimation target (default 0; baking still repairs manifold topology)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("mesh-postprocess-quality", "Optional mesh postprocessing preset: fast, standard, high",
+         cxxopts::value<std::string>()->default_value("standard"))
+        ("mesh-remesh-target-faces", "Independent remesh triangle budget (0 follows reduction target or input)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("mesh-remesh-smooth-iterations", "Remesh smoothing passes (0-10)",
+         cxxopts::value<int>()->default_value("2"))
         ("mesh-tsdf-voxel-scale",
          "Automatic TSDF voxel multiplier (-1 = gs2mesh default 1x)",
          cxxopts::value<float>()->default_value("-1"))
@@ -1105,14 +1174,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "1 = ignore masks during the bake)",
          cxxopts::value<float>()->default_value("0.05"))
         ("texture-fill-unobserved",
-         "Fill rasterized atlas texels that received no projection sample from "
-         "the nearest valid texel",
+         "Fill unobserved texels from observed faces along shared mesh edges",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("texture-optimize",
          "Refine projected atlas with photara_drender's native optimizer",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("texture-optimize-steps", "Native texture optimization steps",
-         cxxopts::value<std::uint32_t>()->default_value("1000"))
+         cxxopts::value<std::uint32_t>()->default_value("3000"))
+        ("texture-seam-steps", "UV seam optimization steps (0 disables seam polish)",
+         cxxopts::value<std::uint32_t>()->default_value("60"))
         ("texture-optimize-batch-size", "Views per texture optimization step",
          cxxopts::value<std::uint32_t>()->default_value("4"))
         ("texture-seam-samples", "Samples per UV chart seam edge",
@@ -1195,7 +1265,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint32_t>())
         ("uv-parallel-partitions",
          "Spatial UVAtlas partitioning level (1 = serial)",
-         cxxopts::value<std::uint32_t>()->default_value("8"));
+         cxxopts::value<std::uint32_t>()->default_value("8"))
+        ("uv-max-stretch", "UV distortion budget (higher values allow fewer cuts)",
+         cxxopts::value<float>()->default_value("0.333333333"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("version")) {
@@ -1375,6 +1447,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_simplify_sh = result["splat-simplify-sh"].as<int>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
+    // Independent of --capture-mode: absent means the struct default (off).
+    if (result.count("splat-focus-region") != 0)
+        cli.splat_focus_region = result["splat-focus-region"].as<bool>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
             "--capture-mode must be object or scene");
@@ -1390,6 +1465,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());
     const auto splat_preset = photara::splat::training_preset(cli.splat_mode);
+    cli.splat_checkpoint = utf8_to_path(result["splat-checkpoint"].as<std::string>());
+    cli.splat_checkpoint_control = utf8_to_path(result["splat-checkpoint-control"].as<std::string>());
+    cli.splat_resume = result["splat-resume"].as<bool>();
+    cli.splat_checkpoint_seconds = result["splat-checkpoint-seconds"].as<unsigned>();
     cli.splat_iterations = result.count("splat-iterations")
         ? result["splat-iterations"].as<unsigned>() : splat_preset.iterations;
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
@@ -1440,7 +1519,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
                 "--splat-preview-vk-device-uuid must be 32 hex digits");
     }
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
-    cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
     if (cli.splat_profile_interval == 0 ||
@@ -1485,6 +1563,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
     cli.splat_depth_normal_weight =
         result["splat-depth-normal-weight"].as<float>();
+    cli.splat_filter_3d = result["splat-filter-3d"].as<std::string>();
+    if (cli.splat_filter_3d != "auto" && cli.splat_filter_3d != "on" &&
+        cli.splat_filter_3d != "off")
+        throw std::invalid_argument("--splat-filter-3d must be auto, on or off");
     cli.splat_multi_view_depth_bracket =
         result["splat-mv-depth-bracket"].as<float>();
     cli.splat_multi_view_depth_tolerance =
@@ -1501,8 +1583,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_multi_view_ncc_weight =
         result["splat-mv-ncc-weight"].as<float>();
     cli.splat_multi_view_num = result["splat-mv-neighbors"].as<unsigned>();
-    cli.splat_multi_view_tail_interval =
-        result["splat-mv-tail-interval"].as<unsigned>();
+    cli.splat_multi_view_tail_interval = result.count("splat-mv-tail-interval")
+        ? result["splat-mv-tail-interval"].as<unsigned>()
+        : splat_preset.multi_view_tail_interval;
     cli.splat_multi_view_adaptive =
         result["splat-mv-adaptive"].as<bool>();
     cli.splat_multi_view_adaptive_max_interval =
@@ -1584,6 +1667,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
+    cli.uv_max_stretch = result["uv-max-stretch"].as<float>();
     cli.texture_color_space = result["texture-color-space"].as<std::string>();
     if (cli.texture_color_space != "srgb" &&
         cli.texture_color_space != "linear")
@@ -1605,6 +1689,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.texture_optimize = result["texture-optimize"].as<bool>();
     cli.texture_optimize_steps =
         result["texture-optimize-steps"].as<std::uint32_t>();
+    cli.texture_seam_steps = result["texture-seam-steps"].as<std::uint32_t>();
     cli.texture_optimize_batch_size =
         result["texture-optimize-batch-size"].as<std::uint32_t>();
     cli.texture_seam_samples =
@@ -1615,13 +1700,20 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["pam-pivot-max-points"].as<std::uint64_t>();
     cli.pam_pivot_std_factor =
         result["pam-pivot-std-factor"].as<float>();
+    cli.pam_pivot_binary_steps = result["pam-pivot-binary-steps"].as<unsigned>();
+    cli.pam_max_resample_rounds = result["pam-max-resample-rounds"].as<unsigned>();
+    cli.pam_input_mesh = utf8_to_path(result["pam-input-mesh"].as<std::string>());
+    cli.pam_scene_crop = result["pam-scene-crop"].as<bool>();
+    cli.pam_bounding_box_scaling = result["pam-bounding-box-scaling"].as<float>();
+    cli.pam_pivot_filter_large_edges = result["pam-pivot-filter-large-edges"].as<bool>();
+    cli.pam_manifold_cleanup = result["pam-manifold-cleanup"].as<bool>();
     cli.pam_gaussian_seed_fraction =
         result["pam-gaussian-seed-fraction"].as<float>();
     cli.pam_refinement_steps =
         result["pam-refinement-steps"].as<unsigned>();
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
-    cli.pam_gpu_refinement = result["pam-gpu-refinement"].as<bool>();
     cli.pam_occupancy_chunk_size = result["pam-occupancy-chunk-size"].as<std::uint64_t>();
+    cli.pam_occupancy_host_cache_mb = result["pam-occupancy-host-cache-mb"].as<std::uint64_t>();
     cli.pam_points_per_tetrahedron =
         result["pam-points-per-tetrahedron"].as<unsigned>();
     cli.pam_occupancy_iso_value =
@@ -1634,6 +1726,23 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_target_faces =
         result["mesh-target-faces"].as<std::uint64_t>();
     cli.mesh_remesh = result["mesh-remesh"].as<bool>();
+    cli.mesh_postprocess_quality = result["mesh-postprocess-quality"].as<std::string>();
+    if (cli.mesh_postprocess_quality != "fast" && cli.mesh_postprocess_quality != "standard" &&
+        cli.mesh_postprocess_quality != "high")
+        throw std::invalid_argument("--mesh-postprocess-quality must be fast, standard, or high");
+    cli.mesh_remesh_target_faces = result["mesh-remesh-target-faces"].as<std::uint64_t>();
+    cli.mesh_remesh_smooth_iterations = result["mesh-remesh-smooth-iterations"].as<int>();
+    if (result.count("mesh-postprocess-quality") != 0) {
+        const auto preset = photara::mvs::mesh_postprocess_preset(
+            cli.mesh_postprocess_quality == "fast" ? 0 : cli.mesh_postprocess_quality == "high" ? 2 : 1);
+        if (result.count("mesh-target-faces") == 0) cli.mesh_target_faces = preset.target_faces;
+        if (result.count("mesh-remesh-target-faces") == 0) cli.mesh_remesh_target_faces = preset.target_faces;
+        if (result.count("mesh-remesh-smooth-iterations") == 0)
+            cli.mesh_remesh_smooth_iterations = preset.smooth_iterations;
+        if (result.count("mesh-remesh") == 0) cli.mesh_remesh = false;
+    }
+    cli.mesh_postprocess_requested = cli.mesh_target_faces > 0 ||
+        (cli.mesh_remesh && result.count("mesh-remesh") != 0);
     cli.mesh_tsdf_voxel_scale =
         result["mesh-tsdf-voxel-scale"].as<float>();
     cli.mesh_tsdf_bounds_padding =
@@ -1736,6 +1845,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         !cli.working_mesh.empty() || !cli.mask_mesh.empty();
     cli.texture_only = cli.texture && have_existing_mesh && !cli.splat &&
                        !cli.dense && result.count("mesh") == 0;
+    // Preserve extracted thin structures when preparing an existing mesh.
+    // Field-aligned remeshing remains available through an explicit override.
+    if (cli.texture_only && result.count("mesh-remesh") == 0)
+        cli.mesh_remesh = false;
     if (cli.texture && !cli.texture_only) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     // An explicitly selected capture mode is the product-level full rebuild
@@ -1903,6 +2016,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.uv_parallel_partitions == 0)
         throw std::invalid_argument(
             "--uv-parallel-partitions must be positive");
+    if (!std::isfinite(cli.uv_max_stretch) || cli.uv_max_stretch < 0.F ||
+        cli.uv_max_stretch > 1.F)
+        throw std::invalid_argument("--uv-max-stretch must be finite and within [0,1]");
     if (cli.texture_optimize &&
         (cli.texture_optimize_steps == 0 ||
          cli.texture_optimize_batch_size == 0))
@@ -1917,13 +2033,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_method == "pam" && !cli.splat)
         throw std::invalid_argument(
             "--mesh-method pam requires splat training");
-    if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
-        cli.pam_neighbors == 0 ||
+    if (cli.pam_max_points < 4 || (cli.pam_pivot_max_points != 0 && cli.pam_pivot_max_points < 4) ||
+        cli.pam_neighbors == 0 || cli.pam_neighbors > 64 ||
         cli.pam_occupancy_chunk_size == 0 ||
         cli.pam_occupancy_chunk_size > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) ||
+        cli.pam_occupancy_host_cache_mb > (std::numeric_limits<std::size_t>::max)() / (1024 * 1024) ||
         cli.pam_points_per_tetrahedron == 0 ||
         !std::isfinite(cli.pam_pivot_std_factor) ||
         !(cli.pam_pivot_std_factor > 0.F) ||
+        !std::isfinite(cli.pam_bounding_box_scaling) || !(cli.pam_bounding_box_scaling > 0.F) ||
         !std::isfinite(cli.pam_gaussian_seed_fraction) ||
         cli.pam_gaussian_seed_fraction < 0.F ||
         cli.pam_gaussian_seed_fraction > 1.F ||
@@ -1951,6 +2069,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_target_faces > 0 && cli.mesh_target_faces < 4)
         throw std::invalid_argument(
             "--mesh-target-faces must be 0 or at least 4");
+    if (cli.mesh_remesh_target_faces > 0 && cli.mesh_remesh_target_faces < 4)
+        throw std::invalid_argument("--mesh-remesh-target-faces must be 0 or at least 4");
+    if (cli.mesh_remesh_smooth_iterations < 0 || cli.mesh_remesh_smooth_iterations > 10)
+        throw std::invalid_argument("--mesh-remesh-smooth-iterations must be within [0,10]");
     if (cli.mesh_tsdf_voxel_scale != -1.F &&
         (!(cli.mesh_tsdf_voxel_scale > 0.F) ||
          !std::isfinite(cli.mesh_tsdf_voxel_scale)))
@@ -2083,6 +2205,10 @@ std::filesystem::path splat_file_path(const ReconstructCli& cli) {
 
 void apply_cli_subject_bounds(
     const ReconstructCli& cli, photara::mvs::MvsScene& scene) {
+    if (cli.splat && !cli.splat_focus_region) {
+        scene.subject_bounds = {};
+        return;
+    }
     if (!cli.subject_bounds.empty()) {
         if (!photara::mvs::load_subject_bounds(
                 scene.subject_bounds, cli.subject_bounds))
@@ -2093,7 +2219,7 @@ void apply_cli_subject_bounds(
             "subject_bounds=", cli.subject_bounds.string(), " source=file");
         return;
     }
-    if (cli.capture_mode == "scene") scene.subject_bounds = {};
+    if (!cli.splat && cli.capture_mode == "scene") scene.subject_bounds = {};
 }
 
 photara::splat::CudaVulkanPreviewOptions make_preview_options(
@@ -2176,6 +2302,8 @@ void run_splat_view(
 
 photara::splat::GaussianModel load_trained_gaussians(
     const ReconstructCli& cli, photara::project::Archive* archive) {
+    const auto device=cli.backend=="vulkan" && cli.mesh_method=="pam"
+        ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
     std::error_code exists_error;
     std::vector<std::filesystem::path> candidates;
     if (!cli.working_splat.empty())
@@ -2192,7 +2320,7 @@ photara::splat::GaussianModel load_trained_gaussians(
     candidates.push_back(parent / (stem + ".ply"));
     for (const auto& candidate : candidates) {
         if (!std::filesystem::exists(candidate, exists_error)) continue;
-        auto model = photara::splat::load_gaussians(candidate);
+        auto model = photara::splat::load_gaussians(candidate,device);
         if (model.size() == 0) continue;
         photara::core::Logger::instance().info(
             "splat_mesh_model=", candidate, " gaussians=", model.size());
@@ -2201,7 +2329,7 @@ photara::splat::GaussianModel load_trained_gaussians(
     if (archive != nullptr &&
         archive->has(photara::project::ChunkType::gaussians)) {
         auto model = photara::splat::decode_gaussians(
-            archive->chunk(photara::project::ChunkType::gaussians));
+            archive->chunk(photara::project::ChunkType::gaussians),device);
         if (model.size() != 0) {
             photara::core::Logger::instance().info(
                 "splat_mesh_model=ascan gaussians=", model.size());
@@ -2414,6 +2542,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
+    settings.focus_region = cli.splat_focus_region;
     settings.iterations = static_cast<int>(cli.splat_iterations);
     settings.densification_cap = static_cast<int>(cli.splat_densification_cap);
     settings.training_mode = static_cast<int>(cli.splat_mode);
@@ -2436,6 +2565,15 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.sam_max_size = cli.sam_max_size;
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
+    settings.mesh_postprocess_quality = cli.mesh_postprocess_quality == "fast" ? 0 :
+        cli.mesh_postprocess_quality == "high" ? 2 : 1;
+    const auto postprocess_preset = photara::mvs::mesh_postprocess_preset(settings.mesh_postprocess_quality);
+    settings.mesh_simplify = cli.mesh_target_faces > 0;
+    settings.mesh_target_faces = cli.mesh_target_faces > 0 ? cli.mesh_target_faces : postprocess_preset.target_faces;
+    settings.mesh_remesh = cli.mesh_remesh && cli.mesh_postprocess_requested;
+    settings.mesh_remesh_target_faces = cli.mesh_remesh_target_faces > 0 ?
+        cli.mesh_remesh_target_faces : settings.mesh_target_faces;
+    settings.mesh_remesh_smooth_iterations = cli.mesh_remesh_smooth_iterations;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
     else if (cli.mesh_method == "delaunay") settings.mesh_method = 2;
     else if (cli.mesh_method == "pam") settings.mesh_method = 3;
@@ -2465,6 +2603,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.atlas_resolution = static_cast<int>(atlas_resolution);
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
+    settings.texture_photometric_steps = static_cast<int>(cli.texture_optimize_steps);
+    settings.texture_seam_steps = static_cast<int>(cli.texture_seam_steps);
     settings.texture_blend_linear = cli.texture_color_space == "linear";
     if (atlas_resolution <= 1024) settings.texture_quality = 0;
     else if (atlas_resolution >= 4096) settings.texture_quality = 2;
@@ -2526,12 +2666,20 @@ void write_mesh_artifact(
 }
 
 #if defined(PHOTARA_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+bool repair_and_decimate_mesh(
+    photara::mvs::Mesh& mesh, std::uint64_t target_faces,
+    bool use_instant_remesh, std::uint64_t remesh_target_faces,
+    int smooth_iterations, bool preserve_components);
+#endif
+
 photara::texture::TextureOptions texture_options_from_cli(
     const ReconstructCli& cli) {
     photara::texture::TextureOptions options;
     options.atlas_resolution =
         cli.atlas_resolution.value_or(options.atlas_resolution);
     options.uv_parallel_partitions = cli.uv_parallel_partitions;
+    options.uv_max_stretch = cli.uv_max_stretch;
     options.color_space = cli.texture_color_space == "linear"
         ? photara::texture::BlendColorSpace::linear
         : photara::texture::BlendColorSpace::srgb;
@@ -2549,6 +2697,7 @@ photara::texture::TextureOptions texture_options_from_cli(
     options.atlas_fill_unobserved = cli.texture_fill_unobserved;
     options.optimize = cli.texture_optimize;
     options.optimize_steps = cli.texture_optimize_steps;
+    options.seam_polish_steps = cli.texture_seam_steps;
     options.optimize_batch_size = cli.texture_optimize_batch_size;
     options.seam_samples_per_edge = cli.texture_seam_samples;
     options.delight = cli.delight;
@@ -2637,6 +2786,34 @@ void bake_texture_only(
     const auto parent = cli.output.parent_path().empty()
         ? std::filesystem::current_path()
         : cli.output.parent_path();
+    if (cli.mesh_postprocess_requested) {
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+        if (repair_and_decimate_mesh(
+                scene.mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true)) {
+            const auto processed_path = parent /
+                (cli.output.stem().string() + "_bake_mesh.ply");
+            const auto aliases_source = [&](const std::filesystem::path& source) {
+                if (source.empty()) return false;
+                std::error_code error;
+                return std::filesystem::equivalent(source, processed_path, error);
+            };
+            if (aliases_source(cli.working_mesh) || aliases_source(cli.mask_mesh))
+                throw std::runtime_error(
+                    "Processed baking mesh output aliases the input mesh; "
+                    "choose a different --output stem");
+            ensure_artifact_parent(processed_path);
+            photara::mvs::save_mesh_ply(scene.mesh, processed_path);
+            photara::core::Logger::instance().info(
+                "texture_source_mesh=", processed_path,
+                " faces=", scene.mesh.faces.size());
+        }
+#else
+        throw std::runtime_error(
+            "Bake Texture mesh postprocessing requires CGAL mesh tools; "
+            "disable simplification and remeshing to skip it");
+#endif
+    }
     write_texture_artifact(
         cli, scene, parent / (cli.output.stem().string() + "_textured"),
         write_project ? &archive : nullptr, write_project);
@@ -3138,9 +3315,10 @@ void retain_largest_edge_component(
 
 bool repair_and_decimate_mesh(
     photara::mvs::Mesh& mesh, const std::uint64_t target_faces,
-    const bool use_instant_remesh) {
-    if (target_faces == 0 || mesh.faces.empty()) return false;
-    if (mesh.faces.size() <= target_faces) {
+    const bool use_instant_remesh, const std::uint64_t remesh_target_faces,
+    const int smooth_iterations, const bool preserve_components) {
+    if (mesh.faces.empty() || (target_faces == 0 && !use_instant_remesh)) return false;
+    if (!use_instant_remesh && mesh.faces.size() <= target_faces) {
         photara::core::Logger::instance().info(
             "mesh target postprocess skipped: input_faces=", mesh.faces.size(),
             " target_faces=", target_faces);
@@ -3176,12 +3354,18 @@ bool repair_and_decimate_mesh(
         photara_mesh::RemeshOptions remesh_options;
         // PoSy=4 produces approximately one quad per requested face; the
         // binding triangulates each regular quad for the downstream pipeline.
+        const std::uint64_t remesh_budget = remesh_target_faces > 0 ? remesh_target_faces :
+            target_faces > 0 ? target_faces : indices.size() / 3;
         const std::uint64_t instant_faces =
-            (std::max<std::uint64_t>)(4, (target_faces + 1) / 2);
+            (std::max<std::uint64_t>)(4, remesh_budget / 2 + remesh_budget % 2);
         remesh_options.face_count = static_cast<int>(std::min<std::uint64_t>(
             instant_faces,
             static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
         remesh_options.deterministic = true;
+        remesh_options.smooth_iterations = smooth_iterations;
+        photara::core::Logger::instance().info(
+            "instant mesh config: target_triangles=", remesh_budget,
+            " smooth_iterations=", smooth_iterations);
         try {
             auto remeshed = photara_mesh::remesh_field_aligned(
                 positions, indices, remesh_options);
@@ -3191,7 +3375,8 @@ bool repair_and_decimate_mesh(
                 " -> ", remeshed.indices.size() / 3);
             positions = std::move(remeshed.positions);
             indices = std::move(remeshed.indices);
-            retain_largest_edge_component(positions, indices);
+            if (!preserve_components)
+                retain_largest_edge_component(positions, indices);
         } catch (const std::exception& error) {
             photara::core::Logger::instance().warning(
                 "Instant Meshes failed; continuing with CGAL repair: ",
@@ -3206,8 +3391,11 @@ bool repair_and_decimate_mesh(
     auto result = photara_mesh::repair_and_decimate(
         positions, indices,
         photara_mesh::DecimateOptions{
-            static_cast<std::size_t>(target_faces), false});
-    retain_largest_edge_component(result.positions, result.indices);
+            static_cast<std::size_t>(target_faces > 0 ? target_faces : indices.size() / 3), false});
+    // A scene can contain useful disconnected objects. The largest component
+    // may be the surrounding surface rather than the subject being textured.
+    if (!preserve_components)
+        retain_largest_edge_component(result.positions, result.indices);
     photara::mvs::Mesh processed;
     processed.vertices.reserve(result.positions.size() / 3);
     for (std::size_t vertex = 0; vertex < result.positions.size() / 3;
@@ -3262,6 +3450,21 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.backend = cli.backend == "vulkan"
         ? photara::splat::TrainingBackend::vulkan
         : photara::splat::TrainingBackend::cuda;
+    options.checkpoint_path = cli.splat_checkpoint.empty()
+        ? photara::splat::training_checkpoint_path(cli.output) : cli.splat_checkpoint;
+    if (cli.splat_checkpoint.empty()) photara::splat::migrate_training_checkpoints(cli.output);
+    options.checkpoint_project_settings = photara::project::encode_settings(settings_from_cli(cli), options.checkpoint_path);
+    if (project_archive && project_archive->has(photara::project::ChunkType::sfm))
+        options.checkpoint_project_sfm = project_archive->chunk(photara::project::ChunkType::sfm);
+    else if (!cli.working_sfm.empty() && std::filesystem::exists(cli.working_sfm)) {
+        photara::sfm::AsfmOptions read_options; read_options.path_base = cli.images_dir;
+        photara::sfm::AsfmOptions write_options; write_options.path_base = options.checkpoint_path.parent_path();
+        options.checkpoint_project_sfm = photara::sfm::encode_asfm(
+            photara::sfm::load_asfm(cli.working_sfm, read_options), write_options);
+    }
+    options.resume_checkpoint = cli.splat_resume;
+    options.checkpoint_control_file = cli.splat_checkpoint_control;
+    options.checkpoint_interval_seconds = cli.splat_checkpoint_seconds;
     options.iterations = cli.splat_iterations;
     options.log_interval = cli.splat_log_interval;
     options.preview_interval = cli.splat_preview_interval;
@@ -3270,7 +3473,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
     options.preview_ack_file = cli.splat_preview_ack_file;
-    if (cli.gui && cli.capture_mode == "object")
+    if (cli.gui && cli.splat_focus_region)
         options.live_subject_bounds_file = cli.subject_bounds;
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
@@ -3454,7 +3657,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         cli.splat_normal_field_depth_ratio;
     options.normal_field_from_iter = cli.splat_normal_field_from_iter;
     options.profile_cuda = cli.splat_profile_cuda;
-    options.fuse_sh_adam = cli.splat_fuse_sh_adam;
     options.cuda_profile_interval = cli.splat_profile_interval;
     options.minimum_scale_fraction = cli.splat_min_scale_fraction;
     options.maximum_scale_fraction = cli.splat_max_scale_fraction;
@@ -3471,6 +3673,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.use_depth_normal_loss = cli.mesh &&
         cli.splat_depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.splat_depth_normal_weight;
+    if (cli.splat_filter_3d != "auto")
+        options.use_3d_filter = cli.splat_filter_3d == "on";
     options.multi_view_geo_weight = cli.mesh
         ? cli.splat_multi_view_geo_weight
         : 0.F;
@@ -3487,7 +3691,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
             "splat_mv_tail_interval=", cli.splat_multi_view_tail_interval,
             " meshing=1: multi-view geometry supervision runs every ",
             cli.splat_multi_view_tail_interval,
-            " steps, which lowers TSDF mesh quality. Keep interval=1 when the "
+            " steps after ADC growth stops, which lowers TSDF mesh quality. Keep interval=1 when the "
             "mesh is the deliverable.");
     options.multi_view_adaptive_frequency =
         cli.splat_multi_view_adaptive;
@@ -3509,7 +3713,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         cli.splat_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.splat_geometry_from_iter;
     // Keep structural parameters trainable while GGGS geometry supervision is
-    // active. The 3k schedule now matches pygsplat's complete loss stack.
+    // active, starting at step 7000 by default as in GaussianWrapping.
     if ((options.use_depth_normal_loss ||
          options.multi_view_geo_weight > 0.F ||
          options.multi_view_ncc_weight > 0.F) && dense_input)
@@ -3563,7 +3767,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " background_noise=", options.background_noise_strength,
         " cuda_profile=", options.profile_cuda,
         " cuda_profile_interval=", options.cuda_profile_interval,
-        " fuse_sh_adam=", options.fuse_sh_adam,
+        " fuse_sh_adam=auto",
         " fuse_structure_adam=auto",
         " sh_adam=fp16_u_logq8_v",
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
@@ -3595,7 +3799,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " normal_field_weight=", options.normal_field_weight,
         " normal_field_depth_ratio=", options.normal_field_depth_ratio,
         " normal_field_from_iter=", options.normal_field_from_iter,
-        " filter_3d=", options.use_depth_normal_loss,
+        " filter_3d=", options.use_3d_filter.value_or(
+            (options.use_depth_normal_loss && options.depth_normal_weight > 0.F) ||
+            (options.use_normal_field && options.normal_field_weight > 0.F) ||
+            options.multi_view_geo_weight > 0.F || options.multi_view_ncc_weight > 0.F),
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_depth_bracket=", options.multi_view_depth_bracket,
@@ -3804,9 +4011,11 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         };
     }
     photara::splat::GaussianModel gaussians;
+    double training_seconds = 0.0;
     if (cli.splat_mesh_only) {
         gaussians = load_trained_gaussians(cli, project_archive);
     } else {
+    const auto training_started = std::chrono::steady_clock::now();
     gaussians = photara::splat::Trainer(options).train(
             scene,
             [](const photara::splat::TrainingProgress& progress) {
@@ -3846,6 +4055,12 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 return true;
             },
             evaluate, preview, device_preview);
+    training_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - training_started).count();
+    photara::core::Logger::instance().info(
+        "splat_training_completed iterations=", options.iterations,
+        " training_s=", training_seconds,
+        " checkpoint_evaluations=", options.evaluation_iterations.size());
     const std::filesystem::path model_path = splat_file_path(cli);
     if (!model_path.empty()) {
         ensure_artifact_parent(model_path);
@@ -3885,16 +4100,26 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         "splat_model=", model_path,
         " gaussians=", gaussians.size(),
         " training_s=",
-        elapsed);
+        training_seconds,
+        " elapsed_s=", elapsed);
     if (project_archive) {
+        if (options.checkpoint_path == cli.output && std::filesystem::exists(cli.output))
+            *project_archive = photara::project::Archive::open(cli.output);
         project_archive->set_chunk(
             photara::project::ChunkType::gaussians,
             photara::splat::encode_gaussians(gaussians));
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint);
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint_info);
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint_previous);
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint_previous_info);
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint_history);
         project_archive->save(cli.output);
         photara::core::Logger::instance().info(
             "ascan_gaussians=", cli.output, " count=", gaussians.size());
     }
     }
+    if (!cli.gui && !cli.splat_mesh_only)
+        photara::splat::remove_training_checkpoint(options.checkpoint_path);
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {
         photara::splat::PamMeshOptions pam_options;
@@ -3907,12 +4132,19 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 cli.pam_pivot_max_points,
                 (std::numeric_limits<std::size_t>::max)()));
         pam_options.pivot_std_factor = cli.pam_pivot_std_factor;
+        pam_options.pivot_binary_steps = cli.pam_pivot_binary_steps;
+        pam_options.max_resample_rounds = cli.pam_max_resample_rounds;
+        pam_options.scene_crop = cli.pam_scene_crop;
+        pam_options.bounding_box_scaling = cli.pam_bounding_box_scaling;
+        pam_options.pivot_filter_large_edges = cli.pam_pivot_filter_large_edges;
+        pam_options.manifold_cleanup = cli.pam_manifold_cleanup;
         pam_options.gaussian_seed_fraction =
             cli.pam_gaussian_seed_fraction;
         pam_options.refinement_steps = cli.pam_refinement_steps;
         pam_options.vector_field_neighbors = cli.pam_neighbors;
-        pam_options.gpu_refinement = cli.pam_gpu_refinement;
         pam_options.occupancy_chunk_size = static_cast<std::size_t>(cli.pam_occupancy_chunk_size);
+        pam_options.occupancy_cache_host_budget =
+            static_cast<std::size_t>(cli.pam_occupancy_host_cache_mb) * 1024 * 1024;
         pam_options.points_per_tetrahedron =
             cli.pam_points_per_tetrahedron;
         pam_options.occupancy_iso_value =
@@ -3924,8 +4156,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         // An empty seed requests GaussianWrapping's native path:
         // learned-normal pivots -> tetra_triangulation -> marching tetrahedra
         // -> PAM resampling and a second occupancy-classified Delaunay.
+        const auto pam_seed = cli.pam_input_mesh.empty() ? photara::mvs::Mesh{}
+            : photara::mvs::load_mesh_ply(cli.pam_input_mesh);
         auto pam = photara::splat::extract_pam_mesh(
-            gaussians, scene, photara::mvs::Mesh{}, options,
+            gaussians, scene, pam_seed, options,
             pam_options);
         const auto seed_ply = out_dir /
             (cli.output.stem().string() + "_pam_pivot_mesh.ply");
@@ -4298,9 +4532,10 @@ int main(int argc, char** argv) {
                 write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     repair_and_decimate_mesh(
-                        *mesh, cli.mesh_target_faces, cli.mesh_remesh);
+                        *mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                        cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
 #endif
                 const auto mesh_path = cli.output.parent_path() /
                     (cli.output.stem().string() + "_splat_mesh.ply");
@@ -4590,7 +4825,7 @@ int main(int argc, char** argv) {
             photara::splat::initialize_scene_from_sparse_points(
                 splat_scene);
             apply_cli_subject_bounds(cli, splat_scene);
-            if (cli.capture_mode == "object" && cli.subject_bounds.empty() &&
+            if (cli.splat_focus_region && cli.subject_bounds.empty() &&
                 !splat_scene.subject_bounds.valid)
                 throw std::runtime_error(
                     "Could not estimate SubjectBounds from SfM sparse points");
@@ -4625,9 +4860,10 @@ int main(int argc, char** argv) {
                 write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     repair_and_decimate_mesh(
-                        *mesh, cli.mesh_target_faces, cli.mesh_remesh);
+                        *mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                        cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
 #endif
                 splat_scene.mesh = std::move(*mesh);
                 const auto mesh_path =
@@ -4810,11 +5046,11 @@ int main(int argc, char** argv) {
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
 #if defined(PHOTARA_HAS_MESH_TOOLS)
-                if (cli.splat && cli.mesh_target_faces > 0) {
+                if (cli.mesh_postprocess_requested) {
                     try {
                         repair_and_decimate_mesh(
-                            mvs_scene.mesh, cli.mesh_target_faces,
-                            cli.mesh_remesh);
+                            mvs_scene.mesh, cli.mesh_target_faces, cli.mesh_remesh,
+                            cli.mesh_remesh_target_faces, cli.mesh_remesh_smooth_iterations, true);
                     } catch (const std::exception& error) {
                         photara::core::Logger::instance().warning(
                             "photara mesh postprocess failed; retaining cleaned "
@@ -4822,7 +5058,7 @@ int main(int argc, char** argv) {
                     }
                 }
 #else
-                if (cli.splat && cli.mesh_target_faces > 0)
+                if (cli.mesh_postprocess_requested)
                     photara::core::Logger::instance().warning(
                         "photara mesh postprocess unavailable (CGAL mesh tools "
                         "were not built); retaining cleaned mesh");

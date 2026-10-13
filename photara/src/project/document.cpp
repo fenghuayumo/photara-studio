@@ -114,6 +114,15 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.mesh_quality));
     writer.value(static_cast<std::int32_t>(settings.training_mode));
     writer.value(static_cast<std::uint8_t>(settings.speedy_pruning));
+    writer.value(static_cast<std::int32_t>(settings.texture_photometric_steps));
+    writer.value(static_cast<std::int32_t>(settings.texture_seam_steps));
+    writer.value(static_cast<std::uint8_t>(settings.focus_region));
+    writer.value(static_cast<std::int32_t>(settings.mesh_postprocess_quality));
+    writer.value(static_cast<std::uint8_t>(settings.mesh_simplify));
+    writer.value(settings.mesh_target_faces);
+    writer.value(static_cast<std::uint8_t>(settings.mesh_remesh));
+    writer.value(settings.mesh_remesh_target_faces);
+    writer.value(static_cast<std::int32_t>(settings.mesh_remesh_smooth_iterations));
     return writer.take();
 }
 
@@ -230,6 +239,37 @@ Settings decode_settings(
         settings.training_mode = 1;
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.speedy_pruning = reader.value<std::uint8_t>() != 0;
+    // Older projects stored only the quality preset, without custom step counts.
+    settings.texture_photometric_steps = settings.texture_quality == 0 ? 1000
+        : (settings.texture_quality == 2 ? 6000 : 3000);
+    settings.texture_seam_steps = settings.texture_quality == 0 ? 30
+        : (settings.texture_quality == 2 ? 120 : 60);
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.texture_photometric_steps = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.texture_seam_steps = reader.value<std::int32_t>();
+    if (settings.texture_photometric_steps < 1)
+        settings.texture_photometric_steps = 3000;
+    if (settings.texture_seam_steps < 0)
+        settings.texture_seam_steps = 60;
+    // Focus Region is independent of capture mode; projects saved before the
+    // field existed default it off (Settings::focus_region).
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.focus_region = reader.value<std::uint8_t>() != 0;
+    if (version >= 7) {
+        settings.mesh_postprocess_quality = reader.value<std::int32_t>();
+        settings.mesh_simplify = reader.value<std::uint8_t>() != 0;
+        settings.mesh_target_faces = reader.value<std::uint64_t>();
+        settings.mesh_remesh = reader.value<std::uint8_t>() != 0;
+        settings.mesh_remesh_target_faces = reader.value<std::uint64_t>();
+        settings.mesh_remesh_smooth_iterations = reader.value<std::int32_t>();
+        if (settings.mesh_postprocess_quality < 0 || settings.mesh_postprocess_quality > 2)
+            settings.mesh_postprocess_quality = 1;
+        if (settings.mesh_target_faces < 4) settings.mesh_target_faces = 1'000'000;
+        if (settings.mesh_remesh_target_faces < 4) settings.mesh_remesh_target_faces = 1'000'000;
+        if (settings.mesh_remesh_smooth_iterations < 0 || settings.mesh_remesh_smooth_iterations > 10)
+            settings.mesh_remesh_smooth_iterations = 1;
+    }
     return settings;
 }
 
@@ -269,6 +309,11 @@ void replace_sfm_stage(
     const std::filesystem::path& project_file) {
     write_settings(archive, settings, project_file);
     write_sfm(archive, scene, project_file);
+    archive.erase_chunk(ChunkType::training_checkpoint);
+    archive.erase_chunk(ChunkType::training_checkpoint_info);
+    archive.erase_chunk(ChunkType::training_checkpoint_previous);
+    archive.erase_chunk(ChunkType::training_checkpoint_previous_info);
+    archive.erase_chunk(ChunkType::training_checkpoint_history);
     archive.erase_chunk(ChunkType::gaussians);
     archive.erase_chunk(ChunkType::mesh);
     archive.erase_chunk(ChunkType::texture);

@@ -3,6 +3,7 @@
 #include "i18n.hpp"
 #include "io/video_frames.hpp"
 #include "sam/model_cache.hpp"
+#include "splat/checkpoint.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -450,10 +451,25 @@ const char* mesh_method_flag(const int index) {
     }
 }
 
+void append_mesh_postprocess_flags(
+    std::ostringstream& command, const ProjectSettings& settings) {
+    const char* quality = settings.mesh_postprocess_quality == 0 ? "fast" :
+        settings.mesh_postprocess_quality == 2 ? "high" : "standard";
+    command << " --mesh-postprocess-quality " << quality
+            << " --mesh-target-faces "
+            << (settings.mesh_simplify ? std::max<std::uint64_t>(4, settings.mesh_target_faces) : 0)
+            << " --mesh-remesh=" << (settings.mesh_remesh ? "true" : "false")
+            << " --mesh-remesh-target-faces "
+            << std::max<std::uint64_t>(4, settings.mesh_remesh_target_faces)
+            << " --mesh-remesh-smooth-iterations "
+            << std::clamp(settings.mesh_remesh_smooth_iterations, 0, 10);
+}
+
 void append_mesh_quality_flags(
     std::ostringstream& command, const ProjectSettings& settings,
     const int method, const bool from_mvs = false) {
     const auto preset = mesh_quality_preset(settings.mesh_quality);
+    append_mesh_postprocess_flags(command, settings);
     if (from_mvs)
         command << " --dense-quality " << preset.dense_quality;
     if (method == 3 && !from_mvs) {
@@ -462,7 +478,7 @@ void append_mesh_quality_flags(
                 << " --pam-refinement-steps " << preset.pam_steps
                 << " --pam-neighbors " << preset.pam_neighbors
                 << " --pam-points-per-tetrahedron " << preset.pam_cell_samples
-                << " --pam-gpu-refinement=true --pam-occupancy-chunk-size 4000000";
+                << " --pam-occupancy-chunk-size 4000000";
     } else {
         command << " --mesh-max-points " << preset.mesh_points;
         if (method != 2)
@@ -1251,6 +1267,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
             runtime_dir =
                 temp / "Photara" / runtime_cache_key(layout.project_file);
     }
+    layout.training_checkpoint = photara::splat::training_checkpoint_path(layout.project_file);
     layout.working_sfm = runtime_dir / "sfm.bin";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
@@ -1267,13 +1284,14 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.session_dir = session_error
         ? std::filesystem::path("photara_session")
         : session_temp / "Photara" / session_directory_name();
+    layout.training_control = layout.session_dir / "training_control";
     layout.preview_view_file = layout.session_dir / "preview_view";
     layout.preview_camera_file = layout.session_dir / "preview_camera";
     layout.preview_vis_file = layout.session_dir / "preview_vis";
     layout.preview_ack_file = layout.session_dir / "preview_ack";
     layout.align_live = layout.session_dir / "align.live";
     layout.align_preview = layout.session_dir / "align.preview.asfm";
-    layout.working_subject_bounds = layout.session_dir / "subject_bounds.txt";
+    layout.working_subject_bounds = runtime_dir / "subject_bounds.txt";
     // Job stdout for the Console panel. Session temp, not the dataset folder.
     layout.align_log = layout.session_dir / "align.log";
     layout.train_log = layout.session_dir / "train.log";
@@ -1364,10 +1382,15 @@ std::string build_train_command(
                     << quote(settings.dataset_initial_cloud.data());
     }
 
+    command << " --splat-checkpoint " << quote(layout.training_checkpoint)
+            << " --splat-checkpoint-control " << quote(layout.training_control)
+            << " --splat-checkpoint-seconds " << std::clamp(settings.training_autosave_seconds, 0, 86400);
     command << " --splat --backend " << training_backend_flag(settings)
             << " --capture-mode "
-            << (settings.scene_mode ? "scene" : "object");
-    if (!settings.scene_mode) {
+            << (settings.scene_mode ? "scene" : "object")
+            << " --splat-focus-region="
+            << (settings.focus_region ? "true" : "false");
+    if (settings.focus_region) {
         std::error_code bounds_error;
         if (!layout.working_subject_bounds.empty() &&
             std::filesystem::exists(
@@ -1474,8 +1497,10 @@ std::string build_splat_mesh_command(
     }
     command << " --splat --mesh=true --splat-mesh-only"
             << " --capture-mode "
-            << (settings.scene_mode ? "scene" : "object");
-    if (!settings.scene_mode) {
+            << (settings.scene_mode ? "scene" : "object")
+            << " --splat-focus-region="
+            << (settings.focus_region ? "true" : "false");
+    if (settings.focus_region) {
         std::error_code bounds_error;
         if (!layout.working_subject_bounds.empty() &&
             std::filesystem::exists(
@@ -1573,9 +1598,12 @@ std::string build_texture_command(
             << (settings.texture_optimize ? "true" : "false")
             << " --texture-optimize-steps "
             << texture_optimize_steps(settings)
+            << " --texture-seam-steps "
+            << std::max(0, settings.texture_seam_steps)
             << " --texture-color-space "
             << (settings.texture_blend_linear ? "linear" : "srgb");
     if (settings.texture_delight) command << " --delight";
+    append_mesh_postprocess_flags(command, settings);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);

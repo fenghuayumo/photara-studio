@@ -519,14 +519,16 @@ void SplatEdit::clear() {
     selected_count_ = 0;
     sh_degree_ = 0;
     sh_bases_ = 1;
-    centers_.clear();
-    log_scales_.clear();
-    quaternions_.clear();
-    opacity_.clear();
-    sh_.clear();
-    normals_.clear();
-    filter_.clear();
-    selected_.clear();
+    // Clearing the model must return its host storage, not retain capacities
+    // alongside the next training process's image/model allocations.
+    std::vector<float>{}.swap(centers_);
+    std::vector<float>{}.swap(log_scales_);
+    std::vector<float>{}.swap(quaternions_);
+    std::vector<float>{}.swap(opacity_);
+    std::vector<float>{}.swap(sh_);
+    std::vector<float>{}.swap(normals_);
+    std::vector<float>{}.swap(filter_);
+    std::vector<std::uint8_t>{}.swap(selected_);
     polygon_.clear();
     undo_.clear();
     redo_.clear();

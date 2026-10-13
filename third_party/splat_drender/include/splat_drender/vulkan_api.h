@@ -241,7 +241,7 @@ struct SplatDevicePhotometricOutput {
 // raster shaders, so Adam can update these exact buffers in place.
 struct SplatDeviceGaussians {
     SplatBufferView means;           // [N,3]
-    SplatBufferView sh;              // [N,B,3]
+    SplatBufferView sh;              // [N,B,3], or signed [N,3] if colors_precomputed
     SplatBufferView log_scales;      // [N,3]
     SplatBufferView raw_rotations;   // [N,4]
     SplatBufferView opacity_logits;  // [N]
@@ -249,6 +249,7 @@ struct SplatDeviceGaussians {
     std::uint32_t count = 0;
     std::uint32_t sh_degree = 0;
     std::uint32_t sh_bases = 0;
+    bool colors_precomputed = false;
 };
 
 // 8-bit RGBA frame that stayed on the device. The buffer is owned by the
@@ -340,6 +341,16 @@ struct SplatSHAdamUpdate {
     std::array<float, 8> settings{}; // DC/rest LR, beta1/2, corrections1/2, epsilon, regularization
 };
 
+// Fused raw structure update; consumes the same buffers bound by render().
+// Moment views are means/scales/rotations/opacity, first then second per group.
+struct SplatStructureAdamUpdate {
+    std::array<SplatBufferView, 8> moments;
+    // LRs (4), beta1/2, corrections1/2, epsilon, scale min/max/ratio,
+    // opacity regularization, scale regularization.
+    std::array<float, 14> settings{};
+    bool capture_opacity_gradient{};
+};
+
 // Vulkan EWA forward rasterizer. The per-Gaussian state, sorted instances, and
 // pixel snapshots from the latest forward() stay alive for a later backward pass.
 class SplatRasterizer {
@@ -379,6 +390,12 @@ public:
     [[nodiscard]] SplatDeviceFrame render_device_copy(
         const SplatCamera& camera, const SplatSettings& settings,
         const SplatDeviceFrame& destination);
+    // Reblend precomputed colors using the latest geometry projection/sort.
+    // Consume primary backward first and keep model parameters unchanged.
+    // Overwrites the previous colors, attachments and snapshots.
+    [[nodiscard]] SplatDeviceFrame render_colors_device_copy(
+        const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
+        const SplatSettings& settings, const SplatDeviceFrame& destination);
     // Copies selected attachments into caller-owned VkBuffer slices on the
     // adopted device. Empty destination slices are skipped. This is the bridge
     // used by backend-neutral tensor code without staging through the CPU.
@@ -422,12 +439,20 @@ public:
     // covariance slots between rotations and log_scales. Slots that do not
     // apply to the uploaded representation remain zero. With sh_adam, the SH
     // slots are omitted and parameters/state are updated directly in backward.
+    // With structure_adam (requires sh_adam and raw scale/rotation parameters),
+    // only [refine_weight, optional regularized opacity-logit gradient] is
+    // written. Structural parameters and FP32 moments update in projection
+    // backward after all old-row reads; model_gradient_float_count() describes
+    // the unfused layout, so this output needs N or 2*N floats instead.
+    // In-place structure updates invalidate projection reuse and this frame's
+    // backward snapshots; render a fresh frame before another backward.
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
         const SplatBufferView& packed_model_gradients,
         const SplatBufferView& dL_median_depth = {},
         const SplatBufferView& dL_normal = {},
-        const SplatSHAdamUpdate* sh_adam = nullptr);
+        const SplatSHAdamUpdate* sh_adam = nullptr,
+        const SplatStructureAdamUpdate* structure_adam = nullptr);
     [[nodiscard]] std::uint64_t model_gradient_float_count() const noexcept;
     // GGGS multi-view median-depth query and its complete backward pass.
     // sample_depth_backward consumes the most recent sample_depth call.
@@ -442,10 +467,24 @@ public:
         const SplatBufferView& world_points, std::uint32_t point_count,
         const SplatCamera& camera, const SplatSettings& settings,
         const SplatBufferView& camera_points, const SplatBufferView& inside);
+    // Forward-only integrated occupancy; inside denotes frustum visibility,
+    // including rays whose occupancy is zero.
+    // reuse_prepared_view queries the preceding occupancy call's projection.
+    // Model, camera and settings must match, with no intervening bind or frame.
+    void occupancy_device(
+        const SplatBufferView& world_points, std::uint32_t point_count,
+        const SplatCamera& camera, const SplatSettings& settings,
+        const SplatBufferView& occupancy, const SplatBufferView& inside,
+        bool reuse_prepared_view = false);
     void sample_depth_backward_device(
         const SplatBufferView& dL_camera_points,
         const SplatBufferView& packed_model_gradients,
-        const SplatBufferView& point_gradients);
+        const SplatBufferView& point_gradients,
+        bool omit_appearance_gradients = false);
+    // Depth queries have zero appearance derivatives. The optional layout
+    // removes the SH/color section and otherwise preserves the model layout.
+    [[nodiscard]] std::uint64_t sample_gradient_float_count(
+        bool omit_appearance_gradients = false) const noexcept;
     void multi_view_loss_device(
         const SplatDeviceMultiViewInput& input,
         const SplatDeviceMultiViewOutput& output);

@@ -2,6 +2,7 @@
 
 #include "core/data_types.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -163,11 +164,24 @@ void adaptive_avg_pool2d(const Tensor& src, Tensor& dst, int h_out, int w_out);
 Tensor multinomial(const Tensor& weights, int num_samples, bool replacement);
 std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending);
 
+// Exact finite per-axis quantiles of float32 [N,3], returned as min.xyz/max.xyz.
+// All six ranks are resolved on the GPU; only six floats are downloaded.
+std::array<float, 6> quantile_bounds(const Tensor& means, float percentile);
+
+// Up to three equally sized Bool masks; one scalar-vector readback, no scan scratch.
+std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks);
+// Compact using an already known count, avoiding another scalar readback.
+Tensor nonzero(const Tensor& src, std::size_t known_count);
+// Gather retained rows (invalid indices mean identity) and append values or
+// zero optimizer rows into one final allocation and dispatch.
+Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
+                         const Tensor& added, std::size_t added_rows);
+
 // Exact order statistics over a Float32 array, restricted to the rows `mask`
 // selects (a Bool array of the same length, or an invalid tensor for "all
 // rows"). Both are the device form of sorting a masked copy and taking the
-// front of it, but they cost two histogram passes and one emit pass instead of
-// a full bitonic sort's log2(n)^2 dispatches.
+// front of it. Histogram thresholds stay on the GPU instead of downloading
+// histogram bins; only the selected scalar/count crosses to the host.
 //
 // `rank` is 1-based: select_nth_value writes the exact `rank`-th value in the
 // requested direction and returns false when nothing qualifies.

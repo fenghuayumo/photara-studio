@@ -41,6 +41,9 @@
 #include "scan_block.hlsl.embedded.hpp"
 #include "scatter.hlsl.embedded.hpp"
 #include "select.hlsl.embedded.hpp"
+#include "quantile_bounds.hlsl.embedded.hpp"
+#include "count_masks.hlsl.embedded.hpp"
+#include "remap_append.hlsl.embedded.hpp"
 #include "select_compact.hlsl.embedded.hpp"
 #include "sort_bitonic.hlsl.embedded.hpp"
 #include "strided_copy.hlsl.embedded.hpp"
@@ -143,7 +146,7 @@ const char* shader_name(const ShaderId shader) {
         "cumsum",      "pool",        "scatter",         "select_compact",
         "cat",         "unpack_rgba", "sort_bitonic", "prune",        "panorama_sizes", "select",
         "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan",
-        "constrain_scale_ratio", "sh_adam_quant"};
+        "constrain_scale_ratio", "sh_adam_quant", "quantile_bounds", "count_masks", "remap_append"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -290,7 +293,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::SortBitonic, as_bytes(span{sort_bitonic_hlsl_spv}), 4, 28},
         {ShaderId::Prune, as_bytes(span{prune_hlsl_spv}), 8, 44},
         {ShaderId::PanoramaSizes, as_bytes(span{panorama_sizes_hlsl_spv}), 4, 24},
-        {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 4, 56},
+        {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 5, 40},
         {ShaderId::Gather, as_bytes(span{gather_hlsl_spv}), 3, 104},
         {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
         {ShaderId::ReduceAxis, as_bytes(span{reduce_axis_hlsl_spv}), 2, 44},
@@ -298,6 +301,9 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::ConstrainScaleRatio,
          as_bytes(span{constrain_scale_ratio_hlsl_spv}), 1, 8},
         {ShaderId::ShAdamQuant, as_bytes(span{sh_adam_quant_hlsl_spv}), 5, 68},
+        {ShaderId::QuantileBounds, as_bytes(span{quantile_bounds_hlsl_spv}), 4, 20},
+        {ShaderId::CountMasks, as_bytes(span{count_masks_hlsl_spv}), 4, 16},
+        {ShaderId::RemapAppend, as_bytes(span{remap_append_hlsl_spv}), 4, 40},
     }};
 }
 

@@ -141,8 +141,10 @@ gradients stay on the shared Vulkan device; only reduced logging terms are
 read back. Filter refresh follows resolution changes, topology changes, and
 the configured periodic schedule. Adaptive multi-view statistics are also
 computed on Vulkan. Native fisheye/equirectangular training still disables
-the pinhole geometry losses. Learned normal fields, external MVS targets, and
-transparent-alpha supervision remain unsupported by the Vulkan trainer.
+the pinhole geometry losses. Learned normal fields also run on Vulkan using
+signed precomputed-color rasterization, world-to-camera field consistency,
+and independent feature Adam state. External MVS targets and transparent-alpha
+supervision remain unsupported by the Vulkan trainer.
 
 ## 7. Learned normal field and PAM
 
@@ -154,24 +156,63 @@ state and follows clone, split, prune, and recycle operations.
 PAM (`--mesh --mesh-method pam`) is available in CGAL-enabled builds and does
 not use TSDF:
 
-1. Create center/normal-offset pivots from selected Gaussians.
+1. Create center/normal-offset pivots from every Gaussian by default.
 2. Evaluate multi-view occupancy and build a Delaunay tetrahedralization.
-3. Extract a pivot mesh with Marching Tetrahedra.
-4. Sample refinement candidates by projected face importance.
+3. Extract a pivot mesh with Marching Tetrahedra and refine intersected edges
+   with eight binary-search steps (GW's default).
+4. Crop the initial mesh with GW's default scene box, then sample candidates
+   by face area / nearest-visible-camera-distance squared.
 5. Project candidates toward the occupancy isosurface with the learned normal
-   field.
+   field, resampling until the candidate budget is filled by default.
 6. Tetrahedralize again and extract the occupied/free boundary.
 
+PAM follows the model device: CUDA and Vulkan both provide integrated occupancy
+queries and exact KD-tree vector-field projection (up to 64 neighbours). Vulkan
+keeps the model and refinement points on its device; KD-tree construction and
+CGAL tetrahedralization remain CPU stages. `--splat-mesh-only --backend vulkan`
+loads the saved model directly on Vulkan. Both backends always use device
+vector-field projection; the CPU numerical oracle is confined to tests.
+CUDA reuses the active view's draw list across consecutive point chunks, including
+host-spilled and uncached views. PAM selects a pageable host cache from available
+RAM, leaving 4 GiB plus half the remaining headroom for staging, Delaunay and other
+applications, with an 8 GiB cache ceiling. `--pam-occupancy-host-cache-mb` overrides
+this budget (0 selects automatic sizing). Quality presets and sample counts are
+unaffected. The default 32-neighbour and High 48-neighbour CUDA kernels use smaller
+private heaps than the 64-neighbour fallback.
+GW PLY opacity logits of positive/negative infinity are loaded as finite logits
+with the same saturated float32 sigmoid values; NaNs remain rejected.
+
 Foreground mask views contribute occupancy; explicit background votes empty;
-views outside the frustum abstain. PAM processes the full scene and does not
-apply camera focus, automatic ROI, `SubjectBounds`, or an external convex-hull
-crop. Intermediate outputs include `*_pam_pivot_mesh.ply` and
+views outside the frustum abstain. When `--splat-eval-split-every` is enabled,
+PAM uses the same training views as training, excluding held-out views from
+occupancy queries and camera-weighted sampling. The default scene crop is a
+cube centered at the world origin. Its half extent is 1.1 times the largest
+training-camera distance from the mean camera center, multiplied by
+`--pam-bounding-box-scaling`. Faces crossing the crop boundary are discarded,
+matching Open3D/GW; they are not clipped. This does not implement GW's optional
+ground-truth transform or Blender convex-hull crop modes.
+Intermediate outputs include the uncropped `*_pam_pivot_mesh.ply` and
 `*_pam_candidates.ply`.
 
-Important options include `--pam-pivot-max-points`,
-`--pam-pivot-std-factor`, `--pam-max-points`, `--pam-refinement-steps`,
+`--pam-input-mesh` reuses an existing GW initial PLY mesh. Without it, the
+initial mesh is generated natively. `--pam-pivot-max-points=0` uses all
+Gaussians; a positive cap uniformly subsamples Gaussians as an explicit
+resource-saving extension. Long-edge filtering defaults off as in GW;
+`--pam-pivot-filter-large-edges=true` enables it. Initial occupancy follows
+GW's mask > 0.5 validity rule with background abstaining, whereas PAM
+refinement uses the separate mask-background threshold and empty votes.
+Both use GW's grid_sample pixel-center/align_corners convention.
+The final boundary preserves GW's raw connectivity by default;
+`--pam-manifold-cleanup=true` enables CGAL singular-vertex splitting.
+
+Important options include `--pam-scene-crop`, `--pam-pivot-max-points`,
+`--pam-pivot-std-factor`, `--pam-pivot-binary-steps` (8; 0 uses linear
+interpolation), `--pam-max-resample-rounds` (0 fills the budget; a positive
+value caps the rounds), `--pam-max-points`, `--pam-refinement-steps`,
 `--pam-neighbors`, `--pam-points-per-tetrahedron`, and
 `--pam-occupancy-iso-value`.
+Unlimited resampling reports an error if three consecutive rounds accept no
+points, rather than remaining stuck on an incompatible seed or isovalue.
 
 ## 8. Densification strategies
 
@@ -294,13 +335,9 @@ build\photara\Release\photara.exe `
   transaction, while 32 lane-parallel loads pay one round trip per 32 pixels
   and read out_u/out_f/loss_color contiguously. Lane j's staged values reach
   the rest of the subgroup through the same `WaveReadLaneAt` broadcast, so the
-  arithmetic is unchanged. On the glass dataset this cuts the blend backward
-  from 2.90 ms to 2.33 ms per iteration.
-- Do not chase Vulkan forward dispatch count as a proxy for host cost: removing
-  22 dispatches per frame (a single-block scan for the radix histograms) moved
-  neither the host-side stage time nor the step time, so a dispatch is worth
-  about a microsecond, not the ten a per-dispatch model would predict. Measure
-  the stage, not the op count.
+  arithmetic is unchanged.
+- Measure Vulkan host-side stage cost directly; dispatch count alone does not
+  predict iteration time.
 - Do not drain the Vulkan queue at the end of a stage that only feeds later GPU
   work. The queue is in order, so the next stage already sees the previous one's
   writes; draining there only stops the host from recording the next stage (and
@@ -313,14 +350,8 @@ build\photara\Release\photara.exe `
   rasterizer keeps a command buffer / fence ring (a submission no longer frees
   its command buffer to be reset), double buffers the per-frame camera
   constants, and a growth that replaces a live buffer waits for the queue
-  first. Remeasured drain cost (`splat_vulkan_flush_profile`, temporary
-  instrumentation): 1.19 ms per flush at four flushes per iteration, so the
-  serialization was worth more than the drain call itself.
-- The backward blend's cost was never its subgroup math: disabling only the
-  gradient commit measured 0.08 ms of blend at the glass training scale, so
-  of the 2.2 ms kernel about 2.1 ms was the CAS retry loop in
-  `commit_gradient` - 18M highly contended compare-exchanges per iteration
-  across instances of the same Gaussian. When the device enables
+  first.
+- When the device enables
   `VK_EXT_shader_atomic_float` with `shaderBufferFloat32AtomicAdd` (both the
   TinyTensor shared device and splat_drender's own device do so when
   available), the `splat_blend_backward_no_geometry_atomic.hlsl` variant
@@ -328,26 +359,8 @@ build\photara\Release\photara.exe `
   `[[vk::ext_extension("SPV_EXT_shader_atomic_float_add")]]` +
   `[[vk::ext_capability(6033)]]` + `[[vk::ext_instruction(6035)]]` (the value
   operands must not be `[[vk::ext_reference]]`, which passes variable ids
-  where the instruction needs constant ids). Blend backward drops 2.19 ->
-  1.66 ms and the whole backward (fill+blend+project) reaches CUDA's number,
-  1.89 vs 1.86-1.90 ms, where CUDA's figure also carries its fused SH Adam.
+  where the instruction needs constant ids).
   Devices without the extension keep the CAS subgroup shader as fallback.
-- CUDA's diagonal-wavefront backward blend was ported correctly and is not
-  worth landing: `WavePrefixProduct/Sum` lower to single hardware
-  `OpGroupNonUniformF* ExclusiveScan` instructions, so the broadcast+prefix
-  form costs about as many warp instructions as the wavefront's eleven
-  shuffles per step, and the wavefront's serial per-bucket dependency chain
-  gives back what the shuffle count saves. Measured on glass at training
-  scale: 2.42 ms with a correct subgroup-scoped control barrier, 3.3 ms with
-  a workgroup barrier (single- or two-subgroup workgroups), against 2.19 ms
-  for the prefix form. A subgroup-scoped barrier IS spellable in DXC -
-  `OpControlBarrier` via `[[vk::ext_instruction(224)]]` with plain value
-  parameters for scope (3 = Subgroup) and semantics (0x108) - the earlier
-  failed attempt passed them as `[[vk::ext_reference]]` variable ids. Two
-  further reductions did not pay either: folding the staged constants from 13
-  scalar broadcasts into two float4 ones changed nothing (the subgroup math
-  is not the bound), and re-reading the riding constants from L1 per step
-  instead was slower.
 - Record needed Vulkan frame-to-tensor attachment copies in the same command
   buffer as the final blend dispatch, with buffer-scoped compute-to-transfer
   barriers. RGB/alpha copies are skipped for Vulkan training views because the
@@ -358,8 +371,8 @@ build\photara\Release\photara.exe `
   a bounded LRU instead of re-uploading every host-cached view.
 - Size backward snapshot storage for the channels the frame records. The
   color-only path writes one float4 per bucket/pixel; the geometry path also
-  writes a second float4 for normals. Allocating the second plane for ordinary
-  training added hundreds of MiB to the live workspace on 1080p glass views.
+  writes a second float4 for normals. Ordinary RGB training does not allocate
+  the normal snapshot plane.
 - Upload Vulkan training images in their packed RGBA form and expand them into
   the planar float planes on the device (`unpack_rgba.hlsl` in the TinyTensor
   Vulkan backend, called from `upload_training_view`). The host conversion it
@@ -380,6 +393,48 @@ build\photara\Release\photara.exe `
   the per-dispatch host cost that dominates a Vulkan frame with dozens of small
   compute passes. Descriptor-set binding remains the fallback for devices
   without the extension.
+- Reuse the depth-query tile counts/order in Vulkan sample backward. Each
+  128-thread group stages projected splats once for its point batch, then
+  32-lane subgroups sum the mean/conic/opacity/ray-plane gradients before
+  global atomics. Skip reductions for waves with no contribution. Tail and
+  invalid points still reach all barriers; off-screen point gradients are
+  cleared before dispatch. Devices without 32-lane arithmetic/vote support
+  retain the per-point path. Native float atomics and CAS remain supported.
+  `SPLAT_DRENDER_DISABLE_TILED_SAMPLE_BACKWARD=1` selects the reference path;
+  disabling tiled depth queries also selects that path because no grouping
+  state exists to reuse.
+- After primary backward, the Vulkan learned-normal render uses
+  `RasterizeOptions::reuse_projection` to refresh only precomputed feature
+  colors and reblend. It preserves projected geometry, radii, sorted instances,
+  tile ranges and bucket offsets, while regenerating attachments and snapshots
+  for its own backward. The model geometry must remain unchanged until this
+  auxiliary backward completes; camera/projection settings and geometry buffer
+  identity are checked before reuse. CUDA keeps its existing path.
+  `SPLAT_VULKAN_DISABLE_NORMAL_REUSE=1` selects a full auxiliary forward for A/B
+  comparison. Keep the primary owned radii/visibility tensors for ADC because
+  the auxiliary render overwrites the backend's internal attachments.
+- Vulkan's default RGB path fuses FP32 Adam for means, log scales, raw
+  quaternions and opacity logits into projection backward, together with SH
+  Adam. Intermediate structure gradients remain invocation-local; only ADC
+  refine weights (and an optional diagnostic opacity gradient) are written.
+  At one million Gaussians this removes 76 MB of packed-gradient output and
+  four independent optimizer dispatches. Scale bounds/ratio, finite-value
+  handling, opacity/scale priors and moment decay for culled rows are preserved.
+  No additional performance-selection environment variable is introduced.
+  Auxiliary gradient merges, shape regularizers, frozen structure and empty
+  renders retain their distinct required update paths.
+- Pinhole RGB training uses a compile-time specialization of the Vulkan fused
+  projection backward and Adam shader. It removes other camera models,
+  covariance-only parameters and geometry-gradient branches, and indexes the
+  invocation-local SH gradient by subtracting its row base. The specialization
+  uses the same buffers and compressed SH optimizer state, with no additional
+  workspace or performance-selection switch. Geometry attachments and other
+  camera types use the general shader.
+- `photara_splat_vulkan_parity --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW]`
+  compares the current CUDA and Vulkan RGB render/loss/fused backward+Adam
+  chain from the same initial model and camera. Three warmups are excluded;
+  phase boundaries synchronize both backends, so these are isolated compute
+  timings, excluding ADC, data loading and normal production queue overlap.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the
@@ -404,9 +459,9 @@ build\photara\Release\photara.exe `
   count, strategy, and iteration schedule as part of every benchmark.
 
 Dataset-specific Nsight captures and A/B tables belong under `artifacts/`.
-Architecture documentation records the stable conclusions: sample-depth
-backward is generally more expensive than forward, occupancy varies strongly
-with scene coverage, and scheduling changes must be validated for geometry
+Architecture documentation records the stable conclusions: sample-depth cost
+and occupancy vary with scene coverage and reduction strategy, and scheduling
+changes must be validated for geometry
 quality rather than timing alone.
 
 ## 13. Validation
@@ -418,7 +473,9 @@ runs, mesh extraction, and finite exported model values.
 
 `photara.splat.vulkan_geometry` (`photara_splat_test --vulkan-geometry-only`)
 checks depth-normal finite differences, CUDA/Vulkan filter and full MV gradient
-parity, masked planar NCC, deferred statistics, and synthetic training through
+parity, grouped-query tails and invalid points, reused normal-field render/
+gradient parity and changed-camera rejection, masked planar NCC, deferred
+statistics, and synthetic training through
 densification, resolution changes, and TSDF extraction. These are numerical and
 integration gates; real-scene mesh quality still needs dataset evaluation.
 

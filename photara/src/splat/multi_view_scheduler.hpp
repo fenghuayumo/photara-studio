@@ -6,8 +6,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 
 namespace photara::splat::detail {
+
+[[nodiscard]] constexpr bool tail_multi_view_scheduled(
+    const unsigned iteration, const unsigned grow_stop_iteration,
+    const unsigned interval) noexcept {
+    return iteration <= grow_stop_iteration ||
+        (iteration - grow_stop_iteration) % std::max(1U, interval) == 0;
+}
 
 struct GeometryStabilitySample {
     std::size_t gaussian_count{};
@@ -45,6 +53,22 @@ public:
           distribution_threshold_(
               options.multi_view_adaptive_distribution_threshold) {}
 
+    struct CheckpointState {
+        unsigned interval{1};
+        unsigned stable_refinements{};
+        bool has_previous{};
+        GeometryStabilitySample previous;
+    };
+    [[nodiscard]] CheckpointState checkpoint_state() const {
+        return {interval_, stable_refinements_, has_previous_, previous_};
+    }
+    void restore_checkpoint_state(const CheckpointState& state) {
+        if (!state.interval || state.interval > maximum_interval_ ||
+            state.stable_refinements >= required_stable_refinements_)
+            throw std::runtime_error("Invalid checkpoint scheduler state");
+        interval_ = state.interval; stable_refinements_ = state.stable_refinements;
+        has_previous_ = state.has_previous; previous_ = state.previous;
+    }
     [[nodiscard]] unsigned interval() const noexcept { return interval_; }
 
     GeometryStabilityDecision invalidate() noexcept {

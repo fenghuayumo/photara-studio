@@ -444,8 +444,6 @@ Action draw_inspector(App& app) {
             app.settings.speedy_pruning != preset.speedy_pruning;
         if (ImGui::BeginCombo("##training_mode", customized ? tr("Custom") : modes[mode])) {
             for (int index = 0; index < 3; ++index) {
-                // Sensitivity scoring currently requires the CUDA rasterizer.
-                ImGui::BeginDisabled(index == 0 && app.settings.training_backend == 1);
                 if (ImGui::Selectable(modes[index], !customized && mode == index)) {
                     const auto selected = photara::splat::training_preset(
                         static_cast<photara::splat::TrainingMode>(index));
@@ -454,7 +452,6 @@ Action draw_inspector(App& app) {
                     app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
                     app.settings.speedy_pruning = selected.speedy_pruning;
                 }
-                ImGui::EndDisabled();
             }
             ImGui::EndCombo();
         }
@@ -470,9 +467,18 @@ Action draw_inspector(App& app) {
             app.settings.scene_mode = capture_index == 1;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
-                "Object uses the reconstruction region as Splat SubjectBounds "
-                "(focus region).\n"
-                "Scene trains unbounded and ignores the box."));
+                "Object captures a bounded subject; Scene keeps distant\n"
+                "background geometry."));
+        if (ImGui::Checkbox(
+                tr("Focus Region"), &app.settings.focus_region) &&
+            app.settings.focus_region)
+            app.view_options.show_region = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Constrain splat training to the reconstruction region.\n"
+                "Works with both Object and Scene capture. Turning it on\n"
+                "shows the editable box; hiding the box later only changes\n"
+                "the display and never disables the training constraint."));
         theme::caption("Densification strategy");
         ImGui::SetNextItemWidth(-1.F);
         const char* strategies[] = {
@@ -756,6 +762,45 @@ Action draw_inspector(App& app) {
                 "Appearance-only. Train 3DGS without extracting a surface.");
             ImGui::PopTextWrapPos();
         }
+        ImGui::Spacing();
+        if (ImGui::TreeNodeEx(tr("Mesh postprocessing"),
+                ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            ImGui::PushTextWrapPos(0.F);
+            theme::caption("Applied during mesh extraction and texture baking. Manifold repair runs before UV unwrapping.");
+            ImGui::PopTextWrapPos();
+            theme::caption("Postprocessing quality");
+            const char* qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::Combo("##mesh_post_quality", &app.settings.mesh_postprocess_quality,
+                    qualities, 3))
+                apply_mesh_postprocess_preset(app.settings);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Fast: 500,000 faces, no remesh smoothing.\nStandard: 1,000,000 faces, 1 smoothing iteration.\nHigh: 2,000,000 faces, 2 smoothing iterations.\nPresets set budgets; enable simplification or remeshing separately."));
+            ImGui::Checkbox(tr("Simplify mesh"), &app.settings.mesh_simplify);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Reduce faces only when the mesh exceeds the target. Keep useful disconnected components."));
+            ImGui::BeginDisabled(!app.settings.mesh_simplify);
+            theme::caption("Target triangle count");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputScalar("##mesh_target", ImGuiDataType_U64, &app.settings.mesh_target_faces))
+                app.settings.mesh_target_faces = std::max<std::uint64_t>(4, app.settings.mesh_target_faces);
+            ImGui::EndDisabled();
+            ImGui::Checkbox(tr("Remesh surface"), &app.settings.mesh_remesh);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Rebuild triangle layout with Instant Meshes. Changes geometry and can affect thin structures. Runs independently of simplification."));
+            if (app.settings.mesh_remesh) {
+                theme::caption("Remesh triangle budget");
+                ImGui::SetNextItemWidth(-1.F);
+                if (ImGui::InputScalar("##mesh_remesh_target", ImGuiDataType_U64,
+                        &app.settings.mesh_remesh_target_faces))
+                    app.settings.mesh_remesh_target_faces = std::max<std::uint64_t>(4, app.settings.mesh_remesh_target_faces);
+                theme::caption("Remesh smoothing iterations");
+                ImGui::SetNextItemWidth(-1.F);
+                if (ImGui::InputInt("##mesh_remesh_smooth", &app.settings.mesh_remesh_smooth_iterations))
+                    app.settings.mesh_remesh_smooth_iterations = std::clamp(app.settings.mesh_remesh_smooth_iterations, 0, 10);
+            }
+            ImGui::TreePop();
+        }
         ImGui::EndDisabled();
         if (theme::toolbar_button(
                 "Export Mesh", {-1.F, 28.F},
@@ -792,8 +837,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Fast: 1024 atlas, projection only.\n"
-                "Standard: 2048 atlas + photometric refine.\n"
-                "High: 4096 atlas + longer refine.");
+                "Standard: 2048 atlas, 3000 photometric + 60 seam iterations.\n"
+                "High: 4096 atlas, 6000 photometric + 120 seam iterations.");
         theme::caption("Atlas size");
         ImGui::SetNextItemWidth(-1.F);
         int atlas_index = app.settings.atlas_resolution >= 8192
@@ -830,6 +875,20 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Photometric + seam optimization in photara_drender after the "
                 "projective bake. Off is faster; on cleans view seams.");
+        if (app.settings.texture_optimize) {
+            theme::caption("Photometric iterations");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputInt("##tex_photo_steps", &app.settings.texture_photometric_steps, 100, 1000))
+                app.settings.texture_photometric_steps = std::max(1, app.settings.texture_photometric_steps);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Iterations to fit the atlas colors to the photographs."));
+            theme::caption("Seam iterations");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputInt("##tex_seam_steps", &app.settings.texture_seam_steps, 10, 100))
+                app.settings.texture_seam_steps = std::max(0, app.settings.texture_seam_steps);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Iterations to match colors across UV seams. Set to 0 to skip."));
+        }
         ImGui::EndDisabled();
         if (app.has_texture) {
             ImGui::Spacing();
@@ -892,10 +951,11 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(
             tr("Show reconstruction region"), &app.view_options.show_region);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Splat object-mode SubjectBounds / focus region.\n"
+            ImGui::SetTooltip("%s", tr(
+                "Display-only overlay of the reconstruction region.\n"
                 "Drag the center arrows to move the box, or a face dot\n"
-                "to resize. Object training follows this volume live.");
+                "to resize. Training follows it live only while the Focus\n"
+                "Region checkbox is on; hiding the box never disables it."));
         if (app.reconstruction_box.valid) {
             const Vec3 size = app.reconstruction_box.size();
             ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
@@ -909,8 +969,9 @@ Action draw_inspector(App& app) {
                 write_working_subject_bounds(app);
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Reset to the SfM SubjectBounds used by Splat object mode.");
+                ImGui::SetTooltip("%s", tr(
+                    "Reset to the SfM-estimated SubjectBounds for the "
+                    "focus region."));
         }
         ImGui::Spacing();
     }
@@ -1209,8 +1270,18 @@ Action draw_inspector(App& app) {
     const char* const bake_tip = app.has_texture
         ? "Unwrap UVs again and reproject the calibrated photos onto the current mesh."
         : "Unwrap UVs and project the calibrated photos onto the current mesh.";
+    if (!busy && app.training_checkpoint_info) {
+        const auto& info = *app.training_checkpoint_info;
+        ImGui::Text("%s: %u / %u", tr("Saved Training Progress"), info.iteration, info.total_iterations);
+        if (theme::primary_button("Resume Training##checkpoint", {-1.F, 40.F}, true)) {
+            action = Action::continue_training;
+        }
+    }
     ImGui::Dummy({0, 10.F});
-    if (busy) {
+    if (busy && app.saving_training) {
+        ImGui::TextWrapped("%s", tr("Saving project and training progress. Please wait."));
+        if (ImGui::Button(tr("Cancel"), {-1.F, 36.F})) cancel_project_save(app);
+    } else if (busy) {
         if (app.job.paused()) {
             if (icons::labeled_button(
                     "##resume_job", icons::Icon::play,

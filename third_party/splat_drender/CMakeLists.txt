@@ -10,6 +10,20 @@ endif()
 
 find_package(CUDAToolkit 12.0 REQUIRED)
 
+option(SPLAT_DRENDER_BUILD_TESTS "Build CUDA geometry gradient checks" OFF)
+if(SPLAT_DRENDER_BUILD_TESTS)
+    enable_testing()
+    add_executable(splat_geometry_gradient_test tests/geometry_gradient_test.cu)
+    target_include_directories(splat_geometry_gradient_test PRIVATE include src)
+    target_link_libraries(splat_geometry_gradient_test PRIVATE CUDA::cudart)
+    target_compile_options(splat_geometry_gradient_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-use_fast_math>)
+    set_target_properties(splat_geometry_gradient_test PROPERTIES
+        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    add_test(NAME splat_drender.geometry_gradient COMMAND splat_geometry_gradient_test)
+endif()
+
 add_library(splat_drender STATIC
     src/pipeline.cu
     src/render_forward.cu
@@ -71,15 +85,25 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_pruning_scores_atomic.hlsl
             shaders/splat_median_backward.hlsl
             shaders/splat_blend_backward.hlsl
+            shaders/splat_blend_backward_geometry_subgroup.hlsl
+            shaders/splat_blend_backward_geometry_atomic.hlsl
             shaders/splat_blend_backward_no_geometry.hlsl
             shaders/splat_blend_backward_no_geometry_subgroup.hlsl
             shaders/splat_blend_backward_no_geometry_atomic.hlsl
             shaders/splat_sample_depth.hlsl
+            shaders/splat_occupancy.hlsl
+            shaders/splat_sample_depth_group.hlsl
+            shaders/splat_sample_depth_tiled.hlsl
             shaders/splat_sample_depth_backward.hlsl
+            shaders/splat_sample_depth_backward_tiled.hlsl
+            shaders/splat_sample_depth_backward_tiled_atomic.hlsl
+            shaders/splat_sample_depth_backward_atomic.hlsl
             shaders/splat_multi_view.hlsl
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
             shaders/splat_project_backward_sh_adam.hlsl
+            shaders/splat_project_backward_structure_adam.hlsl
+            shaders/splat_project_backward_pinhole_rgb_adam.hlsl
             shaders/splat_pack_rgba.hlsl
             shaders/splat_blend_rings.hlsl)
         # Photometric training shaders belong to Photara's splat backend, not
@@ -118,11 +142,16 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward_structure_adam.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_structure_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_pruning_scores.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward_geometry_subgroup.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sample_depth_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sample_depth_backward_tiled.hlsl"
                 "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
 
         target_include_directories(splat_drender_vulkan

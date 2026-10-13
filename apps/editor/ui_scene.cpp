@@ -98,7 +98,7 @@ void draw_scene_panel(App& app) {
             ImGui::TreeNodeEx(tr("Reconstruction"), flags);
             if (ImGui::IsItemClicked()) {
                 if (app.view_mode == VisualizationMode::mesh)
-                    show_mesh_view(app, !app.mesh.has());
+                    show_mesh_view(app, false);
                 else if (
                     (app.view_mode == VisualizationMode::splat ||
                      app.view_mode == VisualizationMode::rings) &&

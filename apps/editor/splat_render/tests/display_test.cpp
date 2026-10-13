@@ -83,7 +83,24 @@ int main() {
         draw(splat_render::Shading::rings);
         draw(splat_render::Shading::gaussian);
         require(center() == color, "switching back must restore RGB");
+        // Training can repeatedly replace the offline preview. Clearing must
+        // destroy frame/workspace resources, and the next upload must recreate
+        // a usable EWA/ring renderer on the same editor device.
+        for (int run = 0; run < 3; ++run) {
+            const auto epoch = renderer.frames_epoch();
+            renderer.clear_model();
+            require(renderer.splat_count() == 0 && renderer.source_key().empty(),
+                    "clear_model retained the previous model");
+            require(!renderer.has_frame_size(64, 64) && renderer.frames_epoch() > epoch,
+                    "clear_model retained preview frame allocations");
+            if (!renderer.upload(cloud, "display-test"))
+                throw std::runtime_error(renderer.failure());
+            draw(splat_render::Shading::rings);
+            draw(splat_render::Shading::gaussian);
+            require(center() == color, "preview failed after clear/reload");
+        }
         std::cout << "RGB, depth, normal, display settings and frame cache passed\n";
+        std::cout << "Repeated preview clear/reload passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
