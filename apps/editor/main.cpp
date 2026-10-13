@@ -38,8 +38,11 @@ int main(const int argc, char** argv) {
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
     const bool stop_smoke = smoke_arg == "--interop-stop-smoke" ||
                             smoke_arg == "--interop-stop-smoke-vulkan";
+    const bool retrain_smoke = smoke_arg == "--interop-retrain-smoke" ||
+                               smoke_arg == "--interop-retrain-smoke-vulkan";
     app.smoke_mode = smoke_arg == "--interop-smoke" ||
-                     smoke_arg == "--interop-smoke-vulkan" || stop_smoke;
+                     smoke_arg == "--interop-smoke-vulkan" || stop_smoke ||
+                     retrain_smoke;
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
@@ -55,7 +58,8 @@ int main(const int argc, char** argv) {
             "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\cuda_vulkan_smoke");
         app.settings.iterations = stop_smoke ? 30'000 : 100;
         if (smoke_arg == "--interop-smoke-vulkan" ||
-            smoke_arg == "--interop-stop-smoke-vulkan")
+            smoke_arg == "--interop-stop-smoke-vulkan" ||
+            smoke_arg == "--interop-retrain-smoke-vulkan")
             app.settings.training_backend = 1;
     }
 
@@ -149,6 +153,12 @@ int main(const int argc, char** argv) {
     app.preview.create(k_preview_extent, k_preview_extent);
 
     const auto smoke_begin = std::chrono::steady_clock::now();
+    // Retrain smoke: the first run must complete, then Train 3DGS is started
+    // again exactly like a user click, after the frame that still references
+    // the old preview descriptors has been submitted.
+    int smoke_completed_runs = 0;
+    bool retrain_pending = false;
+    bool retrain_requested = false;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -169,18 +179,30 @@ int main(const int argc, char** argv) {
             if (!app.smoke_started && !app.job.running()) {
                 app.smoke_started = true;
                 editor::start_train(app, true);
-                if (!stop_smoke) glfwIconifyWindow(window);
+                // The retrain flow has to keep presenting frames: the bug was
+                // a draw list referencing descriptors destroyed by the second
+                // start_train().
+                if (!stop_smoke && !retrain_smoke)
+                    glfwIconifyWindow(window);
             } else if (
                 app.smoke_started && !app.job.running() &&
+                !retrain_pending &&
                 (stop_smoke || editor::gpu::consumed_timeline_value() >= 3)) {
-                app.smoke_success = stop_smoke
-                    ? app.job.exit_code() == 2 && !app.preview.display.descriptor &&
-                          app.active_job == editor::JobKind::none
-                    : app.job.exit_code() == 0;
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                ++smoke_completed_runs;
+                if (retrain_smoke && smoke_completed_runs == 1 &&
+                    app.job.exit_code() == 0) {
+                    retrain_pending = true;
+                } else {
+                    app.smoke_success = stop_smoke
+                        ? app.job.exit_code() == 2 &&
+                              !app.preview.display.descriptor &&
+                              app.active_job == editor::JobKind::none
+                        : app.job.exit_code() == 0;
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                }
             } else if (
                 std::chrono::steady_clock::now() - smoke_begin >
-                std::chrono::seconds(60)) {
+                std::chrono::seconds(retrain_smoke ? 240 : 60)) {
                 app.job.stop();
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
@@ -252,17 +274,28 @@ int main(const int argc, char** argv) {
         if (stop_smoke && app.job.running() &&
             editor::gpu::consumed_timeline_value() >= 3)
             action = Action::stop;
+        if (retrain_pending) {
+            retrain_requested = true;
+            retrain_pending = false;
+        }
 
         bool stop_requested = false;
+        // start_train() recreates the shared preview image and drops the
+        // splat descriptor sets that this frame's draw list may still
+        // reference. Like Stop, the request has to wait until the frame is
+        // submitted; queue idle cannot protect an unsubmitted draw list.
+        bool train_requested = false;
+        bool dense_requested = false;
         switch (action) {
             case Action::align:
                 if (!app.smoke_mode) editor::start_align(app);
                 break;
             case Action::train:
-                if (!app.smoke_mode) editor::start_train(app, false);
+                train_requested = !app.smoke_mode;
                 break;
             case Action::dense:
-                if (!app.smoke_mode) editor::start_dense(app);
+                // The Gaussians path falls through to start_train().
+                dense_requested = !app.smoke_mode;
                 break;
             case Action::texture:
                 if (!app.smoke_mode) editor::start_texture(app);
@@ -319,6 +352,12 @@ int main(const int argc, char** argv) {
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             editor::gpu::present(draw_data, editor::theme::surface_0);
         editor::publish_preview_ack(app);
+
+        // Now the frame is submitted and the stale preview descriptors are
+        // safe to destroy.
+        if (train_requested) editor::start_train(app, false);
+        if (retrain_requested) editor::start_train(app, true);
+        if (dense_requested) editor::start_dense(app);
 
         // Finish submitting the draw list and acknowledging its shared image
         // before terminating the producer. on_job_finished() destroys the
