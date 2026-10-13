@@ -5,6 +5,12 @@ every 120 seconds, and at the last iteration. Checkpoint I/O runs at an iteratio
 boundary and temporarily adds to that iteration's time. A failed automatic save
 is logged and training continues; the previous successful checkpoint is retained.
 
+**Preferences > Storage > Training autosave** changes the interval in seconds
+(default 120; 0 disables periodic autosave). This preference is saved on this
+computer, survives creating/opening projects, and is passed to the next training
+or resume process. Stop training before changing it. Manual saves and first/final
+iteration checkpoints remain enabled; there is no iteration-cadence control in Studio.
+
 **Save Project** / **Ctrl+S** during training asks the trainer to finish its current
 iteration, save its state and hold at that boundary. The editor embeds the checkpoint
 in the `.ascan` project, then lets training continue. A paused training process is
