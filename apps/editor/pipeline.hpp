@@ -275,6 +275,7 @@ struct ProjectSettings {
     int video_rotate = 0;
 
     bool scene_mode = false;
+    bool focus_region = true;
     int iterations = 30'000;
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.

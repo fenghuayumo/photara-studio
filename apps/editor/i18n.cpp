@@ -701,12 +701,19 @@ constexpr Entry k_entries[] = {
     {"Gaussian Splatting", "高斯溅射", "ガウシアン・スプラッティング", "가우시안 스플래팅"},
     {"Capture type", "采集类型", "撮影タイプ", "촬영 유형"},
     {"Object", "物体", "オブジェクト", "오브젝트"},
-    {"Object uses the reconstruction region as Splat SubjectBounds "
-     "(focus region).\n"
-     "Scene trains unbounded and ignores the box.",
-     "物体模式用重建区域作为溅射 SubjectBounds（焦点区域）。\n场景模式无界训练并忽略包围盒。",
-     "オブジェクトは再構成領域を Splat SubjectBounds（焦点）に使います。\nシーンは無界学習でボックスを無視します。",
-     "오브젝트는 재구성 영역을 스플랫 SubjectBounds(초점 영역)로 사용합니다.\n장면은 무한 학습이며 박스를 무시합니다."},
+    {"Object captures a bounded subject; Scene keeps distant\n"
+     "background geometry.",
+     "物体模式采集有界主体；场景模式保留远处背景几何。",
+     "オブジェクトは境界のある被写体を、シーンは遠方の背景形状を保持します。",
+     "오브젝트는 경계가 있는 피사체를, 장면은 먼 배경 형상을 유지합니다."},
+    {"Focus Region", "Focus Region", "Focus Region", "Focus Region"},
+    {"Constrain splat training to the reconstruction region.\n"
+     "Works with both Object and Scene capture. Turning it on\n"
+     "shows the editable box; hiding the box later only changes\n"
+     "the display and never disables the training constraint.",
+     "把溅射训练限制在重建区域内。\n物体和场景采集都可用。开启时会自动显示可编辑包围盒；\n之后隐藏只影响显示，不会取消训练限制。",
+     "スプラット学習を再構成領域に制限します。\nオブジェクトでもシーンでも使用できます。オンにすると編集可能なボックスを表示し、\n後から非表示にしても表示が変わるだけで学習の制限は解除されません。",
+     "스플랫 학습을 재구성 영역으로 제한합니다.\n오브젝트와 장면 촬영 모두에서 사용할 수 있습니다. 켜면 편집 가능한 박스가 나타나고,\n나중에 숨겨도 표시만 바뀌며 학습 제한은 유지됩니다."},
     {"Densification strategy", "稠密化策略", "稠密化戦略", "밀집화 전략"},
     {"ADC IGS", "ADC IGS", "ADC IGS", "ADC IGS"},
     {"ADC Plus", "ADC Plus", "ADC Plus", "ADC Plus"},
@@ -1127,17 +1134,18 @@ constexpr Entry k_entries[] = {
      "世界原点の RGB 軸（X 赤、Y 緑、Z 青）。",
      "월드 원점의 RGB 축(X 빨강, Y 초록, Z 파랑)."},
     {"Show reconstruction region", "显示重建区域", "再構成領域を表示", "재구성 영역 표시"},
-    {"Splat object-mode SubjectBounds / focus region.\n"
+    {"Display-only overlay of the reconstruction region.\n"
      "Drag the center arrows to move the box, or a face dot\n"
-     "to resize. Object training follows this volume live.",
-     "溅射物体模式的 SubjectBounds / 焦点区域。\n拖动中心箭头移动包围盒，或拖动面点缩放。物体训练会实时跟随该区域。",
-     "スプラット物体モードの SubjectBounds / 焦点領域。\n中央矢印で移動、面の点でリサイズ。物体学習はこの領域にリアルタイムで追従します。",
-     "스플랫 오브젝트 모드 SubjectBounds / 초점 영역.\n가운데 화살표로 이동, 면 점으로 크기 조절. 오브젝트 학습이 이 영역을 실시간으로 따릅니다."},
+     "to resize. Training follows it live only while the Focus\n"
+     "Region checkbox is on; hiding the box never disables it.",
+     "仅控制重建区域的显示。\n拖动中心箭头移动包围盒，或拖动面点缩放。只有勾选\n“Focus Region”时训练才会实时跟随该区域；\n隐藏包围盒不会取消该限制。",
+     "再構成領域の表示のみを切り替えます。\n中央矢印で移動、面の点でリサイズ。学習がリアルタイムで追従するのは\n「Focus Region」チェックボックスがオンの間だけで、ボックスを隠しても制限は解除されません。",
+     "재구성 영역 표시만 제어합니다.\n가운데 화살표로 이동, 면 점으로 크기 조절. 학습이 실시간으로 따르는 건\n'Focus Region' 체크박스가 켜져 있을 때뿐이며, 박스를 숨겨도 제한은 유지됩니다."},
     {"Fit Region to Cloud", "使区域贴合点云", "領域を点群に合わせる", "영역을 클라우드에 맞추기"},
-    {"Reset to the SfM SubjectBounds used by Splat object mode.",
-     "重置为溅射物体模式使用的 SfM SubjectBounds。",
-     "スプラット物体モードが使う SfM SubjectBounds に戻す。",
-     "스플랫 오브젝트 모드가 쓰는 SfM SubjectBounds로 되돌립니다."},
+    {"Reset to the SfM-estimated SubjectBounds for the focus region.",
+     "重置为 SfM 为焦点区域估计的 SubjectBounds。",
+     "フォーカス領域に対して SfM が推定した SubjectBounds に戻します。",
+     "포커스 영역에 대해 SfM이 추정한 SubjectBounds로 되돌립니다."},
     {"Image QA", "图像质检", "画像 QA", "이미지 QA"},
     {"Capture", "采集", "撮影", "촬영"},
     {"Camera", "相机", "カメラ", "카메라"},

@@ -12,7 +12,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 5;
+inline constexpr std::uint32_t k_settings_version = 6;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct Settings {
@@ -41,6 +41,7 @@ struct Settings {
     bool reuse_cache = false;
     unsigned max_features = 27'000;
     bool scene_mode = false;
+    bool focus_region = true;
     int iterations = 30'000;
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.

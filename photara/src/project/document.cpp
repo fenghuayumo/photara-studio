@@ -116,6 +116,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::uint8_t>(settings.speedy_pruning));
     writer.value(static_cast<std::int32_t>(settings.texture_photometric_steps));
     writer.value(static_cast<std::int32_t>(settings.texture_seam_steps));
+    writer.value(static_cast<std::uint8_t>(settings.focus_region));
     return writer.take();
 }
 
@@ -243,6 +244,10 @@ Settings decode_settings(
         settings.texture_photometric_steps = 3000;
     if (settings.texture_seam_steps < 0)
         settings.texture_seam_steps = 60;
+    // Focus Region is independent of capture mode; projects saved before the
+    // field existed simply default it on (Settings::focus_region).
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.focus_region = reader.value<std::uint8_t>() != 0;
     return settings;
 }
 

@@ -464,9 +464,18 @@ Action draw_inspector(App& app) {
             app.settings.scene_mode = capture_index == 1;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
-                "Object uses the reconstruction region as Splat SubjectBounds "
-                "(focus region).\n"
-                "Scene trains unbounded and ignores the box."));
+                "Object captures a bounded subject; Scene keeps distant\n"
+                "background geometry."));
+        if (ImGui::Checkbox(
+                tr("Focus Region"), &app.settings.focus_region) &&
+            app.settings.focus_region)
+            app.view_options.show_region = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Constrain splat training to the reconstruction region.\n"
+                "Works with both Object and Scene capture. Turning it on\n"
+                "shows the editable box; hiding the box later only changes\n"
+                "the display and never disables the training constraint."));
         theme::caption("Densification strategy");
         ImGui::SetNextItemWidth(-1.F);
         const char* strategies[] = {
@@ -900,10 +909,11 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(
             tr("Show reconstruction region"), &app.view_options.show_region);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Splat object-mode SubjectBounds / focus region.\n"
+            ImGui::SetTooltip("%s", tr(
+                "Display-only overlay of the reconstruction region.\n"
                 "Drag the center arrows to move the box, or a face dot\n"
-                "to resize. Object training follows this volume live.");
+                "to resize. Training follows it live only while the Focus\n"
+                "Region checkbox is on; hiding the box never disables it."));
         if (app.reconstruction_box.valid) {
             const Vec3 size = app.reconstruction_box.size();
             ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
@@ -917,8 +927,9 @@ Action draw_inspector(App& app) {
                 write_working_subject_bounds(app);
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Reset to the SfM SubjectBounds used by Splat object mode.");
+                ImGui::SetTooltip("%s", tr(
+                    "Reset to the SfM-estimated SubjectBounds for the "
+                    "focus region."));
         }
         ImGui::Spacing();
     }

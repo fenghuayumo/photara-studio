@@ -1367,8 +1367,10 @@ std::string build_train_command(
 
     command << " --splat --backend " << training_backend_flag(settings)
             << " --capture-mode "
-            << (settings.scene_mode ? "scene" : "object");
-    if (!settings.scene_mode) {
+            << (settings.scene_mode ? "scene" : "object")
+            << " --splat-focus-region="
+            << (settings.focus_region ? "true" : "false");
+    if (settings.focus_region) {
         std::error_code bounds_error;
         if (!layout.working_subject_bounds.empty() &&
             std::filesystem::exists(
@@ -1475,8 +1477,10 @@ std::string build_splat_mesh_command(
     }
     command << " --splat --mesh=true --splat-mesh-only"
             << " --capture-mode "
-            << (settings.scene_mode ? "scene" : "object");
-    if (!settings.scene_mode) {
+            << (settings.scene_mode ? "scene" : "object")
+            << " --splat-focus-region="
+            << (settings.focus_region ? "true" : "false");
+    if (settings.focus_region) {
         std::error_code bounds_error;
         if (!layout.working_subject_bounds.empty() &&
             std::filesystem::exists(

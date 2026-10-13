@@ -373,8 +373,9 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto legacy_bytes = settings_bytes;
-        // Remove texture steps, training mode/pruning, mesh quality and SAM alignment opt-in.
-        legacy_bytes.resize(legacy_bytes.size() - 4 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
+        // Remove texture steps, training mode/pruning, mesh quality, SAM
+        // alignment opt-in, and the Focus Region byte.
+        legacy_bytes.resize(legacy_bytes.size() - 4 * sizeof(std::int32_t) - 3 * sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");
@@ -385,6 +386,20 @@ int main() {
         expect(!decode_settings(encode_settings(disabled, ascan_path), ascan_path)
                     .sam_use_mask_for_sfm,
                "SAM alignment mask opt-out round trip");
+    }
+    {
+        Settings toggled = updated;
+        toggled.scene_mode = true;
+        toggled.focus_region = false;
+        const Settings restored =
+            decode_settings(encode_settings(toggled, ascan_path), ascan_path);
+        expect(restored.scene_mode && !restored.focus_region,
+               "focus region is independent of capture mode and round trips");
+        auto pre_region = encode_settings(toggled, ascan_path);
+        pre_region.resize(pre_region.size() - sizeof(std::uint8_t));
+        const Settings legacy_region = decode_settings(pre_region, ascan_path);
+        expect(legacy_region.scene_mode && legacy_region.focus_region,
+               "projects saved before focus region default it on");
     }
     settings_bytes.insert(settings_bytes.end(), {0x11, 0x22, 0x33, 0x44});
     const Settings additive = decode_settings(settings_bytes, ascan_path);

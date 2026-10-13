@@ -145,6 +145,7 @@ struct ReconstructCli {
     float splat_simplify_merge_cap{0.5F};
     int splat_simplify_sh{-1};
     std::string capture_mode{"object"};
+    bool splat_focus_region = true;
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
@@ -533,9 +534,11 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-resolution-level N  MVS downscale steps; unset follows\n"
                  "                              --dense-quality (0=full, 1~=half)\n"
               << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
-              << "  --capture-mode object|scene  object uses SfM SubjectBounds; with --dense\n"
-              << "               and without --splat this only selects the bounds\n"
-              << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
+              << "  --capture-mode object|scene  SfM/MVS capture type (MVS object\n"
+              << "               mode uses SubjectBounds; scene is unbounded)\n"
+              << "  --splat-focus-region BOOL  constrain splat training to the\n"
+              << "               focus region, independent of capture mode\n"
+              << "  --subject-bounds PATH  load focus region (SubjectBounds txt)\n"
               << "  --masks DIR optional valid-region masks for default SfM/MVS/training; "
                  "black pixels are ignored (auto: sibling masks/)\n"
               << "Texture (Stage B after --mesh; requires Vulkan + UVAtlas):\n"
@@ -772,11 +775,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Extract a mesh from an existing trained splat without running the optimizer",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("capture-mode",
-         "Capture type: object uses SfM SubjectBounds; scene is unbounded",
+         "Capture type for SfM/MVS: object or scene (splat training uses "
+         "--splat-focus-region independently)",
          cxxopts::value<std::string>()->default_value("object"))
         ("subject-bounds",
-         "Load object-mode SubjectBounds / focus region from a text file",
+         "Load SubjectBounds / focus region from a text file",
          cxxopts::value<std::string>()->default_value(""))
+        ("splat-focus-region",
+         "Constrain splat training to the SubjectBounds focus region "
+         "(default: true)",
+         cxxopts::value<bool>()->implicit_value("true"))
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
@@ -1411,6 +1419,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_simplify_sh = result["splat-simplify-sh"].as<int>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
+    // Independent of --capture-mode: absent means the struct default (on).
+    if (result.count("splat-focus-region") != 0)
+        cli.splat_focus_region = result["splat-focus-region"].as<bool>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
             "--capture-mode must be object or scene");
@@ -2133,6 +2144,10 @@ std::filesystem::path splat_file_path(const ReconstructCli& cli) {
 
 void apply_cli_subject_bounds(
     const ReconstructCli& cli, photara::mvs::MvsScene& scene) {
+    if (cli.splat && !cli.splat_focus_region) {
+        scene.subject_bounds = {};
+        return;
+    }
     if (!cli.subject_bounds.empty()) {
         if (!photara::mvs::load_subject_bounds(
                 scene.subject_bounds, cli.subject_bounds))
@@ -2143,7 +2158,7 @@ void apply_cli_subject_bounds(
             "subject_bounds=", cli.subject_bounds.string(), " source=file");
         return;
     }
-    if (cli.capture_mode == "scene") scene.subject_bounds = {};
+    if (!cli.splat && cli.capture_mode == "scene") scene.subject_bounds = {};
 }
 
 photara::splat::CudaVulkanPreviewOptions make_preview_options(
@@ -2467,6 +2482,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
+    settings.focus_region = cli.splat_focus_region;
     settings.iterations = static_cast<int>(cli.splat_iterations);
     settings.densification_cap = static_cast<int>(cli.splat_densification_cap);
     settings.training_mode = static_cast<int>(cli.splat_mode);
@@ -3326,7 +3342,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
     options.preview_ack_file = cli.splat_preview_ack_file;
-    if (cli.gui && cli.capture_mode == "object")
+    if (cli.gui && cli.splat_focus_region)
         options.live_subject_bounds_file = cli.subject_bounds;
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
@@ -4670,7 +4686,7 @@ int main(int argc, char** argv) {
             photara::splat::initialize_scene_from_sparse_points(
                 splat_scene);
             apply_cli_subject_bounds(cli, splat_scene);
-            if (cli.capture_mode == "object" && cli.subject_bounds.empty() &&
+            if (cli.splat_focus_region && cli.subject_bounds.empty() &&
                 !splat_scene.subject_bounds.valid)
                 throw std::runtime_error(
                     "Could not estimate SubjectBounds from SfM sparse points");

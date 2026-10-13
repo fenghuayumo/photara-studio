@@ -92,7 +92,7 @@ void ensure_reconstruction_box(App& app) {
 
 void write_working_subject_bounds(App& app) {
     ensure_reconstruction_box(app);
-    if (app.settings.scene_mode || !app.reconstruction_box.valid) return;
+    if (!app.reconstruction_box.valid) return;
     const ReconstructionBox& box = app.reconstruction_box;
     const ReconstructionBox& previous = app.published_reconstruction_box;
     std::error_code bounds_error;
@@ -400,6 +400,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.max_features = static_cast<unsigned>(
         std::max(0, app.settings.max_features));
     settings.scene_mode = app.settings.scene_mode;
+    settings.focus_region = app.settings.focus_region;
     settings.iterations = app.settings.iterations;
     settings.densification_cap = app.settings.densification_cap;
     settings.training_mode = app.settings.training_mode;
@@ -471,6 +472,7 @@ void apply_project_settings(
     app.settings.reuse_cache = settings.reuse_cache;
     app.settings.max_features = static_cast<int>(settings.max_features);
     app.settings.scene_mode = settings.scene_mode;
+    app.settings.focus_region = settings.focus_region;
     app.settings.iterations = settings.iterations;
     app.settings.densification_cap = settings.densification_cap;
     app.settings.training_mode = settings.training_mode;
