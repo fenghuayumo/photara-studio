@@ -441,8 +441,6 @@ Action draw_inspector(App& app) {
             app.settings.speedy_pruning != preset.speedy_pruning;
         if (ImGui::BeginCombo("##training_mode", customized ? tr("Custom") : modes[mode])) {
             for (int index = 0; index < 3; ++index) {
-                // Sensitivity scoring currently requires the CUDA rasterizer.
-                ImGui::BeginDisabled(index == 0 && app.settings.training_backend == 1);
                 if (ImGui::Selectable(modes[index], !customized && mode == index)) {
                     const auto selected = photara::splat::training_preset(
                         static_cast<photara::splat::TrainingMode>(index));
@@ -451,7 +449,6 @@ Action draw_inspector(App& app) {
                     app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
                     app.settings.speedy_pruning = selected.speedy_pruning;
                 }
-                ImGui::EndDisabled();
             }
             ImGui::EndCombo();
         }
