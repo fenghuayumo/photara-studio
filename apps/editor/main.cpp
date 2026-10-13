@@ -50,25 +50,32 @@ int main(const int argc, char** argv) {
     if (!app.smoke_mode) editor::load_editor_preferences(app);
 
     if (app.smoke_mode) {
-        // The interop smoke harness is a manual developer tool. The defaults
-        // keep the original author's fixed COLMAP dataset so runs stay
-        // comparable; redirect them per machine with PHOTARA_SMOKE_IMAGES /
-        // PHOTARA_SMOKE_PROJECT instead of editing the source.
+        // The interop smoke harness needs a fixed dataset so runs stay
+        // comparable, but developer-machine paths do not belong in the
+        // source. Point PHOTARA_SMOKE_IMAGES at the COLMAP images directory;
+        // optionally set PHOTARA_SMOKE_PROJECT for the output project folder
+        // (default: "<dataset>/photara_smoke" beside the images directory).
         const char* smoke_images = std::getenv("PHOTARA_SMOKE_IMAGES");
+        if (smoke_images == nullptr || smoke_images[0] == '\0') {
+            std::fprintf(
+                stderr,
+                "--interop-* smoke requires PHOTARA_SMOKE_IMAGES (COLMAP "
+                "images directory); optionally PHOTARA_SMOKE_PROJECT\n");
+            return 2;
+        }
         const char* smoke_project = std::getenv("PHOTARA_SMOKE_PROJECT");
+        const std::filesystem::path project_path =
+            smoke_project != nullptr && smoke_project[0] != '\0'
+                ? editor::path_from_utf8_field(smoke_project)
+                : editor::path_from_utf8_field(smoke_images).parent_path() /
+                      "photara_smoke";
+        const std::u8string project_u8 = project_path.u8string();
         std::snprintf(
             app.settings.images_dir.data(), app.settings.images_dir.size(),
-            "%s",
-            smoke_images != nullptr && smoke_images[0] != '\0'
-                ? smoke_images
-                : "D:\\ScanVideo\\ori_img\\images");
+            "%s", smoke_images);
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
-            "%s",
-            smoke_project != nullptr && smoke_project[0] != '\0'
-                ? smoke_project
-                : "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\"
-                  "cuda_vulkan_smoke");
+            "%s", reinterpret_cast<const char*>(project_u8.c_str()));
         app.settings.iterations = stop_smoke ? 30'000 : 100;
         if (smoke_arg == "--interop-smoke-vulkan" ||
             smoke_arg == "--interop-stop-smoke-vulkan" ||
