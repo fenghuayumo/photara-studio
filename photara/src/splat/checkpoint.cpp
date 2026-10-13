@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+#include <memory>
+#include <cctype>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -72,8 +74,7 @@ void sync_checkpoint(const std::filesystem::path& path) {
     if (synced) throw std::system_error(parent_error, std::generic_category(), "Cannot flush checkpoint directory");
 #endif
 }
-TrainingCheckpointInfo read_info(const Archive& archive) {
-    const auto bytes = archive.chunk(ChunkType::settings);
+TrainingCheckpointInfo decode_info(const std::vector<std::uint8_t>& bytes) {
     CheckpointReader reader(bytes);
     if (reader.pod<std::uint32_t>() != version)
         throw std::runtime_error("Unsupported training checkpoint version");
@@ -93,21 +94,44 @@ TrainingCheckpointInfo read_info(const Archive& archive) {
         (info.focus_bounds.half_extent.array() <= 0.F).any()))
         throw std::runtime_error("Invalid checkpoint focus bounds");
     if (!info.total_iterations || info.iteration > info.total_iterations ||
-        !info.gaussian_count || info.gaussian_count > 50'000'000 ||
-        !archive.has(ChunkType::training_checkpoint))
+        !info.gaussian_count || info.gaussian_count > 50'000'000)
         throw std::runtime_error("Invalid training checkpoint metadata");
     return info;
 }
-std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input) throw std::runtime_error("Cannot read training checkpoint");
-    const auto size = input.tellg();
-    if (size < 0 || size > std::streamoff(32ULL * 1024 * 1024 * 1024))
-        throw std::runtime_error("Invalid training checkpoint size");
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    input.seekg(0); input.read(reinterpret_cast<char*>(bytes.data()), size);
-    if (!input) throw std::runtime_error("Cannot read complete training checkpoint");
-    return bytes;
+struct CheckpointRecord {
+    std::vector<std::uint8_t> metadata;
+    std::vector<std::uint8_t> payload;
+};
+CheckpointRecord read_record(const Archive& archive, bool previous = false) {
+    const auto info_type = previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info;
+    const auto data_type = previous ? ChunkType::training_checkpoint_previous : ChunkType::training_checkpoint;
+    if (archive.has(info_type)) {
+        auto metadata = archive.chunk(info_type); decode_info(metadata);
+        return {std::move(metadata), archive.chunk(data_type)};
+    }
+    if (previous) throw std::runtime_error("No previous checkpoint in this project");
+    // Original sidecar format or the nested sidecar embedded by older Studio.
+    if (archive.has(ChunkType::settings)) {
+        try {
+            auto metadata = archive.chunk(ChunkType::settings); decode_info(metadata);
+            return {std::move(metadata), archive.chunk(ChunkType::training_checkpoint)};
+        } catch (...) {}
+    }
+    return read_record(Archive::from_bytes(archive.chunk(ChunkType::training_checkpoint)));
+}
+TrainingCheckpointInfo read_info(const Archive& archive, bool previous = false) {
+    const auto info_type = previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info;
+    if (archive.has(info_type)) return decode_info(archive.chunk(info_type));
+    return decode_info(read_record(archive, previous).metadata);
+}
+void set_record(Archive& archive, CheckpointRecord record, bool previous = false) {
+    archive.set_chunk(previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info,
+        std::move(record.metadata));
+    archive.set_chunk(previous ? ChunkType::training_checkpoint_previous : ChunkType::training_checkpoint,
+        std::move(record.payload));
+}
+Archive open_or_create_project(const std::filesystem::path& path) {
+    return std::filesystem::exists(path) ? Archive::open(path) : Archive::create();
 }
 void write_tensor(CheckpointWriter& writer, const tinytensor::Tensor& tensor) {
     writer.pod(std::uint32_t(tensor.is_valid() ? tensor.shape().rank() : 0));
@@ -142,45 +166,78 @@ tinytensor::Tensor read_tensor(CheckpointReader& reader, tinytensor::Device devi
 }
 std::filesystem::path training_checkpoint_path(const std::filesystem::path& project) {
     if (project.empty()) return {};
-    return project.parent_path() / ".photara-recovery" / project.filename() / "training.ascan";
+    auto native = project;
+    std::string extension = native.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (extension != ".ascan") native.replace_extension(".ascan");
+    return native;
 }
 void migrate_training_checkpoints(const std::filesystem::path& project) {
     if (project.empty()) return;
-    auto legacy = project; legacy += ".training.ascan";
-    std::error_code error;
-    if (!std::filesystem::exists(legacy, error) &&
-        !std::filesystem::exists(previous_path(legacy), error)) return;
-    // Acquire both namespaces before moving anything. An older running trainer
-    // must retain its files until it exits, and a new trainer must not race us.
-    detail::TrainingCheckpointLease old_lease(legacy);
-    const auto current = training_checkpoint_path(project);
-    detail::TrainingCheckpointLease new_lease(current);
-    for (const auto& pair : {std::pair{legacy, current},
-                            std::pair{previous_path(legacy), previous_path(current)}}) {
-        if (!std::filesystem::exists(pair.first)) continue;
-        if (!std::filesystem::is_regular_file(pair.first))
-            throw std::runtime_error("Legacy training checkpoint is not a regular file");
-        auto destination = pair.second;
-        // Preserve an existing recovery file. Conflicting old generations remain
-        // recoverable inside an internal archive rather than being discarded.
-        if (std::filesystem::exists(destination)) {
-            destination = current.parent_path() / "legacy" / pair.first.filename();
-            if (std::filesystem::exists(destination)) {
-                destination += "." + std::to_string(
-                    std::filesystem::last_write_time(pair.first).time_since_epoch().count());
-                unsigned suffix = 0;
-                const auto base = destination;
-                while (std::filesystem::exists(destination)) {
-                    destination = base; destination += "." + std::to_string(++suffix);
-                }
-            }
-            std::filesystem::create_directories(destination.parent_path());
-        }
-        // Same project directory/volume: a rename moves the complete file
-        // without rewriting large tensors or changing their checksum/identity.
-        std::filesystem::rename(pair.first, destination);
-        sync_checkpoint(destination);
+    auto visible = project; visible += ".training.ascan";
+    const auto hidden = project.parent_path() / ".photara-recovery" / project.filename() / "training.ascan";
+    std::vector<std::filesystem::path> sources;
+    for (const auto& path : {hidden, previous_path(hidden), visible, previous_path(visible)})
+        if (std::filesystem::exists(path)) sources.push_back(path);
+    const auto native = training_checkpoint_path(project);
+    const auto legacy_directory = hidden.parent_path() / "legacy";
+    if (std::filesystem::is_directory(legacy_directory)) {
+        for (const auto& item : std::filesystem::directory_iterator(legacy_directory))
+            if (item.is_regular_file() && item.path().filename().native().starts_with(visible.filename().native()))
+                sources.push_back(item.path());
     }
+    auto archive = open_or_create_project(native);
+    const bool nested = archive.has(ChunkType::training_checkpoint) && !archive.has(ChunkType::training_checkpoint_info);
+    if (sources.empty() && !nested) return;
+    detail::TrainingCheckpointLease project_lease(native);
+    std::vector<std::unique_ptr<detail::TrainingCheckpointLease>> legacy_leases;
+    if (!sources.empty()) {
+        legacy_leases.push_back(std::make_unique<detail::TrainingCheckpointLease>(hidden));
+        legacy_leases.push_back(std::make_unique<detail::TrainingCheckpointLease>(visible));
+    }
+    auto history = archive.has(ChunkType::training_checkpoint_history)
+        ? Archive::from_bytes(archive.chunk(ChunkType::training_checkpoint_history)) : Archive::create();
+    unsigned history_id = 1000;
+    const auto retain_history = [&](CheckpointRecord record) {
+        while (history.has(static_cast<ChunkType>(history_id))) ++history_id;
+        auto portable = Archive::create();
+        portable.set_chunk(ChunkType::settings, std::move(record.metadata));
+        portable.set_chunk(ChunkType::training_checkpoint, std::move(record.payload));
+        history.set_chunk(static_cast<ChunkType>(history_id++), portable.encode());
+    };
+    std::optional<CheckpointRecord> latest, previous;
+    try { latest = read_record(archive); } catch (...) {}
+    try { previous = read_record(archive, true); } catch (...) {}
+    for (const auto& source : sources) {
+        auto record = read_record(Archive::open(source)); // Check checksums before any cleanup.
+        const auto info = decode_info(record.metadata);
+        if (!latest) latest = std::move(record);
+        else {
+            const auto current = decode_info(latest->metadata);
+            if (info.fingerprint != current.fingerprint) { retain_history(std::move(record)); continue; }
+            if (info.iteration > current.iteration) {
+                previous = std::move(latest); latest = std::move(record);
+            } else if (info.iteration < current.iteration &&
+                (!previous || info.iteration > decode_info(previous->metadata).iteration))
+                previous = std::move(record);
+        }
+    }
+    if (!latest) throw std::runtime_error("No valid checkpoint to merge into the project");
+    set_record(archive, std::move(*latest));
+    if (previous) set_record(archive, std::move(*previous), true);
+    if (history_id > 1000) archive.set_chunk(ChunkType::training_checkpoint_history, history.encode());
+    archive.save(native); sync_checkpoint(native);
+    // Read the published generations back before removing the old copies.
+    const auto verified = Archive::open(native); (void)read_record(verified);
+    if (previous) (void)read_record(verified, true);
+    for (const auto& source : sources) std::filesystem::remove(source);
+    legacy_leases.clear(); // Release/delete old lock files before empty-directory cleanup.
+    // Remove only empty directories belonging to this project. Other projects,
+    // conflicting archived generations and unrelated files are never removed.
+    std::error_code ignored;
+    std::filesystem::remove(legacy_directory, ignored);
+    std::filesystem::remove(hidden.parent_path(), ignored);
+    std::filesystem::remove(hidden.parent_path().parent_path(), ignored);
 }
 bool training_checkpoint_in_use(const std::filesystem::path& path) {
     if (path.empty()) return false;
@@ -188,53 +245,45 @@ bool training_checkpoint_in_use(const std::filesystem::path& path) {
     catch (...) { return true; }
 }
 std::optional<TrainingCheckpointInfo> inspect_training_checkpoint(const std::filesystem::path& path) {
-    if (path.empty()) return std::nullopt;
-    for (const auto& candidate : {path, previous_path(path)}) {
-        std::error_code error;
-        if (!std::filesystem::exists(candidate, error)) continue;
-        try { return read_info(Archive::open(candidate)); } catch (...) {}
-    }
+    if (path.empty() || !std::filesystem::exists(path)) return std::nullopt;
+    try {
+        const auto archive = Archive::open(path);
+        for (bool previous : {false, true}) {
+            try { return read_info(archive, previous); } catch (...) {}
+        }
+    } catch (...) {}
     return std::nullopt;
 }
 std::vector<std::uint8_t> training_checkpoint_bytes(const std::filesystem::path& path) {
-    for (const auto& candidate : {path, previous_path(path)}) {
+    const auto source = Archive::open(path);
+    for (bool previous : {false, true}) {
         try {
-            const auto archive = Archive::open(candidate);
-            read_info(archive);
-            (void)archive.chunk(ChunkType::training_checkpoint); // Verify payload checksum.
-            return read_file(candidate);
+            auto record = read_record(source, previous);
+            auto portable = Archive::create();
+            portable.set_chunk(ChunkType::settings, std::move(record.metadata));
+            portable.set_chunk(ChunkType::training_checkpoint, std::move(record.payload));
+            return portable.encode();
         } catch (...) {}
     }
     throw std::runtime_error("No valid training checkpoint to save");
 }
 void restore_training_checkpoint(std::span<const std::uint8_t> bytes, const std::filesystem::path& path) {
     detail::TrainingCheckpointLease lease(path);
-    ensure_checkpoint_directory(path);
-    auto staged = path; staged += ".restore";
-    try {
-        {
-            std::ofstream output(staged, std::ios::binary | std::ios::trunc);
-            output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            output.close();
-            if (!output) throw std::runtime_error("Failed to restore training checkpoint");
-        }
-        auto archive = Archive::open(staged);
-        read_info(archive); (void)archive.chunk(ChunkType::training_checkpoint);
-        archive.save(path); // Atomic publication.
-        sync_checkpoint(path);
-    } catch (...) {
-        std::error_code ignored; std::filesystem::remove(staged, ignored); throw;
-    }
-    std::error_code ignored; std::filesystem::remove(staged, ignored);
+    auto record = read_record(Archive::from_bytes(bytes));
+    auto archive = open_or_create_project(path);
+    set_record(archive, std::move(record));
+    archive.save(path); sync_checkpoint(path);
 }
 void remove_training_checkpoint(const std::filesystem::path& path) {
-    if (path.empty()) return;
+    if (path.empty() || !std::filesystem::exists(path)) return;
     detail::TrainingCheckpointLease lease(path);
-    for (const auto& candidate : {path, previous_path(path)}) {
-        std::error_code error;
-        std::filesystem::remove(candidate, error);
-        if (error) throw std::system_error(error, "Failed to remove training checkpoint");
+    auto archive = Archive::open(path);
+    bool modified = false;
+    for (auto type : {ChunkType::training_checkpoint, ChunkType::training_checkpoint_info,
+                     ChunkType::training_checkpoint_previous, ChunkType::training_checkpoint_previous_info, ChunkType::training_checkpoint_history}) {
+        modified |= archive.has(type); archive.erase_chunk(type);
     }
+    if (modified) { archive.save(path); sync_checkpoint(path); }
 }
 namespace detail {
 TrainingCheckpointLease::TrainingCheckpointLease(const std::filesystem::path& path) {
@@ -456,14 +505,14 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
 TrainingCheckpoint load_training_checkpoint(const std::filesystem::path& path,
     std::uint64_t fingerprint, tinytensor::Device device) {
     std::string failure;
-    for (const auto& candidate : {path, previous_path(path)}) {
+    const auto archive = Archive::open(path);
+    for (bool previous : {false, true}) {
         try {
-            const auto archive = Archive::open(candidate);
-            TrainingCheckpoint result; result.info = read_info(archive);
+            auto record = read_record(archive, previous);
+            TrainingCheckpoint result; result.info = decode_info(record.metadata);
             if (result.info.fingerprint != fingerprint)
-                throw std::runtime_error("Training implementation, settings, cameras or input images changed. Choose Start Over to train with the new inputs.");
-            const auto bytes = archive.chunk(ChunkType::training_checkpoint);
-            CheckpointReader reader(bytes);
+                throw std::runtime_error("Training implementation, settings, cameras or input images changed. Choose Train 3DGS to train with the new inputs.");
+            CheckpointReader reader(record.payload);
             auto runtime = reader.take(reader.pod<std::uint64_t>());
             result.runtime.assign(runtime.begin(), runtime.end());
             const auto count = reader.pod<std::uint32_t>();
@@ -476,7 +525,9 @@ TrainingCheckpoint load_training_checkpoint(const std::filesystem::path& path,
 }
 void save_training_checkpoint(const std::filesystem::path& path,
     const TrainingCheckpointInfo& info, const std::vector<std::uint8_t>& runtime,
-    const std::vector<tinytensor::Tensor*>& tensors) {
+    const std::vector<tinytensor::Tensor*>& tensors,
+    std::span<const std::uint8_t> project_settings,
+    std::span<const std::uint8_t> project_sfm) {
     ensure_checkpoint_directory(path);
     CheckpointWriter metadata;
     metadata.pod(version); metadata.pod(info.iteration); metadata.pod(info.total_iterations);
@@ -489,18 +540,17 @@ void save_training_checkpoint(const std::filesystem::path& path,
     payload.pod(std::uint64_t(runtime.size())); payload.raw(runtime.data(), runtime.size());
     payload.pod(std::uint32_t(tensors.size()));
     for (const auto* tensor : tensors) write_tensor(payload, *tensor);
-    auto archive = Archive::create();
-    archive.set_chunk(ChunkType::settings, std::move(metadata.bytes));
-    archive.set_chunk(ChunkType::training_checkpoint, std::move(payload.bytes));
-    // Publish the previous generation atomically before replacing the current one.
-    // Never replace the backup with a corrupt current generation.
-    try {
-        const auto old = Archive::open(path);
-        read_info(old); (void)old.chunk(ChunkType::training_checkpoint);
-        old.save(previous_path(path));
-    } catch (...) {}
-    archive.save(path);
-    sync_checkpoint(path);
+    auto archive = open_or_create_project(path);
+    try { set_record(archive, read_record(archive), true); }
+    catch (...) {
+        // If the current generation is corrupt, keep the existing previous
+        // complete generation rather than copying damaged data over it.
+    }
+    set_record(archive, {std::move(metadata.bytes), std::move(payload.bytes)});
+    if (!project_settings.empty()) archive.set_chunk(ChunkType::settings, {project_settings.begin(), project_settings.end()});
+    if (!project_sfm.empty()) archive.set_chunk(ChunkType::sfm, {project_sfm.begin(), project_sfm.end()});
+    archive.save(path); sync_checkpoint(path);
 }
+
 } // namespace detail
 } // namespace photara::splat

@@ -451,6 +451,26 @@ int main() {
     expect(
         unknown_loaded.chunk(static_cast<ChunkType>(100)).size() == 3,
         "unknown chunk bytes copied");
+    unknown_loaded.set_chunk(ChunkType::training_checkpoint, {1, 2, 3, 4});
+    unknown_loaded.save(ascan_path);
+    expect(
+        unknown_loaded.chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "same-file save refreshes offsets of untouched lazy chunks");
+    unknown_loaded.erase_chunk(ChunkType::training_checkpoint);
+    unknown_loaded.save(ascan_path);
+    expect(
+        Archive::open(ascan_path).chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "sequential stage saves retain untouched chunks");
+    const auto encoded = unknown_loaded.encode();
+    expect(
+        Archive::from_bytes(encoded).chunk(static_cast<ChunkType>(100)) == std::vector<std::uint8_t>({9, 8, 7}),
+        "in-memory archive round trip preserves optional chunks");
+    auto damaged = encoded;
+    damaged.back() ^= 1;
+    bool checksum_refused = false;
+    try { (void)Archive::from_bytes(damaged); }
+    catch (const std::exception&) { checksum_refused = true; }
+    expect(checksum_refused, "in-memory archive validates payload checksums");
 
     Archive required_unknown = Archive::create();
     write_settings(required_unknown, updated, ascan_path);

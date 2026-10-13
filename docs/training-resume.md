@@ -20,14 +20,19 @@ Train 3DGS always starts a new training run directly, including after Stop. It r
 the old pending checkpoint. Recovery is a separate **Resume Training** action in the
 toolbar, Reconstruction menu and inspector. Reopening a project exposes its saved
 progress without opening a recovery dialog. Automatic
-checkpoints and their previous good generation are stored internally under
-`.photara-recovery/<project filename>/training.ascan` and `training.ascan.previous`.
-The recovery directory is hidden in Windows Explorer. The only visible project
-file is `<project>.ascan`; internal recovery files are independent of the cache
-folder and are not deleted by cache retention. Opening an older project migrates
-its visible `.training.ascan` sidecars into recovery storage without rewriting
-training data or overwriting existing generations. A manual project save embeds the
-checkpoint so that reopening the `.ascan` can restore a missing sidecar.
+training state and the previous good generation are stored as checksummed chunks
+inside the native `.ascan` project. No independent checkpoint or backup files are
+created, and no `.photara-recovery` folder is needed. Automatic saves atomically
+rewrite the project while retaining its settings, aligned cameras, completed
+models, meshes, textures and unknown optional chunks. A temporary write file may
+exist during publication; it is not a second saved project.
+
+Opening an older project merges its embedded or external recovery records into
+native project chunks. The merged records are read back and validated before old
+visible/hidden recovery files are removed. Different historical runs are retained
+inside a project history chunk. An active older trainer prevents migration.
+Copying or using Save Project As on the `.ascan` file carries the training state
+with it; original images/datasets must still be available.
 
 The checkpoint preserves model tensors, FP32 and quantized SH Adam moments,
 normal-feature update counts, PPISP/bilateral-grid parameters and Adam moments,
@@ -64,7 +69,7 @@ in training-state semantics require an explicit ABI/schema change.
 
 Use the same numerical training arguments for both commands. Optional controls:
 
-- `--splat-checkpoint PATH`: override the checkpoint file (default: internal recovery directory beside output).
+- `--splat-checkpoint PATH`: override the checkpoint file (default: native `.ascan` project).
 - `--splat-checkpoint-seconds N`: periodic automatic save cadence (default 120;
   zero disables periodic saves, while first/last iteration saves remain enabled).
 - `--splat-checkpoint-control PATH`: editor integration request sidecar; not needed
@@ -72,7 +77,7 @@ Use the same numerical training arguments for both commands. Optional controls:
 
 `photara_splat_checkpoint_test` verifies interrupted/continuous training equivalence,
 correct resumed iteration, topology changes, quantized optimizer state, appearance
-correction, progressive resolution, checksum fallback, project embedding, invalidation,
+correction, progressive resolution, checksum fallback, single-file project preservation, migration, invalidation,
 write failures and cooperative save/hold/cancel. Run it with `--vulkan` for the Vulkan
 backend. `training_resume_process_test.py` also kills an actual CLI process and
 verifies that a fresh process resumes the saved iteration and that a concurrent

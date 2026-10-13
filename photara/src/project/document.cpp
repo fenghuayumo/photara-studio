@@ -288,6 +288,10 @@ void replace_sfm_stage(
     write_settings(archive, settings, project_file);
     write_sfm(archive, scene, project_file);
     archive.erase_chunk(ChunkType::training_checkpoint);
+    archive.erase_chunk(ChunkType::training_checkpoint_info);
+    archive.erase_chunk(ChunkType::training_checkpoint_previous);
+    archive.erase_chunk(ChunkType::training_checkpoint_previous_info);
+    archive.erase_chunk(ChunkType::training_checkpoint_history);
     archive.erase_chunk(ChunkType::gaussians);
     archive.erase_chunk(ChunkType::mesh);
     archive.erase_chunk(ChunkType::texture);

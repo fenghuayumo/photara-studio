@@ -1668,7 +1668,8 @@ GaussianModel Trainer::train(
         try {
             detail::save_training_checkpoint(options_.checkpoint_path,
                 {iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds},
-                write_runtime(), checkpoint_tensors);
+                write_runtime(), checkpoint_tensors,
+                options_.checkpoint_project_settings, options_.checkpoint_project_sfm);
             last_checkpoint_time = std::chrono::steady_clock::now();
             response = "saved " + std::to_string(iteration);
             core::Logger::instance().info("splat_checkpoint_saved iteration=", iteration,

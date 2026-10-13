@@ -34,7 +34,7 @@ def run(executable):
             '2 0.2 0 2 128 128 128 0.01 1 1 2 1 3 1\n')
         control = root / 'control'; control.write_text('process-save\n')
         output = root / 'project.ascan'
-        checkpoint = root / '.photara-recovery' / 'project.ascan' / 'training.ascan'
+        checkpoint = output
         args = [str(executable), '--images', str(images), '--splat', '--splat-dataset', str(root), '--output', str(output),
                 '--splat-checkpoint-control', str(control),
                 '--splat-iterations', '12', '--splat-log-interval', '1', '--splat-use-mask=false',
@@ -75,7 +75,14 @@ def run(executable):
         assert 'splat iteration=2/12' in restarted.stdout, 'Restart did not continue at the next iteration'
         assert 'splat iteration=1/12' not in restarted.stdout, 'Restart began training from scratch'
         assert output.exists(), 'Completed project was not published'
-        assert not checkpoint.exists(), 'Completed CLI training retained a pending checkpoint'
+        assert not (root / '.photara-recovery').exists(), 'Native project save created a recovery directory'
+        assert not Path(str(output) + '.previous').exists(), 'Native project save created a separate backup'
+        # A native container contains its completed model, not pending training chunks.
+        with output.open('rb') as project:
+            header = project.read(24)
+            count = struct.unpack('<I', header[16:20])[0]
+            kinds = [struct.unpack('<IIQQQ', project.read(32))[0] for _ in range(count)]
+        assert 3 in kinds and not set(kinds).intersection({6, 7, 8, 9}), 'Completed project retained pending training state'
         print('Process crash/restart and concurrent-writer recovery tests passed')
         shutil.rmtree(root)
     except BaseException:

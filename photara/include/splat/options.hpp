@@ -58,6 +58,10 @@ enum class PpispParamType {
 struct TrainingOptions {
     std::filesystem::path checkpoint_path;
     std::filesystem::path checkpoint_control_file;
+    // Native project metadata prepared by the CLI before the training writer
+    // acquires its lease. Preserve cameras/settings alongside automatic saves.
+    std::vector<std::uint8_t> checkpoint_project_settings;
+    std::vector<std::uint8_t> checkpoint_project_sfm;
     bool resume_checkpoint{false};
     unsigned checkpoint_interval_seconds{120};
     // Optional iteration cadence, primarily useful for reproducible tests.

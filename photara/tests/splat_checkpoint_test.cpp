@@ -3,6 +3,7 @@
 #include "io/image.hpp"
 #include "mvs/export.hpp"
 #include "project/archive.hpp"
+#include "project/document.hpp"
 #include "../src/splat/checkpoint.hpp"
 
 #include <algorithm>
@@ -39,6 +40,16 @@ static void compare(const splat::GaussianModel& a, const splat::GaussianModel& b
     }
 }
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--migrate-project") {
+        try {
+            const auto path = std::filesystem::u8path(argv[2]);
+            splat::migrate_training_checkpoints(path);
+            const auto info = splat::inspect_training_checkpoint(path);
+            require(info.has_value(), "Migrated project has no readable training state");
+            std::cout << "Project migration verified: " << info->iteration << '/' << info->total_iterations << '\n';
+            return 0;
+        } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     const bool vulkan = argc > 1 && std::string(argv[1]) == "--vulkan";
     const auto root = std::filesystem::temp_directory_path() /
         ("photara-resume-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -90,6 +101,13 @@ int main(int argc, char** argv) {
         compare(uninterrupted, splat::Trainer(options).train(scene));
         options.checkpoint_path = splat::training_checkpoint_path(root / "project.ascan");
         options.checkpoint_interval_iterations = 2;
+        const auto marker_type = static_cast<project::ChunkType>(100);
+        auto native_project = project::Archive::create();
+        project::Settings project_settings;
+        project_settings.image_directory = root; project_settings.iterations = 10;
+        project::write_settings(native_project, project_settings, options.checkpoint_path);
+        native_project.set_chunk(marker_type, {9, 8, 7});
+        native_project.save(options.checkpoint_path);
         // Cover both sides of a progressive-resolution / SH / refine boundary.
         for (unsigned stop_iteration : {3U, 4U}) {
             splat::remove_training_checkpoint(options.checkpoint_path);
@@ -114,11 +132,20 @@ int main(int argc, char** argv) {
             require(locked, "Concurrent checkpoint writer was accepted");
         }
         require(!splat::training_checkpoint_in_use(options.checkpoint_path), "Checkpoint lease was not released");
-        // A checksum failure must recover the previous complete generation.
+        // Corrupt the current training payload, not the in-project backup.
         {
             std::fstream corrupt(options.checkpoint_path, std::ios::binary | std::ios::in | std::ios::out);
-            corrupt.seekg(-1, std::ios::end); char last; corrupt.read(&last, 1);
-            last ^= 0x55; corrupt.seekp(-1, std::ios::end); corrupt.write(&last, 1);
+            std::uint32_t count; corrupt.seekg(16); corrupt.read(reinterpret_cast<char*>(&count), 4);
+            corrupt.seekg(24);
+            struct Entry { std::uint32_t type, flags; std::uint64_t offset, size, checksum; };
+            std::uint64_t position = 0;
+            for (unsigned i = 0; i < count; ++i) {
+                Entry entry; corrupt.read(reinterpret_cast<char*>(&entry), sizeof(entry));
+                if (entry.type == std::uint32_t(project::ChunkType::training_checkpoint)) position = entry.offset + entry.size - 1;
+            }
+            require(position != 0, "Project did not contain the training-state chunk");
+            char last; corrupt.seekg(position); corrupt.read(&last, 1);
+            last ^= 0x55; corrupt.seekp(position); corrupt.write(&last, 1);
         }
         const auto recovered = splat::Trainer(options).train(scene);
         compare(uninterrupted, recovered);
@@ -126,51 +153,56 @@ int main(int argc, char** argv) {
         bool rejected = false;
         try { splat::Trainer(changed).train(scene); } catch (const std::exception&) { rejected = true; }
         require(rejected, "Changed training settings accepted an old checkpoint");
-        // An embedded checkpoint remains usable after the sidecar is removed.
+        // A copied native project is sufficient for recovery; no sidecar files.
         const auto bytes = splat::training_checkpoint_bytes(options.checkpoint_path);
-        auto archive = project::Archive::create();
-        archive.set_chunk(project::ChunkType::training_checkpoint, bytes);
-        archive.save(root / "project.ascan");
+        auto archive = project::Archive::open(options.checkpoint_path);
+        require(archive.chunk(marker_type) == std::vector<std::uint8_t>{9, 8, 7}, "Automatic save discarded existing project data");
+        require(project::read_settings(archive).iterations == 10, "Automatic save discarded project settings");
+        const auto copied_project = root / "copied.ascan";
+        archive.save(copied_project);
+        const auto original_project = options.checkpoint_path;
+        options.checkpoint_path = copied_project;
+        compare(uninterrupted, splat::Trainer(options).train(scene));
+        options.checkpoint_path = original_project;
         splat::remove_training_checkpoint(options.checkpoint_path);
-        splat::restore_training_checkpoint(project::Archive::open(root / "project.ascan").chunk(
-            project::ChunkType::training_checkpoint), options.checkpoint_path);
+        require(std::filesystem::exists(options.checkpoint_path) && !splat::inspect_training_checkpoint(options.checkpoint_path),
+            "Clearing a checkpoint removed the project itself");
+        require(project::Archive::open(options.checkpoint_path).chunk(marker_type) == std::vector<std::uint8_t>{9, 8, 7},
+            "Clearing training state discarded other project chunks");
+        splat::restore_training_checkpoint(bytes, options.checkpoint_path);
         compare(uninterrupted, splat::Trainer(options).train(scene));
         {
             const auto legacy_project = root / "legacy-project.ascan";
+            auto base = project::Archive::create();
+            project::write_settings(base, project_settings, legacy_project);
+            base.set_chunk(marker_type, {9, 8, 7}); base.save(legacy_project);
             auto legacy = legacy_project; legacy += ".training.ascan";
-            auto legacy_previous = legacy; legacy_previous += ".previous";
-            splat::restore_training_checkpoint(bytes, legacy);
-            splat::restore_training_checkpoint(bytes, legacy_previous);
-            const auto migrated = splat::training_checkpoint_path(legacy_project);
+            auto old = project::Archive::from_bytes(bytes); old.save(legacy);
+            const auto hidden = root / ".photara-recovery" / legacy_project.filename() / "training.ascan";
+            old.save(hidden);
             {
                 splat::detail::TrainingCheckpointLease active_legacy(legacy);
                 bool blocked = false;
                 try { splat::migrate_training_checkpoints(legacy_project); } catch (...) { blocked = true; }
-                require(blocked && std::filesystem::exists(legacy) && !std::filesystem::exists(migrated),
-                    "Migration moved an active older trainer's checkpoint");
+                require(blocked && std::filesystem::exists(legacy), "Migration moved an active older trainer's checkpoint");
             }
             splat::migrate_training_checkpoints(legacy_project);
-            require(!std::filesystem::exists(legacy) && !std::filesystem::exists(legacy_previous),
-                "Migration left visible checkpoint files beside the project");
-            require(splat::training_checkpoint_bytes(migrated) == bytes,
-                "Migration changed the saved training state");
-            auto migrated_previous = migrated; migrated_previous += ".previous";
-            require(splat::training_checkpoint_bytes(migrated_previous) == bytes,
-                "Migration lost the previous good generation");
-            const auto original_checkpoint_path = options.checkpoint_path;
-            options.checkpoint_path = migrated;
+            require(!std::filesystem::exists(legacy) && !std::filesystem::exists(hidden),
+                "Migration left external checkpoint files");
+            require(splat::training_checkpoint_bytes(legacy_project) == bytes, "Migration changed the saved training state");
+            require(project::Archive::open(legacy_project).chunk(marker_type) == std::vector<std::uint8_t>{9, 8, 7},
+                "Migration discarded existing project chunks");
+            options.checkpoint_path = legacy_project;
             compare(uninterrupted, splat::Trainer(options).train(scene));
-            options.checkpoint_path = original_checkpoint_path;
+            options.checkpoint_path = original_project;
             splat::migrate_training_checkpoints(legacy_project); // Idempotent reopen.
-            splat::restore_training_checkpoint(bytes, legacy);
+            // Different old runs are preserved as project history, never separate files.
+            tinytensor::Tensor tensor = tinytensor::Tensor::ones({2}, tinytensor::Device::CPU);
+            splat::detail::save_training_checkpoint(legacy, {1, 2, 2, 42}, {}, {&tensor});
             splat::migrate_training_checkpoints(legacy_project);
-            require(splat::training_checkpoint_bytes(migrated) == bytes &&
-                std::filesystem::exists(migrated.parent_path() / "legacy" / legacy.filename()),
-                "Migration overwrote an existing recovery generation");
-#ifdef _WIN32
-            require((GetFileAttributesW((root / ".photara-recovery").c_str()) & FILE_ATTRIBUTE_HIDDEN) != 0,
-                "Recovery directory is not hidden in Explorer");
-#endif
+            require(!std::filesystem::exists(legacy) &&
+                project::Archive::open(legacy_project).has(project::ChunkType::training_checkpoint_history),
+                "Conflicting legacy state was not retained inside the project");
         }
         // Saving to an unwritable path preserves the previous valid file.
         {
