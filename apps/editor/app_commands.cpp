@@ -2998,12 +2998,10 @@ void start_train(App& app, const bool smoke) {
         app, true, app.preview_raster_width, app.preview_raster_height);
     ensure_sparse_loaded(app);
 
-    // The preview keeps the whole model resident (attributes plus the sort
-    // buffers) and the trainer needs that VRAM. An unsaved edit session is the
-    // only copy of those deletions, so it keeps the preview alive until it is
-    // saved or superseded by the trained model.
+    // Keep unsaved edits on the CPU, but always release the preview model,
+    // sorting workspaces and frame targets before starting the trainer.
+    release_splat_preview(app);
     if (!app.splat_edit.dirty()) {
-        app.splat_renderer.clear_model();
         app.splat_edit.clear();
     }
 
@@ -3276,6 +3274,17 @@ void on_job_finished(App& app) {
     app.monitor.mark_finished(code);
     const JobKind kind = app.active_job;
     app.active_job = JobKind::none;
+    if (kind == JobKind::train && code != 0) {
+        // The child is already reaped. Drop inherited-preview resources and
+        // cached model workspaces, then avoid immediately loading the previous
+        // saved model back into VRAM from the idle splat viewport.
+        app.preview.reset();
+        release_splat_preview(app);
+        if (!app.splat_edit.dirty()) app.splat_edit.clear();
+        if (app.view_mode == VisualizationMode::splat ||
+            app.view_mode == VisualizationMode::rings)
+            app.view_mode = VisualizationMode::points;
+    }
     refresh_artifacts(app);
 
     if (code == 2) {
