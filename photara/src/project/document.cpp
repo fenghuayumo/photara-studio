@@ -114,6 +114,8 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.mesh_quality));
     writer.value(static_cast<std::int32_t>(settings.training_mode));
     writer.value(static_cast<std::uint8_t>(settings.speedy_pruning));
+    writer.value(static_cast<std::int32_t>(settings.texture_photometric_steps));
+    writer.value(static_cast<std::int32_t>(settings.texture_seam_steps));
     return writer.take();
 }
 
@@ -228,6 +230,19 @@ Settings decode_settings(
         settings.training_mode = 1;
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.speedy_pruning = reader.value<std::uint8_t>() != 0;
+    // Older projects stored only the quality preset, without custom step counts.
+    settings.texture_photometric_steps = settings.texture_quality == 0 ? 1000
+        : (settings.texture_quality == 2 ? 6000 : 3000);
+    settings.texture_seam_steps = settings.texture_quality == 0 ? 30
+        : (settings.texture_quality == 2 ? 120 : 60);
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.texture_photometric_steps = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.texture_seam_steps = reader.value<std::int32_t>();
+    if (settings.texture_photometric_steps < 1)
+        settings.texture_photometric_steps = 3000;
+    if (settings.texture_seam_steps < 0)
+        settings.texture_seam_steps = 60;
     return settings;
 }
 

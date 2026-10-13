@@ -1574,6 +1574,8 @@ std::string build_texture_command(
             << (settings.texture_optimize ? "true" : "false")
             << " --texture-optimize-steps "
             << texture_optimize_steps(settings)
+            << " --texture-seam-steps "
+            << std::max(0, settings.texture_seam_steps)
             << " --texture-color-space "
             << (settings.texture_blend_linear ? "linear" : "srgb");
     if (settings.texture_delight) command << " --delight";

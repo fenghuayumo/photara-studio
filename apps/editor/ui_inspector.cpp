@@ -786,8 +786,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Fast: 1024 atlas, projection only.\n"
-                "Standard: 2048 atlas + photometric refine.\n"
-                "High: 4096 atlas + longer refine.");
+                "Standard: 2048 atlas, 3000 photometric + 60 seam iterations.\n"
+                "High: 4096 atlas, 6000 photometric + 120 seam iterations.");
         theme::caption("Atlas size");
         ImGui::SetNextItemWidth(-1.F);
         int atlas_index = app.settings.atlas_resolution >= 8192
@@ -824,6 +824,20 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Photometric + seam optimization in photara_drender after the "
                 "projective bake. Off is faster; on cleans view seams.");
+        ImGui::BeginDisabled(!app.settings.texture_optimize);
+        theme::caption("Photometric iterations");
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::InputInt("##tex_photo_steps", &app.settings.texture_photometric_steps, 100, 1000))
+            app.settings.texture_photometric_steps = std::max(1, app.settings.texture_photometric_steps);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Iterations to fit the atlas colors to the photographs."));
+        theme::caption("Seam iterations");
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::InputInt("##tex_seam_steps", &app.settings.texture_seam_steps, 10, 100))
+            app.settings.texture_seam_steps = std::max(0, app.settings.texture_seam_steps);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Iterations to match colors across UV seams. Set to 0 to skip."));
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (app.has_texture) {
             ImGui::Spacing();

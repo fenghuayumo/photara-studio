@@ -323,6 +323,8 @@ struct ProjectSettings {
     int atlas_resolution = 2048;
     bool texture_delight = false;
     bool texture_optimize = true;
+    int texture_photometric_steps = 3000;
+    int texture_seam_steps = 60;
     // false = sRGB blend (matches photographs). true = scene-linear blend.
     bool texture_blend_linear = false;
 };
@@ -484,22 +486,26 @@ inline void apply_texture_quality_preset(ProjectSettings& settings) {
         case 0:
             settings.atlas_resolution = 1024;
             settings.texture_optimize = false;
+            settings.texture_photometric_steps = 1000;
+            settings.texture_seam_steps = 30;
             break;
         case 2:
             settings.atlas_resolution = 4096;
             settings.texture_optimize = true;
+            settings.texture_photometric_steps = 6000;
+            settings.texture_seam_steps = 120;
             break;
         default:
             settings.atlas_resolution = 2048;
             settings.texture_optimize = true;
+            settings.texture_photometric_steps = 3000;
+            settings.texture_seam_steps = 60;
             break;
     }
 }
 
 inline int texture_optimize_steps(const ProjectSettings& settings) {
-    if (settings.texture_quality == 0) return 400;
-    if (settings.texture_quality == 2) return 2000;
-    return 1000;
+    return std::max(1, settings.texture_photometric_steps);
 }
 
 // Folder of stills SfM/training actually reads. Equals images_dir for a photo

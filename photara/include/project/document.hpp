@@ -12,7 +12,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 4;
+inline constexpr std::uint32_t k_settings_version = 5;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct Settings {
@@ -79,6 +79,8 @@ struct Settings {
     int atlas_resolution = 2048;
     bool texture_delight = false;
     bool texture_optimize = true;
+    int texture_photometric_steps = 3000;
+    int texture_seam_steps = 60;
     // false = blend and export in sRGB (matches photographs). true = linear.
     bool texture_blend_linear = false;
     float depth_normal_weight = 0.05F;

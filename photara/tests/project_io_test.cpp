@@ -218,6 +218,8 @@ int main() {
     settings.atlas_resolution = 4096;
     settings.texture_delight = true;
     settings.texture_optimize = false;
+    settings.texture_photometric_steps = 4500;
+    settings.texture_seam_steps = 90;
     settings.texture_blend_linear = true;
     settings.mask_mode = 1;
     settings.sam_masks = true;
@@ -276,7 +278,7 @@ int main() {
     expect(round_trip.build_mesh, "settings build mesh");
     expect(round_trip.mesh_quality == 2, "settings mesh quality");
     auto legacy_settings = encode_settings(settings, ascan_path);
-    legacy_settings.resize(legacy_settings.size() - 2 * sizeof(std::int32_t) - sizeof(std::uint8_t));
+    legacy_settings.resize(legacy_settings.size() - 4 * sizeof(std::int32_t) - sizeof(std::uint8_t));
     expect(decode_settings(legacy_settings, ascan_path).mesh_quality == 1,
            "legacy project defaults to standard mesh quality");
     for (int quality : {0, 1, 2}) {
@@ -300,7 +302,7 @@ int main() {
                "3DGS presets survive project roundtrip");
     }
     auto old_training = encode_settings(settings, ascan_path);
-    old_training.resize(old_training.size() - sizeof(std::int32_t) - sizeof(std::uint8_t));
+    old_training.resize(old_training.size() - 3 * sizeof(std::int32_t) - sizeof(std::uint8_t));
     const auto old_restored = decode_settings(old_training, ascan_path);
     expect(!old_restored.speedy_pruning && old_restored.densification_cap == 2'500'000,
            "legacy projects preserve their cap without enabling Speedy pruning");
@@ -309,6 +311,29 @@ int main() {
     expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
     expect(round_trip.texture_delight, "settings texture delight");
     expect(!round_trip.texture_optimize, "settings texture optimize");
+    expect(round_trip.texture_photometric_steps == 4500 && round_trip.texture_seam_steps == 90,
+           "custom texture iteration counts survive project roundtrip");
+    for (int quality : {0, 1, 2}) {
+        auto selected = settings;
+        selected.texture_quality = quality;
+        auto old_texture = encode_settings(selected, ascan_path);
+        old_texture.resize(old_texture.size() - 2 * sizeof(std::int32_t));
+        const auto restored = decode_settings(old_texture, ascan_path);
+        expect(restored.texture_photometric_steps == (quality == 0 ? 1000 : (quality == 2 ? 6000 : 3000)) &&
+               restored.texture_seam_steps == (quality == 0 ? 30 : (quality == 2 ? 120 : 60)),
+               "old projects receive texture iteration defaults for their quality preset");
+    }
+    {
+        auto selected = settings;
+        selected.texture_seam_steps = 0;
+        expect(decode_settings(encode_settings(selected, ascan_path), ascan_path).texture_seam_steps == 0,
+               "disabled seam optimization survives project roundtrip");
+        selected.texture_photometric_steps = -1;
+        selected.texture_seam_steps = -1;
+        const auto restored = decode_settings(encode_settings(selected, ascan_path), ascan_path);
+        expect(restored.texture_photometric_steps == 3000 && restored.texture_seam_steps == 60,
+               "invalid texture iteration counts receive safe defaults");
+    }
     expect(round_trip.texture_blend_linear, "settings texture blend linear");
     const auto loaded_scene = read_sfm(loaded);
     expect(loaded_scene.has_value(), "read sfm from ascan");
@@ -348,8 +373,8 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto legacy_bytes = settings_bytes;
-        // Remove training mode/pruning, mesh quality and SAM alignment opt-in.
-        legacy_bytes.resize(legacy_bytes.size() - 2 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
+        // Remove texture steps, training mode/pruning, mesh quality and SAM alignment opt-in.
+        legacy_bytes.resize(legacy_bytes.size() - 4 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");

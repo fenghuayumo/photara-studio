@@ -319,7 +319,8 @@ struct ReconstructCli {
     bool texture_fill_unobserved{true};
     float texture_mask_floor{0.05F};
     float texture_softmax_scale{0.F};
-    std::uint32_t texture_optimize_steps{1000};
+    std::uint32_t texture_optimize_steps{3000};
+    std::uint32_t texture_seam_steps{60};
     std::uint32_t texture_optimize_batch_size{4};
     std::uint32_t texture_seam_samples{4};
     float video_fps{2.F};
@@ -544,7 +545,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
               << "  --texture-color-space srgb|linear  blend space (default srgb, matches photographs)\n"
               << "  --texture-optimize BOOL  photara_drender photometric + seam optimization (default true)\n"
-              << "  --texture-optimize-steps N  native Vulkan Adam steps (default 1000)\n"
+              << "  --texture-optimize-steps N  native Vulkan Adam steps (default 3000)\n"
+              << "  --texture-seam-steps N  seam polish steps (default 60, 0 disables)\n"
               << "  --texture-optimize-batch-size N  calibrated views per optimizer step (default 4)\n"
               << "  --texture-seam-samples N  samples per UV chart seam edge (default 4)\n"
               << "Output formats:\n"
@@ -1142,7 +1144,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Refine projected atlas with photara_drender's native optimizer",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("texture-optimize-steps", "Native texture optimization steps",
-         cxxopts::value<std::uint32_t>()->default_value("1000"))
+         cxxopts::value<std::uint32_t>()->default_value("3000"))
+        ("texture-seam-steps", "UV seam optimization steps (0 disables seam polish)",
+         cxxopts::value<std::uint32_t>()->default_value("60"))
         ("texture-optimize-batch-size", "Views per texture optimization step",
          cxxopts::value<std::uint32_t>()->default_value("4"))
         ("texture-seam-samples", "Samples per UV chart seam edge",
@@ -1639,6 +1643,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.texture_optimize = result["texture-optimize"].as<bool>();
     cli.texture_optimize_steps =
         result["texture-optimize-steps"].as<std::uint32_t>();
+    cli.texture_seam_steps = result["texture-seam-steps"].as<std::uint32_t>();
     cli.texture_optimize_batch_size =
         result["texture-optimize-batch-size"].as<std::uint32_t>();
     cli.texture_seam_samples =
@@ -2511,6 +2516,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.atlas_resolution = static_cast<int>(atlas_resolution);
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
+    settings.texture_photometric_steps = static_cast<int>(cli.texture_optimize_steps);
+    settings.texture_seam_steps = static_cast<int>(cli.texture_seam_steps);
     settings.texture_blend_linear = cli.texture_color_space == "linear";
     if (atlas_resolution <= 1024) settings.texture_quality = 0;
     else if (atlas_resolution >= 4096) settings.texture_quality = 2;
@@ -2595,6 +2602,7 @@ photara::texture::TextureOptions texture_options_from_cli(
     options.atlas_fill_unobserved = cli.texture_fill_unobserved;
     options.optimize = cli.texture_optimize;
     options.optimize_steps = cli.texture_optimize_steps;
+    options.seam_polish_steps = cli.texture_seam_steps;
     options.optimize_batch_size = cli.texture_optimize_batch_size;
     options.seam_samples_per_edge = cli.texture_seam_samples;
     options.delight = cli.delight;
