@@ -12,7 +12,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 6;
+inline constexpr std::uint32_t k_settings_version = 7;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct Settings {
@@ -75,6 +75,12 @@ struct Settings {
     int mesh_source = 0;
     int mesh_method = 0;
     int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High.
+    int mesh_postprocess_quality = 1;
+    bool mesh_simplify = false;
+    std::uint64_t mesh_target_faces = 1'000'000;
+    bool mesh_remesh = false;
+    std::uint64_t mesh_remesh_target_faces = 1'000'000;
+    int mesh_remesh_smooth_iterations = 1;
     // Texture bake after mesh: 0 Fast, 1 Standard, 2 High.
     int texture_quality = 1;
     int atlas_resolution = 2048;

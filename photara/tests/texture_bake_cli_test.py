@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import math
 
 
 def write_image(path):
@@ -61,6 +62,33 @@ def read_x_coordinates(path):
         record = struct.Struct('<' + ''.join(codes[t] for t, _ in properties))
         x_slot = [name for _, name in properties].index('x')
         return [record.unpack(stream.read(record.size))[x_slot] for _ in range(count)]
+
+
+def write_sphere(path):
+    vertices = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+    faces = [(0, 2, 4), (2, 1, 4), (1, 3, 4), (3, 0, 4),
+             (2, 0, 5), (1, 2, 5), (3, 1, 5), (0, 3, 5)]
+    for _ in range(2):
+        midpoints = {}
+        def midpoint(a, b):
+            edge = tuple(sorted((a, b)))
+            if edge not in midpoints:
+                v = tuple(vertices[a][axis] + vertices[b][axis] for axis in range(3))
+                length = math.sqrt(sum(c*c for c in v))
+                midpoints[edge] = len(vertices)
+                vertices.append(tuple(c/length for c in v))
+            return midpoints[edge]
+        refined = []
+        for a, b, c in faces:
+            ab, bc, ca = midpoint(a, b), midpoint(b, c), midpoint(c, a)
+            refined.extend(((a, ab, ca), (b, bc, ab), (c, ca, bc), (ab, bc, ca)))
+        faces = refined
+    text = (f'ply\nformat ascii 1.0\nelement vertex {len(vertices)}\n'
+            'property float x\nproperty float y\nproperty float z\n'
+            f'element face {len(faces)}\nproperty list uchar int vertex_indices\nend_header\n')
+    text += ''.join(f'{x*0.5} {y*0.5} {z*0.5+3}\n' for x, y, z in vertices)
+    text += ''.join('3 ' + ' '.join(map(str, f)) + '\n' for f in faces)
+    path.write_text(text, encoding='ascii')
 
 
 def main():
@@ -117,6 +145,39 @@ def main():
             assert result.returncode != 0 and (
                 '--uv-max-stretch must be finite' in output or
                 (stretch == 'nan' and "Argument 'nan' failed to parse" in output)), output
+        for quality, target in (('fast', 500000), ('standard', 1000000), ('high', 2000000)):
+            result = subprocess.run(base + ['--mesh-postprocess-quality', quality,
+                                    '--output', str(root / ('preset_' + quality + '.ply'))],
+                                    capture_output=True, text=True, errors='replace', timeout=120)
+            output = result.stdout + result.stderr
+            assert result.returncode == 0 and f'target_faces={target}' in output, output
+            assert 'mesh.instant_remesh' not in output, output
+        sphere = root / 'sphere.ply'
+        write_sphere(sphere)
+        sphere_source = sphere.read_bytes()
+        sphere_command = base.copy()
+        sphere_command[sphere_command.index('--working-mesh') + 1] = str(sphere)
+        # Explicit remesh must run with simplification disabled, and even when
+        # the reduction budget is greater than the input face count (128).
+        for name, reduction in (('remesh_only', 0), ('remesh_below_cap', 1000)):
+            result = subprocess.run(sphere_command + ['--mesh-target-faces', str(reduction),
+                                    '--mesh-remesh=true', '--mesh-remesh-target-faces', '256',
+                                    '--mesh-remesh-smooth-iterations', '0',
+                                    '--output', str(root / (name + '.ply'))],
+                                    capture_output=True, text=True, errors='replace', timeout=120)
+            output = result.stdout + result.stderr
+            assert result.returncode == 0, output
+            assert 'instant mesh config: target_triangles=256 smooth_iterations=0' in output, output
+            assert 'Instant Meshes failed' not in output, output
+            assert (root / (name + '_bake_mesh.ply')).exists(), output
+            assert sphere.read_bytes() == sphere_source
+        for option, value in (('--mesh-remesh-target-faces', '3'),
+                              ('--mesh-remesh-smooth-iterations', '-1'),
+                              ('--mesh-remesh-smooth-iterations', '11'),
+                              ('--mesh-postprocess-quality', 'invalid')):
+            result = subprocess.run(base + [option, value, '--output', str(root / 'invalid_mesh.ply')],
+                                    capture_output=True, text=True, errors='replace', timeout=120)
+            assert result.returncode != 0 and option in (result.stdout + result.stderr)
         non_manifold = root / 'non_manifold.ply'
         write_mesh(non_manifold, non_manifold=True)
         non_manifold_original = non_manifold.read_bytes()

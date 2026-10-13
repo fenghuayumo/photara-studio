@@ -117,6 +117,12 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.texture_photometric_steps));
     writer.value(static_cast<std::int32_t>(settings.texture_seam_steps));
     writer.value(static_cast<std::uint8_t>(settings.focus_region));
+    writer.value(static_cast<std::int32_t>(settings.mesh_postprocess_quality));
+    writer.value(static_cast<std::uint8_t>(settings.mesh_simplify));
+    writer.value(settings.mesh_target_faces);
+    writer.value(static_cast<std::uint8_t>(settings.mesh_remesh));
+    writer.value(settings.mesh_remesh_target_faces);
+    writer.value(static_cast<std::int32_t>(settings.mesh_remesh_smooth_iterations));
     return writer.take();
 }
 
@@ -248,6 +254,20 @@ Settings decode_settings(
     // field existed default it off (Settings::focus_region).
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.focus_region = reader.value<std::uint8_t>() != 0;
+    if (version >= 7) {
+        settings.mesh_postprocess_quality = reader.value<std::int32_t>();
+        settings.mesh_simplify = reader.value<std::uint8_t>() != 0;
+        settings.mesh_target_faces = reader.value<std::uint64_t>();
+        settings.mesh_remesh = reader.value<std::uint8_t>() != 0;
+        settings.mesh_remesh_target_faces = reader.value<std::uint64_t>();
+        settings.mesh_remesh_smooth_iterations = reader.value<std::int32_t>();
+        if (settings.mesh_postprocess_quality < 0 || settings.mesh_postprocess_quality > 2)
+            settings.mesh_postprocess_quality = 1;
+        if (settings.mesh_target_faces < 4) settings.mesh_target_faces = 1'000'000;
+        if (settings.mesh_remesh_target_faces < 4) settings.mesh_remesh_target_faces = 1'000'000;
+        if (settings.mesh_remesh_smooth_iterations < 0 || settings.mesh_remesh_smooth_iterations > 10)
+            settings.mesh_remesh_smooth_iterations = 1;
+    }
     return settings;
 }
 

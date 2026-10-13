@@ -451,10 +451,25 @@ const char* mesh_method_flag(const int index) {
     }
 }
 
+void append_mesh_postprocess_flags(
+    std::ostringstream& command, const ProjectSettings& settings) {
+    const char* quality = settings.mesh_postprocess_quality == 0 ? "fast" :
+        settings.mesh_postprocess_quality == 2 ? "high" : "standard";
+    command << " --mesh-postprocess-quality " << quality
+            << " --mesh-target-faces "
+            << (settings.mesh_simplify ? std::max<std::uint64_t>(4, settings.mesh_target_faces) : 0)
+            << " --mesh-remesh=" << (settings.mesh_remesh ? "true" : "false")
+            << " --mesh-remesh-target-faces "
+            << std::max<std::uint64_t>(4, settings.mesh_remesh_target_faces)
+            << " --mesh-remesh-smooth-iterations "
+            << std::clamp(settings.mesh_remesh_smooth_iterations, 0, 10);
+}
+
 void append_mesh_quality_flags(
     std::ostringstream& command, const ProjectSettings& settings,
     const int method, const bool from_mvs = false) {
     const auto preset = mesh_quality_preset(settings.mesh_quality);
+    append_mesh_postprocess_flags(command, settings);
     if (from_mvs)
         command << " --dense-quality " << preset.dense_quality;
     if (method == 3 && !from_mvs) {
@@ -1588,6 +1603,7 @@ std::string build_texture_command(
             << " --texture-color-space "
             << (settings.texture_blend_linear ? "linear" : "srgb");
     if (settings.texture_delight) command << " --delight";
+    append_mesh_postprocess_flags(command, settings);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);

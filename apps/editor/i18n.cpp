@@ -29,6 +29,21 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Mesh postprocessing", "网格后处理", "メッシュ後処理", "메시 후처리"},
+    {"Postprocessing quality", "后处理质量", "後処理品質", "후처리 품질"},
+    {"Simplify mesh", "网格减面", "メッシュ簡略化", "메시 단순화"},
+    {"Target triangle count", "目标三角面数", "目標三角形数", "목표 삼각형 수"},
+    {"Remesh surface", "表面重网格化", "表面リメッシュ", "표면 리메시"},
+    {"Remesh triangle budget", "重网格目标面数", "リメッシュ三角形数", "리메시 목표 삼각형 수"},
+    {"Remesh smoothing iterations", "重网格平滑次数", "リメッシュ平滑化回数", "리메시 스무딩 횟수"},
+    {"Applied during mesh extraction and texture baking. Manifold repair runs before UV unwrapping.",
+        "在网格提取及纹理烘焙时执行。UV 展开前自动修复流形拓扑。", "メッシュ抽出とテクスチャベイク時に適用。UV 展開前に多様体修復を実行。", "메시 추출과 텍스처 베이킹에 적용됩니다. UV 전개 전에 매니폴드를 복구합니다."},
+    {"Fast: 500,000 faces, no remesh smoothing.\nStandard: 1,000,000 faces, 1 smoothing iteration.\nHigh: 2,000,000 faces, 2 smoothing iterations.\nPresets set budgets; enable simplification or remeshing separately.",
+        "快速：50 万面，不进行重网格平滑。\n标准：100 万面，平滑 1 次。\n高质量：200 万面，平滑 2 次。\n预设只设置目标值；减面和重网格化需单独开启。", "高速：50万面、平滑化なし。\n標準：100万面、平滑化1回。\n高品質：200万面、平滑化2回。\n簡略化とリメッシュは個別に有効化します。", "빠름: 50만 면, 스무딩 없음.\n표준: 100만 면, 스무딩 1회.\n높음: 200만 면, 스무딩 2회.\n단순화와 리메시는 별도로 활성화하세요."},
+    {"Reduce faces only when the mesh exceeds the target. Keep useful disconnected components.",
+        "仅在面数超过目标时减面，保留有用的不相连组件。", "目標を超えた場合のみ簡略化し、分離した部分を保持します。", "목표를 초과할 때만 면을 줄이고 분리된 구성 요소를 유지합니다."},
+    {"Rebuild triangle layout with Instant Meshes. Changes geometry and can affect thin structures. Runs independently of simplification.",
+        "使用 Instant Meshes 重建三角面布局，会改变几何并可能影响细小结构。可独立于减面执行。", "Instant Meshes で面配置を再構築。形状と細い構造に影響します。簡略化とは独立して実行。", "Instant Meshes로 삼각형 배치를 재구성합니다. 형상과 얇은 구조에 영향을 줄 수 있으며 단순화와 독립적으로 실행됩니다."},
     // Menus
     {"File", "文件", "ファイル", "파일"},
     {"New Project", "新建项目", "新規プロジェクト", "새 프로젝트"},
