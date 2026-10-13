@@ -3,6 +3,7 @@
 #include "i18n.hpp"
 #include "io/video_frames.hpp"
 #include "sam/model_cache.hpp"
+#include "splat/checkpoint.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1252,6 +1253,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
             runtime_dir =
                 temp / "Photara" / runtime_cache_key(layout.project_file);
     }
+    layout.training_checkpoint = photara::splat::training_checkpoint_path(layout.project_file);
     layout.working_sfm = runtime_dir / "sfm.bin";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
@@ -1268,13 +1270,14 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.session_dir = session_error
         ? std::filesystem::path("photara_session")
         : session_temp / "Photara" / session_directory_name();
+    layout.training_control = layout.session_dir / "training_control";
     layout.preview_view_file = layout.session_dir / "preview_view";
     layout.preview_camera_file = layout.session_dir / "preview_camera";
     layout.preview_vis_file = layout.session_dir / "preview_vis";
     layout.preview_ack_file = layout.session_dir / "preview_ack";
     layout.align_live = layout.session_dir / "align.live";
     layout.align_preview = layout.session_dir / "align.preview.asfm";
-    layout.working_subject_bounds = layout.session_dir / "subject_bounds.txt";
+    layout.working_subject_bounds = runtime_dir / "subject_bounds.txt";
     // Job stdout for the Console panel. Session temp, not the dataset folder.
     layout.align_log = layout.session_dir / "align.log";
     layout.train_log = layout.session_dir / "train.log";
@@ -1365,6 +1368,8 @@ std::string build_train_command(
                     << quote(settings.dataset_initial_cloud.data());
     }
 
+    command << " --splat-checkpoint " << quote(layout.training_checkpoint)
+            << " --splat-checkpoint-control " << quote(layout.training_control);
     command << " --splat --backend " << training_backend_flag(settings)
             << " --capture-mode "
             << (settings.scene_mode ? "scene" : "object")

@@ -267,6 +267,7 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
 }
 
 void refresh_artifacts(App& app) {
+    app.training_checkpoint_info.reset();
     // A normal editor session starts without a project. Do not resolve an
     // empty path relative to the process working directory, otherwise a
     // stray sparse.ply next to the executable could be treated as the active
@@ -284,6 +285,7 @@ void refresh_artifacts(App& app) {
         return;
     }
     app.layout = resolve_layout(app.settings);
+    app.training_checkpoint_info = photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint);
     std::error_code error;
     app.has_asfm = std::filesystem::exists(app.layout.sparse_asfm, error);
     app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
@@ -680,6 +682,12 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                 app.layout.working_sfm, reconstruction_images_path(app));
             photara::project::write_sfm(archive, scene, path);
         }
+        if (photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint)) {
+            archive.set_chunk(photara::project::ChunkType::training_checkpoint,
+                photara::splat::training_checkpoint_bytes(app.layout.training_checkpoint));
+        } else {
+            archive.erase_chunk(photara::project::ChunkType::training_checkpoint);
+        }
         const auto splat = existing_splat_model(app);
         if (app.splat_edit.dirty()) {
             photara::splat::GaussianModel edited;
@@ -735,6 +743,10 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
         }
 #endif
         archive.save(path);
+        if (path != current && archive.has(photara::project::ChunkType::training_checkpoint))
+            photara::splat::restore_training_checkpoint(
+                archive.chunk(photara::project::ChunkType::training_checkpoint),
+                photara::splat::training_checkpoint_path(path));
         store_path_field(app.settings.project_dir, path);
         app.project_folder_automatic = false;
         refresh_artifacts(app);
@@ -2068,7 +2080,25 @@ void apply_opened_project(App& app) {
         const auto archive =
             photara::project::Archive::open(app.layout.project_file);
         apply_project_settings(app, photara::project::read_settings(archive));
+        photara::splat::migrate_training_checkpoints(app.layout.project_file);
         refresh_artifacts(app);
+        if (!app.training_checkpoint_info && archive.has(photara::project::ChunkType::training_checkpoint)) {
+            photara::splat::restore_training_checkpoint(
+                archive.chunk(photara::project::ChunkType::training_checkpoint), app.layout.training_checkpoint);
+            refresh_artifacts(app);
+        }
+        if (app.training_checkpoint_info) {
+            const auto& bounds = app.training_checkpoint_info->focus_bounds;
+            if (bounds.valid && bounds.axes.isApprox(photara::mvs::Mat3f::Identity(), 1e-6F)) {
+                const auto minimum = (bounds.center - bounds.half_extent).eval();
+                const auto maximum = (bounds.center + bounds.half_extent).eval();
+                app.reconstruction_box.min = {minimum.x(), minimum.y(), minimum.z()};
+                app.reconstruction_box.max = {maximum.x(), maximum.y(), maximum.z()};
+                app.reconstruction_box.valid = true;
+                app.reconstruction_box.user_set = true;
+            }
+            set_message(app, "Saved training progress found. Use Resume Training to resume.", theme::accent);
+        }
 #if defined(PHOTARA_HAS_TEXTURE)
         if (archive.has(photara::project::ChunkType::texture) &&
             !textured_mesh_on_disk(app.layout.working_texture)) {
@@ -2204,6 +2234,9 @@ void save_project_as(App& app) {
 }
 
 void save_project(App& app) {
+    if (app.job.running() && app.active_job == JobKind::train) {
+        request_project_save(app, false); return;
+    }
     if (app.job.running()) return;
     assign_default_project_folder(app);
     refresh_artifacts(app);
@@ -2213,6 +2246,99 @@ void save_project(App& app) {
     }
     if (save_project_to_path(app, app.layout.project_file))
         set_message(app, "Project saved", theme::success);
+}
+
+void cancel_project_save(App& app) {
+    if (!app.saving_training) return;
+    std::error_code ignored;
+    // Truncation is safe even when a Windows reader briefly holds the file.
+    { std::ofstream cancel(app.layout.training_control, std::ios::trunc); }
+    std::filesystem::remove(app.layout.training_control, ignored);
+    if (app.job.running() && app.paused_before_save) app.job.pause();
+    app.saving_training = false;
+    app.exit_after_save = false;
+}
+
+void request_project_save(App& app, const bool exit_after_save) {
+    if (app.saving_training) return;
+    app.checkpoint_save_error.clear();
+    if (app.job.running() && app.active_job == JobKind::train) {
+        try {
+            std::filesystem::create_directories(app.layout.training_control.parent_path());
+            auto reply = app.layout.training_control; reply += ".reply";
+            std::error_code ignored; std::filesystem::remove(reply, ignored);
+            app.checkpoint_request = std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            // Atomic request publication: the child must never see a partial ID.
+            auto staged = app.layout.training_control; staged += ".tmp";
+            {
+                std::ofstream output(staged, std::ios::trunc);
+                output << app.checkpoint_request << '\n'; output.close();
+                if (!output) throw std::runtime_error("Cannot request a training checkpoint");
+            }
+            std::filesystem::remove(app.layout.training_control, ignored);
+            std::filesystem::rename(staged, app.layout.training_control);
+            app.paused_before_save = app.job.paused();
+            app.job.resume(); // An OS-suspended trainer cannot acknowledge a save.
+            app.saving_training = true;
+            app.exit_after_save = exit_after_save;
+            app.checkpoint_save_started = std::chrono::steady_clock::now();
+            set_message(app, "Saving project and training progress...", theme::accent);
+        } catch (const std::exception& error) {
+            app.checkpoint_save_error = error.what();
+            set_message(app, error.what(), theme::danger);
+        }
+        return;
+    }
+    assign_default_project_folder(app);
+    refresh_artifacts(app);
+    if (app.layout.project_file.empty()) {
+        save_project_as(app);
+        if (!app.layout.project_file.empty() && std::filesystem::exists(app.layout.project_file))
+            app.close_approved = exit_after_save;
+        return;
+    }
+    const bool was_paused = app.job.paused();
+    if (app.job.running()) app.job.pause();
+    if (save_project_to_path(app, app.layout.project_file)) {
+        app.close_approved = exit_after_save;
+        set_message(app, "Project saved", theme::success);
+    } else app.checkpoint_save_error = app.message;
+    if (app.job.running() && !was_paused) app.job.resume();
+}
+
+void poll_project_save(App& app) {
+    if (!app.saving_training) return;
+    auto reply = app.layout.training_control; reply += ".reply";
+    std::ifstream input(reply);
+    std::string request, response;
+    std::getline(input, request); std::getline(input, response);
+    const bool acknowledged = request == app.checkpoint_request && !response.empty();
+    if (!acknowledged && app.job.running()) return;
+    if (acknowledged && response.starts_with("error ")) {
+        app.checkpoint_save_error = response.substr(6);
+        cancel_project_save(app);
+        set_message(app, app.checkpoint_save_error, theme::danger);
+        return;
+    }
+    if (acknowledged && !response.starts_with("saved ")) return;
+    if (!acknowledged && app.job.exit_code() != 0) {
+        app.checkpoint_save_error = "Training stopped before confirming the save. The last automatic checkpoint is retained.";
+        cancel_project_save(app);
+        set_message(app, app.checkpoint_save_error, theme::danger);
+        return;
+    }
+    const bool exit_after_save = app.exit_after_save;
+    if (save_project_to_path(app, app.layout.project_file)) {
+        if (exit_after_save) {
+            app.close_approved = true; // Keep the child at its safe boundary until shutdown.
+            app.saving_training = false;
+        } else cancel_project_save(app);
+        set_message(app, "Project and training progress saved", theme::success);
+    } else {
+        app.checkpoint_save_error = app.message;
+        cancel_project_save(app);
+    }
 }
 
 bool has_reconstruction_result(const App& app) {
@@ -2250,6 +2376,8 @@ void delete_reconstruction_results(App& app) {
 
     std::uintmax_t removed = 0;
     std::string failure;
+    try { photara::splat::remove_training_checkpoint(app.layout.training_checkpoint); }
+    catch (const std::exception& error) { failure = error.what(); }
     for (const std::filesystem::path& path : generated_files) {
         if (path.empty()) continue;
         std::error_code error;
@@ -2262,6 +2390,7 @@ void delete_reconstruction_results(App& app) {
             if (std::filesystem::exists(app.layout.project_file)) {
                 auto archive =
                     photara::project::Archive::open(app.layout.project_file);
+                archive.erase_chunk(photara::project::ChunkType::training_checkpoint);
                 archive.erase_chunk(photara::project::ChunkType::sfm);
                 archive.erase_chunk(photara::project::ChunkType::gaussians);
                 archive.erase_chunk(photara::project::ChunkType::mesh);
@@ -2974,7 +3103,7 @@ void export_alignment(App& app) {
     }
 }
 
-void start_train(App& app, const bool smoke) {
+void start_train(App& app, const bool smoke, const bool resume_training) {
     if (app.job.running()) return;
     if (!smoke && !ensure_sam_ready(app)) return;
     assign_default_project_folder(app);
@@ -2982,7 +3111,25 @@ void start_train(App& app, const bool smoke) {
         set_message(app, "Save or choose a project file first", theme::warning);
         return;
     }
+    try { photara::splat::migrate_training_checkpoints(resolve_layout(app.settings).project_file); }
+    catch (const std::exception& failure) { set_message(app, failure.what(), theme::danger); return; }
     refresh_artifacts(app);
+    if (resume_training && !app.training_checkpoint_info) {
+        set_message(app, "No saved training progress is available.", theme::warning);
+        return;
+    }
+    if (!smoke && photara::splat::training_checkpoint_in_use(app.layout.training_checkpoint)) {
+        set_message(app, "This project's training checkpoint is in use by another process.", theme::warning);
+        return;
+    }
+    try {
+        if (!resume_training && !smoke)
+            photara::splat::remove_training_checkpoint(app.layout.training_checkpoint);
+        // Persist the inputs before starting: a crash must leave a project to reopen.
+        if (!smoke && !save_project_to_path(app, app.layout.project_file)) return;
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger); return;
+    }
     write_working_subject_bounds(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -3090,6 +3237,7 @@ void start_train(App& app, const bool smoke) {
                 cli_path().c_str(), app.settings, app.layout, handles);
         }
 
+        if (!smoke) command += resume_training ? " --splat-resume=true" : " --splat-resume=false";
         app.monitor.begin(JobKind::train);
         app.log.open(app.layout.train_log);
         app.job.start(command, app.layout.train_log);
@@ -3310,7 +3458,9 @@ void on_job_finished(App& app) {
         set_message(
             app,
             std::string(job_name(kind)) +
-                " stopped. You can change images, video, or parameters and run again.",
+                (kind == JobKind::train && app.training_checkpoint_info
+                    ? " stopped. Resume Training restores the last saved checkpoint."
+                    : " stopped. You can change images, video, or parameters and run again."),
             theme::warning);
         return;
     }
@@ -3324,6 +3474,15 @@ void on_job_finished(App& app) {
         return;
     }
 
+    if (kind == JobKind::train && !app.smoke_mode) {
+        try {
+            // The completed products replace the pending training snapshot.
+            photara::splat::remove_training_checkpoint(app.layout.training_checkpoint);
+            if (!save_project_to_path(app, app.layout.project_file)) return;
+        } catch (const std::exception& error) {
+            set_message(app, error.what(), theme::danger); return;
+        }
+    }
     if (kind == JobKind::align) {
         app.align_live = {};
         app.align_match_session.clear();

@@ -619,6 +619,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
+            src/splat/checkpoint.cpp
             src/splat/trainer.cpp)
         add_library(Photara::Splat ALIAS photara_splat)
         target_include_directories(photara_splat
@@ -1135,6 +1136,19 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     target_link_libraries(photara_logging_test PRIVATE Photara::BA)
     add_test(NAME photara.core.logging COMMAND photara_logging_test)
     if(TARGET photara_splat)
+        add_executable(photara_splat_checkpoint_test tests/splat_checkpoint_test.cpp)
+        target_link_libraries(photara_splat_checkpoint_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.checkpoint COMMAND photara_splat_checkpoint_test)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND AND TARGET photara)
+            add_test(NAME photara.splat.process_resume
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_resume_process_test.py"
+                    $<TARGET_FILE:photara>)
+            set_tests_properties(photara.splat.process_resume PROPERTIES TIMEOUT 150)
+        endif()
+        if(PHOTARA_ENABLE_VULKAN_COMPUTE)
+            add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
+        endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
         add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
@@ -1261,6 +1275,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_ba_test
         photara_thread_pool_test
         photara_logging_test
+        photara_splat_checkpoint_test
         photara_splat_test
         photara_splat_quality_eval
         photara_splat_vulkan_forward_test

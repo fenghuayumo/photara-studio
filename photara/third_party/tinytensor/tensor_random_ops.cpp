@@ -57,6 +57,14 @@ namespace tinytensor {
         impl->call_counter_.store(0); // Reset call counter when seed is set
     }
 
+    uint64_t RandomGenerator::checkpoint_counter() const {
+        return static_cast<const RandomGeneratorImpl*>(impl_)->call_counter_.load();
+    }
+
+    void RandomGenerator::restore_checkpoint_counter(uint64_t counter) {
+        static_cast<RandomGeneratorImpl*>(impl_)->call_counter_.store(counter);
+    }
+
     uint64_t RandomGenerator::get_next_cuda_seed() {
         auto* impl = static_cast<RandomGeneratorImpl*>(impl_);
         uint64_t base_seed = impl->seed_;

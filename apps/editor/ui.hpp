@@ -27,5 +27,6 @@ void draw_alignment_export_modal(App& app);
 void draw_splat_export_modal(App& app);
 ClearResultsAction draw_clear_results_modal(App& app);
 void draw_sam_license_modal(App& app);
+void draw_project_lifecycle_modals(App& app);
 
 }  // namespace editor

@@ -365,6 +365,8 @@ struct ProjectLayout {
     // The editor writes the number of preview frames it has copied out of the
     // shared image here, so the trainer can skip a preview instead of waiting.
     std::filesystem::path preview_ack_file;
+    std::filesystem::path training_checkpoint;
+    std::filesystem::path training_control;
     std::filesystem::path working_sfm;
     std::filesystem::path align_live;
     std::filesystem::path align_preview;

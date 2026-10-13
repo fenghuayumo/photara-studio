@@ -15,6 +15,7 @@
 #include "sfm/align_live.hpp"
 #include "splat/visualize.hpp"
 #include "splat/types.hpp"
+#include "splat/checkpoint.hpp"
 
 #include "imgui.h"
 
@@ -56,6 +57,7 @@ enum class Action {
     none,
     align,
     train,
+    continue_training,
     dense,
     texture,
     export_sfm,
@@ -163,6 +165,15 @@ struct App {
     bool smoke_started{};
     bool smoke_success{};
     bool close_requested{};
+    bool close_approved{};
+    bool show_close_confirmation{};
+    std::optional<photara::splat::TrainingCheckpointInfo> training_checkpoint_info;
+    bool saving_training{};
+    bool exit_after_save{};
+    bool paused_before_save{};
+    std::string checkpoint_request;
+    std::string checkpoint_save_error;
+    std::chrono::steady_clock::time_point checkpoint_save_started{};
     bool show_controls{};
     bool show_about{};
     bool show_preferences{};
@@ -289,6 +300,9 @@ void select_image_folder(App& app);
 void select_video_file(App& app);
 void select_project_folder(App& app);
 void save_project(App& app);
+void request_project_save(App& app, bool exit_after_save);
+void poll_project_save(App& app);
+void cancel_project_save(App& app);
 void save_project_as(App& app);
 void request_ascan_scene_load(App& app);
 void consume_dropped_paths(App& app);
@@ -308,7 +322,7 @@ void start_splat_simplify(App& app);
 bool ensure_splat_renderer(App& app);
 void release_splat_preview(App& app);
 void start_align(App& app);
-void start_train(App& app, bool smoke);
+void start_train(App& app, bool smoke, bool resume_training = false);
 void start_dense(App& app);
 void start_texture(App& app);
 void start_export_sfm(App& app);

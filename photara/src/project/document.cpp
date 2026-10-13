@@ -287,6 +287,7 @@ void replace_sfm_stage(
     const std::filesystem::path& project_file) {
     write_settings(archive, settings, project_file);
     write_sfm(archive, scene, project_file);
+    archive.erase_chunk(ChunkType::training_checkpoint);
     archive.erase_chunk(ChunkType::gaussians);
     archive.erase_chunk(ChunkType::mesh);
     archive.erase_chunk(ChunkType::texture);

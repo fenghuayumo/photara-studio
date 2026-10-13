@@ -1228,8 +1228,18 @@ Action draw_inspector(App& app) {
     const char* const bake_tip = app.has_texture
         ? "Unwrap UVs again and reproject the calibrated photos onto the current mesh."
         : "Unwrap UVs and project the calibrated photos onto the current mesh.";
+    if (!busy && app.training_checkpoint_info) {
+        const auto& info = *app.training_checkpoint_info;
+        ImGui::Text("%s: %u / %u", tr("Saved Training Progress"), info.iteration, info.total_iterations);
+        if (theme::primary_button("Resume Training##checkpoint", {-1.F, 40.F}, true)) {
+            action = Action::continue_training;
+        }
+    }
     ImGui::Dummy({0, 10.F});
-    if (busy) {
+    if (busy && app.saving_training) {
+        ImGui::TextWrapped("%s", tr("Saving project and training progress. Please wait."));
+        if (ImGui::Button(tr("Cancel"), {-1.F, 36.F})) cancel_project_save(app);
+    } else if (busy) {
         if (app.job.paused()) {
             if (icons::labeled_button(
                     "##resume_job", icons::Icon::play,

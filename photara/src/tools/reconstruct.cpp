@@ -24,6 +24,7 @@
 #include "splat/formats.hpp"
 #include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
+#include "splat/checkpoint.hpp"
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
 #include "splat_drender/vulkan_api.h"
@@ -150,6 +151,10 @@ struct ReconstructCli {
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
     std::string backend{"cuda"};
+    std::filesystem::path splat_checkpoint;
+    std::filesystem::path splat_checkpoint_control;
+    bool splat_resume{false};
+    unsigned splat_checkpoint_seconds{120};
     unsigned splat_iterations{30'000};
     photara::splat::TrainingMode splat_mode{photara::splat::TrainingMode::standard};
     unsigned splat_log_interval{100};
@@ -792,6 +797,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-mode", "Training preset: fast, standard, high-quality",
          cxxopts::value<std::string>()->default_value("standard"))
+        ("splat-checkpoint", "Training checkpoint file (default: beside output)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-resume", "Resume a compatible saved training checkpoint",
+         cxxopts::value<bool>()->default_value("false"))
+        ("splat-checkpoint-seconds", "Automatic checkpoint interval in seconds (0 disables periodic saves)",
+         cxxopts::value<unsigned>()->default_value("120"))
+        ("splat-checkpoint-control", "Editor save request and acknowledgement sidecar",
+         cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations (overrides preset)",
          cxxopts::value<unsigned>()->default_value("30000"))
         ("splat-log-interval",
@@ -1437,6 +1450,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());
     const auto splat_preset = photara::splat::training_preset(cli.splat_mode);
+    cli.splat_checkpoint = utf8_to_path(result["splat-checkpoint"].as<std::string>());
+    cli.splat_checkpoint_control = utf8_to_path(result["splat-checkpoint-control"].as<std::string>());
+    cli.splat_resume = result["splat-resume"].as<bool>();
+    cli.splat_checkpoint_seconds = result["splat-checkpoint-seconds"].as<unsigned>();
     cli.splat_iterations = result.count("splat-iterations")
         ? result["splat-iterations"].as<unsigned>() : splat_preset.iterations;
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
@@ -3334,6 +3351,12 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.backend = cli.backend == "vulkan"
         ? photara::splat::TrainingBackend::vulkan
         : photara::splat::TrainingBackend::cuda;
+    options.checkpoint_path = cli.splat_checkpoint.empty()
+        ? photara::splat::training_checkpoint_path(cli.output) : cli.splat_checkpoint;
+    if (cli.splat_checkpoint.empty()) photara::splat::migrate_training_checkpoints(cli.output);
+    options.resume_checkpoint = cli.splat_resume;
+    options.checkpoint_control_file = cli.splat_checkpoint_control;
+    options.checkpoint_interval_seconds = cli.splat_checkpoint_seconds;
     options.iterations = cli.splat_iterations;
     options.log_interval = cli.splat_log_interval;
     options.preview_interval = cli.splat_preview_interval;
@@ -3978,11 +4001,14 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         project_archive->set_chunk(
             photara::project::ChunkType::gaussians,
             photara::splat::encode_gaussians(gaussians));
+        project_archive->erase_chunk(photara::project::ChunkType::training_checkpoint);
         project_archive->save(cli.output);
         photara::core::Logger::instance().info(
             "ascan_gaussians=", cli.output, " count=", gaussians.size());
     }
     }
+    if (!cli.gui && !cli.splat_mesh_only)
+        photara::splat::remove_training_checkpoint(options.checkpoint_path);
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {
         photara::splat::PamMeshOptions pam_options;

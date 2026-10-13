@@ -92,6 +92,12 @@ int main(const int argc, char** argv) {
         1600, 940, tr("Photara Studio"), nullptr, nullptr);
     editor::apply_studio_window_icon(window);
     glfwSetWindowUserPointer(window, &app);
+    glfwSetWindowCloseCallback(window, [](GLFWwindow* handle) {
+        auto* state = static_cast<App*>(glfwGetWindowUserPointer(handle));
+        if (!state || state->smoke_mode || state->close_approved) return;
+        glfwSetWindowShouldClose(handle, GLFW_FALSE);
+        state->close_requested = true;
+    });
     glfwSetDropCallback(
         window, [](GLFWwindow* handle, const int count, const char** paths) {
             auto* state = static_cast<App*>(glfwGetWindowUserPointer(handle));
@@ -183,6 +189,7 @@ int main(const int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         app.job.poll();
+        editor::poll_project_save(app);
         app.preview.poll();
         app.log.poll(app.fresh_lines);
         for (const std::string& line : app.fresh_lines)
@@ -305,13 +312,19 @@ int main(const int argc, char** argv) {
         // reference. Like Stop, the request has to wait until the frame is
         // submitted; queue idle cannot protect an unsubmitted draw list.
         bool train_requested = false;
+        bool resume_training_requested = false;
         bool dense_requested = false;
+        if (app.saving_training) action = Action::none;
         switch (action) {
             case Action::align:
                 if (!app.smoke_mode) editor::start_align(app);
                 break;
             case Action::train:
                 train_requested = !app.smoke_mode;
+                break;
+            case Action::continue_training:
+                train_requested = !app.smoke_mode;
+                resume_training_requested = true;
                 break;
             case Action::dense:
                 // The Gaussians path falls through to start_train().
@@ -366,7 +379,12 @@ int main(const int argc, char** argv) {
         editor::draw_sam_license_modal(app);
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
-        if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);
+        if (app.close_requested) {
+            app.close_requested = false;
+            app.show_close_confirmation = true;
+        }
+        editor::draw_project_lifecycle_modals(app);
+        if (app.close_approved) glfwSetWindowShouldClose(window, GLFW_TRUE);
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
@@ -375,7 +393,7 @@ int main(const int argc, char** argv) {
 
         // Now the frame is submitted and the stale preview descriptors are
         // safe to destroy.
-        if (train_requested) editor::start_train(app, false);
+        if (train_requested) editor::start_train(app, false, resume_training_requested);
         if (retrain_requested) editor::start_train(app, true);
         if (dense_requested) editor::start_dense(app);
 
