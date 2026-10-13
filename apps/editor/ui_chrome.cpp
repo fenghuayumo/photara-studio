@@ -193,6 +193,8 @@ void build_dock_space(App& app) {
 
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
+    // Direct keyboard shortcuts do not inherit ImGui's disabled widget state.
+    if (app.pending_train_prepare.valid()) return action;
     const bool busy = app.job.running();
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&

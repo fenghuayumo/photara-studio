@@ -251,7 +251,7 @@ int main(const int argc, char** argv) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-        editor::consume_dropped_paths(app);
+        if (!app.pending_train_prepare.valid()) editor::consume_dropped_paths(app);
 
         app.settings.iterations = std::max(app.settings.iterations, 1);
         app.settings.densification_cap = std::clamp(
@@ -284,6 +284,7 @@ int main(const int argc, char** argv) {
         app.settings.atlas_resolution =
             std::clamp(app.settings.atlas_resolution, 64, 8192);
 
+        ImGui::BeginDisabled(app.pending_train_prepare.valid());
         Action action = editor::draw_menu_bar(app);
         const Action toolbar_action = editor::draw_toolbar(app);
         if (action == Action::none) action = toolbar_action;
@@ -379,9 +380,21 @@ int main(const int argc, char** argv) {
         editor::draw_sam_license_modal(app);
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
-        if (app.close_requested) {
+        ImGui::EndDisabled();
+        if (app.close_requested && !app.pending_train_prepare.valid()) {
             app.close_requested = false;
             app.show_close_confirmation = true;
+        }
+        if (app.pending_train_prepare.valid()) {
+            ImGui::OpenPopup("Preparing Training");
+            if (ImGui::BeginPopupModal("Preparing Training", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted("Saving project inputs before training...");
+                ImGui::TextUnformatted("Large projects may take a moment.");
+                ImGui::EndPopup();
+            }
+        } else if (ImGui::BeginPopupModal("Preparing Training", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
         editor::draw_project_lifecycle_modals(app);
         if (app.close_approved) glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -390,6 +403,10 @@ int main(const int argc, char** argv) {
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             editor::gpu::present(draw_data, editor::theme::surface_0);
         editor::publish_preview_ack(app);
+
+        // Preparation runs off the UI thread; launch only after the submitted
+        // frame no longer references preview resources that start_train drops.
+        editor::poll_train_start(app);
 
         // Now the frame is submitted and the stale preview descriptors are
         // safe to destroy.

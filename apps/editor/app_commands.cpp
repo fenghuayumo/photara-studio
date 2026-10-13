@@ -3098,15 +3098,13 @@ void export_alignment(App& app) {
 }
 
 void start_train(App& app, const bool smoke, const bool resume_training) {
-    if (app.job.running()) return;
+    if (app.job.running() || app.pending_train_prepare.valid()) return;
     if (!smoke && !ensure_sam_ready(app)) return;
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
         return;
     }
-    try { photara::splat::migrate_training_checkpoints(resolve_layout(app.settings).project_file); }
-    catch (const std::exception& failure) { set_message(app, failure.what(), theme::danger); return; }
     refresh_artifacts(app);
     if (resume_training && !app.training_checkpoint_info) {
         set_message(app, "No saved training progress is available.", theme::warning);
@@ -3116,14 +3114,48 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         set_message(app, "This project's training checkpoint is in use by another process.", theme::warning);
         return;
     }
-    try {
-        if (!resume_training && !smoke)
-            photara::splat::remove_training_checkpoint(app.layout.training_checkpoint);
-        // Persist the inputs before starting: a crash must leave a project to reopen.
-        if (!smoke && !save_project_to_path(app, app.layout.project_file)) return;
-    } catch (const std::exception& failure) {
-        set_message(app, failure.what(), theme::danger); return;
+    if (!smoke && !app.training_project_ready) {
+        const auto layout = app.layout;
+        const auto settings = collect_project_settings(app);
+        const auto images = reconstruction_images_path(app);
+        photara::splat::GaussianModel edited;
+        const bool have_edits = app.splat_edit.dirty() && app.splat_edit.copy_model(edited);
+        app.train_prepare_resume = resume_training;
+        app.pending_train_prepare = std::async(std::launch::async,
+            [layout, settings, images, resume_training, have_edits, edited = std::move(edited)]() mutable {
+                try {
+                    photara::splat::migrate_training_checkpoints(layout.project_file);
+                    // Serialize preparation with other project writers. One atomic
+                    // save both updates inputs and invalidates a fresh run's state.
+                    photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
+                    auto archive = std::filesystem::exists(layout.project_file)
+                        ? photara::project::Archive::open(layout.project_file)
+                        : photara::project::Archive::create();
+                    photara::project::write_settings(archive, settings, layout.project_file);
+                    if (!layout.working_sfm.empty() && std::filesystem::exists(layout.working_sfm))
+                        photara::project::write_sfm(archive,
+                            load_working_sfm(layout.working_sfm, images), layout.project_file);
+                    if (have_edits)
+                        archive.set_chunk(photara::project::ChunkType::gaussians,
+                            photara::splat::encode_gaussians(edited));
+                    if (!resume_training) {
+                        for (auto type : {photara::project::ChunkType::training_checkpoint,
+                            photara::project::ChunkType::training_checkpoint_info,
+                            photara::project::ChunkType::training_checkpoint_previous,
+                            photara::project::ChunkType::training_checkpoint_previous_info,
+                            photara::project::ChunkType::training_checkpoint_history})
+                            archive.erase_chunk(type);
+                    }
+                    // Existing output chunks are already native project data;
+                    // reloading exported models/meshes/textures adds no inputs.
+                    archive.save(layout.project_file);
+                    return std::string{};
+                } catch (const std::exception& failure) { return std::string(failure.what()); }
+            });
+        set_message(app, "Preparing training: saving project inputs...", theme::accent);
+        return;
     }
+    app.training_project_ready = false;
     write_working_subject_bounds(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -3250,6 +3282,20 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
     // The child has inherited the handles; the parent copies are no longer
     // needed and must not leak across runs.
     app.preview.close_export_handles();
+}
+
+void poll_train_start(App& app) {
+    if (!app.pending_train_prepare.valid() ||
+        app.pending_train_prepare.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    const auto error = app.pending_train_prepare.get();
+    if (!error.empty()) { set_message(app, error, theme::danger); return; }
+    app.project_folder_automatic = false;
+    refresh_artifacts(app);
+    // A requested close takes precedence over starting a new GPU task.
+    if (app.close_requested || app.show_close_confirmation || app.close_approved) return;
+    app.training_project_ready = true;
+    start_train(app, false, app.train_prepare_resume);
+    app.training_project_ready = false;
 }
 
 void start_splat_mesh(App& app) {

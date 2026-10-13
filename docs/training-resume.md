@@ -17,7 +17,13 @@ releases a pending save request; Exit Without Saving retains any earlier automat
 checkpoints, but does not promise to preserve the latest iterations.
 
 Train 3DGS always starts a new training run directly, including after Stop. It replaces
-the old pending checkpoint. Recovery is a separate **Resume Training** action in the
+the old pending checkpoint. Before launching, Studio saves the current training inputs
+and clears the old checkpoint in one atomic project write on a background worker.
+The preparation indicator keeps the window responsive; project-changing actions are
+disabled until publication finishes. A failed save prevents launch, and closing the
+window during preparation takes precedence over launching the trainer. Existing
+project model, mesh and texture chunks are preserved without reloading exports.
+Recovery is a separate **Resume Training** action in the
 toolbar, Reconstruction menu and inspector. Reopening a project exposes its saved
 progress without opening a recovery dialog. Automatic
 training state and the previous good generation are stored as checksummed chunks

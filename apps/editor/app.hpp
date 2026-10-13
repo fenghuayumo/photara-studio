@@ -108,6 +108,9 @@ struct App {
     std::filesystem::path published_subject_bounds_path;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
+    std::future<std::string> pending_train_prepare;
+    bool train_prepare_resume{};
+    bool training_project_ready{};
     std::future<SceneLoad> alignment_preview_load;
     std::filesystem::file_time_type alignment_preview_stamp{};
     std::chrono::steady_clock::time_point alignment_preview_poll{};
@@ -323,6 +326,7 @@ bool ensure_splat_renderer(App& app);
 void release_splat_preview(App& app);
 void start_align(App& app);
 void start_train(App& app, bool smoke, bool resume_training = false);
+void poll_train_start(App& app);
 void start_dense(App& app);
 void start_texture(App& app);
 void start_export_sfm(App& app);

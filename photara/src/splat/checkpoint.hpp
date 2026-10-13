@@ -12,17 +12,6 @@
 
 namespace photara::splat::detail {
 
-// Exclusive process lease. The OS releases it on normal exit or a crash.
-class TrainingCheckpointLease {
-public:
-    explicit TrainingCheckpointLease(const std::filesystem::path& path);
-    ~TrainingCheckpointLease();
-    TrainingCheckpointLease(const TrainingCheckpointLease&) = delete;
-    TrainingCheckpointLease& operator=(const TrainingCheckpointLease&) = delete;
-private:
-    std::intptr_t handle_{-1};
-};
-
 class CheckpointWriter {
 public:
     std::vector<std::uint8_t> bytes;

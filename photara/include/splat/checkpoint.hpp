@@ -10,6 +10,19 @@
 
 namespace photara::splat {
 
+namespace detail {
+// Serializes native project writes with the trainer; released by the OS on exit.
+class TrainingCheckpointLease {
+public:
+    explicit TrainingCheckpointLease(const std::filesystem::path& path);
+    ~TrainingCheckpointLease();
+    TrainingCheckpointLease(const TrainingCheckpointLease&) = delete;
+    TrainingCheckpointLease& operator=(const TrainingCheckpointLease&) = delete;
+private:
+    std::intptr_t handle_{-1};
+};
+}
+
 struct TrainingCheckpointInfo {
     unsigned iteration{};
     unsigned total_iterations{};
