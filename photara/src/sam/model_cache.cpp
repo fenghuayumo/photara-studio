@@ -1,4 +1,7 @@
 #include "sam/model_cache.hpp"
+#if defined(PHOTARA_HAS_INFERENCE)
+#include "inference/model_cache.hpp"
+#endif
 
 #include <cstdlib>
 #include <fstream>
@@ -37,16 +40,24 @@ std::filesystem::path roaming_app_data() {
 }  // namespace
 
 std::filesystem::path user_model_path() {
+#if defined(PHOTARA_HAS_INFERENCE)
+    return inference::cached_model_path(k_model_file);
+#else
     const auto base = local_app_data();
     if (base.empty()) return std::filesystem::path(k_model_file);
     return base / "Photara" / "models" / k_model_file;
+#endif
 }
 
 bool model_file_ready(const std::filesystem::path& path) {
+#if defined(PHOTARA_HAS_INFERENCE)
+    return inference::model_file_ready(path, k_model_bytes / 2 + 1);
+#else
     std::error_code error;
     if (path.empty() || !std::filesystem::is_regular_file(path, error))
         return false;
     return std::filesystem::file_size(path, error) > k_model_bytes / 2;
+#endif
 }
 
 std::filesystem::path locate_model() {

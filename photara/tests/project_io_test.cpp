@@ -28,7 +28,7 @@ std::vector<std::uint8_t> encode_settings_v6(
     const Settings& settings, const std::filesystem::path& project) {
     auto bytes = encode_settings(settings, project);
     // Version 7 appends two ints, two booleans and two uint64 budgets.
-    bytes.resize(bytes.size() - 2 * sizeof(std::int32_t) -
+    bytes.resize(bytes.size() - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
     const std::uint32_t version = 6;
     std::memcpy(bytes.data(), &version, sizeof(version));

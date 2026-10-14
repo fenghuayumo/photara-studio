@@ -1,0 +1,4 @@
+# Development conversion only; not required by the C++ application.
+gguf==0.19.0
+numpy>=1.26
+torch>=2.6
