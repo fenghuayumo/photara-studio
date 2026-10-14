@@ -79,6 +79,44 @@ float luma(const std::uint8_t* pixel) {
            0.0722F * static_cast<float>(pixel[2]);
 }
 
+photara::io::GrayImage resize_mask(
+    const photara::io::GrayImage& source, const std::uint32_t width,
+    const std::uint32_t height) {
+    if (source.pixels.empty()) return {};
+    if (source.width == width && source.height == height) return source;
+    photara::io::GrayImage out;
+    out.width = width;
+    out.height = height;
+    out.pixels.resize(static_cast<std::size_t>(width) * height);
+    photara::io::resize_bilinear(
+        source.pixels.data(), source.width, source.height, 1,
+        out.pixels.data(), width, height);
+    return out;
+}
+
+// Match TrainingDataLoader: explicit directory, otherwise nested/sibling
+// masks, exact filename before PNG/JPEG alternatives, then source alpha.
+std::filesystem::path metric_mask_path(
+    const std::filesystem::path& image, const std::filesystem::path& directory) {
+    const auto find = [&](const std::filesystem::path& root) {
+        if (root.empty() || !std::filesystem::is_directory(root))
+            return std::filesystem::path{};
+        const auto exact = root / image.filename();
+        if (std::filesystem::is_regular_file(exact)) return exact;
+        for (const char* extension :
+             {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"}) {
+            auto candidate = root / image.stem();
+            candidate += extension;
+            if (std::filesystem::is_regular_file(candidate)) return candidate;
+        }
+        return std::filesystem::path{};
+    };
+    auto path = find(directory.empty() ? image.parent_path() / "masks" : directory);
+    if (path.empty() && directory.empty())
+        path = find(image.parent_path().parent_path() / "masks");
+    return path;
+}
+
 void fit_metric_size(
     const std::uint32_t src_w, const std::uint32_t src_h, std::uint32_t& w,
     std::uint32_t& h) {
@@ -99,7 +137,8 @@ void fit_metric_size(
 }
 
 ImageQaMetrics compute_metrics(
-    const photara::io::RgbImage& gt, const photara::io::RgbImage& render) {
+    const photara::io::RgbImage& gt, const photara::io::RgbImage& render,
+    const photara::io::GrayImage& mask) {
     ImageQaMetrics metrics;
     if (gt.width == 0 || gt.height == 0 || render.width == 0 ||
         render.height == 0)
@@ -110,12 +149,17 @@ ImageQaMetrics compute_metrics(
     fit_metric_size(gt.width, gt.height, mw, mh);
     const photara::io::RgbImage a = resize_rgb(gt, mw, mh);
     const photara::io::RgbImage b = resize_rgb(render, mw, mh);
+    const photara::io::GrayImage valid = resize_mask(mask, mw, mh);
+    metrics.masked = !valid.pixels.empty();
     if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return metrics;
 
     const std::size_t pixels = static_cast<std::size_t>(mw) * mh;
     double se = 0.0;
     double ae = 0.0;
+    std::size_t valid_pixels = 0;
     for (std::size_t i = 0; i < pixels; ++i) {
+        if (metrics.masked && valid.pixels[i] == 0) continue;
+        ++valid_pixels;
         for (int c = 0; c < 3; ++c) {
             const double d =
                 (static_cast<double>(a.pixels[3 * i + c]) -
@@ -125,7 +169,8 @@ ImageQaMetrics compute_metrics(
             ae += std::abs(d);
         }
     }
-    const double samples = static_cast<double>(pixels) * 3.0;
+    if (valid_pixels == 0) return metrics;
+    const double samples = static_cast<double>(valid_pixels) * 3.0;
     const double mse = se / samples;
     metrics.mae = static_cast<float>(ae / samples);
     metrics.rmse = static_cast<float>(std::sqrt(mse));
@@ -138,19 +183,22 @@ ImageQaMetrics compute_metrics(
     constexpr double k_c2 = 58.5225;
     double ssim_sum = 0.0;
     int windows = 0;
-    if (mw >= k_win && mh >= k_win) {
-        for (std::uint32_t y = 0; y + k_win <= mh; y += k_win) {
-            for (std::uint32_t x = 0; x + k_win <= mw; x += k_win) {
+    if (mw > 0 && mh > 0) {
+        for (std::uint32_t y = 0; y < mh; y += k_win) {
+            for (std::uint32_t x = 0; x < mw; x += k_win) {
                 double sum_a = 0.0;
                 double sum_b = 0.0;
                 double sum_aa = 0.0;
                 double sum_bb = 0.0;
                 double sum_ab = 0.0;
-                for (int yy = 0; yy < k_win; ++yy) {
-                    for (int xx = 0; xx < k_win; ++xx) {
+                double n = 0.0;
+                for (int yy = 0; yy < k_win && y + yy < mh; ++yy) {
+                    for (int xx = 0; xx < k_win && x + xx < mw; ++xx) {
                         const std::size_t index =
                             (static_cast<std::size_t>(y + yy) * mw +
                              static_cast<std::size_t>(x + xx));
+                        if (metrics.masked && valid.pixels[index] == 0) continue;
+                        ++n;
                         const double la = luma(a.pixels.data() + index * 3);
                         const double lb = luma(b.pixels.data() + index * 3);
                         sum_a += la;
@@ -160,7 +208,9 @@ ImageQaMetrics compute_metrics(
                         sum_ab += la * lb;
                     }
                 }
-                constexpr double n = static_cast<double>(k_win * k_win);
+                // Masked pixels never enter means, variances or covariance.
+                // Weight each window by its valid area, including boundary tiles.
+                if (n == 0.0) continue;
                 const double mu_a = sum_a / n;
                 const double mu_b = sum_b / n;
                 const double var_a = sum_aa / n - mu_a * mu_a;
@@ -172,8 +222,8 @@ ImageQaMetrics compute_metrics(
                     (mu_a * mu_a + mu_b * mu_b + k_c1) *
                     (var_a + var_b + k_c2);
                 if (den > 1e-12) {
-                    ssim_sum += num / den;
-                    ++windows;
+                    ssim_sum += (num / den) * n;
+                    windows += static_cast<int>(n);
                 }
             }
         }
@@ -203,29 +253,38 @@ void turbo_colour(const float t, std::uint8_t& r, std::uint8_t& g, std::uint8_t&
 }
 
 photara::io::RgbImage make_error_map(
-    const photara::io::RgbImage& gt, const photara::io::RgbImage& render) {
+    const photara::io::RgbImage& gt, const photara::io::RgbImage& render,
+    const photara::io::GrayImage& mask) {
     photara::io::RgbImage map;
     if (gt.width == 0 || gt.height == 0) return map;
+    std::uint32_t w{}, h{};
+    fit_metric_size(gt.width, gt.height, w, h);
+    const auto target = resize_rgb(gt, w, h);
     const photara::io::RgbImage aligned =
-        resize_rgb(render, gt.width, gt.height);
-    if (aligned.pixels.size() != gt.pixels.size()) return map;
+        resize_rgb(render, w, h);
+    if (aligned.pixels.size() != target.pixels.size()) return map;
 
     const std::size_t pixels =
-        static_cast<std::size_t>(gt.width) * gt.height;
+        static_cast<std::size_t>(w) * h;
+    const auto valid = resize_mask(mask, w, h);
     std::vector<float> error(pixels);
+    std::vector<float> sorted;
+    sorted.reserve(pixels);
     for (std::size_t i = 0; i < pixels; ++i) {
+        if (!valid.pixels.empty() && valid.pixels[i] == 0) continue;
         float se = 0.F;
         for (int c = 0; c < 3; ++c) {
             const float d =
-                (static_cast<float>(gt.pixels[3 * i + c]) -
+                (static_cast<float>(target.pixels[3 * i + c]) -
                  static_cast<float>(aligned.pixels[3 * i + c])) /
                 255.F;
             se += d * d;
         }
         error[i] = std::sqrt(se / 3.F);
+        sorted.push_back(error[i]);
     }
 
-    std::vector<float> sorted = error;
+    if (sorted.empty()) return map;
     const std::size_t p95 = static_cast<std::size_t>(
         std::min<double>(sorted.size() - 1, sorted.size() * 0.95));
     std::nth_element(
@@ -233,10 +292,12 @@ photara::io::RgbImage make_error_map(
         sorted.end());
     const float scale = std::max(1e-4F, sorted[p95]);
 
-    map.width = gt.width;
-    map.height = gt.height;
+    map.width = w;
+    map.height = h;
     map.pixels.resize(pixels * 3);
     for (std::size_t i = 0; i < pixels; ++i) {
+        // Excluded pixels stay black and cannot distort the heatmap scale.
+        if (!valid.pixels.empty() && valid.pixels[i] == 0) continue;
         turbo_colour(
             error[i] / scale, map.pixels[3 * i], map.pixels[3 * i + 1],
             map.pixels[3 * i + 2]);
@@ -558,11 +619,16 @@ void ImageQaSession::clear() {
     gt_.reset();
     error_.reset();
     gt_cpu_ = {};
+    mask_cpu_ = {};
     render_cpu_ = {};
     pending_ = {};
     metrics_pending_ = {};
     pending_path_.clear();
     loaded_path_.clear();
+    pending_key_.clear();
+    loaded_key_.clear();
+    ++capture_revision_;
+    mask_failed_ = false;
     pending_view_ = -1;
     loaded_view_ = -1;
     render_view_ = -1;
@@ -583,18 +649,22 @@ void ImageQaSession::harvest_retired() {
         try {
             // A superseded decode cannot change what is on screen, but it is
             // still a usable capture: keep it for the next visit.
-            const photara::io::RgbImage image = it->second.get();
-            remember_gt(it->first, image);
+            const Capture capture = it->second.get();
+            remember_gt(it->first, capture);
         } catch (...) {
         }
         it = retired_.erase(it);
     }
 }
 
-void ImageQaSession::publish_gt(const photara::io::RgbImage& image) {
+void ImageQaSession::publish_gt(const Capture& capture) {
+    const auto& image = capture.image;
     if (image.width == 0 || image.height == 0 || image.pixels.empty())
         throw std::runtime_error("empty capture");
     gt_cpu_ = image;
+    mask_cpu_ = capture.mask;
+    mask_failed_ = capture.mask_failed;
+    ++capture_revision_;
     gt_.upload(gt_cpu_);
     // The previous heatmap belongs to another capture. Tear it down before this
     // frame records ImGui image draws.
@@ -605,10 +675,13 @@ void ImageQaSession::publish_gt(const photara::io::RgbImage& image) {
 
 void ImageQaSession::remember_gt(
     const std::filesystem::path::string_type& key,
-    const photara::io::RgbImage& image) {
+    const Capture& capture) {
+    const auto& image = capture.image;
     constexpr std::size_t k_cached_captures = 8;
     if (image.width == 0 || image.height == 0 || image.pixels.empty()) return;
-    gt_cache_[key] = image;
+    // Failed mask decodes must be retryable after a file is repaired.
+    if (capture.mask_failed) return;
+    gt_cache_[key] = capture;
     gt_cache_order_.push_back(key);
     while (gt_cache_order_.size() > k_cached_captures) {
         const std::filesystem::path::string_type oldest =
@@ -643,22 +716,42 @@ ImTextureID ImageQaSession::error_id() const {
 }
 
 void ImageQaSession::request_gt(
-    const int view_index, const std::filesystem::path& path) {
+    const int view_index, const std::filesystem::path& path,
+    const bool use_mask, const std::filesystem::path& mask_dir) {
     if (path.empty() || view_index < 0) return;
-    if (loaded_view_ == view_index && loaded_path_ == path && has_gt()) return;
-    if (loading_ && pending_view_ == view_index && pending_path_ == path) return;
+    auto key = path.native();
+    std::filesystem::path mask_path;
+    bool mask_path_failed = false;
+    if (use_mask) {
+        key += std::filesystem::path("|masked|").native();
+        key += mask_dir.native();
+        try {
+            mask_path = metric_mask_path(path, mask_dir);
+            if (!mask_path.empty()) {
+                key += mask_path.native();
+                const auto stamp = std::filesystem::last_write_time(mask_path);
+                key += std::filesystem::path(
+                    std::to_string(stamp.time_since_epoch().count())).native();
+            }
+        } catch (...) {
+            mask_path_failed = true;
+            key += std::filesystem::path("|unreadable|").native();
+        }
+    }
+    if (loaded_view_ == view_index && loaded_key_ == key && has_gt()) return;
+    if (loading_ && pending_view_ == view_index && pending_key_ == key) return;
     harvest_retired();
     // A capture that is already decoded in this session is published in place.
-    const std::filesystem::path::string_type key = path.native();
     if (const auto found = gt_cache_.find(key); found != gt_cache_.end()) {
         if (pending_.valid())
             retired_.emplace_back(
-                pending_path_.native(), std::move(pending_));
+                pending_key_, std::move(pending_));
         loading_ = false;
         failed_ = false;
         pending_view_ = -1;
         pending_path_.clear();
         loaded_path_ = path;
+        loaded_key_ = key;
         loaded_view_ = view_index;
         try {
             publish_gt(found->second);
@@ -673,13 +766,33 @@ void ImageQaSession::request_gt(
     // Never join the in-flight decode: it belongs to a capture the user has
     // already moved past, and the UI must stay responsive while it lands.
     if (pending_.valid())
-        retired_.emplace_back(pending_path_.native(), std::move(pending_));
+        retired_.emplace_back(pending_key_, std::move(pending_));
     pending_path_ = path;
+    pending_key_ = key;
     pending_view_ = view_index;
     failed_ = false;
     loading_ = true;
-    pending_ = std::async(std::launch::async, [path] {
-        return load_qa_image(path);
+    metrics_ = {};
+    error_.reset();
+    ++capture_revision_;
+    pending_ = std::async(std::launch::async, [path, use_mask, mask_path,
+                                            mask_path_failed] {
+        Capture capture;
+        capture.image = load_qa_image(path);
+        if (use_mask) {
+            try {
+                if (mask_path_failed) throw std::runtime_error("unreadable mask");
+                std::uint32_t w{}, h{};
+                fit_metric_size(capture.image.width, capture.image.height, w, h);
+                const auto mask = mask_path.empty()
+                    ? photara::io::load_alpha(path)
+                    : photara::io::load_gray(mask_path);
+                capture.mask = resize_mask(mask, w, h);
+            } catch (...) {
+                capture.mask_failed = true;
+            }
+        }
+        return capture;
     });
 }
 
@@ -687,11 +800,13 @@ void ImageQaSession::poll() {
     if (loading_ && pending_.valid() &&
         pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         try {
-            photara::io::RgbImage image = pending_.get();
-            remember_gt(pending_path_.native(), image);
+            Capture capture = pending_.get();
+            remember_gt(pending_key_, capture);
             loaded_path_ = pending_path_;
+            loaded_key_ = pending_key_;
             loaded_view_ = pending_view_;
-            publish_gt(image);
+            loading_ = false;
+            publish_gt(capture);
         } catch (...) {
             failed_ = true;
             gt_.reset();
@@ -707,7 +822,8 @@ void ImageQaSession::poll() {
         try {
             MetricsJob job = metrics_pending_.get();
             metrics_busy_ = false;
-            if (job.view != render_view_ || job.revision != render_revision_) {
+            if (job.view != render_view_ || job.revision != render_revision_ ||
+                job.capture_revision != capture_revision_) {
                 queue_metrics();
             } else {
                 metrics_ = job.metrics;
@@ -730,6 +846,7 @@ void ImageQaSession::set_render(
 }
 
 void ImageQaSession::queue_metrics() {
+    if (loading_ || mask_failed_) return;
     if (gt_cpu_.width == 0 || render_cpu_.width == 0) return;
     if (loaded_view_ < 0 || render_view_ != loaded_view_) return;
     if (metrics_busy_) return;
@@ -739,16 +856,20 @@ void ImageQaSession::queue_metrics() {
     metrics_busy_ = true;
     const int view = render_view_;
     const std::uint64_t revision = render_revision_;
+    const std::uint64_t capture_revision = capture_revision_;
     photara::io::RgbImage gt = gt_cpu_;
     photara::io::RgbImage render = render_cpu_;
+    photara::io::GrayImage mask = mask_cpu_;
     metrics_pending_ = std::async(
         std::launch::async,
-        [gt = std::move(gt), render = std::move(render), view, revision] {
+        [gt = std::move(gt), render = std::move(render), mask = std::move(mask),
+         view, revision, capture_revision] {
             MetricsJob job;
-            job.metrics = compute_metrics(gt, render);
-            job.error = make_error_map(gt, render);
+            job.metrics = compute_metrics(gt, render, mask);
+            job.error = make_error_map(gt, render, mask);
             job.view = view;
             job.revision = revision;
+            job.capture_revision = capture_revision;
             return job;
         });
 }
@@ -846,7 +967,8 @@ void draw_image_qa(
         session.request_gt(
             live->index_a >= 0 ? live->index_a : state.selected, live_a);
     else if (!item.path.empty())
-        session.request_gt(state.selected, item.path);
+        session.request_gt(
+            state.selected, item.path, input.use_metric_mask, input.mask_dir);
     if (live_matching && input.pair_session != nullptr && !live->path_b.empty())
         input.pair_session->request_gt(
             live->index_b >= 0 ? live->index_b : 0, live->path_b);
@@ -1311,6 +1433,23 @@ void draw_image_qa(
         draw_metric_card(
             draw, card, "SSIM", ssim, metric_tone(m.ssim, 0.90F, 0.80F));
         draw_metric_card(draw, card, "MAE", mae, theme::accent);
+        draw->AddText(
+            {canvas_min.x + 14.F, canvas_max.y - 78.F},
+            theme::u32(theme::text_muted),
+            m.masked ? tr("Metrics: foreground only") :
+                (input.use_metric_mask ? tr("Metrics: full image (no mask found)")
+                                       : tr("Metrics: full image")));
+    } else if (!live_align && image_qa_needs_render(state.mode) &&
+               session.mask_failed()) {
+        draw->AddText(
+            {canvas_min.x + 14.F, canvas_max.y - 58.F},
+            theme::u32(theme::warning), tr("Cannot load metric mask"));
+    } else if (!live_align && image_qa_needs_render(state.mode) &&
+               !session.loading() && !session.metrics_busy() &&
+               session.metrics().masked) {
+        draw->AddText(
+            {canvas_min.x + 14.F, canvas_max.y - 58.F},
+            theme::u32(theme::warning), tr("Mask has no valid pixels"));
     }
 
     char zoom_label[16];

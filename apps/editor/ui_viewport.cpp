@@ -1611,6 +1611,10 @@ void draw_viewport_panel(App& app) {
         input.render_live = training_now && live_preview_active(app);
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
+        input.use_metric_mask =
+            (app.settings.use_mask || app.settings.sam_masks) &&
+            app.settings.mask_mode == 0;
+        input.mask_dir = reconstruction_images_path(app).parent_path() / "masks";
         if (alignment_job_running(app) &&
             app.align_live.kind != photara::sfm::AlignLiveKind::none) {
             const Stage stage = app.monitor.stage();
