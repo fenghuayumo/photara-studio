@@ -688,6 +688,13 @@ constexpr Entry k_entries[] = {
      "선택적 밀집 PLY 초기화. COLMAP/OpenMVS 희소 점이 있으면 자동 사용됩니다."},
     {"Clear external dataset", "清除外部数据集", "外部データセットをクリア", "외부 데이터셋 지우기"},
     {"Trained splat model (optional)", "已训练溅射模型（可选）", "学習済みスプラット（任意）", "학습된 스플랫 모델(선택)"},
+    {"Drop photos, a video, 3DGS, or a mesh", "拖入照片、视频、3DGS 或网格模型", "写真、動画、3DGS、メッシュをドロップ", "사진, 동영상, 3DGS 또는 메시를 드롭"},
+    {"Drop photos, video, 3DGS (PLY/SOG/SPZ/GLB/USDC), mesh (PLY/OBJ), .asfm, or .ascan", "拖入照片、视频、3DGS（PLY/SOG/SPZ/GLB/USDC）、网格（PLY/OBJ）、.asfm 或 .ascan", "写真、動画、3DGS（PLY/SOG/SPZ/GLB/USDC）、メッシュ（PLY/OBJ）、.asfm、.ascan をドロップ", "사진, 동영상, 3DGS (PLY/SOG/SPZ/GLB/USDC), 메시 (PLY/OBJ), .asfm 또는 .ascan을 드롭"},
+    {"Drop photos, 3DGS, mesh, .asfm, or .ascan here", "将照片、3DGS、网格、.asfm 或 .ascan 拖到此处", "写真、3DGS、メッシュ、.asfm、.ascan をここにドロップ", "사진, 3DGS, 메시, .asfm 또는 .ascan을 여기에 드롭"},
+    {"Drop photos, a video, 3DGS, mesh, .asfm, or .ascan on the viewport", "请将照片、视频、3DGS、网格、.asfm 或 .ascan 拖到视口内", "写真、動画、3DGS、メッシュ、.asfm、.ascan をビューポートにドロップ", "사진, 동영상, 3DGS, 메시, .asfm 또는 .ascan을 뷰포트에 드롭"},
+    {"Drop a single 3DGS or mesh model", "请拖入单个 3DGS 或网格模型", "3DGS またはメッシュを 1 つドロップ", "3DGS 또는 메시 모델 하나를 드롭하세요"},
+    {"Wait for the current operation before importing a model", "请等待当前操作完成后再导入模型", "現在の処理が完了してからモデルをインポート", "현재 작업 완료 후 모델을 가져오세요"},
+    {"Export Gaussian edits, then start a new project before importing another model", "请先导出高斯编辑结果，再新建项目导入其他模型", "編集結果をエクスポートし、新規プロジェクトで別モデルをインポート", "편집 결과를 내보낸 후 새 프로젝트에서 다른 모델을 가져오세요"},
     {"Load an existing PLY, SOG, SPZ, or GLB model for preview. "
      "When set, it takes precedence over the trained working copy.",
      "加载已有 PLY、SOG、SPZ 或 GLB 进行预览。设置后优先于训练工作副本。",

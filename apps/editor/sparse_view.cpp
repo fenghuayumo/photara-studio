@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -1358,8 +1359,20 @@ MeshLoad load_preview_mesh(
     try {
         std::error_code error;
         if (!mesh_ply.empty() && std::filesystem::exists(mesh_ply, error)) {
-            loaded.mesh = preview_mesh_from_mvs(
-                photara::mvs::load_mesh_ply(mesh_ply));
+            auto extension = mesh_ply.extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension == ".obj") {
+                auto stem = mesh_ply;
+                stem.replace_extension();
+                loaded.mesh = preview_mesh_from_obj(mesh_ply);
+                auto albedo = stem;
+                albedo += "_albedo.png";
+                if (std::filesystem::exists(albedo, error))
+                    loaded.mesh.albedo_path = albedo;
+            } else {
+                loaded.mesh = preview_mesh_from_mvs(photara::mvs::load_mesh_ply(mesh_ply));
+            }
         } else if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
             const auto archive = photara::project::Archive::open(ascan);
             if (!archive.has(photara::project::ChunkType::mesh)) {
