@@ -24,8 +24,9 @@ Studio ──────────────→ Photara::SAMCache
 生命周期仍由外部 `sam3` 库管理，不经过新会话包装。两者共享同一份 ggml。
 
 MoGe 已提供权重转换、GGUF 检查、CPU/Vulkan 加载、ViT-B 编码器，以及
-neck 和 points/normal/mask/scale head。当前返回原始 head 输出，图像输出
-重采样、几何恢复及公开预测接口尚未接入。
+neck 和 points/normal/mask/scale head，以及公开的输出后处理与几何恢复接口。
+原始 head 输出可转换为原图分辨率的 `GeometryPrior`；完整 RGB 图像预处理
+和 `GeometryPredictor` 实现尚未接入。
 没有可以调用但只会抛出“未实现”的模型工厂。
 既有 ONNX 特征和去光照路径保持原状，当前不迁移它们的会话封装。
 
@@ -78,7 +79,7 @@ python python/models/moge/verify_weights.py model.pt model-f32.gguf build/photar
 与 C++ 从实际后端回读的值比较。F16 文件需给转换和验证脚本都指定
 `--precision f16`。模型文件不进入仓库，默认 ctest 不下载或加载 checkpoint。
 转换脚本同时校验固定 ViT-B neck/head 拓扑，拒绝不同归一化、激活、
-残差数量或上采样配置。后续仍需完成预处理、几何恢复和完整预测接口；
+残差数量或上采样配置。后续仍需完成预处理和完整预测接口；
 权重回读通过不能视为模型推理正确。
 
 ## ViT 编码器与逐层对比
@@ -135,9 +136,8 @@ F16 权重的编码器前向精度尚未验收。
 转置卷积权重布局混淆。最后一级使用双线性上采样。
 
 `DecoderResult` 返回网格 16 倍分辨率的 HWC 原始点图、原始法线、
-mask logits 和 log metric scale。它们还不是可交给重建的几何先验：
-仍需恢复到输入图像尺寸、执行点图 remap、法线归一化、sigmoid/exp，
-然后恢复焦距/z-shift 并形成深度、有效掩码和统一坐标下的点图。
+mask logits 和 log metric scale，通过公共 `MogeRawGeometry` 数据约定
+交给后处理，再形成可交给重建的几何先验。
 
 ```powershell
 cmake --build build --config Release --target photara_moge_decoder_test
@@ -157,6 +157,47 @@ Vulkan 验证沿用严格 F32 子进程策略，默认快路径和 F16 权重尚
 mask logits 约 `7.27e-6`、log metric scale 约 `2.51e-6`。
 该网格正常 decoder 图缓冲区约 901 MiB，不包含模型权重、诊断数据、
 上传暂存或后端内部缓冲，也不代表整个进程的显存峰值。
+
+## 输出后处理与几何恢复
+
+公共入口为 `inference/models/moge.hpp` 中的 `recover_moge_geometry()`，
+实现位于 `models/moge/postprocess.cpp`。输入包括原始 head 输出、原图尺寸、
+可选针孔内参以及模型/设备元数据；输出为 `MogeGeometryResult`，包含
+`GeometryPrior` 和恢复状态、z-shift、归一化焦距、重投影 RMS、采样数量。
+后处理在 CPU 上执行，不要求调用方持有 ggml 会话。
+
+处理顺序与官方 MoGe-2 一致：先双线性恢复原图尺寸（align_corners=false），
+再执行 `z=exp(raw_z)`、`x/y=raw_x/y*z`、预测法线归一化、mask sigmoid
+和尺度 exp。默认掩码使用严格 `probability > 0.5`，无穷、NaN、零法线和
+非正深度不参与恢复。尺度将最终相机 Z 深度转换为米。
+
+恢复使用官方的最近邻 64×64 采样网格，至少需要四个不同的有效像素。
+未知内参时假设 `fx=fy`、主点位于 `(width-1)/2, (height-1)/2`，联合恢复
+焦距与 z-shift。已知内参时保留完整 K，支持不同 fx/fy 和偏离中心的主点，
+只恢复 z-shift。输出点图根据恢复的深度和 K 重新投影，保持针孔几何一致；
+法线保留模型预测来源，confidence 留空，不把 mask 概率当成几何置信度。
+
+原生求解器不依赖 SciPy：固定 shift 时焦距有闭式解，在正深度约束下进行
+对数网格搜索和局部黄金分割。它与官方优化器实现不同，使用输出数值对比
+验收。未知焦距的恒定 Z 点图判为退化；支持不足返回 `no_support`，退化或
+搜索边界解返回 `degenerate`。失败结果的 valid 全为零，不补造内参。
+恢复成功不等于多视图一致，调用方仍需评估重投影 RMS 和重建约束。
+
+```powershell
+cmake --build build --config Release --target photara_moge_geometry_test photara_moge_postprocess_compare
+ctest --test-dir build -C Release -R '^photara\.inference\.moge_geometry$' --output-on-failure
+python python/models/moge/compare_geometry.py build/photara/Release/photara_moge_postprocess_compare.exe --moge-source path/to/MoGe --report build/geometry-reference.json
+```
+
+契约测试覆盖正负 shift、已知/未知内参、非中心主点和不同 fx/fy、米制尺度、
+点图投影一致性、空掩码、稀疏支持、退化平面及非法输入。参考脚本直接调用
+官方 forward/infer 的后处理路径，八组合成案例通过；参考环境还需要官方
+使用的 `utils3d_moge` 包和 SciPy，仅用于 Python 验证，不是 C++ 运行依赖。
+`--raw-dir` 可读取 native decoder 的诊断输出，并通过 `--raw-width/--raw-height`
+指定尺寸。真实 F32 权重、合成输入、严格 Vulkan 编码器/解码器的输出也通过
+已知/未知焦距对比：深度 relative L2 分别约 `1.50e-7` / `2.80e-6`，法线约
+`5.86e-8`，有效掩码一致。尚未验收真实图像的端到端预测，也未自动接入
+SfM/MVS/Splat 或更新场景相机。
 
 ## 几何约定
 
