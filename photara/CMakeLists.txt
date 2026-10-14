@@ -1155,6 +1155,26 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     add_test(NAME photara.studio.model_import COMMAND photara_model_import_test)
     photara_exclude_from_default(photara_model_import_test)
     add_dependencies(photara_tests photara_model_import_test)
+    if(TARGET photara_studio)
+        add_executable(photara_mesh_preview_test
+            tests/mesh_preview_test.cpp
+            ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
+            ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp
+            ${PHOTARA_STUDIO_DIR}/theme.cpp
+            ${PHOTARA_STUDIO_DIR}/i18n.cpp)
+        target_include_directories(photara_mesh_preview_test PRIVATE ${PHOTARA_STUDIO_DIR})
+        target_link_libraries(photara_mesh_preview_test PRIVATE
+            photara_imgui Photara::SfM Photara::Splat Vulkan::Vulkan glfw photara_vk::photara_vk)
+        target_compile_features(photara_mesh_preview_test PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(photara_mesh_preview_test PRIVATE /utf-8)
+        endif()
+        add_test(NAME photara.studio.mesh_preview COMMAND photara_mesh_preview_test)
+        add_test(NAME photara.studio.mesh_preview_vulkan COMMAND photara_mesh_preview_test --vulkan)
+        set_tests_properties(photara.studio.mesh_preview_vulkan PROPERTIES SKIP_RETURN_CODE 77)
+        photara_exclude_from_default(photara_mesh_preview_test)
+        add_dependencies(photara_tests photara_mesh_preview_test)
+    endif()
     if(TARGET photara_inference)
         add_executable(photara_inference_test tests/inference/inference_test.cpp)
         target_include_directories(photara_inference_test PRIVATE src/inference)
@@ -1400,6 +1420,11 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_mvs_test tests/mvs_test.cpp)
         target_link_libraries(photara_mvs_test PRIVATE Photara::MVS)
         add_test(NAME photara.mvs.pipeline COMMAND photara_mvs_test)
+        add_executable(photara_mesh_load_test tests/mesh_load_test.cpp)
+        target_link_libraries(photara_mesh_load_test PRIVATE Photara::MVS)
+        add_test(NAME photara.mesh.load COMMAND photara_mesh_load_test)
+        photara_exclude_from_default(photara_mesh_load_test)
+        add_dependencies(photara_tests photara_mesh_load_test)
     endif()
     set(_photara_test_targets
         photara_bearing_cuda_test

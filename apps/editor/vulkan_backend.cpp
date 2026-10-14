@@ -1244,13 +1244,6 @@ ImTextureID CameraPhotoCache::id(const std::size_t index) const {
 
 namespace {
 
-struct MeshGpuVertex {
-    float px, py, pz, pad0;
-    float nx, ny, nz, pad1;
-    float r, g, b, pad2;
-    float u, v, pad3, pad4;
-};
-static_assert(sizeof(MeshGpuVertex) == 64, "mesh vertex must stay 16-byte aligned");
 
 struct MeshPush {
     float world_to_clip[16];
@@ -1478,6 +1471,7 @@ void upload_sampled_image(
 }  // namespace
 
 void MeshPreviewRenderer::destroy_mesh_buffers() {
+    mesh_data_.reset();
     if (!g_device) {
         vertex_buffer_ = {};
         index_buffer_ = {};
@@ -1728,10 +1722,10 @@ bool MeshPreviewRenderer::ensure_albedo() {
     return albedo_set_ != VK_NULL_HANDLE;
 }
 
-void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
+void MeshPreviewRenderer::set_albedo(const MeshGpuTexture& atlas) {
     if (!g_device || !ensure_albedo()) return;
     if (atlas.width == 0 || atlas.height == 0 || atlas.pixels.size() <
-            static_cast<std::size_t>(atlas.width) * atlas.height * 3U) {
+            static_cast<std::size_t>(atlas.width) * atlas.height * 4U) {
         if (albedo_width_ != 1 || albedo_height_ != 1) {
             idle_queue();
             const std::uint8_t white[4] = {255, 255, 255, 255};
@@ -1747,18 +1741,8 @@ void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
     idle_queue();
     create_sampled_image(
         albedo_image_, albedo_memory_, albedo_view_, atlas.width, atlas.height);
-    std::vector<std::uint8_t> rgba(
-        static_cast<std::size_t>(atlas.width) * atlas.height * 4U);
-    const std::size_t pixels =
-        static_cast<std::size_t>(atlas.width) * atlas.height;
-    for (std::size_t i = 0; i < pixels; ++i) {
-        rgba[4U * i] = atlas.pixels[3U * i];
-        rgba[4U * i + 1U] = atlas.pixels[3U * i + 1U];
-        rgba[4U * i + 2U] = atlas.pixels[3U * i + 2U];
-        rgba[4U * i + 3U] = 255;
-    }
     upload_sampled_image(
-        albedo_image_, atlas.width, atlas.height, rgba.data());
+        albedo_image_, atlas.width, atlas.height, atlas.pixels.data());
     albedo_width_ = atlas.width;
     albedo_height_ = atlas.height;
     bind_albedo_view(albedo_view_);
@@ -1818,65 +1802,31 @@ bool MeshPreviewRenderer::ensure_frames(
     return true;
 }
 
-void MeshPreviewRenderer::set_mesh(
-    const std::vector<float>& positions, const std::vector<float>& normals,
-    const std::vector<float>& colours,
-    const std::vector<std::uint32_t>& indices,
-    const std::vector<float>& uvs) {
+void MeshPreviewRenderer::set_mesh(std::shared_ptr<const MeshGpuData> data) {
     destroy_mesh_buffers();
-    const std::size_t vertex_count = positions.size() / 3U;
-    if (vertex_count == 0 || indices.size() < 3) return;
-    std::vector<MeshGpuVertex> vertices(vertex_count);
-    const bool have_n = normals.size() == positions.size();
-    const bool have_c = colours.size() == positions.size();
-    const bool have_uv = uvs.size() == vertex_count * 2U;
-    for (std::size_t i = 0; i < vertex_count; ++i) {
-        MeshGpuVertex& v = vertices[i];
-        v.px = positions[3U * i];
-        v.py = positions[3U * i + 1U];
-        v.pz = positions[3U * i + 2U];
-        if (have_n) {
-            v.nx = normals[3U * i];
-            v.ny = normals[3U * i + 1U];
-            v.nz = normals[3U * i + 2U];
-        } else {
-            v.nz = -1.F;
-        }
-        if (have_c) {
-            v.r = colours[3U * i];
-            v.g = colours[3U * i + 1U];
-            v.b = colours[3U * i + 2U];
-        } else {
-            v.r = v.g = v.b = 1.F;
-        }
-        if (have_uv) {
-            v.u = uvs[2U * i];
-            v.v = uvs[2U * i + 1U];
-        }
-    }
+    mesh_data_ = std::move(data);
+    if (!mesh_data_ || mesh_data_->vertices.empty() || mesh_data_->indices.size() < 3) return;
+    create_buffer_with_data(
+        vertex_buffer_, vertex_memory_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        mesh_data_->vertices.data(), mesh_data_->vertices.size() * sizeof(MeshGpuVertex));
+    create_buffer_with_data(
+        index_buffer_, index_memory_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        mesh_data_->indices.data(), mesh_data_->indices.size() * sizeof(std::uint32_t));
+    index_count_ = static_cast<std::uint32_t>(mesh_data_->indices.size());
+}
+
+void MeshPreviewRenderer::ensure_wireframe() {
+    if (edge_buffer_ || !mesh_data_) return;
+    const auto& indices = mesh_data_->indices;
     std::vector<std::uint32_t> edges;
     edges.reserve(indices.size() * 2U);
     for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
-        const std::uint32_t a = indices[i];
-        const std::uint32_t b = indices[i + 1];
-        const std::uint32_t c = indices[i + 2];
-        edges.push_back(a);
-        edges.push_back(b);
-        edges.push_back(b);
-        edges.push_back(c);
-        edges.push_back(c);
-        edges.push_back(a);
+        const auto a = indices[i], b = indices[i + 1], c = indices[i + 2];
+        edges.insert(edges.end(), {a, b, b, c, c, a});
     }
-    create_buffer_with_data(
-        vertex_buffer_, vertex_memory_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        vertices.data(), vertices.size() * sizeof(MeshGpuVertex));
-    create_buffer_with_data(
-        index_buffer_, index_memory_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        indices.data(), indices.size() * sizeof(std::uint32_t));
     create_buffer_with_data(
         edge_buffer_, edge_memory_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         edges.data(), edges.size() * sizeof(std::uint32_t));
-    index_count_ = static_cast<std::uint32_t>(indices.size());
     edge_count_ = static_cast<std::uint32_t>(edges.size());
 }
 
@@ -1885,6 +1835,7 @@ bool MeshPreviewRenderer::draw(
     const MeshPreviewUniforms& uniforms) {
     if (!g_device || index_count_ == 0 || width == 0 || height == 0)
         return false;
+    if (uniforms.wireframe) ensure_wireframe();
     if (!ensure_frames(width, height)) return false;
     Frame& frame = frames_[write_];
     check(vkWaitForFences(g_device, 1, &frame.fence, VK_TRUE, UINT64_MAX));

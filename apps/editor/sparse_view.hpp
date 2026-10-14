@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imgui.h"
+#include "mesh_gpu_data.hpp"
 
 #include "sfm/scene.hpp"
 #include "splat/types.hpp"
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,10 @@ struct SceneLoad {
 
 struct MeshLoad {
     PreviewMesh mesh;
+    std::shared_ptr<const gpu::MeshGpuData> gpu_data;
+    gpu::MeshGpuTexture albedo;
+    std::array<Vec3, 2> reconstruction_bounds{};
+    bool reconstruction_bounds_valid{};
     std::string error;
     bool ok{};
 };
@@ -155,6 +161,9 @@ MeshLoad load_preview_mesh(
 
 // Loads a baked OBJ (with UVs) and records the sibling albedo PNG path.
 MeshLoad load_preview_textured_mesh(std::filesystem::path stem);
+// CPU packing, texture decode and optional box fitting belong on the loader
+// thread, so accepting a finished load on the UI thread only uploads buffers.
+MeshLoad prepare_mesh_preview(MeshLoad loaded, bool fit_box);
 
 enum class EditorProjection { perspective, orthographic, fisheye, panorama };
 
