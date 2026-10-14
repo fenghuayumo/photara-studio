@@ -1,6 +1,32 @@
 find_package(OpenMP)
 find_package(CGAL QUIET)
 
+if(PHOTARA_HAS_INFERENCE)
+    add_library(photara_inference STATIC
+        src/inference/model_cache.cpp
+        src/inference/geometry_prior.cpp
+        src/inference/runtime/ggml_runtime.cpp)
+    add_library(Photara::Inference ALIAS photara_inference)
+    target_include_directories(photara_inference PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_compile_features(photara_inference PUBLIC cxx_std_20)
+    target_compile_definitions(photara_inference PUBLIC PHOTARA_HAS_INFERENCE=1)
+    target_link_libraries(photara_inference PRIVATE ggml)
+    if(TARGET ggml-vulkan)
+        target_compile_definitions(photara_inference PRIVATE PHOTARA_INFERENCE_HAS_VULKAN=1)
+    endif()
+    set_target_properties(photara_inference PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# Cache/licence APIs remain available even in builds without inference/SAM.
+add_library(photara_sam_cache STATIC src/sam/model_cache.cpp)
+add_library(Photara::SAMCache ALIAS photara_sam_cache)
+target_include_directories(photara_sam_cache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(photara_sam_cache PUBLIC cxx_std_20)
+if(TARGET photara_inference)
+    target_link_libraries(photara_sam_cache PRIVATE Photara::Inference)
+endif()
+
 set(PHOTARA_BA_SOURCES
     src/ba/linearizer_cpu.cpp
     src/ba/optimizer_cpu.cpp)
@@ -806,18 +832,24 @@ if(PHOTARA_ENABLE_FEATURES)
     endif()
 
 if(TARGET photara_features)
+    add_library(photara_sam STATIC src/sam/masks.cpp)
+    add_library(Photara::SAM ALIAS photara_sam)
+    target_link_libraries(photara_sam PUBLIC Photara::SAMCache PRIVATE Photara::SfM)
+    target_include_directories(photara_sam PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(photara_sam PUBLIC cxx_std_20)
+    if(PHOTARA_HAS_SAM)
+        target_link_libraries(photara_sam PRIVATE photara_sam3)
+        target_compile_definitions(photara_sam PRIVATE PHOTARA_HAS_SAM=1)
+    endif()
     add_library(photara_cxxopts INTERFACE)
     add_library(cxxopts::cxxopts ALIAS photara_cxxopts)
     target_include_directories(photara_cxxopts INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
 
     add_executable(photara
-        src/tools/reconstruct.cpp
-        src/tools/sam_model_cache.cpp
-        src/tools/sam_masks.cpp)
-    target_link_libraries(photara PRIVATE Photara::MVS cxxopts::cxxopts)
+        src/tools/reconstruct.cpp)
+    target_link_libraries(photara PRIVATE Photara::MVS Photara::SAM cxxopts::cxxopts)
     if(PHOTARA_HAS_SAM)
-        target_link_libraries(photara PRIVATE photara_sam3)
         target_compile_definitions(photara PRIVATE PHOTARA_HAS_SAM=1)
     endif()
     if(TARGET photara_splat)
@@ -907,7 +939,6 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/main.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
                 ${PHOTARA_STUDIO_DIR}/sam_model.cpp
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/splat_edit.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp
@@ -944,7 +975,7 @@ if(TARGET photara_features)
             target_include_directories(photara_studio PRIVATE
                 ${PHOTARA_STUDIO_DIR})
             target_link_libraries(photara_studio PRIVATE
-                photara_imgui Photara::SfM Photara::Splat
+                photara_imgui Photara::SfM Photara::Splat Photara::SAMCache
                 photara::splat_render photara_vk::photara_vk
                 Vulkan::Vulkan glfw)
             if(PHOTARA_HAS_TEXTURE AND TARGET Photara::Texture)
@@ -1114,6 +1145,24 @@ endif()
 
 if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     add_custom_target(photara_tests)
+    if(TARGET photara_inference)
+        add_executable(photara_inference_test tests/inference/inference_test.cpp)
+        target_include_directories(photara_inference_test PRIVATE src/inference)
+        target_link_libraries(photara_inference_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_inference_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_inference_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_inference_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        add_test(NAME photara.inference.contracts COMMAND photara_inference_test)
+        add_test(NAME photara.inference.vulkan COMMAND photara_inference_test --vulkan)
+        set_tests_properties(photara.inference.vulkan PROPERTIES SKIP_RETURN_CODE 77)
+        photara_exclude_from_default(photara_inference_test)
+        add_dependencies(photara_tests photara_inference_test)
+    endif()
     if(PHOTARA_ENABLE_CUDA AND TARGET Ceres::ceres)
         add_executable(photara_bearing_cuda_test tests/bearing_cuda_test.cpp)
         target_link_libraries(photara_bearing_cuda_test PRIVATE Photara::BA Ceres::ceres)

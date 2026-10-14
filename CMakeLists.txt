@@ -180,6 +180,7 @@ if(PHOTARA_ENABLE_TEXTURE)
 endif()
 
 include(CTest)
+include(PhotaraInference)
 include(PhotaraSam)
 
 add_subdirectory(photara)
