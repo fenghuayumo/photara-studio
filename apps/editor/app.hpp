@@ -94,11 +94,7 @@ struct App {
     std::array<VkImageView, 3> splat_preview_views{};
     std::uint64_t splat_frames_epoch{};
     std::string splat_load_failed_key;
-    std::vector<float> mesh_gpu_positions;
-    std::vector<float> mesh_gpu_normals;
-    std::vector<float> mesh_gpu_colours;
-    std::vector<float> mesh_gpu_uvs;
-    std::vector<std::uint32_t> mesh_gpu_indices;
+    std::shared_ptr<const gpu::MeshGpuData> mesh_gpu_data;
     bool mesh_gpu_uploaded{};
     bool mesh_gpu_failed{};
     OrbitCamera camera;

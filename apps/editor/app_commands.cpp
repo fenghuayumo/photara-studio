@@ -788,14 +788,10 @@ void clear_viewport_scene(App& app) {
     app.mesh.clear();
     app.imported_mesh_source.clear();
     app.mesh_load_failed = false;
-    app.mesh_gpu_positions.clear();
-    app.mesh_gpu_normals.clear();
-    app.mesh_gpu_colours.clear();
-    app.mesh_gpu_uvs.clear();
-    app.mesh_gpu_indices.clear();
+    app.mesh_gpu_data.reset();
     app.mesh_gpu_uploaded = false;
     app.mesh_gpu_failed = false;
-    app.mesh_renderer.set_mesh({}, {}, {}, {});
+    app.mesh_renderer.set_mesh({});
     app.mesh_renderer.set_albedo({});
     app.splat_renderer.clear_model();
     app.splat_edit.clear();
@@ -1390,11 +1386,13 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     app.mesh_load_failed = false;
     app.frame_mesh_on_load = frame_when_ready;
     app.pending_scene_load_generation = app.scene_load_generation;
+    const bool fit_box = !app.scene.has_points() && !app.reconstruction_box.user_set;
     app.pending_mesh_load = std::async(
         std::launch::async,
-        [ply, ascan, textured, have_textured] {
-            if (have_textured) return load_preview_textured_mesh(textured);
-            return load_preview_mesh(ply, ascan);
+        [ply, ascan, textured, have_textured, fit_box] {
+            return prepare_mesh_preview(
+                have_textured ? load_preview_textured_mesh(textured)
+                              : load_preview_mesh(ply, ascan), fit_box);
         });
 }
 
@@ -1994,75 +1992,6 @@ void export_mesh_file(App& app) {
         set_message(app, failure.what(), theme::danger);
     }
 }
-
-void pack_mesh_gpu_buffers(App& app) {
-    app.mesh_gpu_positions.clear();
-    app.mesh_gpu_normals.clear();
-    app.mesh_gpu_colours.clear();
-    app.mesh_gpu_uvs.clear();
-    app.mesh_gpu_indices.clear();
-    app.mesh_gpu_uploaded = false;
-    if (!app.mesh.has()) {
-        app.mesh_renderer.set_mesh({}, {}, {}, {});
-        app.mesh_renderer.set_albedo({});
-        return;
-    }
-    const std::size_t count = app.mesh.vertices.size();
-    app.mesh_gpu_positions.resize(count * 3U);
-    for (std::size_t i = 0; i < count; ++i) {
-        app.mesh_gpu_positions[3U * i] = app.mesh.vertices[i].x;
-        app.mesh_gpu_positions[3U * i + 1U] = app.mesh.vertices[i].y;
-        app.mesh_gpu_positions[3U * i + 2U] = app.mesh.vertices[i].z;
-    }
-    if (app.mesh.normals.size() == count) {
-        app.mesh_gpu_normals.resize(count * 3U);
-        for (std::size_t i = 0; i < count; ++i) {
-            app.mesh_gpu_normals[3U * i] = app.mesh.normals[i].x;
-            app.mesh_gpu_normals[3U * i + 1U] = app.mesh.normals[i].y;
-            app.mesh_gpu_normals[3U * i + 2U] = app.mesh.normals[i].z;
-        }
-    }
-    if (app.mesh.colours.size() == count) {
-        app.mesh_gpu_colours.resize(count * 3U);
-        for (std::size_t i = 0; i < count; ++i) {
-            const std::uint32_t packed = app.mesh.colours[i];
-            app.mesh_gpu_colours[3U * i] =
-                static_cast<float>((packed >> IM_COL32_R_SHIFT) & 255U) / 255.F;
-            app.mesh_gpu_colours[3U * i + 1U] =
-                static_cast<float>((packed >> IM_COL32_G_SHIFT) & 255U) / 255.F;
-            app.mesh_gpu_colours[3U * i + 2U] =
-                static_cast<float>((packed >> IM_COL32_B_SHIFT) & 255U) / 255.F;
-        }
-    }
-    if (app.mesh.uvs.size() == count) {
-        app.mesh_gpu_uvs.resize(count * 2U);
-        for (std::size_t i = 0; i < count; ++i) {
-            app.mesh_gpu_uvs[2U * i] = app.mesh.uvs[i].x;
-            app.mesh_gpu_uvs[2U * i + 1U] = app.mesh.uvs[i].y;
-        }
-    }
-    app.mesh_gpu_indices.reserve(app.mesh.faces.size() * 3U);
-    for (const auto& face : app.mesh.faces) {
-        app.mesh_gpu_indices.push_back(face[0]);
-        app.mesh_gpu_indices.push_back(face[1]);
-        app.mesh_gpu_indices.push_back(face[2]);
-    }
-    app.mesh_renderer.set_mesh(
-        app.mesh_gpu_positions, app.mesh_gpu_normals, app.mesh_gpu_colours,
-        app.mesh_gpu_indices, app.mesh_gpu_uvs);
-    if (!app.mesh.albedo_path.empty()) {
-        try {
-            app.mesh_renderer.set_albedo(
-                photara::io::load_rgb(app.mesh.albedo_path));
-        } catch (...) {
-            app.mesh_renderer.set_albedo({});
-        }
-    } else {
-        app.mesh_renderer.set_albedo({});
-    }
-    app.mesh_gpu_uploaded = true;
-}
-
 std::array<float, 16> mesh_world_to_clip(
     const SplatPreviewCamera& camera, const float near_z, const float far_z) {
     const float* m = camera.world_to_camera.data();
@@ -2099,7 +2028,8 @@ std::array<float, 16> mesh_world_to_clip(
 }
 
 bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
-    if (!app.mesh.has() || app.mesh_gpu_failed || app.mesh_gpu_indices.empty())
+    if (!app.mesh.has() || app.mesh_gpu_failed || !app.mesh_gpu_data ||
+        app.mesh_gpu_data->indices.empty())
         return false;
     std::uint32_t width = static_cast<std::uint32_t>(
         std::max(1.F, std::floor(max.x - min.x)));
@@ -2123,9 +2053,7 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
     uniforms.wireframe = app.view_options.mesh_wireframe;
     try {
         if (!app.mesh_gpu_uploaded) {
-            app.mesh_renderer.set_mesh(
-                app.mesh_gpu_positions, app.mesh_gpu_normals,
-                app.mesh_gpu_colours, app.mesh_gpu_indices, app.mesh_gpu_uvs);
+            app.mesh_renderer.set_mesh(app.mesh_gpu_data);
             app.mesh_gpu_uploaded = true;
         }
         return app.mesh_renderer.draw(width, height, uniforms);
@@ -2663,11 +2591,28 @@ void poll_mesh_load(App& app) {
         return;
     }
     app.mesh = std::move(loaded.mesh);
-    invalidate_reconstruction_box(app.reconstruction_box);
+    app.mesh_gpu_data = std::move(loaded.gpu_data);
     app.mesh_load_failed = false;
     if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
-    pack_mesh_gpu_buffers(app);
-    ensure_reconstruction_box(app);
+    // A mesh mode switch does not change the Gaussian cloud the existing
+    // subject box was fitted to. Preserve that cached fit instead of walking
+    // millions of Gaussian centres again on the UI thread.
+    if (!app.scene.has_points() && !app.reconstruction_box.user_set) {
+        app.reconstruction_box.min = loaded.reconstruction_bounds[0];
+        app.reconstruction_box.max = loaded.reconstruction_bounds[1];
+        app.reconstruction_box.valid = loaded.reconstruction_bounds_valid;
+        app.reconstruction_box.auto_fitted = true;
+    }
+    try {
+        app.mesh_renderer.set_mesh(app.mesh_gpu_data);
+        app.mesh_renderer.set_albedo(loaded.albedo);
+        app.mesh_gpu_uploaded = true;
+        app.mesh_gpu_failed = false;
+    } catch (const std::exception& failure) {
+        app.mesh_gpu_failed = true;
+        set_message(app, std::string("Mesh GPU upload: ") + failure.what(), theme::danger);
+        return;
+    }
     // Frame only when this load was requested with framing intent (fresh
     // mesh from extraction or first session entry). A load triggered by
     // switching to the mesh tab keeps the current camera for 3DGS/mesh
