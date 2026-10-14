@@ -23,8 +23,9 @@ Studio ──────────────→ Photara::SAMCache
 `Photara::SAM` 已从 CLI 的 `tools` 中独立出来，但 SAM 的计算图与后端
 生命周期仍由外部 `sam3` 库管理，不经过新会话包装。两者共享同一份 ggml。
 
-MoGe 已提供权重转换、GGUF 检查、CPU/Vulkan 加载和 ViT-B 编码器计算图。
-深度、法线等完整前向预测尚未实现。
+MoGe 已提供权重转换、GGUF 检查、CPU/Vulkan 加载、ViT-B 编码器，以及
+neck 和 points/normal/mask/scale head。当前返回原始 head 输出，图像输出
+重采样、几何恢复及公开预测接口尚未接入。
 没有可以调用但只会抛出“未实现”的模型工厂。
 既有 ONNX 特征和去光照路径保持原状，当前不迁移它们的会话封装。
 
@@ -76,7 +77,8 @@ python python/models/moge/verify_weights.py model.pt model-f32.gguf build/photar
 验证工具从源 checkpoint 的每个张量独立提取头部、内部和末尾样本，
 与 C++ 从实际后端回读的值比较。F16 文件需给转换和验证脚本都指定
 `--precision f16`。模型文件不进入仓库，默认 ctest 不下载或加载 checkpoint。
-后续仍需完成解码器张量清单校验、neck/head 计算图与预处理、几何恢复和完整前向参考对比；
+转换脚本同时校验固定 ViT-B neck/head 拓扑，拒绝不同归一化、激活、
+残差数量或上采样配置。后续仍需完成预处理、几何恢复和完整预测接口；
 权重回读通过不能视为模型推理正确。
 
 ## ViT 编码器与逐层对比
@@ -120,6 +122,41 @@ Vulkan 对比默认使用严格 F32 模式：仅对子进程设置
 上述精度门槛（融合特征 relative L2 约 `6.1e-3`），不能与严格模式混称。
 库不会自行切换这些进程级选项，后续产品接入需明确精度策略。
 F16 权重的编码器前向精度尚未验收。
+
+## Neck/head 解码器
+
+`models/moge/decoder.*` 接收 encoder 的融合特征、class token，以及原始
+输入图像的宽高比。宽高比可以与整数 token 网格不同，UV 金字塔不能直接
+使用网格比例替代。实现五级 neck 和三个图像 head，通道数为
+768/256/128/64/32，scale head 为独立 MLP。
+
+3×3 卷积使用 gather 构造边缘复制填充，并显式使用 F32 im2col；
+2×2/stride-2 转置卷积通过四相投影和像素重排实现，避免普通卷积与
+转置卷积权重布局混淆。最后一级使用双线性上采样。
+
+`DecoderResult` 返回网格 16 倍分辨率的 HWC 原始点图、原始法线、
+mask logits 和 log metric scale。它们还不是可交给重建的几何先验：
+仍需恢复到输入图像尺寸、执行点图 remap、法线归一化、sigmoid/exp，
+然后恢复焦距/z-shift 并形成深度、有效掩码和统一坐标下的点图。
+
+```powershell
+cmake --build build --config Release --target photara_moge_decoder_test
+python python/models/moge/compare_decoder.py model.pt model-f32.gguf build/photara/Release/photara_moge_decoder_test.exe --moge-source path/to/MoGe --vulkan --report build/decoder.json
+python python/models/moge/compare_decoder.py model.pt model-f32.gguf build/photara/Release/photara_moge_decoder_test.exe --moge-source path/to/MoGe --rows 30 --columns 40 --vulkan --native-encoder --report build/network-raw.json
+```
+
+对比工具用官方 ConvStack/MLP 和相同权重验证 104 个阶段。
+默认把参考 encoder 特征直接传给 native decoder，隔离解码器误差；
+`--native-encoder` 则串联 native 编码器与解码器，验证真实模块边界。
+两种模式都重复执行不保留中间输出的 decoder，检查正常路径和诊断路径一致。
+Vulkan 验证沿用严格 F32 子进程策略，默认快路径和 F16 权重尚未验收。
+
+已通过 CPU 的 4×6、1×1 网格和 Vulkan 的 4×6、6×4（原图宽高比 1.7）、
+30×40 网格；串联验证通过 CPU 4×6 和 Vulkan 30×40。
+30×40 串联输出相对 L2：原始点图约 `5.24e-7`、法线约 `4.33e-7`、
+mask logits 约 `7.27e-6`、log metric scale 约 `2.51e-6`。
+该网格正常 decoder 图缓冲区约 901 MiB，不包含模型权重、诊断数据、
+上传暂存或后端内部缓冲，也不代表整个进程的显存峰值。
 
 ## 几何约定
 

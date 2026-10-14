@@ -30,6 +30,20 @@ def checkpoint_summary(checkpoint: dict) -> dict:
     if not all(config.get(head) for head in
                ("points_head", "normal_head", "mask_head", "scale_head")):
         raise ValueError("The point, normal, mask and scale heads are required")
+    channels = [768, 256, 128, 64, 32]
+    for prefix in ("neck", "points_head", "normal_head", "mask_head"):
+        stack = config[prefix]
+        expected_in = [770, 2, 2, 2, 2] if prefix == "neck" else channels
+        expected_out = None if prefix == "neck" else [None, None, None, None,
+                                                      1 if prefix == "mask_head" else 3]
+        if stack["dim_in"] != expected_in or stack["dim_out"] != expected_out or \
+           stack["dim_res_blocks"] != channels or stack["num_res_blocks"] != [0, 1, 1, 1, 0] or \
+           stack["resamplers"] != ["conv_transpose", "conv_transpose", "conv_transpose", "bilinear"] or \
+           stack["res_block_in_norm"] != "none" or stack["res_block_hidden_norm"] != "none" or \
+           stack.get("activation", "relu") != "relu" or stack.get("dim_times_res_block_hidden", 1) != 1:
+            raise ValueError(f"Unsupported MoGe-2 ViT-B decoder topology: {prefix}")
+    if config["scale_head"]["dims"] != [768, 768, 768, 1]:
+        raise ValueError("Unsupported MoGe-2 scale head")
     required_shapes = {
         "encoder.backbone.patch_embed.proj.weight": (768, 3, 14, 14),
         "encoder.backbone.cls_token": (1, 1, 768),
