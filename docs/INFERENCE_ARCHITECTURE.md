@@ -23,7 +23,8 @@ Studio ──────────────→ Photara::SAMCache
 `Photara::SAM` 已从 CLI 的 `tools` 中独立出来，但 SAM 的计算图与后端
 生命周期仍由外部 `sam3` 库管理，不经过新会话包装。两者共享同一份 ggml。
 
-MoGe 尚未实现；没有可以调用但只会抛出“未实现”的模型工厂。
+MoGe 已提供权重转换、GGUF 检查与 CPU/Vulkan 加载，前向预测尚未实现。
+没有可以调用但只会抛出“未实现”的模型工厂。
 既有 ONNX 特征和去光照路径保持原状，当前不迁移它们的会话封装。
 
 ## 目录与职责
@@ -41,10 +42,40 @@ MoGe 尚未实现；没有可以调用但只会抛出“未实现”的模型工
 计算图、预处理和几何恢复放在那里。多个模型真正共享算子后，才抽到
 公共实现；不预先创建空模型目录或通用算子框架。
 
-后续 MoGe-2 接入以 `Ruicheng/moge-2-vitb-normal` 为首个候选模型。
+后续 MoGe-2 接入以 `Ruicheng/moge-2-vitb-normal` 为首个目标模型。
 模型适配器负责 token 网格、权重加载、计算图和几何恢复；调用方通过
 `GeometryInput` 提供可选针孔内参。正式接入时固定权重版本，逐阶段对比
 参考输出，再验证 Vulkan/CPU 精度和重建效果。
+
+## MoGe 权重通路
+
+`python/models/moge/convert_weights.py` 将官方 `model.pt` 转换为 GGUF，
+保留原始张量名称和连续内存顺序。GGUF 的维度顺序与 PyTorch 相反，
+但转换阶段不改变张量存储；计算图中的卷积、转置卷积需自行使用正确布局。
+首个支持的模型为 MoGe-2 ViT-B normal。默认 F32，用于先验证数值；可选
+F16 仅转换矩阵/卷积权重，位置编码及一维仿射参数保留 F32。
+
+文件记录格式版本、原始配置、checkpoint revision 与源文件 SHA-256。
+本轮验证使用 revision `ca5f0e07ff01d3e5a364c1d954ed12ee1814b368`，
+源文件 SHA-256 为 `16b8110e86d5dc5a849db120ca96ef3a223fd30b0c9146d1d81db504073da5f6`。
+C++ `inspect_moge_model()` 校验格式、元数据、主要编码器/输出张量形状和
+数据区完整性，不分配 GPU 内存。内部 `MogeWeights` 完成后端分配与上传，
+并允许设置原始张量字节上限；该上限不包含分配对齐，也不是全局显存预算。
+SHA-256 记录源文件身份，不是转换后 GGUF 的完整性摘要。
+
+```powershell
+python -m pip install -r python/models/moge/requirements.txt
+python python/models/moge/convert_weights.py model.pt model-f32.gguf --revision ca5f0e07ff01d3e5a364c1d954ed12ee1814b368
+cmake --build build --config Release --target photara_moge_weights_test
+python python/models/moge/verify_weights.py model.pt model-f32.gguf build/photara/Release/photara_moge_weights_test.exe
+python python/models/moge/verify_weights.py model.pt model-f32.gguf build/photara/Release/photara_moge_weights_test.exe --vulkan
+```
+
+验证工具从源 checkpoint 的每个张量独立提取头部、内部和末尾样本，
+与 C++ 从实际后端回读的值比较。F16 文件需给转换和验证脚本都指定
+`--precision f16`。模型文件不进入仓库，默认 ctest 不下载或加载 checkpoint。
+后续仍需完成完整张量清单校验、计算图与预处理、几何恢复和前向参考对比；
+权重回读通过不能视为模型推理正确。
 
 ## 几何约定
 
