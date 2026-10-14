@@ -1156,6 +1156,26 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     photara_exclude_from_default(photara_model_import_test)
     add_dependencies(photara_tests photara_model_import_test)
     if(TARGET photara_studio)
+        get_target_property(_session_sources photara_studio SOURCES)
+        list(FILTER _session_sources EXCLUDE REGEX "(main\\.cpp|\\.rc)$")
+        get_target_property(_session_links photara_studio LINK_LIBRARIES)
+        get_target_property(_session_definitions photara_studio COMPILE_DEFINITIONS)
+        add_executable(photara_gaussian_session_test tests/gaussian_session_test.cpp ${_session_sources})
+        target_include_directories(photara_gaussian_session_test PRIVATE ${PHOTARA_STUDIO_DIR})
+        target_link_libraries(photara_gaussian_session_test PRIVATE ${_session_links})
+        target_compile_features(photara_gaussian_session_test PRIVATE cxx_std_20)
+        if(_session_definitions)
+            target_compile_definitions(photara_gaussian_session_test PRIVATE ${_session_definitions})
+        endif()
+        if(MSVC)
+            target_compile_options(photara_gaussian_session_test PRIVATE /utf-8)
+        endif()
+        add_test(NAME photara.studio.gaussian_session COMMAND photara_gaussian_session_test)
+        add_test(NAME photara.studio.gaussian_session_vulkan COMMAND photara_gaussian_session_test --vulkan)
+        set_tests_properties(photara.studio.gaussian_session_vulkan PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+        set_tests_properties(photara.studio.gaussian_session PROPERTIES TIMEOUT 30)
+        photara_exclude_from_default(photara_gaussian_session_test)
+        add_dependencies(photara_tests photara_gaussian_session_test)
         add_executable(photara_mesh_preview_test
             tests/mesh_preview_test.cpp
             ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
@@ -1302,6 +1322,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_RUNTIME_DLLS:photara_splat_deployment_test>
                     $<TARGET_FILE_DIR:photara_splat_deployment_test> COMMAND_EXPAND_LISTS)
         endif()
+        add_executable(photara_splat_merge_test tests/splat_merge_test.cpp)
+        target_link_libraries(photara_splat_merge_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.merge COMMAND photara_splat_merge_test)
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_merge_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_merge_test>
+                    $<TARGET_FILE_DIR:photara_splat_merge_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
@@ -1436,6 +1465,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_splat_test
         photara_splat_usdc_test
         photara_splat_deployment_test
+        photara_splat_merge_test
         photara_splat_quality_eval
         photara_splat_vulkan_forward_test
         photara_splat_vulkan_parity

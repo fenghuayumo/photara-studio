@@ -68,6 +68,27 @@ enum class Action {
     reveal
 };
 
+// One imported 3DGS file in the editor's multi-model list. Placement is a
+// uniform scale plus translation applied when the composed preview is built
+// and when models are merged to disk.
+struct GaussianModelEntry {
+    std::filesystem::path path;
+    std::string name;
+    std::uint64_t splat_count{};
+    bool visible{true};
+    float offset[3]{};
+    float scale{1.F};
+    std::shared_ptr<const std::vector<std::uint8_t>> embedded;
+    std::shared_ptr<const photara::splat::GaussianModel> cached_model;
+    std::string cached_key;
+};
+
+// Result of the background merge job. An empty error means success.
+struct GaussianMergeJob {
+    std::uint64_t splat_count{};
+    std::string error;
+};
+
 struct App {
     ProjectSettings settings;
     ProjectLayout layout;
@@ -90,6 +111,21 @@ struct App {
     gpu::MeshPreviewRenderer mesh_renderer;
     splat_render::Renderer splat_renderer;
     SplatEdit splat_edit;
+    std::vector<GaussianModelEntry> gaussian_models;
+    std::shared_ptr<const photara::splat::GaussianModel> composed_model;
+    std::string composed_model_key;
+    struct GaussianMergeState {
+        bool running{};
+        bool discard{};
+        bool apply_pending{};
+        float progress{};
+        std::uint32_t input_count{};
+        std::filesystem::path output;
+        GaussianMergeJob pending;
+        std::shared_ptr<std::atomic<float>> progress_atom;
+        std::future<GaussianMergeJob> job;
+        std::string error;
+    } gaussian_merge;
     std::array<VkDescriptorSet, 3> splat_preview_sets{};
     std::array<VkImageView, 3> splat_preview_views{};
     std::uint64_t splat_frames_epoch{};
@@ -119,6 +155,9 @@ struct App {
     bool loading_scene{};
     std::string scene_source;
     std::string dataset_scene_key;
+    // A visibility/placement change arrived while a scene load was in
+    // flight; reload the composed model once that load is discarded.
+    bool gaussian_composition_reload{};
 
     bool has_sparse{};
     bool has_asfm{};
@@ -315,6 +354,16 @@ void cancel_project_save(App& app);
 void save_project_as(App& app);
 void request_ascan_scene_load(App& app);
 void consume_dropped_paths(App& app);
+
+bool gaussian_models_managed(const App& app);
+std::size_t visible_gaussian_model_count(const App& app);
+void import_gaussian_models(
+    App& app, const std::vector<std::filesystem::path>& paths,
+    bool announce = true);
+void remove_gaussian_model(App& app, std::size_t index);
+void refresh_gaussian_composition(App& app);
+void start_gaussian_merge(App& app, const std::filesystem::path& output);
+void poll_gaussian_merge(App& app);
 
 void ensure_sparse_loaded(App& app);
 void ensure_gaussian_scene(App& app);

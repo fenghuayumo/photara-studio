@@ -12,8 +12,16 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 7;
+inline constexpr std::uint32_t k_settings_version = 8;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
+
+struct GaussianSource {
+    std::filesystem::path path;
+    std::string name;
+    bool visible{true};
+    float offset[3]{};
+    float scale{1.F};
+};
 
 struct Settings {
     std::string name;
@@ -27,6 +35,7 @@ struct Settings {
     std::string splat_output_format{"ply"};
     // Optional external trained Gaussian file used by the editor preview.
     std::filesystem::path splat_model_source;
+    std::vector<GaussianSource> gaussian_models;
     // Optional video capture. image_directory may itself be a video file; these
     // fields are the extraction knobs Align Photos / --images apply first.
     std::filesystem::path video_frames_dir;
@@ -115,6 +124,9 @@ void write_settings(
     const Settings& settings,
     const std::filesystem::path& project_file);
 Settings read_settings(const Archive& archive);
+void write_gaussian_sources(Archive& archive,
+    const std::vector<std::vector<std::uint8_t>>& sources);
+std::vector<std::vector<std::uint8_t>> read_gaussian_sources(const Archive& archive);
 
 void write_sfm(
     Archive& archive,

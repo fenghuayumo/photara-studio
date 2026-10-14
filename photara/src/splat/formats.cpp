@@ -1459,6 +1459,141 @@ void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
         throw std::runtime_error("Failed to truncate spherical harmonics");
 }
 
+GaussianModel transform_gaussians(
+    const GaussianModel& model, const GaussianTransform& transform) {
+    if (!(transform.scale > 0.F) || !std::isfinite(transform.scale))
+        throw std::runtime_error("Gaussian transform scale must be positive");
+    if (model.size() == 0 || transform.identity()) return model;
+    const auto count = model.size();
+    const auto device = model.means.device();
+    auto means = model.means.to_vector();
+    auto scales = model.log_scales.to_vector();
+    if (means.size() != count * 3U || scales.size() != count * 3U)
+        throw std::runtime_error("Gaussian model has an unexpected layout");
+    const float log_scale = std::log(transform.scale);
+    for (float& value : means) value *= transform.scale;
+    for (float& value : scales) value += log_scale;
+    for (std::size_t index = 0; index < count; ++index)
+        for (std::size_t axis = 0; axis < 3U; ++axis)
+            means[index * 3U + axis] += transform.translation[axis];
+
+    GaussianModel placed;
+    placed.means = tinytensor::Tensor::from_vector(
+        means, {count, 3U}, device);
+    placed.log_scales = tinytensor::Tensor::from_vector(
+        scales, {count, 3U}, device);
+    placed.quaternions = model.quaternions;
+    placed.opacity_logits = model.opacity_logits;
+    placed.sh = model.sh;
+    placed.normal_features = model.normal_features;
+    placed.sh_degree = model.sh_degree;
+    // filter_3d is a world-space Mip-Splatting radius, so it grows with the
+    // uniform scale like every other spatial quantity.
+    if (model.filter_3d.is_valid() && model.filter_3d.numel() == count) {
+        auto filter = model.filter_3d.to_vector();
+        for (float& value : filter) value *= transform.scale;
+        placed.filter_3d = tinytensor::Tensor::from_vector(
+            filter, {count, 1U}, device);
+    }
+    return placed;
+}
+
+GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
+    if (models.empty())
+        throw std::runtime_error("Merging needs at least one Gaussian model");
+    std::size_t total = 0;
+    std::size_t max_bases = 1;
+    unsigned degree = 0;
+    bool all_normals = true;
+    bool all_filter = true;
+    for (const GaussianModel& model : models) {
+        const auto count = model.size();
+        if (count == 0)
+            throw std::runtime_error("Cannot merge an empty Gaussian model");
+        if (model.means.numel() != count * 3U ||
+            model.log_scales.numel() != count * 3U ||
+            model.quaternions.numel() != count * 4U ||
+            model.opacity_logits.numel() != count)
+            throw std::runtime_error("Gaussian model has an unexpected layout");
+        total += count;
+        if (model.sh.is_valid() && model.sh.shape().rank() == 3)
+            max_bases = std::max(max_bases, model.sh.shape()[1]);
+        degree = std::max(degree, model.sh_degree);
+        all_normals = all_normals && model.normal_features.is_valid() &&
+                      model.normal_features.numel() == count * 4U;
+        all_filter = all_filter && model.filter_3d.is_valid() &&
+                     model.filter_3d.numel() == count;
+    }
+    // A padded band count can exceed the stored degree of every input.
+    while (degree < 3U && (degree + 1U) * (degree + 1U) < max_bases) ++degree;
+
+    const auto device = models.front().means.device();
+    std::vector<float> means, scales, rotations, opacities, sh, normals, filter;
+    means.reserve(total * 3U);
+    scales.reserve(total * 3U);
+    rotations.reserve(total * 4U);
+    sh.reserve(total * max_bases * 3U);
+    for (const GaussianModel& model : models) {
+        const auto count = model.size();
+        const auto append = [](std::vector<float>& target,
+                               const std::vector<float>& values) {
+            target.insert(target.end(), values.begin(), values.end());
+        };
+        append(means, model.means.to_vector());
+        append(scales, model.log_scales.to_vector());
+        append(rotations, model.quaternions.to_vector());
+        append(opacities, model.opacity_logits.to_vector());
+        if (all_normals)
+            append(normals, model.normal_features.to_vector());
+        if (all_filter) append(filter, model.filter_3d.to_vector());
+
+        // Zero-pad SH along the band axis so mixed-degree inputs keep their
+        // colour while sharing one layout.
+        std::size_t bases = 1;
+        std::vector<float> coefficients;
+        if (model.sh.is_valid() && model.sh.shape().rank() == 3) {
+            bases = model.sh.shape()[1];
+            coefficients = model.sh.to_vector();
+        }
+        const std::size_t source_stride = bases * 3U;
+        const std::size_t target_stride = max_bases * 3U;
+        if (coefficients.size() != count * source_stride)
+            throw std::runtime_error("Gaussian SH layout is inconsistent");
+        const std::size_t block = sh.size();
+        sh.resize(block + count * target_stride, 0.F);
+        for (std::size_t index = 0; index < count; ++index)
+            std::copy_n(
+                coefficients.begin() +
+                    static_cast<std::ptrdiff_t>(index * source_stride),
+                source_stride,
+                sh.begin() + static_cast<std::ptrdiff_t>(
+                    block + index * target_stride));
+    }
+    if (means.size() != total * 3U || scales.size() != total * 3U ||
+        rotations.size() != total * 4U || opacities.size() != total ||
+        sh.size() != total * max_bases * 3U)
+        throw std::runtime_error("Merged Gaussian layout is inconsistent");
+
+    GaussianModel merged;
+    merged.means = tinytensor::Tensor::from_vector(means, {total, 3U}, device);
+    merged.log_scales =
+        tinytensor::Tensor::from_vector(scales, {total, 3U}, device);
+    merged.quaternions =
+        tinytensor::Tensor::from_vector(rotations, {total, 4U}, device);
+    merged.opacity_logits =
+        tinytensor::Tensor::from_vector(opacities, {total, 1U}, device);
+    merged.sh = tinytensor::Tensor::from_vector(
+        sh, {total, max_bases, 3U}, device);
+    merged.sh_degree = degree;
+    if (all_normals)
+        merged.normal_features = tinytensor::Tensor::from_vector(
+            normals, {total, 4U}, device);
+    if (all_filter)
+        merged.filter_3d = tinytensor::Tensor::from_vector(
+            filter, {total, 1U}, device);
+    return merged;
+}
+
 void save_gaussians(
     const GaussianModel& model, const std::filesystem::path& path,
     GaussianFormat format) {

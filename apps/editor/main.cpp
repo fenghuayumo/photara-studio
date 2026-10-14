@@ -201,6 +201,7 @@ int main(const int argc, char** argv) {
         editor::poll_align_live(app);
         editor::poll_camera_photos(app);
         editor::poll_splat_simplify(app);
+        editor::poll_gaussian_merge(app);
         editor::poll_splat_export(app);
 
         if (app.smoke_mode) {

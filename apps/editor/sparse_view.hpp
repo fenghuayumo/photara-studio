@@ -120,6 +120,10 @@ struct PreviewMesh {
 
 struct SceneLoad {
     SparseScene scene;
+    std::shared_ptr<const photara::splat::GaussianModel> composed_model;
+    std::string composed_key;
+    std::vector<std::shared_ptr<const photara::splat::GaussianModel>> source_models;
+    std::vector<std::string> source_keys;
     std::string error;
     bool ok{};
 };

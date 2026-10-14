@@ -6,12 +6,15 @@
 
 #include "imgui_internal.h"
 
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace editor {
@@ -51,6 +54,134 @@ void draw_step(
         ImGui::SetCursorPosX(44.F);
         theme::caption(note);
     }
+}
+
+void draw_gaussian_models_panel(App& app) {
+    if (app.gaussian_models.empty()) return;
+
+    ImGui::Dummy({0, 6.F});
+    theme::section_header(tr("GAUSSIAN MODELS"));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 6.F});
+    const bool merge_busy = app.gaussian_merge.running;
+    // Unsaved screen-space edits bind to the composed cloud; changing
+    // the composition now would silently discard them.
+    const bool edits_locked = app.splat_edit.dirty();
+    bool composition_changed = false;
+    for (std::size_t index = 0; index < app.gaussian_models.size(); ++index) {
+        GaussianModelEntry& entry = app.gaussian_models[index];
+        ImGui::PushID(static_cast<int>(index));
+        ImGui::SetCursorPosX(10.F);
+        ImGui::BeginDisabled(merge_busy || edits_locked);
+        if (ImGui::Checkbox("##gaussian_model_visible", &entry.visible))
+            composition_changed = true;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", tr("Show or hide this model in the merged preview."));
+        ImGui::SameLine(0.F, 6.F);
+        const std::string label = entry.name + "###gaussian_model";
+        const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+            ImGuiTreeNodeFlags_AllowOverlap;
+        const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+        std::string tooltip = path_to_utf8(entry.path);
+        if (entry.splat_count > 0)
+            tooltip += "\n" + format_count(entry.splat_count) + " splats";
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tooltip.c_str());
+        ImGui::SameLine();
+        const float remove_width = ImGui::CalcTextSize("X").x + 14.F;
+        ImGui::SetCursorPosX(
+            ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
+            remove_width);
+        ImGui::BeginDisabled(merge_busy || edits_locked);
+        if (ImGui::Button("X##remove_gaussian_model")) {
+            remove_gaussian_model(app, index);
+            // The entry was erased from the vector; stop touching it.
+            ImGui::EndDisabled();
+            if (open) ImGui::TreePop();
+            ImGui::PopID();
+            break;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Remove this model from the session."));
+        if (open) {
+            ImGui::Indent(16.F);
+            ImGui::BeginDisabled(merge_busy || edits_locked);
+            ImGui::DragFloat3(
+                tr("Offset"), entry.offset, 0.05F, -100000.F, 100000.F,
+                "%.2f");
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                composition_changed = true;
+            ImGui::DragFloat(
+                tr("Scale"), &entry.scale, 0.005F, 0.01F, 1000.F, "%.3f",
+                ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                composition_changed = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "%s",
+                    tr("Uniform scale and translation applied before merge.\n"
+                    "The preview reloads when the drag ends."));
+            ImGui::EndDisabled();
+            ImGui::Unindent(16.F);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    if (composition_changed) refresh_gaussian_composition(app);
+
+    ImGui::Dummy({0, 2.F});
+    ImGui::SetCursorPosX(10.F);
+    ImGui::BeginDisabled(merge_busy || edits_locked);
+    if (ImGui::Button(tr("Add Model..."), {116.F, 0.F})) {
+        std::vector<std::filesystem::path> picked;
+        if (pick_splat_model_files(L"Add Gaussian splat models", picked)) {
+            if (app.gaussian_models.empty()) clear_loaded_result(app);
+            import_gaussian_models(app, picked);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine(0.F, 6.F);
+    const std::size_t visible_models = visible_gaussian_model_count(app);
+    ImGui::BeginDisabled(merge_busy || visible_models < 2);
+    if (ImGui::Button(tr("Merge Models..."), {-1.F, 0.F})) {
+        std::array<char, 1024> output{};
+        std::filesystem::path directory;
+        if (!app.gaussian_models.empty()) {
+            std::error_code error;
+            directory = app.gaussian_models.front().path.parent_path();
+            if (directory.empty() ||
+                !std::filesystem::is_directory(directory, error))
+                directory = std::filesystem::current_path(error);
+        }
+        store_path_field(output, directory / "merged_gaussians.ply");
+        if (pick_export_path(
+                L"Merge Gaussian Models", output, FilePickKind::splat_model,
+                L"merged_gaussians.ply", L"ply")) {
+            start_gaussian_merge(app, path_from_utf8_field(output.data()));
+        }
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "%s",
+            tr("Write every visible model (with its placement) into one new "
+            "splat file, then load that file as the session's single model."));
+
+    if (merge_busy) {
+        ImGui::SetCursorPosX(10.F);
+        const float width = ImGui::GetContentRegionAvail().x - 10.F;
+        char overlay[64]{};
+        std::snprintf(
+            overlay, sizeof(overlay), "%s %u/%u", tr("Merging models"),
+            static_cast<unsigned>(
+                app.gaussian_merge.progress * app.gaussian_merge.input_count),
+            app.gaussian_merge.input_count);
+        ImGui::ProgressBar(app.gaussian_merge.progress, {width, 0.F}, overlay);
+    }
+    ImGui::PopStyleVar();
 }
 
 void draw_scene_panel(App& app) {
@@ -134,6 +265,7 @@ void draw_scene_panel(App& app) {
         ImGui::TreePop();
     }
     ImGui::PopStyleVar();
+    draw_gaussian_models_panel(app);
     ImGui::Dummy({0, 6.F});
 
     theme::section_header(tr("PIPELINE"));
