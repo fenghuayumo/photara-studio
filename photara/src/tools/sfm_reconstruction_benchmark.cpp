@@ -7,12 +7,13 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 
 int main(int argc, char** argv) {
     try {
         using namespace photara::sfm;
-        if (argc < 4 || argc > 5)
-            throw std::invalid_argument("Usage: photara_sfm_reconstruction_benchmark tracks-HEX.bin automatic|cpu|cuda|vulkan NEW_OUTPUT.asfm [automatic|cpu|cuda|vulkan BA]");
+        if (argc < 4 || argc > 7)
+            throw std::invalid_argument("Usage: photara_sfm_reconstruction_benchmark tracks-HEX.bin automatic|cpu|cuda|vulkan NEW_OUTPUT.asfm [automatic|cpu|cuda|vulkan BA [global|hierarchical [CLUSTER_CAPACITY]]]");
         const auto backend = [](const std::string& value) {
             if (value == "automatic") return PositioningBackend::automatic;
             if (value == "cpu") return PositioningBackend::cpu;
@@ -22,12 +23,25 @@ int main(int argc, char** argv) {
         };
         ReconstructionConfig config;
         config.global_positioning.backend = backend(argv[2]);
-        const std::string ba = argc == 5 ? argv[4] : "automatic";
+        const std::string ba = argc >= 5 ? argv[4] : "automatic";
         if (ba == "automatic") set_bundle_backend_preference(BundleBackendPreference::automatic);
         else if (ba == "cpu") set_bundle_backend_preference(BundleBackendPreference::cpu);
         else if (ba == "cuda") set_bundle_backend_preference(BundleBackendPreference::cuda);
         else if (ba == "vulkan") set_bundle_backend_preference(BundleBackendPreference::vulkan);
         else throw std::invalid_argument("Unknown BA backend");
+        const std::string mode = argc >= 6 ? argv[5] : "global";
+        if (mode == "hierarchical") config.mode = ReconstructionMode::hierarchical;
+        else if (mode != "global") throw std::invalid_argument("Unknown reconstruction mode");
+        if (argc == 7) {
+            const std::string value = argv[6];
+            if (mode != "hierarchical" || value.empty() ||
+                value.find_first_not_of("0123456789") != std::string::npos)
+                throw std::invalid_argument("Cluster capacity requires hierarchical mode and a positive integer");
+            const auto capacity = std::stoull(value);
+            if (capacity == 0 || capacity > std::numeric_limits<unsigned>::max())
+                throw std::invalid_argument("Cluster capacity out of range");
+            config.hierarchical.cluster.max_views_per_cluster = static_cast<unsigned>(capacity);
+        }
         const std::filesystem::path input(argv[1]), output(argv[3]);
         if (std::filesystem::exists(output)) throw std::invalid_argument("Output already exists");
         const auto stem = input.stem().string();
@@ -63,6 +77,8 @@ int main(int argc, char** argv) {
         graph.read = false;
         CheckpointStore(graph).save_scene(CheckpointStage::reconstruction, key, scene);
         std::cout << std::setprecision(12)
+                  << "reconstruction_mode=" << mode << '\n'
+                  << "cluster_capacity=" << config.hierarchical.cluster.max_views_per_cluster << '\n'
                   << "checkpoint_load_seconds=" << load_seconds << '\n'
                   << "alignment_seconds=" << alignment_seconds << '\n'
                   << "serialization_seconds=" << seconds(save_start) << '\n'

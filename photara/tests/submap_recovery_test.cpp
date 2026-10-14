@@ -319,6 +319,48 @@ int main() {
         }
         Scene no_anchor = fixture(false);
         expect(recover_stable_resections(no_anchor).empty(), "resection must reject missing stable depths");
+        const auto patch_fixture = [&] {
+            Scene patch = fixture();
+            patch.cameras[0].width = 4000; patch.cameras[0].height = 3200;
+            for (Index id = 4; id < 8; ++id) {
+                patch.images[id].registered = false;
+                for (Index anchor = 0; anchor < 3; ++anchor) {
+                    ImagePair pair(anchor, id);
+                    Pose3D target; target.C = Vec3(0.25 * id, 0.12 * (id % 2), 0);
+                    pair.relative_pose = target / patch.images[anchor].pose;
+                    pair.relative_pose->C.normalize(); pair.weight_spatial = 1;
+                    for (Index feature = 0; feature < 160; ++feature)
+                        pair.matches.push_back({feature, feature});
+                    patch.pairs.push_back(std::move(pair));
+                }
+            }
+            return patch;
+        };
+        Scene patch = patch_fixture();
+        expect(recover_stable_resections(patch, stable).size() == 4,
+            "well-conditioned localized support with independent pair witnesses must recover missing views");
+        for (Index id = 4; id < 8; ++id)
+            expect((patch.images[id].pose.C - Vec3(0.25 * id, 0.12 * (id % 2), 0)).norm() < 0.01,
+                "localized recovery must retain pose accuracy");
+        for (const bool bad_rotation : {false, true}) {
+            Scene rejected_patch = patch_fixture();
+            if (bad_rotation) {
+                for (auto& pair : rejected_patch.pairs)
+                    if (pair.id1 < 4 && pair.id2 >= 4)
+                        pair.relative_pose->R = Eigen::AngleAxisd(0.2, Vec3::UnitY()).toRotationMatrix();
+            } else {
+                rejected_patch.cameras[0].width = 100000;
+                rejected_patch.cameras[0].height = 100000;
+            }
+            const auto before = rejected_patch.images;
+            expect(recover_stable_resections(rejected_patch, stable).empty(),
+                "localized evidence requires image extent and independent absolute rotation agreement");
+            for (Index id = 0; id < 8; ++id)
+                expect(rejected_patch.images[id].registered == before[id].registered &&
+                       rejected_patch.images[id].pose.C == before[id].pose.C &&
+                       rejected_patch.images[id].pose.R == before[id].pose.R,
+                    "rejected localized recovery must preserve registration and poses");
+        }
         Scene noisy = fixture();
         for (Index i=4;i<8;++i) {
             const auto pixels=noisy.images[i].features.keypoints;
@@ -579,38 +621,50 @@ int main() {
         try { make_independent_submap(original, {4, 4}); }
         catch (const std::invalid_argument&) { invalid = true; }
         expect(invalid, "duplicate image IDs must be rejected");
-        Scene corridor = corridor_fixture();
-        Scene full_rebuild = corridor;
-        WeakBranchRecoveryOptions reference;
-        reference.reuse_verified_geometry = false;
-        const auto reference_count = recover_weakly_connected_views(full_rebuild, reference);
-        const auto cached_count = recover_weakly_connected_views(corridor);
-        expect(cached_count == reference_count && cached_count >= 4,
-            "weak branch beyond a locally rigid clique must still recover");
-        expect(corridor.tracks.size() == full_rebuild.tracks.size(),
-               "cached recovery must preserve split track topology");
-        for (Index i=0;i<corridor.images.size();++i)
-            expect(corridor.images[i].registered == full_rebuild.images[i].registered &&
-                   (corridor.images[i].pose.C-full_rebuild.images[i].pose.C).norm()<1e-10 &&
-                   (corridor.images[i].pose.R-full_rebuild.images[i].pose.R).norm()<1e-10,
-                   "cached recovery must match full-rebuild poses");
-        for (Index i=0;i<corridor.tracks.size();++i) {
-            const auto& a=corridor.tracks[i];const auto& b=full_rebuild.tracks[i];
-            expect(a.num_inliers==b.num_inliers && a.observations.size()==b.observations.size() &&
-                   (a.position-b.position).norm()<1e-10,
-                   "cached recovery must match full-rebuild triangulation");
-            for (std::size_t o=0;o<a.observations.size();++o)
-                expect(a.observations[o].image_id==b.observations[o].image_id &&
-                       a.observations[o].feature_id==b.observations[o].feature_id,
-                       "cached recovery must preserve observation ordering");
+        for (const bool new_depths : {false, true}) {
+            Scene corridor = corridor_fixture();
+            // Parallel rays cannot triangulate. Cache their failed solve while
+            // other tracks propagate, and invalidate incident tracks as new
+            // anchors register just as in the full-rebuild reference.
+            for (auto& image : corridor.images) {
+                if (new_depths && image.id >= 8) continue;
+                for (Index feature = 0; feature < 5; ++feature) {
+                    image.features.keypoints[feature].x = 500;
+                    image.features.keypoints[feature].y = 400;
+                }
+            }
+            Scene full_rebuild = corridor;
+            WeakBranchRecoveryOptions reference;
+            reference.reuse_verified_geometry = false;
+            const auto reference_count = recover_weakly_connected_views(full_rebuild, reference);
+            const auto cached_count = recover_weakly_connected_views(corridor);
+            expect(cached_count == reference_count && cached_count >= 4,
+                "weak branch beyond a locally rigid clique must still recover");
+            expect(corridor.tracks.size() == full_rebuild.tracks.size(),
+                   "cached recovery must preserve split track topology");
+            for (Index i=0;i<corridor.images.size();++i)
+                expect(corridor.images[i].registered == full_rebuild.images[i].registered &&
+                       (corridor.images[i].pose.C-full_rebuild.images[i].pose.C).norm()<1e-10 &&
+                       (corridor.images[i].pose.R-full_rebuild.images[i].pose.R).norm()<1e-10,
+                       "cached recovery must match full-rebuild poses");
+            for (Index i=0;i<corridor.tracks.size();++i) {
+                const auto& a=corridor.tracks[i];const auto& b=full_rebuild.tracks[i];
+                expect(a.num_inliers==b.num_inliers && a.observations.size()==b.observations.size() &&
+                       (a.position-b.position).norm()<1e-10,
+                       "cached recovery must match full-rebuild triangulation");
+                for (std::size_t o=0;o<a.observations.size();++o)
+                    expect(a.observations[o].image_id==b.observations[o].image_id &&
+                           a.observations[o].feature_id==b.observations[o].feature_id,
+                           "cached recovery must preserve observation ordering");
+            }
+            for (Index i = 8; i < 12; ++i)
+                expect(corridor.images[i].registered &&
+                       (corridor.images[i].pose.C - Vec3(0.25 * i, 0.12 * (i % 2), 0)).norm() < 0.05,
+                       "weak branch on the far side of the corridor must stay recovered");
+            for (Index i = 0; i < 4; ++i)
+                expect(corridor.images[i].registered,
+                       "core cameras must remain registered");
         }
-        for (Index i = 8; i < 12; ++i)
-            expect(corridor.images[i].registered &&
-                   (corridor.images[i].pose.C - Vec3(0.25 * i, 0.12 * (i % 2), 0)).norm() < 0.05,
-                   "weak branch on the far side of the corridor must stay recovered");
-        for (Index i = 0; i < 4; ++i)
-            expect(corridor.images[i].registered,
-                   "core cameras must remain registered");
         std::cout << "submap recovery tests passed\n";
         return 0;
     } catch (const std::exception& error) {

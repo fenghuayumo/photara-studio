@@ -21,7 +21,8 @@ std::vector<Index> recover_stable_resections(
 // branches from independently validated anchors, and unregister unsupported
 // poses. Strong-component poses and camera intrinsics stay fixed.
 struct WeakBranchRecoveryOptions {
-    // Disable for an offline comparison with full rebuild/triangulation.
+    // Disable for an offline comparison with full rebuild/triangulation,
+    // including the frozen-boundary local BA neighborhood.
     bool reuse_verified_geometry{true};
 };
 unsigned recover_weakly_connected_views(
