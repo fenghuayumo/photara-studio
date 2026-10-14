@@ -23,7 +23,8 @@ Studio ──────────────→ Photara::SAMCache
 `Photara::SAM` 已从 CLI 的 `tools` 中独立出来，但 SAM 的计算图与后端
 生命周期仍由外部 `sam3` 库管理，不经过新会话包装。两者共享同一份 ggml。
 
-MoGe 已提供权重转换、GGUF 检查与 CPU/Vulkan 加载，前向预测尚未实现。
+MoGe 已提供权重转换、GGUF 检查、CPU/Vulkan 加载和 ViT-B 编码器计算图。
+深度、法线等完整前向预测尚未实现。
 没有可以调用但只会抛出“未实现”的模型工厂。
 既有 ONNX 特征和去光照路径保持原状，当前不迁移它们的会话封装。
 
@@ -34,12 +35,13 @@ MoGe 已提供权重转换、GGUF 检查与 CPU/Vulkan 加载，前向预测尚�
 | `photara/include/inference` | 公开的数据和任务约定 |
 | `photara/src/inference/runtime` | 后端、图分配和图执行；不知道模型结构 |
 | `photara/src/inference` | 公共几何校验和模型缓存路径 |
+| `photara/src/inference/models/moge` | MoGe 权重与模型计算图 |
 | `photara/src/sam` | SAM 掩码业务、模型位置与许可记录 |
 | `third_party/sam3` | 外部模型实现及当前 ggml 源码 |
 | `photara/tests/inference` | 无需权重的公共契约与真实后端测试 |
 
-接入 MoGe 时创建 `photara/src/inference/models/moge`，把权重加载、
-计算图、预处理和几何恢复放在那里。多个模型真正共享算子后，才抽到
+MoGe 的权重加载、计算图、后续预处理和几何恢复放在模型目录中。
+多个模型真正共享算子后，才抽到
 公共实现；不预先创建空模型目录或通用算子框架。
 
 后续 MoGe-2 接入以 `Ruicheng/moge-2-vitb-normal` 为首个目标模型。
@@ -74,8 +76,50 @@ python python/models/moge/verify_weights.py model.pt model-f32.gguf build/photar
 验证工具从源 checkpoint 的每个张量独立提取头部、内部和末尾样本，
 与 C++ 从实际后端回读的值比较。F16 文件需给转换和验证脚本都指定
 `--precision f16`。模型文件不进入仓库，默认 ctest 不下载或加载 checkpoint。
-后续仍需完成完整张量清单校验、计算图与预处理、几何恢复和前向参考对比；
+后续仍需完成解码器张量清单校验、neck/head 计算图与预处理、几何恢复和完整前向参考对比；
 权重回读通过不能视为模型推理正确。
+
+## ViT 编码器与逐层对比
+
+`models/moge/encoder.*` 实现单图 ViT-B/14：patch 投影、class token、
+位置编码、12 个 Transformer block、第 5/11 层归一化和特征投影。
+输出是 token-major 的 768 维融合特征与最终 class token，供后续 neck
+和 scale head 使用。计算图包括多头注意力、LayerScale、残差、
+`LayerNorm eps=1e-6` 和 erf GELU。
+
+当前输入是已经准备好的 CHW 浮点 RGB 图，尺寸为 `rows*14 × columns*14`。
+完整图像重采样和归一化尚未接入；patch 排布与 native DINOv2 位置插值
+在编码器中实现，位置插值保留 0.1 偏移，不启用 antialias。
+注意力使用显式矩阵运算，网格限制在 1..4096 patches；尚未优化 flash attention。
+
+`compare_encoder.py` 直接实例化本地官方 MoGe 源码中的编码器，并严格加载
+同一 checkpoint；通过 hooks 获取参考输出，不另写一份参考 Transformer。
+校验覆盖 21 个阶段，包括全部 block、两个 tap、最终特征和 class token。
+native 工具还重复执行不保留中间结果的正常路径，检查与诊断路径一致。
+
+```powershell
+cmake --build build --config Release --target photara_moge_encoder_test
+python python/models/moge/compare_encoder.py model.pt model-f32.gguf build/photara/Release/photara_moge_encoder_test.exe --moge-source path/to/MoGe --rows 30 --columns 40 --report build/encoder-cpu.json
+python python/models/moge/compare_encoder.py model.pt model-f32.gguf build/photara/Release/photara_moge_encoder_test.exe --moge-source path/to/MoGe --rows 30 --columns 40 --vulkan --report build/encoder-vulkan.json
+```
+
+参考源码 revision 为 `74fbce054ebed49800de42d0ad0e83495065719a`。
+已验证 F32 checkpoint：CPU/Vulkan 的 8×12、30×40 网格，以及 Vulkan
+的 12×8（不同随机输入）和 37×37（原生位置编码）网格。输入为确定种子的
+合成 RGB 图，尚未覆盖真实图像的完整预处理。
+30×40 最终特征的相对 L2 误差：CPU 约 `2.86e-6`，严格 Vulkan 约 `3.33e-6`。
+
+默认门槛为 relative L2 ≤ `2e-4`，最大绝对误差 ≤
+`2e-3 + 2e-4 * max(abs(reference))`；报告同时保存原始绝对误差与参考幅值。
+后期残差层可出现超过 300 的激活，不能给所有层套同一个绝对误差门槛。
+
+Vulkan 对比默认使用严格 F32 模式：仅对子进程设置
+`GGML_VK_DISABLE_F16/COOPMAT/COOPMAT2=1`。不修改编辑器或库调用方的环境。
+`GGML_PREC_F32` 只约束部分累加策略，不能保证后端不转换输入为 F16。
+通过 `--vulkan-precision default` 可检查默认快路径；其 8×12 结果尚未通过
+上述精度门槛（融合特征 relative L2 约 `6.1e-3`），不能与严格模式混称。
+库不会自行切换这些进程级选项，后续产品接入需明确精度策略。
+F16 权重的编码器前向精度尚未验收。
 
 ## 几何约定
 
