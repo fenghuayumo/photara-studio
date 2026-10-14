@@ -1,31 +1,31 @@
-# SfM 改进参考
+# SfM Improvement Notes
 
-保留后续分析和改进需要的关键发现。算法结构见 [SFM_ARCHITECTURE.md](SFM_ARCHITECTURE.md)。
+Key findings for future analysis and improvements. See [SFM_ARCHITECTURE.md](SFM_ARCHITECTURE.md) for the algorithm structure.
 
-## 已有结论
+## Established Findings
 
-- CUDA 分块求解、恢复缓存和并行轨迹拆分有实际收益，已有相关数值回归。Berlin 的 split peel 从约 29.9 s 降至 1.5 s；进一步优化应关注剩余定位、BA 和恢复开销。
-- bicycle、bonsai、flowers、garden 全部注册，热启动方案的 mapping 减少约 36%–60%，未见明显质量退化。Flowers 定位观测不足 50000，实际回退 CPU，提速不能归因于 CUDA。
-- Berlin 和 Alameda 在充分预算下，CPU/CUDA 位姿误差非常接近。默认预算的差异主要与优化进度有关，不能直接归因于 CUDA 精度。
-- 多簇的覆盖丢失、内参错误合并、严重旋转冲突及全景后半球统计问题已修复；Berlin 原约 55° 的异常旋转降至约 1.1°。这些不再是待修故障，但相关回归需要保留。
-- 暂时保留默认簇容量 2048、热启动门槛 512 和 CPU 回退。降低热启动门槛有潜力，但不宜仅凭几组数据直接改成通用默认。
+- CUDA block solves, recovery caching, and parallel track splitting provide measurable gains and have numerical regression coverage. Berlin's split peel decreased from about 29.9 s to 1.5 s; further optimization should focus on remaining positioning, BA, and recovery costs.
+- Bicycle, bonsai, flowers, and garden registered all images. The warm-start approach reduced mapping time by about 36%–60% without noticeable quality degradation. Flowers had fewer than 50000 positioning observations and fell back to CPU, so its speedup cannot be attributed to CUDA.
+- With sufficient budgets, CPU/CUDA pose errors were very close on Berlin and Alameda. Differences under default budgets mainly reflected optimization progress rather than CUDA precision.
+- Multi-cluster coverage loss, incorrect intrinsic merging, severe rotation conflicts, and panorama rear-hemisphere statistics have been fixed. Berlin's rotation outlier decreased from about 55° to 1.1°. Retain the relevant regressions even though these are no longer open defects.
+- Keep the default cluster capacity of 2048, warm-start threshold of 512, and CPU fallback for now. Lowering the warm-start threshold is promising, but a few datasets do not justify changing the general default.
 
-## 优先改进的问题
+## Improvement Priorities
 
-| 问题 | 实验依据 | 改进方向 |
+| Issue | Evidence | Next Steps |
 |---|---|---|
-| CPU 短预算 | 已区分超时、停滞与 IRLS 收敛；无有效更新且未真正收敛的轮次不再改变权重，剩余预算充足才扩大预算重试 | 继续验证不同硬件及 CPU 回退的质量；预算耗尽仍不等于质量达标 |
-| 优化目标与实际位姿质量不完全一致 | 更多迭代、更低残差未必更接近参考；Berlin 和 Alameda 均有此现象 | 分析弱约束、异常匹配和鲁棒权重，避免把单一残差当作质量目标 |
-| Alameda 局部中心偏差 | 最大中心差约 3.19 个参考步长；强连接与视差审计已能标记最坏相机，但稳定点 PnP 未通过其修复验证 | 已持久化“位置未验证”状态；继续分析跨分支约束，不能把标记或低 RMS 当作已修复 |
-| 多簇与弱分支的尾部质量 | 覆盖已恢复，但室内多簇中心 P95 仍约 1.78 步；办公室与 Global 最大旋转差约 4° | 继续检查跨簇合并、共享内参和弱分支恢复；不能只看注册率和平均误差 |
-| 大场景与资源回退 | 主要实验集中在同一台 RTX 5090，尚缺超过 2048 张的默认多簇及低显存对照 | 补充实际大场景、目标硬件和后端失败回退测试 |
+| Short CPU budgets | Timeout, stall, and IRLS convergence are now distinguished. Passes without effective updates or genuine convergence no longer change weights; retries receive larger slices only when the remaining budget permits. | Continue validating quality across hardware and CPU fallback paths. Budget exhaustion does not imply acceptable accuracy. |
+| Optimization objective versus pose accuracy | More iterations and lower residuals did not always improve agreement with the reference on Berlin or Alameda. | Analyze weak constraints, incorrect matches, and robust weights; avoid using a single residual metric as the quality objective. |
+| Alameda local camera-center drift | Maximum center deviation was about 3.19 reference steps. Strong-connection and parallax audits now flag the worst cameras, but PnP from stable-only depths did not pass their repair validation. | Position-unverified status is now persisted. Continue investigating cross-branch constraints; neither a risk flag nor low RMS demonstrates a successful repair. |
+| Tail quality in multiple clusters and weak branches | Coverage was restored, but indoor multi-cluster center P95 remained about 1.78 steps; the office scene had a maximum rotation difference of about 4° relative to Global. | Continue checking cross-cluster merging, shared intrinsics, and weak-branch recovery. Registration rate and mean error alone are insufficient. |
+| Large scenes and resource fallback | Most experiments used the same RTX 5090. Default multi-cluster runs above 2048 images and low-VRAM comparisons are still missing. | Add real large-scene, target-hardware, and backend-failure fallback tests. |
 
-Alameda 默认预算 CPU/CUDA 的中心 P95 为约 0.100/0.127 步；充分预算 CPU 也达到约 0.127 步。因此 CUDA 数值一致性与该弱段的位置准确性应分别处理。Flowers 的 `_DSC9142.JPG` 也保留约 1.11° 旋转差，属于默认与热启动两条路径共有的尾部问题。
+In the earlier Alameda comparison, center P95 under default CPU/CUDA budgets was about 0.100/0.127 reference steps; CPU with sufficient budget also reached about 0.127 steps. CUDA numerical consistency and position accuracy in the weak segment therefore require separate analysis. Flowers' `_DSC9142.JPG` retained a rotation difference of about 1.11°, a tail issue shared by the default and warm-start paths.
 
-## 后续对照原则
+## Comparison Guidelines
 
-- 复用相同 tracks，禁止 reconstruction 缓存捷径；参考模型仅用于事后评估，不输入重建。
-- 同时看注册集合、旋转/中心 P95、最差相机和重投影误差。`valid` 或退出码不等于精度合格；参考模型也不视为绝对真值。
-- mapping、含末尾恢复/审计的完整对齐、冷前端端到端耗时分别比较；有 GPU 争用的记录不用于性能结论。
-- 比较后端精度时确认迭代上限、容差和实际超时情况。时间参数 `0` 只取消共享预算，bearing 每次 Solve 的既有 45 s 上限仍在。
-- 用 `PHOTARA_LOG_LEVEL=debug` 查看逐轮代价、终止原因和 `accepted_updates`；记录实际后端，不能由 CUDA 请求参数推断一定用了 GPU。
+- Reuse identical tracks and bypass reconstruction-cache shortcuts. Use reference models only for post-reconstruction evaluation, never as reconstruction input.
+- Compare registered image sets, rotation/center P95, worst cameras, and reprojection errors. Neither `valid` nor the exit code establishes accuracy; the reference model is not absolute ground truth either.
+- Measure mapping, complete alignment including final recovery/audits, and cold-frontend end-to-end time separately. Exclude runs with GPU contention from performance conclusions.
+- Confirm iteration limits, tolerances, and actual timeouts when comparing backend accuracy. A time parameter of `0` disables only the shared budget; the existing 45 s limit per bearing Solve remains.
+- Use `PHOTARA_LOG_LEVEL=debug` to inspect per-pass costs, termination reasons, and `accepted_updates`. Record the actual backend; requesting CUDA does not prove that GPU execution occurred.
