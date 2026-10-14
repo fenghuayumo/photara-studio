@@ -4,6 +4,7 @@
 #include "vulkan_backend.hpp"
 
 #include "sfm/align_live.hpp"
+#include "io/image.hpp"
 
 #include "imgui.h"
 
@@ -25,6 +26,7 @@ enum class ImageQaMode { photo, features, compare, error };
 
 struct ImageQaMetrics {
     bool valid{};
+    bool masked{};
     float psnr{};
     float ssim{};
     float mae{};
@@ -58,7 +60,9 @@ public:
 
     void clear();
     void poll();
-    void request_gt(int view_index, const std::filesystem::path& path);
+    void request_gt(
+        int view_index, const std::filesystem::path& path,
+        bool use_mask = false, const std::filesystem::path& mask_dir = {});
     void set_render(
         photara::io::RgbImage render, int view, std::uint64_t revision);
 
@@ -75,6 +79,7 @@ public:
     [[nodiscard]] ImTextureID gt_id() const;
     [[nodiscard]] ImTextureID error_id() const;
     [[nodiscard]] const ImageQaMetrics& metrics() const { return metrics_; }
+    [[nodiscard]] bool mask_failed() const { return mask_failed_; }
     [[nodiscard]] std::uint32_t gt_width() const { return gt_cpu_.width; }
     [[nodiscard]] std::uint32_t gt_height() const { return gt_cpu_.height; }
 
@@ -83,37 +88,47 @@ private:
     // Decodes retired by a newer selection are harvested instead of joined, so
     // switching cameras never blocks the UI on an in-flight capture.
     void harvest_retired();
-    void publish_gt(const photara::io::RgbImage& image);
+    struct Capture {
+        photara::io::RgbImage image;
+        photara::io::GrayImage mask;
+        bool mask_failed{};
+    };
+    void publish_gt(const Capture& capture);
     void remember_gt(
         const std::filesystem::path::string_type& key,
-        const photara::io::RgbImage& image);
+        const Capture& capture);
 
     struct MetricsJob {
         ImageQaMetrics metrics;
         photara::io::RgbImage error;
         int view{-1};
         std::uint64_t revision{};
+        std::uint64_t capture_revision{};
     };
 
     gpu::PreviewTexture gt_;
     gpu::PreviewTexture error_;
     photara::io::RgbImage gt_cpu_;
     photara::io::RgbImage render_cpu_;
-    std::future<photara::io::RgbImage> pending_;
+    photara::io::GrayImage mask_cpu_;
+    std::future<Capture> pending_;
     // Superseded requests keep their key so a decode that finishes after the
     // selection moved on still lands in the cache instead of being thrown away.
     std::vector<std::pair<std::filesystem::path::string_type,
-                          std::future<photara::io::RgbImage>>>
+                          std::future<Capture>>>
         retired_;
     std::future<MetricsJob> metrics_pending_;
     // Decoded captures keyed by native path, most recent last: comparing a few
     // cameras back and forth must not pay for the decode again.
     std::unordered_map<std::filesystem::path::string_type,
-                       photara::io::RgbImage>
+                       Capture>
         gt_cache_;
     std::deque<std::filesystem::path::string_type> gt_cache_order_;
     std::filesystem::path pending_path_;
     std::filesystem::path loaded_path_;
+    std::filesystem::path::string_type pending_key_;
+    std::filesystem::path::string_type loaded_key_;
+    std::uint64_t capture_revision_{};
     int pending_view_{-1};
     int loaded_view_{-1};
     int render_view_{-1};
@@ -121,6 +136,7 @@ private:
     bool loading_{};
     bool metrics_busy_{};
     bool failed_{};
+    bool mask_failed_{};
     ImageQaMetrics metrics_;
 };
 
@@ -146,6 +162,8 @@ struct ImageQaDrawInput {
     bool render_live{};
     bool has_model{};
     bool external_alignment{};
+    bool use_metric_mask{};
+    std::filesystem::path mask_dir;
     const photara::sfm::AlignLiveFrame* live{};
     ImageQaSession* pair_session{};
 };

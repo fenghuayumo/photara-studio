@@ -1038,6 +1038,8 @@ Action draw_inspector(App& app) {
             ImGui::Spacing();
             theme::section_header("COMPARE");
             const ImageQaMetrics& metrics = app.image_qa_session.metrics();
+            ImGui::TextDisabled("%s", metrics.masked
+                ? tr("Metrics: foreground only") : tr("Metrics: full image"));
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), "%.2f dB", metrics.psnr);
             theme::metric("PSNR", buffer);
