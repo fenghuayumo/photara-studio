@@ -213,12 +213,14 @@ unsigned recover_weakly_connected_views(
         }
         for (Index id=0;id<verified_tracks.size();++id) {
             bool reuse=!triangulated_tracks.empty() &&
-                triangulated_tracks[id].is_triangulated() &&
                 // A peeled parent must be solved from the original topology
                 // again, so its split children retain their exact ordering.
                 triangulated_tracks[id].observations.size()==verified_tracks[id].observations.size();
             if (reuse) for (const auto& obs:verified_tracks[id].observations)
                 if (changed[obs.image_id]) { reuse=false;break; }
+            // Failed triangulations are reusable too: unchanged observations,
+            // poses and registration flags cannot supply a new depth. Any
+            // newly registered anchor still invalidates every incident track.
             if (reuse) scene.tracks[id]=triangulated_tracks[id];
             else dirty.push_back(id);
         }
@@ -331,11 +333,34 @@ unsigned recover_weakly_connected_views(
                 "locally rigid neighborhood BA: free=",free,
                 " fixed=",local.fixed_image_ids.size(),
                 " recovered_anchors=",recovered_count);
-            triangulate_tracks(scene,false,2.F,1.F);
+            std::vector<std::uint8_t> affected(scene.images.size(), 0);
+            for (Index id : local.free_image_ids) affected[id] = 1;
+            for (Index id = 0; id < recovered.size(); ++id)
+                if (recovered[id]) affected[id] = 1;
+            const auto triangulate_neighborhood = [&] {
+                if (!options.reuse_verified_geometry) {
+                    triangulate_tracks(scene, false, 2.F, 1.F);
+                    return;
+                }
+                std::vector<Index> tracks;
+                for (Index id = 0; id < scene.tracks.size(); ++id)
+                    for (const auto& obs : scene.tracks[id].observations)
+                        if (obs.image_id < affected.size() && affected[obs.image_id]) {
+                            tracks.push_back(id);
+                            break;
+                        }
+                core::Logger::instance().info("local recovery triangulation: tracks=",
+                    tracks.size(), '/', scene.tracks.size());
+                // BA already packs only points incident to free views. All
+                // other poses/intrinsics are frozen, so unrelated geometry
+                // has no changed input before or after this local solve.
+                triangulate_tracks(scene, tracks, false, 2.F, 1.F);
+            };
+            triangulate_neighborhood();
             if (!run_bundle_adjustment(scene,local).success)
                 core::Logger::instance().warning(
                     "locally rigid neighborhood BA failed; keeping previous poses");
-            triangulate_tracks(scene,false,2.F,1.F);
+            triangulate_neighborhood();
         }
     }
     core::Logger::instance().info(
@@ -794,6 +819,7 @@ std::vector<Index> recover_stable_resections(
         // away from the independently verified pair graph. Keep two distinct
         // frozen rotation witnesses as a non-regression check; this still
         // permits correcting an already inaccurate inherited orientation.
+        std::set<Index> precise_rotation_anchors;
         if (pose.success) {
             std::set<Index> rotation_anchors;
             double rotation_weight = 0, rotation_before = 0, rotation_after = 0;
@@ -810,7 +836,9 @@ std::vector<Index> recover_stable_resections(
                 const Mat3 after = forward ? Mat3(pose.pose.R * scene.images[anchor].pose.R.transpose())
                                            : Mat3(scene.images[anchor].pose.R * pose.pose.R.transpose());
                 rotation_before += weight * rotation_error_degrees(before, pair.relative_pose->R);
-                rotation_after += weight * rotation_error_degrees(after, pair.relative_pose->R);
+                const double after_error = rotation_error_degrees(after, pair.relative_pose->R);
+                rotation_after += weight * after_error;
+                if (after_error <= 2.0) precise_rotation_anchors.insert(anchor);
                 rotation_weight += weight;
             }
             if (rotation_anchors.size() >= 2 && rotation_weight > 0) {
@@ -906,11 +934,13 @@ std::vector<Index> recover_stable_resections(
         unsigned heldout = 0;
         std::set<std::pair<int, int>> cells;
         std::vector<Vec3> heldout_points;
+        std::vector<Vec2> heldout_pixels;
         for (const auto& m : validation) {
             if (!supports(scene, {id, m.feature}, m.point, pose.pose, 2)) continue;
             ++heldout;
             heldout_points.push_back(m.point);
             const auto& p = image.features.keypoints[m.feature];
+            heldout_pixels.emplace_back(p.x, p.y);
             cells.emplace(static_cast<int>(std::clamp(4*p.x/std::max(1u,camera.width), 0.F, 3.F)),
                           static_cast<int>(std::clamp(4*p.y/std::max(1u,camera.height), 0.F, 3.F)));
         }
@@ -928,7 +958,42 @@ std::vector<Index> recover_stable_resections(
         if (heldout < 12 || heldout < minimum_validation_ratio * validation.size()) { reject("heldout_consensus_failed"); continue; }
         core::Logger::instance().info("stable resection validation geometry: image=", image.path.filename(),
             " cells=", cells.size(), " noncollinear=", noncollinear(heldout_points));
-        if (cells.size() < 3) { reject("insufficient_validation_cells"); continue; }
+        if (cells.size() < 3) {
+            // Frame-aligned cells can reject a well-spread local patch merely
+            // because it lies within one cell. For missing views only, require
+            // an independent pair certificate and conditioning/extent of the
+            // actual held-out pixels before considering patch-relative cells.
+            Vec2 low = heldout_pixels.front(), high = low, mean = Vec2::Zero();
+            for (const Vec2& pixel : heldout_pixels) {
+                low = low.cwiseMin(pixel); high = high.cwiseMax(pixel); mean += pixel;
+            }
+            mean /= static_cast<double>(heldout_pixels.size());
+            const Vec2 extent = high - low;
+            Eigen::Matrix2d scatter = Eigen::Matrix2d::Zero();
+            std::set<std::pair<int, int>> patch_cells;
+            for (const Vec2& pixel : heldout_pixels) {
+                const Vec2 normalized((pixel.x() - mean.x()) / std::max(1u, camera.width),
+                                      (pixel.y() - mean.y()) / std::max(1u, camera.height));
+                scatter += normalized * normalized.transpose();
+                if (extent.minCoeff() > 0) {
+                    const Vec2 cell = 4.0 * (pixel - low).cwiseQuotient(extent);
+                    patch_cells.emplace(static_cast<int>(std::clamp(cell.x(), 0.0, 3.0)),
+                                        static_cast<int>(std::clamp(cell.y(), 0.0, 3.0)));
+                }
+            }
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> eig(scatter);
+            const bool conditioned = eig.info() == Eigen::Success &&
+                eig.eigenvalues().allFinite() && eig.eigenvalues()[1] > 0 &&
+                eig.eigenvalues()[0] >= 0.01 * eig.eigenvalues()[1];
+            const bool patch_supported = !image.registered && direction_certified &&
+                precise_rotation_anchors.size() >= 2 && conditioned && patch_cells.size() >= 3 &&
+                extent.x() >= 0.05 * camera.width && extent.y() >= 0.05 * camera.height;
+            core::Logger::instance().info("stable resection patch audit: image=", image.path.filename(),
+                " extent=", extent.transpose(), " cells=", patch_cells.size(),
+                " conditioned=", conditioned, " rotation_anchors=", precise_rotation_anchors.size(),
+                " accepted=", patch_supported);
+            if (!patch_supported) { reject("insufficient_validation_cells"); continue; }
+        }
         if (!noncollinear(heldout_points)) { reject("ill_conditioned_validation_points"); continue; }
         for (const auto& [feature, m] : unique)
             if (supports(scene, {id, feature}, m.point, pose.pose, 2)) accepted[id].push_back(m);

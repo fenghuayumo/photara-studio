@@ -252,6 +252,25 @@ model's checked residual. Equirectangular cameras include the rear hemisphere
 with a seam- and pole-safe tangent residual in pixels. An oriented-ray check
 rejects antipodal observations, whose tangent residual alone can be zero.
 
+Stable-depth resection retains independent fit/held-out samples, checked pixel
+support, 3D conditioning and verified pair rotation/direction gates. For an
+unregistered image whose held-out inliers occupy fewer than three frame-aligned
+cells, localized support can be considered only with two distinct frozen pair
+rotation witnesses within 2 degrees and a direction certificate. The held-out
+patch must span at least 5% of both image dimensions, have normalized pixel
+covariance eigenvalue ratio at least 0.01, and occupy three patch-relative cells.
+These extra checks reuse the existing PnP result and correspondences. Registered
+poses retain the original frame-cell gate.
+
+Weak-branch propagation reuses successful and failed triangulations when their
+canonical observation topology, participating registered poses and registration
+flags are unchanged. New anchors invalidate incident cached failures too.
+Frozen-boundary local BA packs points observed by free views; its surrounding
+triangulation therefore selects only tracks incident to free or recovered
+images. It retains all observations of those tracks, including distant frozen
+anchors. The development-only full-rebuild path remains available as a numerical
+comparison through `WeakBranchRecoveryOptions::reuse_verified_geometry=false`.
+
 ## 5. Bundle adjustment
 
 `Photara::BA` provides Levenberg-Marquardt optimization with analytic

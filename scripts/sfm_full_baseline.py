@@ -3,6 +3,7 @@
 Usage: python scripts/sfm_full_baseline.py INPUT_SCENARIOS.json NEW_OUTPUT_DIR
 Scenario fields: name, tracks, images, reference; optional positioning/ba
 backends (default automatic). Requires psutil for OS peak working-set sampling.
+Optional mode (global by default) and cluster_capacity select hierarchical runs.
 Never sends reference paths to the reconstruction process. Runs sequentially.
 """
 from __future__ import annotations
@@ -99,7 +100,8 @@ def main():
               "binary_sha256": {path.name: sha256(path) for path in [benchmark, evaluator, diagnostics]}, "runs": []}
     report["source_sha256"] = {name: sha256(ROOT / name) for name in [
         "photara/src/sfm/global_positioning.cpp", "photara/src/sfm/reconstruct.cpp",
-        "photara/src/sfm/submap_recovery.cpp", "photara/src/tools/sfm_reconstruction_benchmark.cpp",
+        "photara/src/sfm/submap_recovery.cpp", "photara/src/sfm/hierarchical.cpp",
+        "photara/src/sfm/rotation_recovery.cpp", "photara/src/tools/sfm_reconstruction_benchmark.cpp",
         "photara/src/tools/sfm_position_diagnostics.cpp", "scripts/sfm_full_baseline.py"]}
 
     def save():
@@ -118,8 +120,11 @@ def main():
         row = dict(case, tracks_sha256=sha256(tracks), gpu_before=gpu_sample())
         report["runs"].append(row); save()
         print("Starting " + name, flush=True)
-        reconstruction = run([benchmark, tracks, case.get("positioning", "automatic"), model,
-                              case.get("ba", "automatic")], out / (name + ".log"), out / (name + "_resources.json"), env)
+        command = [benchmark, tracks, case.get("positioning", "automatic"), model,
+                   case.get("ba", "automatic"), case.get("mode", "global")]
+        if "cluster_capacity" in case:
+            command.append(case["cluster_capacity"])
+        reconstruction = run(command, out / (name + ".log"), out / (name + "_resources.json"), env)
         row["reconstruction"] = reconstruction
         row["summary"] = metrics(out / (name + ".log"))
         log = (out / (name + ".log")).read_text(encoding="utf-8", errors="replace")
