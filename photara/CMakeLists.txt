@@ -5,11 +5,13 @@ if(PHOTARA_HAS_INFERENCE)
     add_library(photara_inference STATIC
         src/inference/model_cache.cpp
         src/inference/models/moge/weights.cpp
+        src/inference/models/moge/encoder.cpp
         src/inference/geometry_prior.cpp
         src/inference/runtime/ggml_runtime.cpp)
     add_library(Photara::Inference ALIAS photara_inference)
     target_include_directories(photara_inference PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/inference)
     target_compile_features(photara_inference PUBLIC cxx_std_20)
     target_compile_definitions(photara_inference PUBLIC PHOTARA_HAS_INFERENCE=1)
     target_link_libraries(photara_inference PRIVATE ggml)
@@ -1177,6 +1179,19 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         endif()
         photara_exclude_from_default(photara_moge_weights_test)
         add_dependencies(photara_tests photara_moge_weights_test)
+        add_executable(photara_moge_encoder_test tests/inference/moge_encoder_test.cpp)
+        target_include_directories(photara_moge_encoder_test PRIVATE src/inference)
+        target_link_libraries(photara_moge_encoder_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_encoder_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_encoder_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_encoder_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        photara_exclude_from_default(photara_moge_encoder_test)
+        add_dependencies(photara_tests photara_moge_encoder_test)
     endif()
     if(PHOTARA_ENABLE_CUDA AND TARGET Ceres::ceres)
         add_executable(photara_bearing_cuda_test tests/bearing_cuda_test.cpp)
