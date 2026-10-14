@@ -6,6 +6,8 @@ bundle adjustment, camera models, exports, checkpoints, and quality gates.
 See [MVS architecture](MVS_ARCHITECTURE.md),
 [Splat C++ backend](SPLAT_CPP.md), and [Pipeline overview](PIPELINE.md) for
 downstream stages.
+Key experiment findings and priorities for further improvement are recorded
+in [SfM improvement notes](SFM_VALIDATION.md).
 
 ## 1. Scope
 
