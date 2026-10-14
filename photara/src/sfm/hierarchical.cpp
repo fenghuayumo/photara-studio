@@ -1260,7 +1260,8 @@ ReconstructionSummary run_hierarchical_mapping(
         // sparse or degenerate graphs where global positioning cannot solve.
         Scene global_scene = scene;
         const ReconstructionSummary global = run_global_mapping(
-            global_scene, {}, {}, config.resection);
+            global_scene, config.global_rotation, config.global_positioning,
+            config.resection);
         const double global_coverage =
             static_cast<double>(global.registered_views) /
             static_cast<double>(std::max<std::size_t>(1, scene.images.size()));
@@ -1353,12 +1354,8 @@ ReconstructionSummary run_hierarchical_mapping(
             }
             ResectionConfig resection = config.resection;
             resection.checkpoint_callback = {};
-            GlobalPositioningOptions positioning;
-            if (bundle_backend_preference() == BundleBackendPreference::cpu) {
-                positioning.backend = PositioningBackend::cpu;
-                positioning.prefer_cuda = false;
-            }
-            const auto global = run_global_mapping(candidate, {}, positioning, resection);
+            const auto global = run_global_mapping(
+                candidate, config.global_rotation, config.global_positioning, resection);
             if (global.valid) {
                 prune_unsupported_registrations(candidate);
                 if (candidate.registered_count() >= 2 &&

@@ -115,7 +115,8 @@ struct ReconstructCli {
     bool texture_only{false};
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
-    std::size_t neighbor_window{3};
+    std::size_t neighbor_window{photara::sfm::FrontEndOptions{}.neighbor_window};
+    bool retrieval_augmentation{photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval};
     float match_ratio{0.8F};
     bool mutual_check{true};
     double sift_contrast{0.005};
@@ -691,8 +692,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Write OpenMVS Interface after SfM. Optional path; default is "
          "<output-stem>.mvs. .ply output does not write .mvs unless this is set.",
          cxxopts::value<std::string>()->implicit_value(""))
-        ("window", "Sequential neighbor window",
-         cxxopts::value<std::size_t>()->default_value("3"))
+        ("window", "Sequential neighbor window (0 uses automatic pair selection)",
+         cxxopts::value<std::size_t>()->default_value(
+             std::to_string(photara::sfm::FrontEndOptions{}.neighbor_window)))
+        ("retrieval-augmentation", "Augment sequential pairs with image retrieval",
+         cxxopts::value<bool>()->default_value(
+             photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval ? "true" : "false"))
         ("match-ratio", "Lowe ratio test threshold",
          cxxopts::value<float>()->default_value("0.8"))
         ("mutual-check", "Mutual match consistency check",
@@ -1407,6 +1412,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
             cli.export_mvs_path = utf8_to_path(export_mvs_text);
     }
     cli.neighbor_window = result["window"].as<std::size_t>();
+    cli.retrieval_augmentation = result["retrieval-augmentation"].as<bool>();
     cli.match_ratio = result["match-ratio"].as<float>();
     cli.mutual_check = result["mutual-check"].as<bool>();
     cli.sift_contrast = result["sift-contrast"].as<double>();
@@ -2111,8 +2117,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     if (cli.match_ratio <= 0.F || cli.match_ratio > 1.F)
         throw std::invalid_argument("--match-ratio must be in (0, 1]");
-    if (cli.neighbor_window == 0)
-        throw std::invalid_argument("--window must be positive");
     if (cli.sift_contrast <= 0.0)
         throw std::invalid_argument("--sift-contrast must be positive");
     if (cli.max_features == 0U)
@@ -4693,7 +4697,7 @@ int main(int argc, char** argv) {
         config.frontend.lightglue_use_cuda = !cli.lightglue_cpu;
         // Sequential window + BoW retrieval (learned vocabulary).
         // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
-        config.frontend.augment_sequential_with_retrieval = true;
+        config.frontend.augment_sequential_with_retrieval = cli.retrieval_augmentation;
         config.frontend.checkpoint.directory = cli.cache_dir;
         photara::sfm::AlignLivePreview live_preview;
         if (!cli.working_sfm.empty()) {

@@ -1410,7 +1410,9 @@ void draw_image_qa(
         if (thumb.registered || (!scene.views.empty() && thumb.pose)) {
             strip->AddCircleFilled(
                 {pic_max.x - 6.F, pic_min.y + 6.F}, 3.F,
-                theme::u32(thumb.registered ? theme::success : theme::warning));
+                theme::u32(thumb.registered && (!thumb.pose ||
+                    thumb.pose->position_audit != photara::sfm::PositionAudit::unverified)
+                        ? theme::success : theme::warning));
         }
         ImFont* small = theme::small_font();
         const char* label = thumb.name.empty() ? "—" : thumb.name.c_str();
@@ -1422,8 +1424,11 @@ void draw_image_qa(
             theme::u32((selected || pair_b) ? theme::text_bright : theme::text_faint),
             label);
         strip->PopClipRect();
-        if (hovered && !thumb.name.empty())
-            ImGui::SetTooltip("%s", thumb.name.c_str());
+        if (hovered && !thumb.name.empty()) {
+            if (thumb.pose && thumb.pose->position_audit == photara::sfm::PositionAudit::unverified)
+                ImGui::SetTooltip("%s\n%s", thumb.name.c_str(), i18n::tr("Needs position review"));
+            else ImGui::SetTooltip("%s", thumb.name.c_str());
+        }
 
         if (ImGui::IsItemVisible()) {
             state.filmstrip_first = std::min(state.filmstrip_first, i);

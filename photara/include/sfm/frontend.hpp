@@ -15,12 +15,12 @@ namespace photara::sfm {
 class AlignLivePreview;
 
 struct FrontEndOptions {
-    CameraModel camera_model{CameraModel::pinhole};
+    CameraModel camera_model{CameraModel::automatic};
     double focal_pixels{0.0};  // 0 => 1.2 * max(w,h), fisheye: 0.5 * max(w,h)
     // A supplied focal is normally an initialization, not a calibration.
     // Set true only for externally calibrated/locked intrinsics.
     bool trust_focal_pixels{false};
-    std::size_t neighbor_window{0};  // 0 => exhaustive for small sets, else sequential window
+    std::size_t neighbor_window{3};  // 0 => exhaustive for small sets, else sequential window
     unsigned thread_count{0};
     // Optional valid-region masks matched by image filename/stem. Zero pixels
     // are excluded before retrieval and matching; non-zero pixels are kept.
@@ -61,7 +61,7 @@ struct FrontEndOptions {
     std::size_t retrieval_min_images{50};
     // When true, sequential window is augmented with BoW pairs (requires
     // descriptors; temporary SiftGPU extract may be used for retrieval only).
-    bool augment_sequential_with_retrieval{false};
+    bool augment_sequential_with_retrieval{true};
     // After the primary GPU pass, expand only weak verified views against the
     // remaining images with an independently configurable ratio test. This
     // preserves the fast path for well-connected views while recovering

@@ -1872,6 +1872,8 @@ ReconstructionSummary reconstruct_from_frontend(
         HierarchicalConfig hierarchical = config.hierarchical;
         hierarchical.star = config.star;
         hierarchical.resection = config.resection;
+        hierarchical.global_rotation = config.global_rotation;
+        hierarchical.global_positioning = config.global_positioning;
         run_hierarchical_mapping(scene, hierarchical);
     } else {
         run_global_mapping(scene, config.global_rotation,

@@ -71,3 +71,13 @@ assert callable(aes.load_sfm)
 assert callable(aes.run_mvs)
 assert callable(aes.train_3dgs)
 assert callable(aes.extract_tsdf)
+
+frontend = aes.FrontEndOptions()
+assert frontend.camera_model == aes.CameraModel.AUTOMATIC
+assert frontend.neighbor_window == 3
+assert frontend.augment_sequential_with_retrieval
+hierarchical = aes.HierarchicalOptions()
+hierarchical.global_positioning.backend = aes.PositioningBackend.CPU
+assert hierarchical.global_positioning.backend == aes.PositioningBackend.CPU
+hierarchical.global_rotation.max_l1_iterations = 0
+assert hierarchical.global_rotation.max_l1_iterations == 0

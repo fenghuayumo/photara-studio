@@ -179,6 +179,14 @@ provide focal and physical-camera grouping priors.
 
 Entry point: `sfm::reconstruct` in `src/sfm/reconstruct.cpp`.
 
+CLI, Studio, and default Python/C++ frontend configurations use automatic camera
+selection, a sequential window of 3, and retrieval augmentation. Explicit
+`neighbor_window=0` / `--window 0` selects automatic pair selection; CLI retrieval
+augmentation can be disabled with `--retrieval-augmentation=false`.
+`ReconstructionConfig.global_rotation` and `global_positioning` apply to both
+Global and Hierarchical, including single-cluster fast paths and cluster retries.
+Direct `run_hierarchical_mapping` callers configure these in `HierarchicalConfig`.
+
 ### 4.1 `global` (default)
 
 ```text
@@ -205,8 +213,8 @@ merge into those groups instead of collapsing distinct lenses into one camera.
 A failed local initialization, or coverage below 98%, triggers a cluster-local
 Global retry with the original intrinsics. A supported candidate replaces a
 failed seed or a valid seed with fewer registered views. Retry candidates pass
-the final observation-support audit; explicit CPU BA also selects CPU
-positioning for this retry. Logs identify both attempts and accepted results.
+the final observation-support audit and retain the caller's rotation and
+positioning options. Logs identify both attempts and accepted results.
 After merged BA and densification, a bounded polish reconciles the newly added
 observations before the final audit. Its budget uses
 `resection.final_ba_additional_iterations` (60 by default; zero disables it).
@@ -279,6 +287,19 @@ Rotation averaging scopes OpenMP to one thread for its small sparse CG products
 and restores the caller's thread setting before positioning and BA.
 
 ## 6. Outputs
+
+Studio's photo-alignment compute preference selects both positioning and BA.
+Advanced CLI and Python/C++ callers can still choose their backends separately.
+Studio displays position-risk counts and per-camera status from native scenes
+and diagnostic CSV, with warning markers on flagged image thumbnails. Imported
+or older scenes without audit metadata remain explicitly unaudited.
+
+New Studio projects reuse compatible alignment caches by default; saved projects
+retain their choice. Turning reuse off sends `--cache-dir -` and recomputes
+alignment stages, while working cameras remain available for training/preview.
+CLI and library caching requires an explicit directory. Image fingerprints,
+parameters, and implementation versions invalidate affected cached stages;
+final recovery and position audits still run on reconstruction-cache hits.
 
 | API / CLI | Output |
 |---|---|

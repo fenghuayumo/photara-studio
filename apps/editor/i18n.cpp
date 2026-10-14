@@ -690,14 +690,28 @@ constexpr Entry k_entries[] = {
     {"Mixed", "混合", "混在", "혼합"},
     {"Max features per image", "每图最大特征数", "画像あたり最大特徴", "이미지당 최대 특징"},
     {"Reuse cached alignment", "复用缓存对齐", "キャッシュしたアライメントを再利用", "캐시된 정렬 재사용"},
-    {"Cache extracted features and matches in the project\n"
-     ".cache folder so the next Align/Train can reuse them.\n"
-     "Off by default. Working copies for preview are always\n"
-     "kept; .ascan, .asfm, and PLY files are only written when\n"
-     "you Save Project or Export.",
-     "把提取的特征与匹配缓存到项目 .cache，供下次对齐/训练复用。默认关闭。\n预览用工作副本始终保留；.ascan、.asfm、PLY 只在保存项目或导出时写出。",
-     "抽出した特徴とマッチをプロジェクト .cache に保存し、次回のアライメント/学習で再利用します。既定はオフ。\nプレビュー用作業コピーは常に残し、.ascan / .asfm / PLY は保存または書き出し時のみ出力します。",
-     "추출한 특징과 매칭을 프로젝트 .cache에 저장해 다음 정렬/학습에서 재사용합니다. 기본은 끔.\n미리보기용 작업본은 항상 남고, .ascan / .asfm / PLY는 저장 또는 내보내기 때만 씁니다."},
+    {"Reuse compatible alignment stages from the project cache.\n"
+     "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
+     "On by default for new projects. Off recomputes alignment;\n"
+     "working cameras remain available for training and preview.",
+     "复用项目缓存中兼容的对齐阶段。\n图像、参数或算法版本变化会使相关缓存失效。\n新项目默认开启；关闭后重新计算对齐。\n工作相机仍可用于训练和预览。",
+     "互換性のあるアライメント段階をキャッシュから再利用します。\n画像、設定、アルゴリズムの変更で該当キャッシュは無効になります。\n新規プロジェクトではオン。オフでは再計算します。\n作業用カメラは学習とプレビューで引き続き利用できます。",
+     "호환되는 정렬 단계를 프로젝트 캐시에서 재사용합니다.\n이미지, 설정 또는 알고리즘 변경 시 관련 캐시는 무효화됩니다.\n새 프로젝트에서는 켜짐. 끄면 정렬을 다시 계산합니다.\n작업 카메라는 학습과 미리보기에 계속 사용할 수 있습니다."},
+    {"Camera positioning and refinement. Automatic uses CUDA, then Vulkan, then CPU.",
+     "相机定位与精修。自动模式依次选择 CUDA、Vulkan、CPU。",
+     "カメラ位置推定と最適化。自動では CUDA、Vulkan、CPU の順に選択します。",
+     "카메라 위치 추정과 최적화. 자동은 CUDA, Vulkan, CPU 순으로 선택합니다."},
+    {"Positions needing review", "需复核的位置", "要確認のカメラ位置", "검토가 필요한 위치"},
+    {"Positions not audited", "未审计的位置", "未検証のカメラ位置", "검증되지 않은 위치"},
+    {"Position audit", "位置审计", "位置の検証", "위치 검증"},
+    {"Position support", "位置约束支持", "位置の拘束", "위치 제약 지원"},
+    {"Needs position review", "位置需复核", "位置の確認が必要", "위치 검토 필요"},
+    {"Graph supported", "有视图图约束支持", "ビューグラフの拘束あり", "뷰 그래프 제약 있음"},
+    {"Not audited", "未审计", "未検証", "검증되지 않음"},
+    {"Inspect flagged cameras before accepting alignment. Low reprojection error does not verify their positions.",
+     "验收对齐结果前请检查标记的相机。低重投影误差不能证明其位置准确。",
+     "アライメントを承認する前に、マークされたカメラを確認してください。低い再投影誤差だけでは位置精度を保証できません。",
+     "정렬 결과를 승인하기 전에 표시된 카메라를 확인하세요. 낮은 재투영 오차만으로 위치 정확도를 보장할 수 없습니다."},
     {"Cache folder", "缓存目录", "キャッシュフォルダー", "캐시 폴더"},
     {"Leave empty to keep the working copies next to the project\n"
      "(<project folder>/<project name>.cache). Set a folder to\n"
