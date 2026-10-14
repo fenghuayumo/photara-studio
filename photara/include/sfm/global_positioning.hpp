@@ -43,7 +43,8 @@ struct GlobalPositioningOptions {
     unsigned irls_quarantine_after{2};
     double irls_weight_convergence{1e-2};
     unsigned max_num_iterations{100};
-    // Hard wall-clock budget per Ceres attempt (seconds). 0 disables.
+    // Shared time budget per positioning attempt. Ceres checks between steps,
+    // so a step may overrun it. 0 disables this shared limit, not Solve's cap.
     double max_solver_time_sec{45.0};
     double function_tolerance{1e-5};
     double huber_threshold{0.1};
@@ -72,8 +73,31 @@ struct GlobalPositioningOptions {
     bool regularize_complete_orbits{true};
 };
 
+enum class GlobalPositioningTermination {
+    not_run, irls_converged, iteration_limit, time_limit, stalled, failed,
+    camera_only_fallback,
+};
+
+inline const char* positioning_termination_name(GlobalPositioningTermination termination) {
+    switch (termination) {
+    case GlobalPositioningTermination::not_run: return "not_run";
+    case GlobalPositioningTermination::irls_converged: return "irls_converged";
+    case GlobalPositioningTermination::iteration_limit: return "iteration_limit";
+    case GlobalPositioningTermination::time_limit: return "time_limit";
+    case GlobalPositioningTermination::stalled: return "stalled";
+    case GlobalPositioningTermination::failed: return "failed";
+    case GlobalPositioningTermination::camera_only_fallback: return "camera_only_fallback";
+    }
+    return "unknown";
+}
+
+// success describes a usable solution, not convergence. Termination describes
+// the final positioning attempt; CPU counters exclude evaluation iteration zero.
 struct GlobalPositioningSummary {
     bool success{false};
+    GlobalPositioningTermination termination{GlobalPositioningTermination::not_run};
+    unsigned cpu_accepted_updates{};
+    unsigned cpu_time_limited_passes{};
     unsigned positioned_images{0};
     unsigned positioned_tracks{0};
     unsigned observations{0};

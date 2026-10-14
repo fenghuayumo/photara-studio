@@ -231,6 +231,14 @@ camera metadata, mapping options, recovery and final support/rotation audits.
 All modes finish with a `ReconstructionSummary`, observability analysis, and
 `prune_unsupported_registrations`.
 
+The complete reconstruction also screens position support using strong,
+nonplanar pairs with measured bearing parallax, without optimized depths.
+Views outside the largest bridge-free block are marked `unverified`; this
+conservative screen preserves geometry and registration. Summary counts, CLI
+warnings and diagnostic CSV expose the status. ASFM v4 stores it; files with
+unverified registered poses require a v4 reader. Graph support and `valid`
+describe available evidence and usability, not guaranteed position accuracy.
+
 Reprojection summaries, support audits and recovery validation use the camera
 model's checked residual. Equirectangular cameras include the rear hemisphere
 with a seam- and pole-safe tangent residual in pixels. An oriented-ray check
@@ -257,6 +265,18 @@ selector. CUDA and
 Vulkan share the bearing-Schur formulation, robust IRLS passes, gauge
 constraints, and stopping rules so backend comparisons preserve the mapping
 semantics.
+
+CPU positioning reports IRLS convergence, iteration limit, time limit, stall
+or failure separately from solution usability. Evaluation iteration zero is
+excluded from accepted updates. A pass without an accepted update cannot
+change robust weights unless Ceres genuinely converged. Subsequent CPU slices
+reserve measured preprocessing and an attempted step, within the shared budget;
+time-limited passes cannot report IRLS convergence from stable weights alone.
+An unchanged timed-out pass retries with a larger slice only if the measured
+step fits the remaining shared budget; its robust weights remain unchanged.
+Ceres checks deadlines between steps, so actual wall time can exceed a slice.
+Rotation averaging scopes OpenMP to one thread for its small sparse CG products
+and restores the caller's thread setting before positioning and BA.
 
 ## 6. Outputs
 

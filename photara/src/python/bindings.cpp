@@ -128,6 +128,13 @@ sfm::ReconstructionSummary run_sfm_mapping(
     const std::filesystem::path& path, const sfm::AsfmOptions& options) {
     auto result = std::make_shared<SfmSceneHandle>();
     result->scene = sfm::load_asfm(path, options);
+    for (const auto& image : result->scene.images) {
+        if (!image.registered) continue;
+        result->summary.position_audited_views +=
+            image.position_audit != sfm::PositionAudit::not_audited;
+        result->summary.position_unverified_views +=
+            image.position_audit == sfm::PositionAudit::unverified;
+    }
     return result;
 }
 
@@ -702,6 +709,8 @@ NB_MODULE(photara, module) {
 
     nb::class_<sfm::ReconstructionSummary>(module, "SfmSummary")
         .def_ro("valid", &sfm::ReconstructionSummary::valid)
+        .def_ro("position_audited_views", &sfm::ReconstructionSummary::position_audited_views)
+        .def_ro("position_unverified_views", &sfm::ReconstructionSummary::position_unverified_views)
         .def_ro(
             "registered_views",
             &sfm::ReconstructionSummary::registered_views)
@@ -740,9 +749,20 @@ NB_MODULE(photara, module) {
         .def_ro("iterations", &sfm::GlobalRotationSummary::iterations)
         .def_ro("fixed_image", &sfm::GlobalRotationSummary::fixed_image);
 
+    nb::enum_<sfm::GlobalPositioningTermination>(module, "GlobalPositioningTermination")
+        .value("not_run", sfm::GlobalPositioningTermination::not_run)
+        .value("irls_converged", sfm::GlobalPositioningTermination::irls_converged)
+        .value("iteration_limit", sfm::GlobalPositioningTermination::iteration_limit)
+        .value("time_limit", sfm::GlobalPositioningTermination::time_limit)
+        .value("stalled", sfm::GlobalPositioningTermination::stalled)
+        .value("failed", sfm::GlobalPositioningTermination::failed)
+        .value("camera_only_fallback", sfm::GlobalPositioningTermination::camera_only_fallback);
     nb::class_<sfm::GlobalPositioningSummary>(
         module, "GlobalPositioningSummary")
         .def_ro("success", &sfm::GlobalPositioningSummary::success)
+        .def_ro("termination", &sfm::GlobalPositioningSummary::termination)
+        .def_ro("cpu_accepted_updates", &sfm::GlobalPositioningSummary::cpu_accepted_updates)
+        .def_ro("cpu_time_limited_passes", &sfm::GlobalPositioningSummary::cpu_time_limited_passes)
         .def_ro("positioned_images", &sfm::GlobalPositioningSummary::positioned_images)
         .def_ro("positioned_tracks", &sfm::GlobalPositioningSummary::positioned_tracks)
         .def_ro("observations", &sfm::GlobalPositioningSummary::observations)

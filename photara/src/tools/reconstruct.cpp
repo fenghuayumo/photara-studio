@@ -3059,7 +3059,7 @@ std::filesystem::path write_sfm_diagnostics(
               "reprojection_p95_px,reprojection_max_px,previous_center_step,"
               "previous_rotation_deg,alignment_reliable,active_pairs,cycle_supported_pairs,"
               "cycle_inconsistent_pairs,degenerate_pairs,pair_weight_sum,"
-              "pair_weight_max,weighted_mean_ray_angle_deg,camera_model\n";
+              "pair_weight_max,weighted_mean_ray_angle_deg,camera_model,position_audit\n";
 
     std::vector<std::tuple<double, std::size_t, double, double>> worst_images;
     std::vector<double> trajectory_steps;
@@ -3133,7 +3133,11 @@ std::filesystem::path write_sfm_diagnostics(
                        ? "opencv_fisheye"
                        : (camera && camera->model == photara::CameraModel::equirectangular
                               ? "equirectangular"
-                              : "pinhole")) << '\n';
+                              : "pinhole")) << ','
+               << (image.position_audit == photara::sfm::PositionAudit::unverified
+                       ? "unverified"
+                       : (image.position_audit == photara::sfm::PositionAudit::graph_supported
+                              ? "graph_supported" : "not_audited")) << '\n';
     }
 
     const auto pair_csv_path = reconstruction_path.parent_path() /
@@ -4731,6 +4735,20 @@ int main(int argc, char** argv) {
                 scene.images.size() - scene.registered_count());
         }
 
+        // Loaded projects retain their audit status even when alignment is skipped.
+        summary.position_audited_views = 0;
+        summary.position_unverified_views = 0;
+        for (const auto& image : scene.images) {
+            if (!image.registered) continue;
+            summary.position_audited_views +=
+                image.position_audit != photara::sfm::PositionAudit::not_audited;
+            summary.position_unverified_views +=
+                image.position_audit == photara::sfm::PositionAudit::unverified;
+        }
+        if (summary.position_unverified_views > 0)
+            photara::core::Logger::instance().warning(
+                "Alignment needs position review: ", summary.position_unverified_views,
+                " registered cameras lack independent translation support. Low reprojection error does not verify their global positions.");
         save_working_sfm(cli, scene);
 
         // The first SAM pass creates coarse masks; using them for alignment

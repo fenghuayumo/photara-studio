@@ -1,6 +1,7 @@
 #include "sfm/star_init.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/global_positioning.hpp"
+#include "sfm/positioning_control.hpp"
 #include "sfm/global_rotation.hpp"
 #include "sfm/pair_weighting.hpp"
 #include "sfm/reconstruct.hpp"
@@ -258,6 +259,20 @@ void test_global_positioning_points_only() {
         scene.pairs.push_back(std::move(pair));
     }
 
+    {
+        Scene limited = scene;
+        GlobalPositioningOptions options;
+        options.backend = PositioningBackend::cpu;
+        options.prefer_cuda = false;
+        options.max_solver_time_sec = 0.001;
+        const auto stopped = solve_global_positions(limited, options);
+        expect(!stopped.success && stopped.termination == GlobalPositioningTermination::time_limit &&
+               stopped.cpu_accepted_updates == 0 && stopped.irls_iterations == 0,
+               "exhausted CPU budget cannot report a usable solve or IRLS convergence");
+        for (std::size_t i = 0; i < scene.images.size(); ++i)
+            expect(limited.images[i].pose.C == scene.images[i].pose.C,
+                   "failed budget-limited fallback restores the original camera centers");
+    }
     const GlobalPositioningSummary summary = solve_global_positions(scene);
     expect(summary.success, "global positioning converges");
     expect(summary.positioned_images == k_views, "global positioning uses all images");
@@ -1225,7 +1240,93 @@ void test_intrinsic_group_units() {
             "trusted calibration is never overwritten by EXIF grouping");
 }
 
+void test_positioning_budget_progress() {
+    ceres::Solver::Summary summary;
+    summary.termination_type = ceres::NO_CONVERGENCE;
+    summary.total_time_in_seconds = 2.5;
+    summary.preprocessor_time_in_seconds = 2.0;
+    summary.linear_solver_time_in_seconds = 0.4;
+    summary.iterations.resize(2);
+    summary.iterations[0].iteration = 0;
+    summary.iterations[0].step_is_successful = true;
+    summary.iterations[1].iteration = 1;
+    summary.iterations[1].step_is_successful = false;
+    auto progress = detail::positioning_pass_progress(summary, 1.0);
+    expect(progress.accepted_updates == 0 && progress.time_limited && !progress.converged,
+           "evaluation-only timeout is not effective update or convergence");
+    expect(detail::can_retry_positioning_pass(10.0, progress) &&
+           !detail::can_retry_positioning_pass(0.2, progress),
+           "unchanged pass retries only when measured step fits remaining budget");
+    const double budget = detail::positioning_pass_budget(10.0, 8, false,
+                                                        progress.minimum_next_budget);
+    expect(budget > summary.preprocessor_time_in_seconds + 0.4 && budget <= 10.0,
+           "next CPU slice reserves preprocessing and an attempted update");
+    expect(detail::positioning_pass_budget(0.2, 8, false, 3.0) == 0.2,
+           "adaptive slice never exceeds remaining attempt budget");
+    progress = detail::positioning_pass_progress(summary, 10.0);
+    expect(!progress.time_limited && !progress.converged && progress.accepted_updates == 0,
+           "rejected steps without timeout are stalled, not convergence");
+    expect(!detail::can_retry_positioning_pass(10.0, progress),
+           "non-timeout stall does not spin retries");
+    summary.termination_type = ceres::CONVERGENCE;
+    progress = detail::positioning_pass_progress(summary, 1.0);
+    expect(progress.converged && !progress.time_limited,
+           "a stationary optimum can legitimately converge without an update");
+    summary.iterations[1].step_is_successful = true;
+    expect(detail::positioning_pass_progress(summary, 10.0).accepted_updates == 1,
+           "iteration zero is excluded from accepted parameter updates");
+}
+
+void test_position_audit_does_not_certify_a_weak_clique() {
+    Scene scene;
+    scene.cameras.push_back(cam());scene.cameras[0].id=0;
+    scene.images.resize(7);
+    for(Index i=0;i<7;++i) {
+        auto& image=scene.images[i];image.id=i;image.camera_id=0;image.registered=true;
+        image.pose.C=Vec3(0.5*i,0,0);
+        for(unsigned p=0;p<64;++p) {
+            const Vec3 point(-2.0+0.5*(p%8),-1.5+0.4*(p/8),8.0+0.1*(p%3));
+            const Vec2 pixel=scene.cameras[0].project(point-image.pose.C);
+            photara::features::Keypoint kp;kp.x=static_cast<float>(pixel.x());kp.y=static_cast<float>(pixel.y());
+            image.features.keypoints.push_back(kp);
+        }
+    }
+    const auto edge=[&](Index a,Index b,float weight) {
+        ImagePair pair(a,b);pair.relative_pose=scene.images[b].pose/scene.images[a].pose;
+        pair.weight_spatial=weight;
+        for(Index p=0;p<64;++p)pair.matches.push_back({p,p});
+        scene.pairs.push_back(std::move(pair));
+    };
+    for(Index a=0;a<4;++a)for(Index b=a+1;b<4;++b)edge(a,b,1);
+    for(Index a=4;a<7;++a)for(Index b=a+1;b<7;++b)edge(a,b,1);
+    edge(0,4,0.02F);edge(1,5,0.02F);
+    // The weak branch is internally connected but must not become its own witness.
+    for(Index i=4;i<7;++i)scene.images[i].pose.C+=Vec3(3,1,0);
+    const auto before=scene.images;
+    expect(audit_position_support(scene)==3,"weak clique is reported as position-unverified");
+    for(Index i=0;i<7;++i) {
+        expect(scene.images[i].position_audit==(i<4?PositionAudit::graph_supported:PositionAudit::unverified),
+               "position audit distinguishes core support from weak branch");
+        expect(scene.images[i].registered && scene.images[i].pose.C==before[i].pose.C &&
+               scene.images[i].pose.R==before[i].pose.R,"nomination never changes registration or pose");
+    }
+    const Mat3 gauge=axis_rotation(Vec3(1,2,3),40);
+    for(auto& image:scene.images) {
+        image.pose.C=gauge*image.pose.C+Vec3(7,8,9);
+        image.pose.R=image.pose.R*gauge.transpose();
+    }
+    expect(audit_position_support(scene)==3,"position support audit is world-gauge invariant");
+    for(auto& image:scene.images) {
+        image.pose.R=Mat3::Identity();
+        image.features.keypoints=scene.images[0].features.keypoints;
+    }
+    expect(analyze_position_observability(scene).reliable_views==0,
+           "connected zero-parallax matches cannot certify translation support");
+}
+
 int main() {
+    test_positioning_budget_progress();
+    test_position_audit_does_not_certify_a_weak_clique();
     test_intrinsic_group_units();
     test_parallel_track_colours();
     test_pair_cycle_weighting();

@@ -9,7 +9,7 @@
 
 namespace photara::sfm {
 
-inline constexpr std::uint32_t k_asfm_version = 3;
+inline constexpr std::uint32_t k_asfm_version = 4;
 inline constexpr std::uint32_t k_asfm_min_reader = 1;
 // Fisheye cameras were introduced in writer v2. Colour is additive in v3, so
 // older readers that already understand fisheye can still open new files.
@@ -18,6 +18,8 @@ inline constexpr std::uint32_t k_asfm_fisheye_min_reader = 2;
 // Readers older than this must not silently reinterpret a spherical chart as a
 // pinhole projection, so the floor matches the writer version for panoramas.
 inline constexpr std::uint32_t k_asfm_equirectangular_min_reader = 3;
+// Unverified position warnings must not silently disappear in older readers.
+inline constexpr std::uint32_t k_asfm_position_audit_min_reader = 4;
 
 struct AsfmOptions {
     // If set, image paths are stored relative to this directory when they do
