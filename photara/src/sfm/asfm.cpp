@@ -69,6 +69,31 @@ Pose3D read_pose(BufferReader& reader) {
 
 void write_payload(
     BufferWriter& writer, const Scene& scene, const AsfmOptions& options) {
+    const auto usable = [&](const Observation& observation) {
+        return observation.image_id < scene.images.size() &&
+            scene.images[observation.image_id].registered &&
+            observation.feature_id < scene.images[observation.image_id].features.keypoints.size();
+    };
+    std::vector<const Track*> tracks;
+    std::vector<std::vector<Index>> referenced(scene.images.size());
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        if (options.compact) {
+            std::size_t count = 0;
+            for (std::size_t i = 0; i < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++i)
+                count += usable(track.observations[i]);
+            if (count < 2) continue;
+            for (std::size_t i = 0; i < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++i) {
+                const auto& observation = track.observations[i];
+                if (usable(observation)) referenced[observation.image_id].push_back(observation.feature_id);
+            }
+        }
+        tracks.push_back(&track);
+    }
+    if (options.compact) for (auto& ids : referenced) {
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    }
     writer.value_size(scene.cameras.size());
     for (const PinholeCamera& camera : scene.cameras) {
         writer.record([&](BufferWriter& record) {
@@ -100,33 +125,46 @@ void write_payload(
             record.value(image.features.image_width);
             record.value(image.features.image_height);
             record.string(image.features.extractor_name);
-            record.value_size(image.features.keypoints.size());
-            for (const features::Keypoint& keypoint : image.features.keypoints) {
+            const auto& ids = options.compact ? referenced.at(image.id) : referenced.front();
+            const auto count = options.compact ? ids.size() : image.features.keypoints.size();
+            record.value_size(count);
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto& keypoint = image.features.keypoints[options.compact ? ids[index] : index];
                 record.value(keypoint.x);
                 record.value(keypoint.y);
-                record.value(keypoint.scale);
-                record.value(keypoint.orientation);
-                record.value(keypoint.response);
+                if (!options.compact) {
+                    record.value(keypoint.scale);
+                    record.value(keypoint.orientation);
+                    record.value(keypoint.response);
+                }
             }
             record.value(static_cast<std::uint8_t>(image.position_audit));
         });
     }
 
-    std::uint64_t track_count = 0;
-    for (const Track& track : scene.tracks)
-        if (track.is_triangulated()) ++track_count;
-    writer.value_size(static_cast<std::size_t>(track_count));
-    for (const Track& track : scene.tracks) {
-        if (!track.is_triangulated()) continue;
+    writer.value_size(tracks.size());
+    for (const Track* pointer : tracks) {
+        const auto& track = *pointer;
         writer.record([&](BufferWriter& record) {
             for (Eigen::Index axis = 0; axis < 3; ++axis)
                 record.value(track.position[axis]);
-            record.value_size(track.observations.size());
-            for (const Observation& observation : track.observations) {
+            std::vector<Observation> observations;
+            if (options.compact) {
+                for (std::size_t i = 0; i < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++i) {
+                    auto observation = track.observations[i];
+                    if (!usable(observation)) continue;
+                    const auto& ids = referenced[observation.image_id];
+                    observation.feature_id = static_cast<Index>(std::lower_bound(ids.begin(), ids.end(), observation.feature_id) - ids.begin());
+                    observations.push_back(observation);
+                }
+            }
+            const auto& saved_observations = options.compact ? observations : track.observations;
+            record.value_size(saved_observations.size());
+            for (const Observation& observation : saved_observations) {
                 record.value(observation.image_id);
                 record.value(observation.feature_id);
             }
-            record.value(static_cast<std::uint32_t>(track.num_inliers));
+            record.value(static_cast<std::uint32_t>(options.compact ? observations.size() : track.num_inliers));
             record.value(static_cast<std::uint8_t>(track.has_color ? 1 : 0));
             record.value(track.color_r);
             record.value(track.color_g);
@@ -135,7 +173,7 @@ void write_payload(
     }
 }
 
-Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
+Scene read_payload(BufferReader& reader, const AsfmOptions& options, const bool compact) {
     Scene scene;
     scene.cameras.resize(reader.size(8, 10'000'000));
     for (PinholeCamera& camera : scene.cameras) {
@@ -176,13 +214,15 @@ Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
             image.features.extractor_name = record.string();
             image.features.descriptor_dimension = 0;
             image.features.keypoints.resize(
-                record.size(sizeof(float) * 5, 10'000'000));
+                record.size(sizeof(float) * (compact ? 2 : 5), 10'000'000));
             for (features::Keypoint& keypoint : image.features.keypoints) {
                 keypoint.x = record.value<float>();
                 keypoint.y = record.value<float>();
-                keypoint.scale = record.value<float>();
-                keypoint.orientation = record.value<float>();
-                keypoint.response = record.value<float>();
+                if (!compact) {
+                    keypoint.scale = record.value<float>();
+                    keypoint.orientation = record.value<float>();
+                    keypoint.response = record.value<float>();
+                }
             }
             if (record.remaining() >= 1) {
                 const auto audit = record.value<std::uint8_t>();
@@ -244,7 +284,7 @@ std::vector<std::uint8_t> encode_asfm(
 
     BufferWriter file;
     file.bytes(k_magic.data(), k_magic.size());
-    file.value(k_asfm_version);
+    file.value(options.compact ? k_asfm_version : std::uint32_t{4});
     const bool fisheye = std::any_of(scene.cameras.begin(), scene.cameras.end(),
         [](const PinholeCamera& camera) { return camera.model == CameraModel::opencv_fisheye; });
     const bool equirectangular = std::any_of(
@@ -253,7 +293,7 @@ std::vector<std::uint8_t> encode_asfm(
         });
     const bool unverified = std::any_of(scene.images.begin(), scene.images.end(),
         [](const Image& image) { return image.registered && image.position_audit == PositionAudit::unverified; });
-    file.value(unverified ? k_asfm_position_audit_min_reader
+    file.value(options.compact ? std::uint32_t{5} : unverified ? k_asfm_position_audit_min_reader
                           : (equirectangular ? k_asfm_equirectangular_min_reader
                                : (fisheye ? k_asfm_fisheye_min_reader
                                           : k_asfm_min_reader)));
@@ -281,7 +321,7 @@ Scene decode_asfm(
     std::vector<std::uint8_t> payload(static_cast<std::size_t>(payload_size));
     reader.bytes(payload.data(), payload.size());
     BufferReader body(payload);
-    Scene scene = read_payload(body, options);
+    Scene scene = read_payload(body, options, min_reader >= 5);
     body.finish(checksum);
     return scene;
 }

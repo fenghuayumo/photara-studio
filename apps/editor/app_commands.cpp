@@ -776,8 +776,17 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
         const auto current = app.layout.project_file;
         if (!app.saved_results_discarded && !current.empty() && std::filesystem::exists(current, error))
             archive = photara::project::Archive::open(current);
+        auto progress = photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint);
+        auto progress_source = app.layout.training_checkpoint;
+        if (!progress && !app.project_results_dirty && !current.empty()) {
+            progress = photara::splat::inspect_training_checkpoint(current);
+            progress_source = current;
+        }
+        const bool save_progress_model = progress && (!app.splat_edit.dirty() ||
+            (app.job.running() && app.active_job == JobKind::train));
         auto settings = collect_project_settings(app);
         settings.name = path_to_utf8(path.stem());
+        if (save_progress_model) { settings.gaussian_models.clear(); settings.splat_model_source.clear(); }
         photara::project::write_settings(archive, settings, path);
         std::error_code working_error;
         if (!app.layout.working_sfm.empty() &&
@@ -791,9 +800,22 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                 photara::project::write_sfm(archive, scene, path);
                 archive.set_chunk(photara::project::ChunkType::sfm_source, signature);
             }
+        } else if (archive.has(photara::project::ChunkType::sfm)) {
+            const auto bytes = archive.chunk(photara::project::ChunkType::sfm);
+            std::uint32_t minimum_reader = 0;
+            if (bytes.size() >= 16) std::memcpy(&minimum_reader, bytes.data() + 12, sizeof(minimum_reader));
+            if (minimum_reader < 5 || current.parent_path() != path.parent_path()) {
+                photara::sfm::AsfmOptions options;
+                options.path_base = current.parent_path();
+                photara::project::write_sfm(archive, photara::sfm::decode_asfm(bytes, options), path);
+            }
         }
-        const auto splat = existing_splat_model(app);
-        if (app.splat_edit.dirty()) {
+        const auto splat = progress && !progress->model_path.empty()
+            ? progress->model_path : existing_splat_model(app);
+        if (save_progress_model) {
+            archive.set_chunk(photara::project::ChunkType::gaussians,
+                photara::splat::encode_gaussians(photara::splat::checkpoint_model(progress_source)));
+        } else if (app.splat_edit.dirty()) {
             photara::splat::GaussianModel edited;
             if (app.splat_edit.copy_model(edited)) {
                 archive.set_chunk(
@@ -828,7 +850,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
         }
         std::vector<std::vector<std::uint8_t>> sources;
-        if (gaussian_models_managed(app)) {
+        if (!save_progress_model && gaussian_models_managed(app)) {
             if (app.splat_edit.dirty()) {
                 photara::splat::GaussianModel edited;
                 if (!app.splat_edit.copy_model(edited))
@@ -879,19 +901,17 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
         }
 #endif
-        const auto checkpoint = photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint);
-        if (checkpoint || app.project_results_dirty) {
-            const auto snapshot = checkpoint ? photara::project::Archive::open(app.layout.training_checkpoint)
-                : photara::project::Archive::create();
-            for (auto type : {photara::project::ChunkType::training_checkpoint,
+        archive.erase_chunk(photara::project::ChunkType::training_model_info);
+        for (auto type : {photara::project::ChunkType::training_checkpoint,
                  photara::project::ChunkType::training_checkpoint_info,
                  photara::project::ChunkType::training_checkpoint_previous,
                  photara::project::ChunkType::training_checkpoint_previous_info,
                  photara::project::ChunkType::training_checkpoint_history}) {
-                archive.erase_chunk(type);
-                if (snapshot.has(type)) archive.set_chunk(type, snapshot.chunk(type));
-            }
+            archive.erase_chunk(type);
         }
+        if (save_progress_model)
+            archive.set_chunk(photara::project::ChunkType::training_model_info,
+                photara::splat::training_checkpoint_info_bytes(*progress));
         archive.save(path);
         store_path_field(app.settings.project_dir, path);
         refresh_artifacts(app);

@@ -737,6 +737,7 @@ Action draw_toolbar(App& app) {
                 const auto& info = *app.training_checkpoint_info;
                 ImGui::SetTooltip("%s: %u / %u", tr("Saved Training Progress"),
                     info.iteration, info.total_iterations);
+                ImGui::SetTooltip("%s", tr("Continue from the saved PLY model. Optimizer state will be reinitialized."));
             }
         }
     }

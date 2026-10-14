@@ -347,6 +347,7 @@ void write_sfm(
     const std::filesystem::path& project_file) {
     sfm::AsfmOptions options;
     options.path_base = project_directory(project_file);
+    options.compact = true;
     archive.set_chunk(ChunkType::sfm, sfm::encode_asfm(scene, options));
     archive.erase_chunk(ChunkType::sfm_source);
 }
@@ -360,7 +361,7 @@ std::vector<std::uint8_t> sfm_source_signature(
     if (!input.read(header.data(), header.size()))
         throw std::runtime_error("Cannot read working SfM signature");
     BufferWriter writer;
-    writer.value(std::uint32_t{1});
+    writer.value(std::uint32_t{2});
     writer.string(path_utf8(std::filesystem::weakly_canonical(working_sfm)));
     writer.string(path_utf8(std::filesystem::weakly_canonical(image_directory)));
     writer.string(path_utf8(std::filesystem::weakly_canonical(project_file.parent_path())));

@@ -1385,9 +1385,12 @@ void prepare_training_inputs(const ProjectLayout& layout,
         if (!photara::splat::inspect_training_checkpoint(layout.training_checkpoint))
             throw std::runtime_error("No saved training progress is available.");
     } else {
-        photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
         // A new run replaces only the task checkpoint, never a saved project.
-        if (!aborted()) std::filesystem::remove(layout.training_checkpoint);
+        if (!aborted()) {
+            photara::splat::remove_training_checkpoint(layout.training_checkpoint);
+            photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
+            std::filesystem::remove(layout.training_checkpoint);
+        }
     }
     stage(TrainPrepareStage::ready);
 }

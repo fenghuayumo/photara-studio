@@ -1,5 +1,6 @@
 #include "checkpoint.hpp"
 #include "splat/trainer.hpp"
+#include "splat/formats.hpp"
 #include "project/archive.hpp"
 #include "sfm/checkpoint.hpp"
 
@@ -9,8 +10,10 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
-#include <memory>
-#include <cctype>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
+#include <cmath>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -24,17 +27,11 @@
 
 namespace photara::splat {
 namespace {
-constexpr std::uint32_t version = 2;
-// Stable training-state ABI, retaining the initial v2 implementation identity.
-// Storage/UI refactors must not invalidate saved optimizer state. Change this
-// only when training semantics are incompatible; bump the container schema when
-// the persistent state layout changes.
-constexpr auto training_state_abi = "93595752154f44c098e54d8a28fb68b8420e79f2551810d4abf9a739b9b7cc90";
+constexpr std::uint32_t version = 1;
 using project::Archive;
 using project::ChunkType;
 using detail::CheckpointReader;
 using detail::CheckpointWriter;
-std::filesystem::path previous_path(std::filesystem::path path) { path += ".previous"; return path; }
 std::filesystem::path lock_path(std::filesystem::path path) { path += ".lock"; return path; }
 void ensure_checkpoint_directory(const std::filesystem::path& path) {
     if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
@@ -98,146 +95,55 @@ TrainingCheckpointInfo decode_info(const std::vector<std::uint8_t>& bytes) {
         throw std::runtime_error("Invalid training checkpoint metadata");
     return info;
 }
-struct CheckpointRecord {
-    std::vector<std::uint8_t> metadata;
-    std::vector<std::uint8_t> payload;
-};
-CheckpointRecord read_record(const Archive& archive, bool previous = false) {
-    const auto info_type = previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info;
-    const auto data_type = previous ? ChunkType::training_checkpoint_previous : ChunkType::training_checkpoint;
-    if (archive.has(info_type)) {
-        auto metadata = archive.chunk(info_type); decode_info(metadata);
-        return {std::move(metadata), archive.chunk(data_type)};
-    }
-    if (previous) throw std::runtime_error("No previous checkpoint in this project");
-    // Original sidecar format or the nested sidecar embedded by older Studio.
-    if (archive.has(ChunkType::settings)) {
-        try {
-            auto metadata = archive.chunk(ChunkType::settings); decode_info(metadata);
-            return {std::move(metadata), archive.chunk(ChunkType::training_checkpoint)};
-        } catch (...) {}
-    }
-    return read_record(Archive::from_bytes(archive.chunk(ChunkType::training_checkpoint)));
+
+constexpr std::string_view model_magic = "PHOTARA_PLY_CHECKPOINT\n";
+std::optional<TrainingCheckpointInfo> read_model_checkpoint(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::string magic(model_magic.size(), '\0');
+    if (!input.read(magic.data(), magic.size()) || magic != model_magic) return std::nullopt;
+    TrainingCheckpointInfo info;
+    std::string model_path;
+    unsigned schema{};
+    input >> schema >> info.iteration >> info.total_iterations >> info.gaussian_count >> info.fingerprint;
+    input >> std::quoted(model_path) >> info.focus_bounds.valid;
+    for (auto* values : {info.focus_bounds.center.data(), info.focus_bounds.half_extent.data()})
+        for (int i = 0; i < 3; ++i) input >> values[i];
+    for (int i = 0; i < 9; ++i) input >> info.focus_bounds.axes.data()[i];
+    if (!input || schema != 1 || !info.total_iterations || info.iteration > info.total_iterations ||
+        !info.gaussian_count || info.gaussian_count > 50'000'000 || model_path.empty())
+        throw std::runtime_error("Invalid PLY checkpoint manifest");
+    if (info.focus_bounds.valid && (!info.focus_bounds.center.allFinite() ||
+        !info.focus_bounds.half_extent.allFinite() || !info.focus_bounds.axes.allFinite() ||
+        (info.focus_bounds.half_extent.array() <= 0.F).any()))
+        throw std::runtime_error("Invalid checkpoint focus bounds");
+    info.model_path = std::filesystem::u8path(model_path);
+    if (info.model_path.is_relative()) info.model_path = path.parent_path() / info.model_path;
+    return info;
 }
-TrainingCheckpointInfo read_info(const Archive& archive, bool previous = false) {
-    const auto info_type = previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info;
-    if (archive.has(info_type)) return decode_info(archive.chunk(info_type));
-    return decode_info(read_record(archive, previous).metadata);
+
+bool managed_checkpoint_model(const std::filesystem::path& checkpoint, const std::filesystem::path& model) {
+    return model.parent_path().lexically_normal() == checkpoint.parent_path().lexically_normal() &&
+        model.filename().string().starts_with(checkpoint.stem().string() + ".model.") &&
+        model.extension() == ".ply";
 }
-void set_record(Archive& archive, CheckpointRecord record, bool previous = false) {
-    archive.set_chunk(previous ? ChunkType::training_checkpoint_previous_info : ChunkType::training_checkpoint_info,
-        std::move(record.metadata));
-    archive.set_chunk(previous ? ChunkType::training_checkpoint_previous : ChunkType::training_checkpoint,
-        std::move(record.payload));
-}
-Archive open_or_create_project(const std::filesystem::path& path) {
-    return std::filesystem::exists(path) ? Archive::open(path) : Archive::create();
-}
-void write_tensor(CheckpointWriter& writer, const tinytensor::Tensor& tensor) {
-    writer.pod(std::uint32_t(tensor.is_valid() ? tensor.shape().rank() : 0));
-    if (!tensor.is_valid()) return;
-    writer.pod(std::uint32_t(tensor.dtype()));
-    for (std::size_t i = 0; i < tensor.shape().rank(); ++i)
-        writer.pod(std::uint64_t(tensor.shape()[i]));
-    const auto host = tensor.contiguous().cpu();
-    writer.raw(host.data_ptr(), host.bytes());
-}
-tinytensor::Tensor read_tensor(CheckpointReader& reader, tinytensor::Device device) {
-    const auto rank = reader.pod<std::uint32_t>();
-    if (!rank) return {};
-    if (rank > 8) throw std::runtime_error("Invalid checkpoint tensor rank");
-    const auto type = reader.pod<std::uint32_t>();
-    if (type > static_cast<std::uint32_t>(tinytensor::DataType::Float32))
-        throw std::runtime_error("Invalid checkpoint tensor type");
-    const auto dtype = static_cast<tinytensor::DataType>(type);
-    std::vector<std::size_t> shape(rank);
-    std::uint64_t elements = 1;
-    for (auto& dim : shape) {
-        dim = reader.pod<std::uint64_t>();
-        if (dim > 1'000'000'000 || (dim && elements > 1'000'000'000 / dim))
-            throw std::runtime_error("Invalid checkpoint tensor dimensions");
-        elements *= dim;
-    }
-    auto bytes = reader.take(elements * tinytensor::dtype_size(dtype));
-    auto host = tinytensor::Tensor::empty_unpinned(tinytensor::TensorShape(shape), dtype);
-    if (!bytes.empty()) std::memcpy(host.data_ptr(), bytes.data(), bytes.size());
-    return host.to(device);
+
+void publish_checkpoint_file(const std::filesystem::path& temporary, const std::filesystem::path& path) {
+#ifdef _WIN32
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::system_error(GetLastError(), std::system_category(), "Cannot publish checkpoint");
+#else
+    std::filesystem::rename(temporary, path);
+#endif
 }
 }
-std::filesystem::path training_checkpoint_path(const std::filesystem::path& project) {
-    if (project.empty()) return {};
-    auto native = project;
-    std::string extension = native.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    if (extension != ".ascan") native.replace_extension(".ascan");
-    return native;
-}
-void migrate_training_checkpoints(const std::filesystem::path& project) {
-    if (project.empty()) return;
-    auto visible = project; visible += ".training.ascan";
-    const auto hidden = project.parent_path() / ".photara-recovery" / project.filename() / "training.ascan";
-    std::vector<std::filesystem::path> sources;
-    for (const auto& path : {hidden, previous_path(hidden), visible, previous_path(visible)})
-        if (std::filesystem::exists(path)) sources.push_back(path);
-    const auto native = training_checkpoint_path(project);
-    const auto legacy_directory = hidden.parent_path() / "legacy";
-    if (std::filesystem::is_directory(legacy_directory)) {
-        for (const auto& item : std::filesystem::directory_iterator(legacy_directory))
-            if (item.is_regular_file() && item.path().filename().native().starts_with(visible.filename().native()))
-                sources.push_back(item.path());
-    }
-    auto archive = open_or_create_project(native);
-    const bool nested = archive.has(ChunkType::training_checkpoint) && !archive.has(ChunkType::training_checkpoint_info);
-    if (sources.empty() && !nested) return;
-    detail::TrainingCheckpointLease project_lease(native);
-    std::vector<std::unique_ptr<detail::TrainingCheckpointLease>> legacy_leases;
-    if (!sources.empty()) {
-        legacy_leases.push_back(std::make_unique<detail::TrainingCheckpointLease>(hidden));
-        legacy_leases.push_back(std::make_unique<detail::TrainingCheckpointLease>(visible));
-    }
-    auto history = archive.has(ChunkType::training_checkpoint_history)
-        ? Archive::from_bytes(archive.chunk(ChunkType::training_checkpoint_history)) : Archive::create();
-    unsigned history_id = 1000;
-    const auto retain_history = [&](CheckpointRecord record) {
-        while (history.has(static_cast<ChunkType>(history_id))) ++history_id;
-        auto portable = Archive::create();
-        portable.set_chunk(ChunkType::settings, std::move(record.metadata));
-        portable.set_chunk(ChunkType::training_checkpoint, std::move(record.payload));
-        history.set_chunk(static_cast<ChunkType>(history_id++), portable.encode());
-    };
-    std::optional<CheckpointRecord> latest, previous;
-    try { latest = read_record(archive); } catch (...) {}
-    try { previous = read_record(archive, true); } catch (...) {}
-    for (const auto& source : sources) {
-        auto record = read_record(Archive::open(source)); // Check checksums before any cleanup.
-        const auto info = decode_info(record.metadata);
-        if (!latest) latest = std::move(record);
-        else {
-            const auto current = decode_info(latest->metadata);
-            if (info.fingerprint != current.fingerprint) { retain_history(std::move(record)); continue; }
-            if (info.iteration > current.iteration) {
-                previous = std::move(latest); latest = std::move(record);
-            } else if (info.iteration < current.iteration &&
-                (!previous || info.iteration > decode_info(previous->metadata).iteration))
-                previous = std::move(record);
-        }
-    }
-    if (!latest) throw std::runtime_error("No valid checkpoint to merge into the project");
-    set_record(archive, std::move(*latest));
-    if (previous) set_record(archive, std::move(*previous), true);
-    if (history_id > 1000) archive.set_chunk(ChunkType::training_checkpoint_history, history.encode());
-    archive.save(native); sync_checkpoint(native);
-    // Read the published generations back before removing the old copies.
-    const auto verified = Archive::open(native); (void)read_record(verified);
-    if (previous) (void)read_record(verified, true);
-    for (const auto& source : sources) std::filesystem::remove(source);
-    legacy_leases.clear(); // Release/delete old lock files before empty-directory cleanup.
-    // Remove only empty directories belonging to this project. Other projects,
-    // conflicting archived generations and unrelated files are never removed.
-    std::error_code ignored;
-    std::filesystem::remove(legacy_directory, ignored);
-    std::filesystem::remove(hidden.parent_path(), ignored);
-    std::filesystem::remove(hidden.parent_path().parent_path(), ignored);
+std::vector<std::uint8_t> training_checkpoint_info_bytes(const TrainingCheckpointInfo& info) {
+    CheckpointWriter writer;
+    writer.pod(version); writer.pod(info.iteration); writer.pod(info.total_iterations);
+    writer.pod(info.gaussian_count); writer.pod(info.fingerprint); writer.pod(info.focus_bounds.valid);
+    writer.raw(info.focus_bounds.center.data(), sizeof(float) * 3);
+    writer.raw(info.focus_bounds.half_extent.data(), sizeof(float) * 3);
+    writer.raw(info.focus_bounds.axes.data(), sizeof(float) * 9);
+    return std::move(writer.bytes);
 }
 bool training_checkpoint_in_use(const std::filesystem::path& path) {
     if (path.empty()) return false;
@@ -247,45 +153,105 @@ bool training_checkpoint_in_use(const std::filesystem::path& path) {
 std::optional<TrainingCheckpointInfo> inspect_training_checkpoint(const std::filesystem::path& path) {
     if (path.empty() || !std::filesystem::exists(path)) return std::nullopt;
     try {
+        if (auto info = read_model_checkpoint(path)) {
+            if (!std::filesystem::is_regular_file(info->model_path)) return std::nullopt;
+            return info;
+        }
         const auto archive = Archive::open(path);
-        for (bool previous : {false, true}) {
-            try { return read_info(archive, previous); } catch (...) {}
+        if (archive.has(ChunkType::training_model_info) && archive.has(ChunkType::gaussians)) {
+            auto info = decode_info(archive.chunk(ChunkType::training_model_info));
+            return info;
         }
     } catch (...) {}
     return std::nullopt;
 }
 std::vector<std::uint8_t> training_checkpoint_bytes(const std::filesystem::path& path) {
+    if (auto info = read_model_checkpoint(path)) {
+        auto portable = Archive::create();
+        portable.set_chunk(ChunkType::training_model_info, training_checkpoint_info_bytes(*info));
+        portable.set_chunk(ChunkType::gaussians, encode_gaussians(load_gaussians(info->model_path, tinytensor::Device::CPU)));
+        return portable.encode();
+    }
     const auto source = Archive::open(path);
-    for (bool previous : {false, true}) {
-        try {
-            auto record = read_record(source, previous);
-            auto portable = Archive::create();
-            portable.set_chunk(ChunkType::settings, std::move(record.metadata));
-            portable.set_chunk(ChunkType::training_checkpoint, std::move(record.payload));
-            return portable.encode();
-        } catch (...) {}
+    if (source.has(ChunkType::training_model_info) && source.has(ChunkType::gaussians)) {
+        auto portable = Archive::create();
+        portable.set_chunk(ChunkType::training_model_info, source.chunk(ChunkType::training_model_info));
+        portable.set_chunk(ChunkType::gaussians, source.chunk(ChunkType::gaussians));
+        return portable.encode();
     }
     throw std::runtime_error("No valid training checkpoint to save");
 }
+
+GaussianModel checkpoint_model(const std::filesystem::path& path) {
+    if (auto info = read_model_checkpoint(path)) return load_gaussians(info->model_path, tinytensor::Device::CPU);
+    const auto archive = Archive::open(path);
+    if (archive.has(ChunkType::training_model_info))
+        return decode_gaussians(archive.chunk(ChunkType::gaussians), tinytensor::Device::CPU);
+    throw std::runtime_error("Unsupported training checkpoint format; start a new training run.");
+}
 void restore_training_checkpoint(std::span<const std::uint8_t> bytes, const std::filesystem::path& path) {
     detail::TrainingCheckpointLease lease(path);
-    auto record = read_record(Archive::from_bytes(bytes));
-    auto archive = open_or_create_project(path);
-    set_record(archive, std::move(record));
-    archive.save(path); sync_checkpoint(path);
+    const auto portable = Archive::from_bytes(bytes);
+    if (portable.has(ChunkType::training_model_info) && portable.has(ChunkType::gaussians)) {
+        auto info = decode_info(portable.chunk(ChunkType::training_model_info));
+        const auto model = decode_gaussians(portable.chunk(ChunkType::gaussians), tinytensor::Device::CPU);
+        detail::save_model_checkpoint(path, info, model);
+        return;
+    }
+    throw std::runtime_error("Unsupported training checkpoint format; start a new training run.");
 }
 void remove_training_checkpoint(const std::filesystem::path& path) {
     if (path.empty() || !std::filesystem::exists(path)) return;
     detail::TrainingCheckpointLease lease(path);
+    if (auto info = read_model_checkpoint(path)) {
+        std::filesystem::remove(path);
+        if (managed_checkpoint_model(path, info->model_path)) std::filesystem::remove(info->model_path);
+        return;
+    }
     auto archive = Archive::open(path);
     bool modified = false;
-    for (auto type : {ChunkType::training_checkpoint, ChunkType::training_checkpoint_info,
-                     ChunkType::training_checkpoint_previous, ChunkType::training_checkpoint_previous_info, ChunkType::training_checkpoint_history}) {
+    for (auto type : {ChunkType::training_model_info}) {
         modified |= archive.has(type); archive.erase_chunk(type);
     }
     if (modified) { archive.save(path); sync_checkpoint(path); }
 }
 namespace detail {
+void save_model_checkpoint(const std::filesystem::path& path,
+    const TrainingCheckpointInfo& info, const GaussianModel& model) {
+    ensure_checkpoint_directory(path);
+    const auto previous = inspect_training_checkpoint(path);
+    auto model_path = path.parent_path() / (path.stem().string() + ".model." +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".ply");
+    auto temporary = path; temporary += ".tmp";
+    bool created = false;
+    try {
+        save_gaussians(model, model_path, GaussianFormat::ply);
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("Cannot write PLY checkpoint manifest");
+        created = true;
+        const auto filename = model_path.filename().generic_u8string();
+        output << model_magic << "1 " << info.iteration << ' ' << info.total_iterations << ' '
+            << info.gaussian_count << ' ' << info.fingerprint << '\n'
+            << std::quoted(std::string(reinterpret_cast<const char*>(filename.data()), filename.size())) << '\n'
+            << std::setprecision(9) << info.focus_bounds.valid;
+        for (const auto* values : {info.focus_bounds.center.data(), info.focus_bounds.half_extent.data()})
+            for (int i = 0; i < 3; ++i) output << ' ' << values[i];
+        for (int i = 0; i < 9; ++i) output << ' ' << info.focus_bounds.axes.data()[i];
+        output << '\n'; output.close();
+        if (!output) throw std::runtime_error("Cannot finish PLY checkpoint manifest");
+        sync_checkpoint(model_path);
+        publish_checkpoint_file(temporary, path);
+    } catch (...) {
+        std::error_code ignored;
+        if (created) std::filesystem::remove(temporary, ignored);
+        std::filesystem::remove(model_path, ignored);
+        throw;
+    }
+    if (previous && managed_checkpoint_model(path, previous->model_path)) {
+        std::error_code ignored; std::filesystem::remove(previous->model_path, ignored);
+    }
+}
+
 TrainingCheckpointLease::TrainingCheckpointLease(const std::filesystem::path& path) {
     if (path.empty()) return;
     ensure_checkpoint_directory(path);
@@ -315,8 +281,7 @@ TrainingCheckpointLease::~TrainingCheckpointLease() {
 }
 std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOptions& options) {
     sfm::FingerprintBuilder hash;
-    hash.append_string("photara-training-checkpoint-v2");
-    hash.append_string(training_state_abi);
+    hash.append_string("photara-ply-checkpoint-v1");
     hash.append(options.backend);
     hash.append(options.iterations);
     hash.append(options.sh_degree);
@@ -426,9 +391,6 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.multi_view_depth_bracket);
     hash.append(options.multi_view_depth_tolerance);
     hash.append(options.multi_view_num);
-    // Preserve signatures of checkpoints that used every-step supervision
-    // before the tail gate; the retired fixed cadence is now always one.
-    hash.append(1U);
     hash.append(options.multi_view_tail_interval);
     hash.append(options.multi_view_adaptive_frequency);
     hash.append(options.multi_view_adaptive_max_interval);
@@ -504,55 +466,5 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     }
     return hash.value();
 }
-TrainingCheckpoint load_training_checkpoint(const std::filesystem::path& path,
-    std::uint64_t fingerprint, tinytensor::Device device) {
-    std::string failure;
-    const auto archive = Archive::open(path);
-    for (bool previous : {false, true}) {
-        try {
-            auto record = read_record(archive, previous);
-            TrainingCheckpoint result; result.info = decode_info(record.metadata);
-            if (result.info.fingerprint != fingerprint)
-                throw std::runtime_error("Training implementation, settings, cameras or input images changed. Choose Train 3DGS to train with the new inputs.");
-            CheckpointReader reader(record.payload);
-            auto runtime = reader.take(reader.pod<std::uint64_t>());
-            result.runtime.assign(runtime.begin(), runtime.end());
-            const auto count = reader.pod<std::uint32_t>();
-            if (count > 128) throw std::runtime_error("Invalid checkpoint tensor count");
-            for (unsigned i = 0; i < count; ++i) result.tensors.push_back(read_tensor(reader, device));
-            reader.finish(); return result;
-        } catch (const std::exception& error) { if (failure.empty()) failure = error.what(); }
-    }
-    throw std::runtime_error("Cannot resume training: " + failure);
-}
-void save_training_checkpoint(const std::filesystem::path& path,
-    const TrainingCheckpointInfo& info, const std::vector<std::uint8_t>& runtime,
-    const std::vector<tinytensor::Tensor*>& tensors,
-    std::span<const std::uint8_t> project_settings,
-    std::span<const std::uint8_t> project_sfm) {
-    ensure_checkpoint_directory(path);
-    CheckpointWriter metadata;
-    metadata.pod(version); metadata.pod(info.iteration); metadata.pod(info.total_iterations);
-    metadata.pod(info.gaussian_count); metadata.pod(info.fingerprint);
-    metadata.pod(info.focus_bounds.valid);
-    metadata.raw(info.focus_bounds.center.data(), sizeof(float) * 3);
-    metadata.raw(info.focus_bounds.half_extent.data(), sizeof(float) * 3);
-    metadata.raw(info.focus_bounds.axes.data(), sizeof(float) * 9);
-    CheckpointWriter payload;
-    payload.pod(std::uint64_t(runtime.size())); payload.raw(runtime.data(), runtime.size());
-    payload.pod(std::uint32_t(tensors.size()));
-    for (const auto* tensor : tensors) write_tensor(payload, *tensor);
-    auto archive = open_or_create_project(path);
-    try { set_record(archive, read_record(archive), true); }
-    catch (...) {
-        // If the current generation is corrupt, keep the existing previous
-        // complete generation rather than copying damaged data over it.
-    }
-    set_record(archive, {std::move(metadata.bytes), std::move(payload.bytes)});
-    if (!project_settings.empty()) archive.set_chunk(ChunkType::settings, {project_settings.begin(), project_settings.end()});
-    if (!project_sfm.empty()) archive.set_chunk(ChunkType::sfm, {project_sfm.begin(), project_sfm.end()});
-    archive.save(path); sync_checkpoint(path);
-}
-
 } // namespace detail
 } // namespace photara::splat

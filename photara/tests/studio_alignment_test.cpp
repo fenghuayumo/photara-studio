@@ -3,6 +3,7 @@
 #include "sfm/asfm.hpp"
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
+#include "splat/trainer.hpp"
 #include "../src/splat/checkpoint.hpp"
 #include <filesystem>
 #include <cstdio>
@@ -100,8 +101,18 @@ int main() {
         const auto project = task_root / "saved.ascan";
         auto archive = photara::project::Archive::create();
         photara::project::write_sfm(archive, source, project);
+        photara::splat::GaussianModel saved_model;
+        saved_model.sh_degree = 0;
+        const auto cpu = tinytensor::Device::CPU;
+        saved_model.means = tinytensor::Tensor::zeros({2, 3}, cpu);
+        saved_model.log_scales = tinytensor::Tensor::zeros({2, 3}, cpu);
+        saved_model.quaternions = tinytensor::Tensor::from_vector({1.F, 0.F, 0.F, 0.F, 1.F, 0.F, 0.F, 0.F}, {2, 4}, cpu);
+        saved_model.opacity_logits = tinytensor::Tensor::zeros({2, 1}, cpu);
+        saved_model.sh = tinytensor::Tensor::zeros({2, 1, 3}, cpu);
+        archive.set_chunk(photara::project::ChunkType::gaussians, photara::splat::encode_gaussians(saved_model));
+        archive.set_chunk(photara::project::ChunkType::training_model_info,
+            photara::splat::training_checkpoint_info_bytes({3, 10, 2, 42}));
         archive.save(project);
-        photara::splat::detail::save_training_checkpoint(project, {3, 10, 2, 42}, {}, {});
         const auto bytes_before = photara::project::Archive::open(project).encode();
         const auto stamp_before = std::filesystem::last_write_time(project);
         put_path(transient.project_dir, project);

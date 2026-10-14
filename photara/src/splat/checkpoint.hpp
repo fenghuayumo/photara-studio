@@ -52,19 +52,6 @@ private:
     std::span<const std::uint8_t> bytes_;
 };
 
-struct TrainingCheckpoint {
-    TrainingCheckpointInfo info;
-    std::vector<std::uint8_t> runtime;
-    std::vector<tinytensor::Tensor> tensors;
-};
-
 std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOptions& options);
-TrainingCheckpoint load_training_checkpoint(const std::filesystem::path& path,
-    std::uint64_t fingerprint, tinytensor::Device device);
-void save_training_checkpoint(const std::filesystem::path& path,
-    const TrainingCheckpointInfo& info, const std::vector<std::uint8_t>& runtime,
-    const std::vector<tinytensor::Tensor*>& tensors,
-    std::span<const std::uint8_t> project_settings = {},
-    std::span<const std::uint8_t> project_sfm = {});
 
 } // namespace photara::splat::detail
