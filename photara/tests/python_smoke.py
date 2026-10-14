@@ -41,6 +41,9 @@ assert abs(emc.densify_growth_factor - 1.05) < 1e-6
 aes.apply_strategy_defaults(emc)
 
 sfm = aes.SfmOptions()
+assert not hasattr(aes, "CameraWarmStartMode")
+assert sfm.global_positioning.camera_warm_start_first
+assert sfm.global_positioning.camera_warm_start_min_images == 512
 sfm.frontend.extractor = "sift"
 sfm.frontend.matcher = "mutual_ratio"
 sfm.frontend.relative.max_epipolar_error_px = 3.0

@@ -1443,7 +1443,6 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET photara_studio)
             add_executable(photara_studio_alignment_test
                 tests/studio_alignment_test.cpp
-                src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp

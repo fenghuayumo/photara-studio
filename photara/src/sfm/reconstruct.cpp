@@ -368,7 +368,7 @@ std::uint64_t reconstruction_key(
     FingerprintBuilder key;
     key.append_string("reconstruction");
     // Invalidate mapping checkpoints when supported modes or configuration change.
-    key.append_string("scaled-weights-20k-v35");
+    key.append_string("scaled-weights-20k-v36-warm-geometry");
     key.append_string(PHOTARA_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)

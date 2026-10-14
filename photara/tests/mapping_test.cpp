@@ -2,6 +2,7 @@
 #include "sfm/bundle.hpp"
 #include "sfm/global_positioning.hpp"
 #include "sfm/positioning_control.hpp"
+#include "../src/sfm/positioning_validation.hpp"
 #include "sfm/global_rotation.hpp"
 #include "sfm/pair_weighting.hpp"
 #include "sfm/reconstruct.hpp"
@@ -208,6 +209,112 @@ void test_global_rotation_dense_graph_iterative_solve() {
            "dense global rotation graph remains accurate with outliers");
 }
 
+void test_warm_start_geometry_acceptance() {
+    Scene scene;
+    scene.cameras.push_back(cam());
+    constexpr Index views = 6, points = 48;
+    for (Index view = 0; view < views; ++view) {
+        Image image;
+        image.id = view;
+        image.camera_id = 0;
+        image.registered = true;
+        image.pose.C = Vec3(0.6 * view, 0.1 * (view % 2), 0);
+        image.features.keypoints.resize(points);
+        scene.images.push_back(std::move(image));
+    }
+    for (Index point = 0; point < points; ++point) {
+        Track track;
+        const Vec3 position(0.2 + 0.04 * point, 0.1 * (point % 5), 5 + 0.05 * point);
+        for (Index view = 0; view < views; ++view) {
+            const Vec2 pixel = scene.cameras[0].project(position - scene.images[view].pose.C);
+            auto& feature = scene.images[view].features.keypoints[point];
+            feature.x = static_cast<float>(pixel.x());
+            feature.y = static_cast<float>(pixel.y());
+            track.observations.push_back({view, point});
+        }
+        scene.tracks.push_back(std::move(track));
+    }
+    for (Index view = 0; view + 1 < views; ++view) {
+        ImagePair pair(view, view + 1);
+        pair.matches.resize(40);
+        pair.weight_spatial = 1;
+        pair.relative_pose = Pose3D{Mat3::Identity(),
+            scene.images[view + 1].pose.C - scene.images[view].pose.C};
+        scene.pairs.push_back(std::move(pair));
+    }
+    const std::vector<Index> optimized{0, 1, 2, 3, 4, 5, 6, 7};
+    const auto baseline = detail::evaluate_warm_start_geometry(scene, optimized);
+    expect(baseline.heldout_tracks == 40 && baseline.positive_observations == 240 &&
+           baseline.camera_heldout_observations.front() == 40 &&
+           baseline.camera_heldout_observations.back() == 40,
+           "validation excludes optimized tracks and scores anchors using alternate fitted observations");
+    expect(baseline.pair_p90_radians < 1e-6 && baseline.heldout_p90_radians < 1e-5,
+           "exact geometry has low independent direction and heldout errors");
+
+    Scene gauge = scene;
+    for (auto& image : gauge.images) image.pose.C = 7 * image.pose.C + Vec3(3, -4, 2);
+    for (auto& track : gauge.tracks) track.position.setConstant(std::numeric_limits<double>::quiet_NaN());
+    const auto gauge_quality = detail::evaluate_warm_start_geometry(gauge, optimized);
+    expect(!detail::warm_start_geometry_rejection(baseline, gauge_quality),
+           "acceptance is scale/translation invariant and ignores optimized point coordinates");
+
+    Scene noisy_initialization = scene;
+    noisy_initialization.images[3].pose.C.y() += 0.4;
+    for (auto& pair : noisy_initialization.pairs)
+        pair.relative_pose = Pose3D{Mat3::Identity(),
+            noisy_initialization.images[pair.id2].pose.C - noisy_initialization.images[pair.id1].pose.C};
+    Scene corrected = noisy_initialization;
+    corrected.images[3].pose.C = scene.images[3].pose.C;
+    const auto noisy_quality = detail::evaluate_warm_start_geometry(noisy_initialization, optimized);
+    const auto corrected_quality = detail::evaluate_warm_start_geometry(corrected, optimized);
+    expect(corrected_quality.pair_p90_radians > noisy_quality.pair_p90_radians + 0.01 &&
+           corrected_quality.heldout_p90_radians < noisy_quality.heldout_p90_radians &&
+           !detail::warm_start_geometry_rejection(noisy_quality, corrected_quality),
+           "independent per-camera ray evidence can accept correction of noisy two-view translations");
+    Scene sparse_noisy = noisy_initialization, sparse_corrected = corrected;
+    for (auto& feature : sparse_noisy.images[3].features.keypoints)
+        feature.x = std::numeric_limits<float>::quiet_NaN();
+    sparse_corrected.images[3].features = sparse_noisy.images[3].features;
+    const auto sparse_before = detail::evaluate_warm_start_geometry(sparse_noisy, optimized);
+    const auto sparse_after = detail::evaluate_warm_start_geometry(sparse_corrected, optimized);
+    expect(!detail::warm_start_geometry_rejection(sparse_before, sparse_after) &&
+           detail::warm_start_unverified_direction_changes(sparse_before, sparse_after) > 0,
+           "missing per-camera evidence is reported as uncertainty instead of a false geometric regression");
+
+    Scene drift = scene;
+    drift.images[3].pose.C.y() += 4;
+    const auto drift_quality = detail::evaluate_warm_start_geometry(drift, optimized);
+    expect(detail::warm_start_geometry_rejection(baseline, drift_quality) != nullptr,
+           "camera drift is rejected despite an otherwise usable solver result");
+    drift.pairs.clear();
+    Scene no_pairs = scene;
+    no_pairs.pairs.clear();
+    const auto heldout_baseline = detail::evaluate_warm_start_geometry(no_pairs, optimized);
+    const auto heldout_drift = detail::evaluate_warm_start_geometry(drift, optimized);
+    expect(detail::warm_start_geometry_rejection(heldout_baseline, heldout_drift) != nullptr,
+           "heldout rays reject drift independently of relative translation constraints");
+    for (auto& image : no_pairs.images) image.pose.C = -image.pose.C;
+    const auto reversed = detail::evaluate_warm_start_geometry(no_pairs, optimized);
+    expect(reversed.heldout_observations == heldout_baseline.heldout_observations &&
+           reversed.positive_observations == 0 &&
+           detail::warm_start_geometry_rejection(heldout_baseline, reversed) != nullptr,
+           "behind-camera predictions remain in validation and trigger rejection");
+    Scene collapsed = scene;
+    collapsed.images[1].pose.C = collapsed.images[0].pose.C;
+    expect(detail::warm_start_geometry_rejection(baseline,
+               detail::evaluate_warm_start_geometry(collapsed, optimized)) != nullptr,
+           "collapsed camera baselines are rejected");
+    collapsed.pairs.clear();
+    for (auto& image : collapsed.images) image.pose.C.setZero();
+    expect(detail::warm_start_geometry_rejection(heldout_baseline,
+               detail::evaluate_warm_start_geometry(collapsed, optimized)) != nullptr,
+           "collapsed camera geometry cannot pass by omitting pair evidence");
+    scene.images[0].pose.C.x() = std::numeric_limits<double>::quiet_NaN();
+    expect(detail::warm_start_geometry_rejection(baseline,
+               detail::evaluate_warm_start_geometry(scene, optimized)) != nullptr,
+           "nonfinite camera centers are rejected");
+}
+
 void test_global_positioning_points_only() {
     constexpr int k_views = 4;
     constexpr int k_points = 30;
@@ -272,6 +379,10 @@ void test_global_positioning_points_only() {
         for (std::size_t i = 0; i < scene.images.size(); ++i)
             expect(limited.images[i].pose.C == scene.images[i].pose.C,
                    "failed budget-limited fallback restores the original camera centers");
+        for (std::size_t i = 0; i < scene.tracks.size(); ++i)
+            expect(limited.tracks[i].position == scene.tracks[i].position &&
+                   limited.tracks[i].num_inliers == scene.tracks[i].num_inliers,
+                   "failed positioning restores both points and inlier metadata");
     }
     const GlobalPositioningSummary summary = solve_global_positions(scene);
     expect(summary.success, "global positioning converges");
@@ -1333,6 +1444,7 @@ int main() {
     test_global_rotation_weighting();
     test_global_rotation_dense_graph_iterative_solve();
     test_global_positioning_points_only();
+    test_warm_start_geometry_acceptance();
     test_large_point_only_positioning_does_not_require_pairs();
     test_final_registration_audit_prunes_unsupported_pose();
     test_full_sphere_registration_audit();
