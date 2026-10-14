@@ -164,7 +164,7 @@ void draw_compute_page(App& app) {
             alignment_enabled))
         store_editor_preferences(app);
     theme::caption(
-        "Bundle adjustment. Automatic uses CUDA, then Vulkan, then CPU.");
+        "Camera positioning and refinement. Automatic uses CUDA, then Vulkan, then CPU.");
 
     ImGui::Spacing();
     preference_heading("Subject masks");

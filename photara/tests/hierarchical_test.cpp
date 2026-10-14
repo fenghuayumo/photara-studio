@@ -2,9 +2,13 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/rotation_recovery.hpp"
 #include "sfm/triangulation.hpp"
+#include "core/logging.hpp"
 
 #include <cmath>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <iterator>
 #include <random>
 #include <vector>
 
@@ -120,6 +124,42 @@ Scene make_track_split_scene() {
 }  // namespace
 
 int main() {
+    {
+        const auto directory = std::filesystem::temp_directory_path() / "photara-hierarchical-parameters";
+        const auto log_path = photara::core::Logger::instance().configure(
+            directory, "forwarding", photara::core::LogLevel::warning);
+        ReconstructionConfig options;
+        options.mode = ReconstructionMode::hierarchical;
+        options.global_positioning.backend = PositioningBackend::cpu;
+        options.global_positioning.max_solver_time_sec = 0.001;
+        options.global_rotation.max_l1_iterations = 0;
+        // Exercise the Global rejection path without completing a new star seed.
+        options.star.min_initial_tracks = 100000;
+        Scene limited = make_scene();
+        reconstruct_from_frontend(limited, options);
+        options.hierarchical.cluster.max_views_per_cluster = 3;
+        options.hierarchical.cluster.min_views_per_cluster = 2;
+        options.hierarchical.cluster.min_common_tracks = 10;
+        options.star.max_views = 3;
+        Scene clustered = make_scene();
+        reconstruct_from_frontend(clustered, options);
+        photara::core::Logger::instance().configure({}, "tests", photara::core::LogLevel::warning);
+        std::ifstream input(log_path);
+        const std::string trace((std::istreambuf_iterator<char>(input)), {});
+        std::size_t budget_calls=0, offset=0;
+        while ((offset=trace.find("max_solver_time_s=0.001", offset))!=std::string::npos) {
+            ++budget_calls;++offset;
+        }
+        expect(budget_calls >= 3,
+               "custom positioning budget reaches fast path and both cluster retries");
+        expect(trace.find("global mapping unavailable; falling back") != std::string::npos &&
+               trace.find("hierarchical subscene accepted global retry") == std::string::npos,
+               "budget-limited Global attempts follow fallback paths instead of ignoring the budget");
+        expect(trace.find("LAD initialized") == std::string::npos,
+               "custom rotation iteration limit reaches the hierarchical Global solve");
+        input.close();
+        std::filesystem::remove(log_path);
+    }
     Scene split_tracks_scene = make_track_split_scene();
     TriangulationOptions split_options;
     split_options.reproj_threshold_px = 0.25F;

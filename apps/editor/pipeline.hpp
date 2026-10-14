@@ -244,7 +244,9 @@ struct ProjectSettings {
     // persisted project setting stay in sync).
     int camera_model = 2;
     int sfm_mode = 0;  // 0 global, 2 hierarchical
-    bool reuse_cache = false;
+    // New projects reuse only compatible, fingerprinted alignment stages.
+    // Saved projects retain their explicit choice.
+    bool reuse_cache = true;
     // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
     // mesh/dense, preview sidecars). Empty keeps them next to the project
     // (<project folder>/<project name>.cache); a set folder collects every
@@ -257,7 +259,7 @@ struct ProjectSettings {
     int cache_retention_days = 0;
     // Machine-level compute policy. Stored in editor.prefs, never in .ascan.
     // training_backend: 0 cuda, 1 vulkan.
-    // alignment_backend: 0 automatic, 1 cpu, 2 cuda (--ba-backend).
+    // alignment_backend: 0 automatic, 1 cpu, 2 cuda (positioning and BA).
     // automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
     int training_backend = 0;

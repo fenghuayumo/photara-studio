@@ -60,6 +60,7 @@ struct ViewPose {
     std::size_t observations{};
     std::size_t triangulated_features{};
     bool registered{};
+    photara::sfm::PositionAudit position_audit{photara::sfm::PositionAudit::not_audited};
     std::vector<ImageFeature> features;
 };
 
@@ -70,6 +71,11 @@ struct GaussianPrimitive {
 };
 
 struct SparseScene {
+    struct PositionAuditCounts {
+        std::size_t audited{};
+        std::size_t unverified{};
+        std::size_t unaudited{};
+    };
     std::vector<Vec3> points;
     // Empty when the PLY has no RGB and photo sampling found no colours.
     std::vector<std::uint32_t> colours;
@@ -94,6 +100,7 @@ struct SparseScene {
         return !gaussians.empty() && gaussians.size() == points.size();
     }
     void compute_bounds();
+    [[nodiscard]] PositionAuditCounts position_audit_counts() const;
     void clear();
 };
 

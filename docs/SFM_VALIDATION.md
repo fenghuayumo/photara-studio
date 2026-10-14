@@ -9,6 +9,7 @@ Key findings for future analysis and improvements. See [SFM_ARCHITECTURE.md](SFM
 - With sufficient budgets, CPU/CUDA pose errors were very close on Berlin and Alameda. Differences under default budgets mainly reflected optimization progress rather than CUDA precision.
 - Multi-cluster coverage loss, incorrect intrinsic merging, severe rotation conflicts, and panorama rear-hemisphere statistics have been fixed. Berlin's rotation outlier decreased from about 55° to 1.1°. Retain the relevant regressions even though these are no longer open defects.
 - Keep the default cluster capacity of 2048, warm-start threshold of 512, and CPU fallback for now. Lowering the warm-start threshold is promising, but a few datasets do not justify changing the general default.
+- Frontend defaults and Hierarchical parameter forwarding are unified. Studio applies its alignment backend to positioning and BA, reuses compatible caches for new projects, and displays persisted position risk. These changes make execution and uncertainty visible; they do not repair weakly constrained geometry.
 
 ## Improvement Priorities
 

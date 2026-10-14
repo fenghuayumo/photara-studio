@@ -1,6 +1,8 @@
 #pragma once
 
 #include "sfm/resection.hpp"
+#include "sfm/global_positioning.hpp"
+#include "sfm/global_rotation.hpp"
 #include "sfm/scene.hpp"
 #include "sfm/star_init.hpp"
 
@@ -42,6 +44,8 @@ struct HierarchicalConfig {
     GlobalAlignmentConfig alignment{};
     StarInitConfig star{};
     ResectionConfig resection{};
+    GlobalRotationOptions global_rotation{};
+    GlobalPositioningOptions global_positioning{};
     bool final_bundle_adjustment{true};
 };
 

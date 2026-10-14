@@ -2575,12 +2575,15 @@ void poll_scene_load(App& app) {
         app.view_mode != VisualizationMode::rings &&
         app.view_mode != VisualizationMode::mesh)
         app.view_mode = VisualizationMode::points;
+    const auto position_audit = app.scene.position_audit_counts();
     set_message(
         app,
         app.scene_source + ": " + format_count(app.scene.points.size()) +
             " points, " + std::to_string(app.scene.registered_views) + " / " +
-            std::to_string(app.scene.total_views) + " views registered",
-        theme::success);
+            std::to_string(app.scene.total_views) + " views registered" +
+            (position_audit.unverified > 0
+                ? "; " + std::to_string(position_audit.unverified) + " positions need review" : ""),
+        position_audit.unverified > 0 ? theme::warning : theme::success);
 }
 
 void poll_align_live(App& app) {

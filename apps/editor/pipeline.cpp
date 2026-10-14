@@ -235,9 +235,16 @@ const char* sam_backend_flag(const ProjectSettings& settings) {
     return "auto";
 }
 
-void append_ba_backend(
+void append_alignment_backends(
     std::ostringstream& command, const ProjectSettings& settings) {
-    command << " --ba-backend " << alignment_backend_flag(settings);
+    command << " --ba-backend " << alignment_backend_flag(settings)
+            << " --positioning-backend " << alignment_backend_flag(settings);
+}
+
+void append_alignment_cache(
+    std::ostringstream& command, const ProjectSettings& settings,
+    const ProjectLayout& layout) {
+    command << " --cache-dir " << (settings.reuse_cache ? quote(layout.cache) : "-");
 }
 
 void append_sam_flags(
@@ -1349,12 +1356,11 @@ std::string build_align_command(
             << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
-    if (settings.reuse_cache)
-        command << " --cache-dir " << quote(layout.cache);
+    append_alignment_cache(command, settings, layout);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, true);
     append_gui_flags(command, layout);
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 
@@ -1371,8 +1377,7 @@ std::string build_train_command(
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model)
             << " --max-features " << settings.max_features;
-    if (settings.reuse_cache)
-        command << " --cache-dir " << quote(layout.cache);
+    append_alignment_cache(command, settings, layout);
 
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
@@ -1472,7 +1477,7 @@ std::string build_train_command(
             command << " --splat-preview-vk-device-uuid "
                     << preview.device_uuid;
     }
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 
@@ -1486,8 +1491,7 @@ std::string build_splat_mesh_command(
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model)
             << " --max-features " << settings.max_features;
-    if (settings.reuse_cache)
-        command << " --cache-dir " << quote(layout.cache);
+    append_alignment_cache(command, settings, layout);
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
                 << quote(settings.dataset_source.data());
@@ -1517,7 +1521,7 @@ std::string build_splat_mesh_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout, splat_model);
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 
@@ -1539,8 +1543,7 @@ std::string build_dense_command(
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
                 << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
-        if (settings.reuse_cache)
-            command << " --cache-dir " << quote(layout.cache);
+        append_alignment_cache(command, settings, layout);
     }
     command << " --capture-mode "
             << (settings.scene_mode ? "scene" : "object");
@@ -1566,7 +1569,7 @@ std::string build_dense_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 
@@ -1588,8 +1591,7 @@ std::string build_texture_command(
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
                 << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
-        if (settings.reuse_cache)
-            command << " --cache-dir " << quote(layout.cache);
+        append_alignment_cache(command, settings, layout);
     }
     command << " --texture"
             << " --atlas-resolution "
@@ -1607,7 +1609,7 @@ std::string build_texture_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 
@@ -1621,14 +1623,11 @@ std::string build_export_sfm_command(
             << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
-    std::error_code exists_error;
-    if (settings.reuse_cache &&
-        std::filesystem::exists(layout.cache, exists_error))
-        command << " --cache-dir " << quote(layout.cache);
+    append_alignment_cache(command, settings, layout);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
-    append_ba_backend(command, settings);
+    append_alignment_backends(command, settings);
     return command.str();
 }
 

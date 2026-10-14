@@ -941,6 +941,8 @@ std::string load_poses(
     const auto columns = split_csv_row(line);
     const auto model_column = std::find(columns.begin(), columns.end(), "camera_model");
     const std::size_t model_index = static_cast<std::size_t>(model_column-columns.begin());
+    const auto audit_column = std::find(columns.begin(), columns.end(), "position_audit");
+    const std::size_t audit_index = static_cast<std::size_t>(audit_column-columns.begin());
     double reprojection_sum = 0.0;
     std::size_t reprojection_count = 0;
     while (std::getline(input, line)) {
@@ -952,6 +954,12 @@ std::string load_poses(
         if (model_index < fields.size())
             apply_camera_model(pose, parse_view_camera_model(fields[model_index]));
         pose.registered = field_as_double(fields, 2) != 0.0;
+        if (audit_column != columns.end() && audit_index < fields.size()) {
+            if (fields[audit_index] == "unverified")
+                pose.position_audit = photara::sfm::PositionAudit::unverified;
+            else if (fields[audit_index] == "graph_supported")
+                pose.position_audit = photara::sfm::PositionAudit::graph_supported;
+        }
         pose.width = static_cast<std::uint32_t>(field_as_double(fields, 4));
         pose.height = static_cast<std::uint32_t>(field_as_double(fields, 5));
         pose.fx = static_cast<float>(field_as_double(fields, 6));
@@ -1132,6 +1140,20 @@ void colour_missing_points(
 }  // namespace
 
 void SparseScene::clear() { *this = {}; }
+
+SparseScene::PositionAuditCounts SparseScene::position_audit_counts() const {
+    PositionAuditCounts counts;
+    for (const auto& view : views) {
+        if (!view.registered) continue;
+        if (view.position_audit == photara::sfm::PositionAudit::not_audited)
+            ++counts.unaudited;
+        else {
+            ++counts.audited;
+            counts.unverified += view.position_audit == photara::sfm::PositionAudit::unverified;
+        }
+    }
+    return counts;
+}
 
 void PreviewMesh::compute_normals() {
     normals.assign(vertices.size(), {});
@@ -1447,6 +1469,7 @@ SceneLoad sparse_scene_from_sfm(const photara::sfm::Scene& scene, bool colour_fr
             : 0;
         pose.image_path = image.path;
         pose.registered = image.registered;
+        pose.position_audit = image.position_audit;
         if (pose.registered) ++loaded.scene.registered_views;
 
         const auto& keypoints = image.features.keypoints;

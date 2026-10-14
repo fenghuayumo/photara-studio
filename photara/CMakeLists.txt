@@ -1260,6 +1260,25 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_test(NAME photara.sfm.submap_recovery COMMAND photara_submap_recovery_test)
         target_link_libraries(photara_hierarchical_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.hierarchical COMMAND photara_hierarchical_test)
+        if(TARGET photara_studio)
+            add_executable(photara_studio_alignment_test
+                tests/studio_alignment_test.cpp
+                src/tools/sam_model_cache.cpp
+                ${PHOTARA_STUDIO_DIR}/pipeline.cpp
+                ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
+                ${PHOTARA_STUDIO_DIR}/theme.cpp
+                ${PHOTARA_STUDIO_DIR}/i18n.cpp)
+            target_include_directories(photara_studio_alignment_test PRIVATE ${PHOTARA_STUDIO_DIR})
+            get_target_property(_studio_alignment_test_libraries photara_studio LINK_LIBRARIES)
+            target_link_libraries(photara_studio_alignment_test PRIVATE ${_studio_alignment_test_libraries})
+            target_compile_definitions(photara_studio_alignment_test PRIVATE
+                $<TARGET_PROPERTY:photara_studio,COMPILE_DEFINITIONS>)
+            target_compile_features(photara_studio_alignment_test PRIVATE cxx_std_20)
+            if(MSVC)
+                target_compile_options(photara_studio_alignment_test PRIVATE /utf-8)
+            endif()
+            add_test(NAME photara.studio.alignment COMMAND photara_studio_alignment_test)
+        endif()
         add_executable(photara_export_mvs_test tests/export_mvs_test.cpp)
         target_link_libraries(photara_export_mvs_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.export_mvs COMMAND photara_export_mvs_test)
@@ -1292,6 +1311,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_vocabulary_test
         photara_checkpoint_test
         photara_hierarchical_test
+        photara_studio_alignment_test
         photara_submap_recovery_test
         photara_export_mvs_test
         photara_project_io_test

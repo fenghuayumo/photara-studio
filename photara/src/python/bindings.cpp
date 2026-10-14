@@ -582,6 +582,8 @@ NB_MODULE(photara, module) {
     PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, constraint);
     PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, constraint_reweight_scale);
     PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, regularize_complete_orbits);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, global_rotation);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, global_positioning);
 
     auto asfm_options = nb::class_<sfm::AsfmOptions>(module, "AsfmOptions")
                             .def(nb::init<>());

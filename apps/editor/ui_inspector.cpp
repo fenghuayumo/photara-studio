@@ -375,11 +375,10 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "%s",
-                tr("Cache extracted features and matches in the project\n"
-                   ".cache folder so the next Align/Train can reuse them.\n"
-                   "Off by default. Working copies for preview are always\n"
-                   "kept; .ascan, .asfm, and PLY files are only written when\n"
-                   "you Save Project or Export."));
+                tr("Reuse compatible alignment stages from the project cache.\n"
+                   "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
+                   "On by default for new projects. Off recomputes alignment;\n"
+                   "working cameras remain available for training and preview."));
         ImGui::EndDisabled();
         draw_cache_folder_link(app);
 
@@ -420,6 +419,18 @@ Action draw_inspector(App& app) {
             std::snprintf(
                 buffer, sizeof(buffer), "%.3f px", app.scene.mean_reprojection);
             theme::metric("Mean reprojection", buffer);
+            const auto audit = app.scene.position_audit_counts();
+            if (audit.unverified > 0) {
+                theme::metric_coloured("Positions needing review",
+                    std::to_string(audit.unverified).c_str(), theme::warning);
+                ImGui::PushStyleColor(ImGuiCol_Text, theme::warning);
+                ImGui::TextWrapped("%s", tr("Inspect flagged cameras before accepting alignment. Low reprojection error does not verify their positions."));
+                ImGui::PopStyleColor();
+            } else {
+                theme::metric("Position audit", tr(audit.audited == 0 ? "Not audited" : "Graph supported"));
+            }
+            if (audit.unaudited > 0 && audit.audited > 0)
+                theme::metric("Positions not audited", std::to_string(audit.unaudited).c_str());
             theme::metric(
                 "Sparse points",
                 format_count(app.scene.points.size()).c_str());
@@ -1013,6 +1024,13 @@ Action draw_inspector(App& app) {
             theme::metric("Resolution", res);
             theme::metric(
                 "Registered", pose.registered ? tr("yes") : tr("no"));
+            theme::metric_coloured("Position support",
+                tr(pose.position_audit == photara::sfm::PositionAudit::unverified
+                    ? "Needs position review"
+                    : pose.position_audit == photara::sfm::PositionAudit::graph_supported
+                        ? "Graph supported" : "Not audited"),
+                pose.position_audit == photara::sfm::PositionAudit::unverified
+                    ? theme::warning : theme::text_muted);
             theme::metric(
                 "Observations", std::to_string(pose.observations).c_str());
             theme::metric(
