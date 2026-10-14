@@ -13,6 +13,9 @@
 
 namespace photara::sfm {
 
+// Graph support is evidence of observability, not a guarantee of pose accuracy.
+enum class PositionAudit : std::uint8_t { not_audited, graph_supported, unverified };
+
 struct Image {
     Index id{k_invalid};
     Index camera_id{k_invalid};
@@ -26,6 +29,7 @@ struct Image {
     double exif_focal_px{0.0};
     Pose3D pose;
     bool registered{false};
+    PositionAudit position_audit{PositionAudit::not_audited};
 
     [[nodiscard]] bool has_features() const { return !features.keypoints.empty(); }
 };

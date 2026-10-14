@@ -1,4 +1,5 @@
 #include "sfm/global_positioning.hpp"
+#include "sfm/positioning_control.hpp"
 #include "core/logging.hpp"
 #if defined(PHOTARA_HAS_CUDA)
 #include "ba/bearing_cuda.hpp"
@@ -1252,21 +1253,22 @@ GlobalPositioningSummary refine_only_points_bearings(
     const auto solve_started = std::chrono::steady_clock::now();
     double total_solve_seconds = 0.0;
     bool have_usable_solution = false;
-    for (unsigned pass = 0; pass <= options.max_irls_iterations; ++pass) {
+    double minimum_cpu_budget = 0.0;
+    result.termination = GlobalPositioningTermination::iteration_limit;
+    for (unsigned pass = 0; pass <= options.max_irls_iterations;) {
         double remaining_seconds = options.max_solver_time_sec;
         if (options.max_solver_time_sec > 0.0) {
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - solve_started).count();
             remaining_seconds = options.max_solver_time_sec - elapsed;
-            if (remaining_seconds <= 0.05) break;
+            if (remaining_seconds <= 0.05) {
+                result.termination = GlobalPositioningTermination::time_limit;
+                break;
+            }
             const unsigned remaining_passes =
                 options.max_irls_iterations - pass + 1;
-            solver_options.max_solver_time_in_seconds = std::max(
-                0.05,
-                pass == 0
-                    ? 0.6 * remaining_seconds
-                    : remaining_seconds /
-                        static_cast<double>(remaining_passes));
+            solver_options.max_solver_time_in_seconds = detail::positioning_pass_budget(
+                remaining_seconds, remaining_passes, pass == 0, minimum_cpu_budget);
         }
         solver_options.max_num_iterations = static_cast<int>(
             pass == 0
@@ -1348,6 +1350,7 @@ GlobalPositioningSummary refine_only_points_bearings(
         result.iterations +=
             static_cast<unsigned>(pass_summary.iterations.size());
         if (!pass_summary.IsSolutionUsable()) {
+            result.termination = GlobalPositioningTermination::failed;
             if (!have_usable_solution) {
                 core::Logger::instance().warning(
                     "global positioning attempt failed: only_points/bearing_schur",
@@ -1355,6 +1358,39 @@ GlobalPositioningSummary refine_only_points_bearings(
                 return result;
             }
             break;
+        }
+        bool cpu_pass_time_limited = false;
+        if (!solved_on_gpu) {
+            const auto progress = detail::positioning_pass_progress(
+                pass_summary, solver_options.max_solver_time_in_seconds);
+            cpu_pass_time_limited = progress.time_limited;
+            result.termination = progress.time_limited
+                ? GlobalPositioningTermination::time_limit
+                : GlobalPositioningTermination::iteration_limit;
+            result.cpu_accepted_updates += progress.accepted_updates;
+            result.cpu_time_limited_passes += progress.time_limited;
+            minimum_cpu_budget = progress.minimum_next_budget;
+            if (progress.accepted_updates == 0 && !progress.converged) {
+                const double remaining = options.max_solver_time_sec > 0
+                    ? options.max_solver_time_sec - std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - solve_started).count() : 0;
+                if (detail::can_retry_positioning_pass(remaining, progress)) {
+                    core::Logger::instance().warning(
+                        "global positioning retrying unchanged CPU pass: attempt=only_points/bearing_schur",
+                        " pass=", pass, " minimum_budget_s=", minimum_cpu_budget,
+                        " remaining_s=", remaining);
+                    continue;
+                }
+                result.termination = progress.time_limited
+                    ? GlobalPositioningTermination::time_limit
+                    : GlobalPositioningTermination::stalled;
+                core::Logger::instance().warning(
+                    "global positioning stopped without effective CPU update: attempt=only_points/bearing_schur",
+                    " pass=", pass, " time_limited=", progress.time_limited,
+                    " retaining_previous_solution=", have_usable_solution);
+                // Do not mutate robust weights/quarantine on unchanged geometry.
+                break;
+            }
         }
         have_usable_solution = true;
         if (options.max_irls_iterations == 0) break;
@@ -1373,10 +1409,15 @@ GlobalPositioningSummary refine_only_points_bearings(
             " downweighted=", update.downweighted,
             " quarantined=", update.quarantined,
             " max_weight_change=", update.maximum_weight_change);
-        if (pass == options.max_irls_iterations ||
-            update.maximum_weight_change < options.irls_weight_convergence)
+        if (update.maximum_weight_change < options.irls_weight_convergence) {
+            result.termination = cpu_pass_time_limited
+                ? GlobalPositioningTermination::time_limit
+                : GlobalPositioningTermination::irls_converged;
             break;
+        }
+        if (pass == options.max_irls_iterations) break;
         result.irls_iterations = pass + 1;
+        ++pass;
     }
     if (!have_usable_solution) return result;
 
@@ -1394,6 +1435,9 @@ GlobalPositioningSummary refine_only_points_bearings(
     result.final_residual = mean_residual_norm(problem);
     core::Logger::instance().info(
         "global positioning succeeded: only_points/bearing_schur",
+        " termination=", positioning_termination_name(result.termination),
+        " cpu_accepted_updates=", result.cpu_accepted_updates,
+        " cpu_time_limited_passes=", result.cpu_time_limited_passes,
         " images=", result.positioned_images,
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
@@ -1486,19 +1530,21 @@ bool attempt_positioning(
     double total_solve_seconds = 0.0;
     bool have_usable_solution = false;
     IrlsUpdate final_update;
-    for (unsigned pass = 0; pass <= maximum_irls; ++pass) {
+    double minimum_cpu_budget = 0.0;
+    result.termination = GlobalPositioningTermination::iteration_limit;
+    for (unsigned pass = 0; pass <= maximum_irls;) {
         double remaining_seconds = options.max_solver_time_sec;
         if (options.max_solver_time_sec > 0.0) {
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - solve_started).count();
             remaining_seconds = options.max_solver_time_sec - elapsed;
-            if (remaining_seconds <= 0.05) break;
+            if (remaining_seconds <= 0.05) {
+                result.termination = GlobalPositioningTermination::time_limit;
+                break;
+            }
             const unsigned remaining_passes = maximum_irls - pass + 1;
-            const double pass_budget = pass == 0
-                ? 0.6 * remaining_seconds
-                : remaining_seconds / static_cast<double>(remaining_passes);
-            solver_options.max_solver_time_in_seconds =
-                std::max(0.05, pass_budget);
+            solver_options.max_solver_time_in_seconds = detail::positioning_pass_budget(
+                remaining_seconds, remaining_passes, pass == 0, minimum_cpu_budget);
         }
         solver_options.max_num_iterations = static_cast<int>(
             pass == 0
@@ -1513,12 +1559,41 @@ bool attempt_positioning(
         result.iterations +=
             static_cast<unsigned>(pass_summary.iterations.size());
         if (!pass_summary.IsSolutionUsable()) {
+            result.termination = GlobalPositioningTermination::failed;
             if (!have_usable_solution) {
                 core::Logger::instance().warning(
                     "global positioning attempt failed: ", attempt.label,
                     " message=", pass_summary.message);
                 return false;
             }
+            break;
+        }
+        const auto progress = detail::positioning_pass_progress(
+            pass_summary, solver_options.max_solver_time_in_seconds);
+        result.termination = progress.time_limited
+            ? GlobalPositioningTermination::time_limit
+            : GlobalPositioningTermination::iteration_limit;
+        result.cpu_accepted_updates += progress.accepted_updates;
+        result.cpu_time_limited_passes += progress.time_limited;
+        minimum_cpu_budget = progress.minimum_next_budget;
+        if (progress.accepted_updates == 0 && !progress.converged) {
+            const double remaining = options.max_solver_time_sec > 0
+                ? options.max_solver_time_sec - std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - solve_started).count() : 0;
+            if (detail::can_retry_positioning_pass(remaining, progress)) {
+                core::Logger::instance().warning(
+                    "global positioning retrying unchanged CPU pass: attempt=", attempt.label,
+                    " pass=", pass, " minimum_budget_s=", minimum_cpu_budget,
+                    " remaining_s=", remaining);
+                continue;
+            }
+            result.termination = progress.time_limited
+                ? GlobalPositioningTermination::time_limit
+                : GlobalPositioningTermination::stalled;
+            core::Logger::instance().warning(
+                "global positioning stopped without effective CPU update: attempt=", attempt.label,
+                " pass=", pass, " time_limited=", progress.time_limited,
+                " retaining_previous_solution=", have_usable_solution);
             break;
         }
         have_usable_solution = true;
@@ -1540,11 +1615,15 @@ bool attempt_positioning(
             " downweighted=", final_update.downweighted,
             " quarantined=", final_update.quarantined,
             " max_weight_change=", final_update.maximum_weight_change);
-        if (pass == maximum_irls ||
-            final_update.maximum_weight_change <
-                options.irls_weight_convergence)
+        if (final_update.maximum_weight_change < options.irls_weight_convergence) {
+            result.termination = progress.time_limited
+                ? GlobalPositioningTermination::time_limit
+                : GlobalPositioningTermination::irls_converged;
             break;
+        }
+        if (pass == maximum_irls) break;
         result.irls_iterations = pass + 1;
+        ++pass;
     }
     if (!have_usable_solution) return false;
 
@@ -1566,6 +1645,9 @@ bool attempt_positioning(
     }
     core::Logger::instance().info(
         "global positioning succeeded: ", attempt.label,
+        " termination=", positioning_termination_name(result.termination),
+        " cpu_accepted_updates=", result.cpu_accepted_updates,
+        " cpu_time_limited_passes=", result.cpu_time_limited_passes,
         " images=", result.positioned_images,
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
@@ -1700,8 +1782,10 @@ GlobalPositioningSummary solve_global_positions(
         GlobalPositioningSummary attempt_summary;
         if (!attempt_positioning(
                 scene, options, attempt, selected_tracks, generator,
-                distribution, attempt_summary))
+                distribution, attempt_summary)) {
+            result = attempt_summary;
             continue;
+        }
 
         if (attempt.constraint == GlobalPositioningConstraint::only_cameras) {
             warm_centers.resize(scene.images.size());
@@ -1733,6 +1817,7 @@ GlobalPositioningSummary solve_global_positions(
         for (std::size_t i = 0; i < scene.tracks.size(); ++i)
             scene.tracks[i].position = original_points[i];
         result.success = true;
+        result.termination = GlobalPositioningTermination::camera_only_fallback;
         result.positioned_images = scene.registered_count();
         result.positioned_tracks = 0;
         result.observations = 0;

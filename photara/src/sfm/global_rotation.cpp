@@ -1,6 +1,7 @@
 #include "sfm/global_rotation.hpp"
 
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 
 #include <Eigen/IterativeLinearSolvers>
 
@@ -357,6 +358,11 @@ GlobalRotationSummary estimate_global_rotations(
     compute_residuals(edges, rotations, valid, residuals);
     core::Logger::instance().debug(
         "global rotation: initial residual_norm=", residuals.norm());
+
+    // Sparse CG repeatedly launches small vector products. OpenMP fan-out
+    // costs more than the work on these graphs; restore the caller's setting
+    // when rotation averaging returns, before positioning/BA begin.
+    const parallel::ScopedOpenMpThreads eigen_threads(1);
 
     if (options.max_l1_iterations > 0) {
         const Eigen::SparseMatrix<double> weighted_matrix =

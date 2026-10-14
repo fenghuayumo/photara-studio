@@ -32,12 +32,16 @@ struct ReconstructionConfig {
 };
 
 struct ReconstructionSummary {
+    // A usable reconstruction; neither a precision guarantee nor solver convergence.
     bool valid{false};
     unsigned registered_views{0};
     unsigned landmarks{0};
     unsigned failed_views{0};
     unsigned alignment_reliable_views{0};
     unsigned alignment_unreliable_views{0};
+    // Graph-support screening is conservative and does not prove position accuracy.
+    unsigned position_audited_views{0};
+    unsigned position_unverified_views{0};
     std::uint64_t reprojection_observations{0};
     double mean_reprojection_error_pixels{0.0};
     double rms_reprojection_error_pixels{0.0};
@@ -52,6 +56,12 @@ struct AlignmentObservability {
 };
 
 AlignmentObservability analyze_alignment_observability(const Scene& scene);
+
+// Screen translation support using strong, nonplanar, parallax-bearing pairs.
+// Does not use optimized landmark coordinates or an external reference.
+AlignmentObservability analyze_position_observability(const Scene& scene);
+// Persist uncertainty separately from registration; nomination never changes poses.
+unsigned audit_position_support(Scene& scene);
 
 // Split untrusted camera/lens states for late BA. Millimetre focal lengths
 // only scale a pixel-space initialization; existing camera groups stay distinct.

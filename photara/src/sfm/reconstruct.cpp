@@ -1009,6 +1009,11 @@ ReconstructionSummary summarize_scene(const Scene& scene) {
     summary.registered_views = scene.registered_count();
     summary.failed_views =
         static_cast<unsigned>(scene.images.size()) - summary.registered_views;
+    for (const auto& image : scene.images) {
+        if (!image.registered) continue;
+        summary.position_audited_views += image.position_audit != PositionAudit::not_audited;
+        summary.position_unverified_views += image.position_audit == PositionAudit::unverified;
+    }
     const AlignmentObservability observability =
         analyze_alignment_observability(scene);
     summary.alignment_reliable_views = observability.reliable_views;
@@ -1287,6 +1292,84 @@ AlignmentObservability analyze_alignment_observability(const Scene& scene) {
     }
     result.unreliable_views = scene.registered_count() - result.reliable_views;
     return result;
+}
+
+AlignmentObservability analyze_position_observability(const Scene& scene) {
+    // Optimized depths must not let a drifting local clique certify itself.
+    Scene graph;
+    graph.images.resize(scene.images.size());
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        graph.images[id].id = id;
+        graph.images[id].registered = scene.images[id].registered;
+    }
+    const auto eligible = [&](const ImagePair& pair) {
+        return pair.active && pair.relative_pose && !pair.zero_baseline &&
+            !pair.degenerate_planar && pair.id1 < scene.images.size() &&
+            pair.id2 < scene.images.size() && pair.matches.size() >= 30 &&
+            scene.images[pair.id1].registered && scene.images[pair.id2].registered &&
+            scene.images[pair.id1].camera_id < scene.cameras.size() &&
+            scene.images[pair.id2].camera_id < scene.cameras.size() &&
+            std::isfinite(pair.composite_weight()) && pair.composite_weight() > 0;
+    };
+    std::vector<float> strongest(scene.images.size());
+    for (const auto& pair : scene.pairs) {
+        if (!eligible(pair)) continue;
+        strongest[pair.id1] = std::max(strongest[pair.id1], pair.composite_weight());
+        strongest[pair.id2] = std::max(strongest[pair.id2], pair.composite_weight());
+    }
+    for (const auto& pair : scene.pairs) {
+        if (!eligible(pair) || pair.composite_weight() <
+                0.1F * std::min(strongest[pair.id1], strongest[pair.id2])) continue;
+        const auto& first = scene.images[pair.id1];
+        const auto& second = scene.images[pair.id2];
+        const auto& a = scene.camera_of(first);
+        const auto& b = scene.camera_of(second);
+        const std::size_t samples = std::min<std::size_t>(256, pair.matches.size());
+        unsigned parallax_support = 0;
+        for (std::size_t index = 0; index < samples; ++index) {
+            const auto& match = pair.matches[index * pair.matches.size() / samples];
+            if (match.query >= first.features.keypoints.size() ||
+                match.train >= second.features.keypoints.size()) continue;
+            const auto& x = first.features.keypoints[match.query];
+            const auto& y = second.features.keypoints[match.train];
+            const Vec3 u = first.pose.R.transpose() * a.unproject_normalized(Vec2(x.x, x.y));
+            const Vec3 v = second.pose.R.transpose() * b.unproject_normalized(Vec2(y.x, y.y));
+            if (!u.allFinite() || !v.allFinite()) continue;
+            const double cosine = u.dot(v);
+            if (cosine > 0 && cosine <= 0.9998476951563913) ++parallax_support;
+        }
+        if (parallax_support < 20) continue;
+        ImagePair edge(pair.id1, pair.id2);
+        edge.relative_pose = pair.relative_pose;
+        graph.pairs.push_back(std::move(edge));
+    }
+    // No jointly optimized landmarks enter the connectivity audit.
+    auto audit = analyze_alignment_observability(graph);
+    if (audit.reliable_views < 3) {
+        std::fill(audit.reliable.begin(), audit.reliable.end(), 0);
+        audit.reliable_views = 0;
+        audit.unreliable_views = scene.registered_count();
+    }
+    return audit;
+}
+
+unsigned audit_position_support(Scene& scene) {
+    if (scene.pairs.empty() || scene.registered_count() < 4) return 0;
+    core::StageScope stage("sfm.position_audit");
+    const auto audit = analyze_position_observability(scene);
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        auto& image = scene.images[id];
+        if (!image.registered) { image.position_audit = PositionAudit::not_audited; continue; }
+        image.position_audit = audit.reliable[id]
+            ? PositionAudit::graph_supported : PositionAudit::unverified;
+        if (!audit.reliable[id])
+            core::Logger::instance().warning("position audit: unverified image=", image.path.filename(),
+                " reason=insufficient_independent_translation_connections");
+    }
+    core::Logger::instance().info("position audit: supported=", audit.reliable_views,
+        " unverified=", audit.unreliable_views,
+        " registration_and_geometry_preserved=1");
+    return audit.unreliable_views;
 }
 
 unsigned prune_unsupported_registrations(
@@ -1795,6 +1878,7 @@ ReconstructionSummary reconstruct_from_frontend(
                            config.global_positioning, config.resection);
     }
     finish_alignment_recovery(scene, config);
+    audit_position_support(scene);
     return summarize_scene(scene);
 }
 
@@ -1815,6 +1899,7 @@ ReconstructionSummary reconstruct(
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
         finish_alignment_recovery(scene_out, config);
+        audit_position_support(scene_out);
         if (config.resection.checkpoint_callback)
             config.resection.checkpoint_callback(scene_out);
         const ReconstructionSummary summary = summarize_scene(scene_out);

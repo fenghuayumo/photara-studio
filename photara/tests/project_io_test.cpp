@@ -118,6 +118,20 @@ int main() {
     expect(restored.tracks[0].num_inliers == 2, "asfm inliers");
     expect(!restored.tracks[0].has_color, "asfm colour absent by default");
     expect(restored.pairs.empty(), "asfm omits pairs");
+    Scene audited=source;
+    audited.images[0].position_audit=PositionAudit::unverified;
+    audited.images[1].position_audit=PositionAudit::graph_supported;
+    const auto audit_bytes=encode_asfm(audited);
+    const auto audit_restored=decode_asfm(audit_bytes);
+    expect(audit_restored.images[0].position_audit==PositionAudit::unverified &&
+           audit_restored.images[1].position_audit==PositionAudit::graph_supported,
+           "position uncertainty survives ASFM round trip without changing registration");
+    std::uint32_t minimum_reader{};
+    std::memcpy(&minimum_reader,audit_bytes.data()+12,sizeof(minimum_reader));
+    expect(minimum_reader==k_asfm_position_audit_min_reader,
+           "unverified poses require a reader that preserves the warning");
+    expect(restored.images[0].position_audit==PositionAudit::not_audited,
+           "unaudited models are not implicitly promoted to verified");
 
     const auto ply_path = dir / "photara_project_io_sparse.ply";
     std::filesystem::remove(ply_path, error);

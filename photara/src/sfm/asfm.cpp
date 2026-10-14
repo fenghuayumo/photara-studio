@@ -108,6 +108,7 @@ void write_payload(
                 record.value(keypoint.orientation);
                 record.value(keypoint.response);
             }
+            record.value(static_cast<std::uint8_t>(image.position_audit));
         });
     }
 
@@ -183,6 +184,12 @@ Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
                 keypoint.orientation = record.value<float>();
                 keypoint.response = record.value<float>();
             }
+            if (record.remaining() >= 1) {
+                const auto audit = record.value<std::uint8_t>();
+                if (audit > static_cast<std::uint8_t>(PositionAudit::unverified))
+                    throw std::runtime_error("Unsupported position audit state");
+                image.position_audit = static_cast<PositionAudit>(audit);
+            }
         });
         if (image.id != index || image.camera_id >= scene.cameras.size())
             throw std::runtime_error("ASFM image references an invalid camera");
@@ -244,9 +251,12 @@ std::vector<std::uint8_t> encode_asfm(
         scene.cameras.begin(), scene.cameras.end(), [](const PinholeCamera& camera) {
             return camera.model == CameraModel::equirectangular;
         });
-    file.value(equirectangular ? k_asfm_equirectangular_min_reader
+    const bool unverified = std::any_of(scene.images.begin(), scene.images.end(),
+        [](const Image& image) { return image.registered && image.position_audit == PositionAudit::unverified; });
+    file.value(unverified ? k_asfm_position_audit_min_reader
+                          : (equirectangular ? k_asfm_equirectangular_min_reader
                                : (fisheye ? k_asfm_fisheye_min_reader
-                                          : k_asfm_min_reader));
+                                          : k_asfm_min_reader)));
     file.value(payload.size());
     file.value(payload.checksum());
     file.bytes(payload.buffer().data(), payload.buffer().size());
