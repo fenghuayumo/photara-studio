@@ -277,7 +277,8 @@ void refresh_artifacts(App& app) {
     // empty path relative to the process working directory, otherwise a
     // stray sparse.ply next to the executable could be treated as the active
     // reconstruction.
-    if (app.settings.project_dir[0] == '\0') {
+    if (app.settings.project_dir[0] == '\0' && app.settings.images_dir[0] == '\0' && !app.settings.dataset_source[0] &&
+        app.settings.runtime_dir[0] == '\0') {
         app.layout = {};
         app.has_sparse = false;
         app.has_asfm = false;
@@ -291,7 +292,10 @@ void refresh_artifacts(App& app) {
         return;
     }
     app.layout = resolve_layout(app.settings);
+    app.layout.use_saved_inputs = !app.saved_results_discarded;
     app.training_checkpoint_info = photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint);
+    if (!app.saved_results_discarded && !app.project_results_dirty && !app.training_checkpoint_info && !app.layout.project_file.empty())
+        app.training_checkpoint_info = photara::splat::inspect_training_checkpoint(app.layout.project_file);
     std::error_code error;
     app.has_asfm = std::filesystem::exists(app.layout.sparse_asfm, error);
     app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
@@ -309,7 +313,7 @@ void refresh_artifacts(App& app) {
     app.has_texture = textured_mesh_on_disk(app.layout.working_texture);
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
-    if (app.layout.project_file.empty()) return;
+    if (app.layout.project_file.empty() || app.saved_results_discarded) return;
     try {
         if (!std::filesystem::exists(app.layout.project_file, error)) return;
         const auto archive =
@@ -336,22 +340,11 @@ std::filesystem::path reconstruction_images_path(const App& app) {
 void store_utf8_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path);
 
-void assign_default_project_folder(App& app) {
-    if (app.settings.images_dir[0] == '\0' ||
-        app.settings.project_dir[0] != '\0')
-        return;
-
-    const std::filesystem::path images =
-        path_from_utf8_field(app.settings.images_dir.data());
-    const std::filesystem::path parent = images.parent_path();
-    std::filesystem::path project_name = is_video_source(app.settings)
-        ? images.stem()
-        : images.filename();
-    project_name += ".ascan";
-    const std::filesystem::path project =
-        parent.empty() ? project_name : parent / project_name;
-    store_utf8_path_field(app.settings.project_dir, project);
-    app.project_folder_automatic = true;
+void ensure_task_cache(App& app) {
+    if (app.settings.runtime_dir[0] != '\0') return;
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) return;
+    const auto layout = resolve_layout(app.settings);
+    store_utf8_path_field(app.settings.runtime_dir, layout.working_sfm.parent_path());
 }
 
 void store_path_field(
@@ -646,13 +639,26 @@ void apply_external_dataset_selection(App& app) {
         if (!inferred.empty())
             store_utf8_path_field(app.settings.images_dir, inferred);
     }
-    assign_default_project_folder(app);
+    ensure_task_cache(app);
     request_dataset_scene_load(app);
     set_message(
         app,
         "External cameras loaded. Align Photos is skipped; Train 3DGS or "
         "Extract Mesh can run next.",
         theme::accent);
+}
+
+void change_external_dataset(App& app, const std::filesystem::path& path) {
+    if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app, path] { change_external_dataset(app, path); })) return;
+    store_utf8_path_field(app.settings.dataset_source, path);
+    app.settings.dataset_initial_cloud.fill('\0');
+    app.settings.project_dir.fill('\0');
+    app.settings.runtime_dir.fill('\0');
+    app.saved_project_settings.clear();
+    app.saved_results_discarded = false;
+    app.project_results_dirty = true;
+    apply_external_dataset_selection(app);
 }
 
 void ensure_dataset_scene_loaded(App& app) {
@@ -715,18 +721,64 @@ void request_ascan_scene_load(App& app) {
 photara::splat::GaussianModel load_export_model(
     const App& app, tinytensor::Device device);
 
+bool has_unsaved_project_changes(const App& app) {
+    const bool has_content = app.settings.images_dir[0] || app.settings.dataset_source[0] ||
+        has_reconstruction_result(app) || !app.gaussian_models.empty() || !app.imported_mesh_source.empty();
+    if (app.saved_project_settings.empty()) return has_content;
+    if (app.project_results_dirty || app.job.running() ||
+        (app.splat_edit.dirty() && app.splat_edit.edit_revision() != app.saved_edit_revision)) return true;
+    if (photara::project::encode_settings(collect_project_settings(app), app.layout.project_file) !=
+        app.saved_project_settings) return true;
+    std::error_code error;
+    if (!app.layout.working_sfm.empty() && std::filesystem::exists(app.layout.working_sfm, error)) {
+        const auto stamp = std::filesystem::last_write_time(app.layout.working_sfm, error);
+        if (!error && app.saved_sfm_write_time && stamp != *app.saved_sfm_write_time) return true;
+    }
+    return false;
+}
+
+void mark_project_saved(App& app) {
+    app.saved_project_settings = photara::project::encode_settings(
+        collect_project_settings(app), app.layout.project_file);
+    app.project_results_dirty = false;
+    app.saved_results_discarded = false;
+    app.saved_edit_revision = app.splat_edit.edit_revision();
+    app.saved_sfm_write_time.reset();
+    std::error_code error;
+    if (!app.layout.working_sfm.empty() && std::filesystem::exists(app.layout.working_sfm, error)) {
+        const auto stamp = std::filesystem::last_write_time(app.layout.working_sfm, error);
+        if (!error) app.saved_sfm_write_time = stamp;
+    }
+}
+
+bool defer_project_transition(App& app, std::function<void()> action) {
+    if (app.project_transition_approved || !has_unsaved_project_changes(app)) return false;
+    app.pending_project_action = std::move(action);
+    app.show_project_switch_confirmation = true;
+    app.checkpoint_save_error.clear();
+    return true;
+}
+
+void complete_project_transition(App& app) {
+    auto action = std::move(app.pending_project_action);
+    app.pending_project_action = {};
+    app.project_transition_approved = true;
+    try { if (action) action(); }
+    catch (const std::exception& error) { set_message(app, error.what(), theme::danger); }
+    app.project_transition_approved = false;
+}
+
 bool save_project_to_path(App& app, const std::filesystem::path& path) {
     try {
         std::error_code error;
         photara::project::Archive archive =
             photara::project::Archive::create();
         const auto current = app.layout.project_file;
-        if (!current.empty() && std::filesystem::exists(current, error))
+        if (!app.saved_results_discarded && !current.empty() && std::filesystem::exists(current, error))
             archive = photara::project::Archive::open(current);
-        else if (std::filesystem::exists(path, error))
-            archive = photara::project::Archive::open(path);
-        photara::project::write_settings(
-            archive, collect_project_settings(app), path);
+        auto settings = collect_project_settings(app);
+        settings.name = path_to_utf8(path.stem());
+        photara::project::write_settings(archive, settings, path);
         std::error_code working_error;
         if (!app.layout.working_sfm.empty() &&
             std::filesystem::exists(app.layout.working_sfm, working_error)) {
@@ -827,9 +879,23 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
         }
 #endif
+        const auto checkpoint = photara::splat::inspect_training_checkpoint(app.layout.training_checkpoint);
+        if (checkpoint || app.project_results_dirty) {
+            const auto snapshot = checkpoint ? photara::project::Archive::open(app.layout.training_checkpoint)
+                : photara::project::Archive::create();
+            for (auto type : {photara::project::ChunkType::training_checkpoint,
+                 photara::project::ChunkType::training_checkpoint_info,
+                 photara::project::ChunkType::training_checkpoint_previous,
+                 photara::project::ChunkType::training_checkpoint_previous_info,
+                 photara::project::ChunkType::training_checkpoint_history}) {
+                archive.erase_chunk(type);
+                if (snapshot.has(type)) archive.set_chunk(type, snapshot.chunk(type));
+            }
+        }
         archive.save(path);
         store_path_field(app.settings.project_dir, path);
-        app.project_folder_automatic = false;
+        refresh_artifacts(app);
+        mark_project_saved(app);
         refresh_artifacts(app);
         return true;
     } catch (const std::exception& error) {
@@ -892,6 +958,7 @@ bool alignment_job_running(const App& app) {
 
 void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app] { new_project(app); })) return;
     clear_loaded_result(app);
     // The cache root, retention policy, and compute choices are editor-wide
     // settings, not part of the project.
@@ -919,18 +986,25 @@ void new_project(App& app) {
     app.atlas_preview_path.clear();
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
-    app.project_folder_automatic = false;
+    app.saved_project_settings.clear();
+    app.project_results_dirty = false;
+    app.saved_results_discarded = false;
     set_message(app, "New project", theme::text_muted);
 }
 
 void apply_image_directory_selection(App& app) {
     clear_loaded_result(app);
+    app.settings.dataset_source.fill('\0');
+    app.settings.dataset_initial_cloud.fill('\0');
     // An image-folder selection starts a different reconstruction. Retaining
     // an explicitly opened project here makes refresh_artifacts() immediately
     // reload that project's old SfM result into the new dataset.
     app.settings.project_dir.fill('\0');
-    app.project_folder_automatic = false;
-    assign_default_project_folder(app);
+    app.settings.runtime_dir.fill('\0');
+    app.saved_project_settings.clear();
+    app.project_results_dirty = true;
+    app.saved_results_discarded = false;
+    ensure_task_cache(app);
     refresh_artifacts(app);
     set_message(
         app, "Image dataset selected; previous viewport result cleared",
@@ -939,9 +1013,20 @@ void apply_image_directory_selection(App& app) {
 
 void select_image_folder(App& app) {
     if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app] { select_image_folder(app); })) return;
     if (!pick_folder(
             L"Select the capture image folder", app.settings.images_dir))
         return;
+    app.settings.video_frames_dir.fill('\0');
+    apply_image_directory_selection(app);
+}
+
+void change_image_source(App& app, const std::filesystem::path& path) {
+    if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app, path] { change_image_source(app, path); })) return;
+    store_utf8_path_field(app.settings.images_dir, path);
+    app.settings.dataset_source.fill('\0');
+    app.settings.dataset_initial_cloud.fill('\0');
     app.settings.video_frames_dir.fill('\0');
     apply_image_directory_selection(app);
 }
@@ -1123,10 +1208,15 @@ void cleanup_cache_session(const App& app) {
 
 void apply_video_selection(App& app) {
     clear_loaded_result(app);
+    app.settings.dataset_source.fill('\0');
+    app.settings.dataset_initial_cloud.fill('\0');
     app.settings.video_frames_dir.fill('\0');
     app.settings.project_dir.fill('\0');
-    app.project_folder_automatic = false;
-    assign_default_project_folder(app);
+    app.settings.runtime_dir.fill('\0');
+    app.saved_project_settings.clear();
+    app.project_results_dirty = true;
+    app.saved_results_discarded = false;
+    ensure_task_cache(app);
     refresh_artifacts(app);
     set_message(
         app,
@@ -1138,6 +1228,7 @@ void apply_video_selection(App& app) {
 
 void select_video_file(App& app) {
     if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app] { select_video_file(app); })) return;
     if (!pick_video_file(
             L"Select a capture video", app.settings.images_dir))
         return;
@@ -1156,6 +1247,7 @@ void apply_dropped_image_source(
             theme::warning);
         return;
     }
+    if (defer_project_transition(app, [&app, dropped] { apply_dropped_image_source(app, dropped); })) return;
     std::vector<std::filesystem::path> videos;
     for (const std::string& text : dropped) {
         if (text.empty()) continue;
@@ -2643,7 +2735,12 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
 }
 void apply_opened_project(App& app) {
     clear_loaded_result(app);
-    app.project_folder_automatic = false;
+    app.settings.runtime_dir.fill('\0');
+    app.saved_results_discarded = false;
+    app.project_results_dirty = false;
+    const auto snapshot_cache = resolve_layout(app.settings).working_sfm.parent_path();
+    store_utf8_path_field(app.settings.runtime_dir, snapshot_cache /
+        ("opened-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())));
     refresh_artifacts(app);
     try {
         auto archive =
@@ -2657,9 +2754,8 @@ void apply_opened_project(App& app) {
                 std::make_shared<const std::vector<std::uint8_t>>(std::move(sources[i]));
         if (gaussian_models_managed(app)) request_gaussian_scene_load(app);
 
-        photara::splat::migrate_training_checkpoints(app.layout.project_file);
-        archive = photara::project::Archive::open(app.layout.project_file);
         refresh_artifacts(app);
+        mark_project_saved(app);
         if (app.training_checkpoint_info) {
             const auto& bounds = app.training_checkpoint_info->focus_bounds;
             if (bounds.valid && bounds.axes.isApprox(photara::mvs::Mat3f::Identity(), 1e-6F)) {
@@ -2703,9 +2799,15 @@ void apply_opened_project(App& app) {
 
 void select_project_folder(App& app) {
     if (app.job.running() || app.loading_scene) return;
+    if (defer_project_transition(app, [&app] { select_project_folder(app); })) return;
+    auto field = app.settings.project_dir;
     if (!pick_project_file(
-            L"Open Photara Project", app.settings.project_dir, false))
+            L"Open Photara Project", field, false))
         return;
+    const auto path = path_from_utf8_field(field.data());
+    try { (void)photara::project::read_settings(photara::project::Archive::open(path)); }
+    catch (const std::exception& error) { set_message(app, error.what(), theme::danger); return; }
+    store_utf8_path_field(app.settings.project_dir, path);
     apply_opened_project(app);
 }
 
@@ -2715,6 +2817,9 @@ void open_project_from_path(App& app, const std::filesystem::path& path) {
             app, "Cannot open a project while a job is running", theme::warning);
         return;
     }
+    if (defer_project_transition(app, [&app, path] { open_project_from_path(app, path); })) return;
+    try { (void)photara::project::read_settings(photara::project::Archive::open(path)); }
+    catch (const std::exception& error) { set_message(app, error.what(), theme::danger); return; }
     store_utf8_path_field(app.settings.project_dir, path);
     apply_opened_project(app);
 }
@@ -2750,13 +2855,17 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
             app, "Cannot open SfM while a job is running", theme::warning);
         return;
     }
+    if (defer_project_transition(app, [&app, asfm] { open_asfm_from_path(app, asfm); })) return;
     clear_loaded_result(app);
+    app.settings.project_dir.fill('\0');
+    app.settings.runtime_dir.fill('\0');
+    app.saved_project_settings.clear();
+    app.project_results_dirty = true;
 
     const auto sibling = asfm.parent_path() / (asfm.stem().string() + ".ascan");
     std::error_code error;
     if (std::filesystem::exists(sibling, error)) {
         store_utf8_path_field(app.settings.project_dir, sibling);
-        app.project_folder_automatic = false;
         try {
             refresh_artifacts(app);
             const auto archive =
@@ -2765,11 +2874,6 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
                 app, photara::project::read_settings(archive));
         } catch (...) {
         }
-    } else {
-        store_utf8_path_field(
-            app.settings.project_dir,
-            asfm.parent_path() / (asfm.stem().string() + ".ascan"));
-        app.project_folder_automatic = true;
     }
 
     if (app.settings.images_dir[0] == '\0') {
@@ -2777,48 +2881,51 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
         if (!inferred.empty())
             store_utf8_path_field(app.settings.images_dir, inferred);
     }
-    if (app.settings.project_dir[0] != '\0') refresh_artifacts(app);
+    ensure_task_cache(app);
+    refresh_artifacts(app);
+    app.layout.sparse_asfm = asfm;
+    if (!app.layout.working_sfm.empty()) {
+        const auto scene = load_working_sfm(asfm, reconstruction_images_path(app));
+        photara::sfm::AsfmOptions options;
+        options.path_base = reconstruction_images_path(app);
+        std::filesystem::create_directories(app.layout.working_sfm.parent_path());
+        photara::sfm::save_asfm(scene, app.layout.working_sfm, options);
+    }
     app.has_sparse = true;
     app.has_asfm = true;
     request_asfm_scene_load(app, asfm, asfm.filename().string());
 }
 
+bool choose_project_save_path(App& app, const bool save_as = false) {
+    ensure_task_cache(app);
+    refresh_artifacts(app);
+    if (!save_as && !app.layout.project_file.empty()) {
+        app.pending_project_save_path = app.layout.project_file;
+        return true;
+    }
+    auto field = app.settings.project_dir;
+    if (!pick_project_file(L"Save Photara Project", field, true)) return false;
+    auto path = path_from_utf8_field(field.data());
+    if (lower_path_extension(path) != ".ascan") path.replace_extension(".ascan");
+    app.pending_project_save_path = path;
+    return true;
+}
+
 void save_project_as(App& app) {
-    if (app.job.running()) return;
-    if (!app.layout.project_file.empty() && photara::splat::training_checkpoint_in_use(app.layout.project_file)) {
+    if (app.job.running() || !choose_project_save_path(app, true)) return;
+    if (photara::splat::training_checkpoint_in_use(app.pending_project_save_path)) {
         set_message(app, "This project is being trained in another process. Stop that task before saving.", theme::warning);
         return;
     }
-    const auto original_project_field = app.settings.project_dir;
-    if (!pick_project_file(L"Save Photara Project", app.settings.project_dir, true)) return;
-    auto path = path_from_utf8_field(app.settings.project_dir.data());
-    std::string extension = path.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (extension != ".ascan") path.replace_extension(".ascan");
-    // Keep the source layout until save_project_to_path has copied all native
-    // project chunks, including the embedded training state, to the new file.
-    app.settings.project_dir = original_project_field;
-    if (save_project_to_path(app, path)) set_message(app, "Project saved", theme::success);
+    if (save_project_to_path(app, app.pending_project_save_path)) {
+        app.pending_project_save_path.clear();
+        set_message(app, "Project saved", theme::success);
+        if (app.pending_project_action) complete_project_transition(app);
+    }
 }
 
 void save_project(App& app) {
-    if (app.job.running() && app.active_job == JobKind::train) {
-        request_project_save(app, false); return;
-    }
-    if (app.job.running()) return;
-    assign_default_project_folder(app);
-    refresh_artifacts(app);
-    if (app.layout.project_file.empty()) {
-        save_project_as(app);
-        return;
-    }
-    if (photara::splat::training_checkpoint_in_use(app.layout.project_file)) {
-        set_message(app, "This project is being trained in another process. Stop that task before saving.", theme::warning);
-        return;
-    }
-    if (save_project_to_path(app, app.layout.project_file))
-        set_message(app, "Project saved", theme::success);
+    request_project_save(app, false);
 }
 
 void cancel_project_save(App& app) {
@@ -2835,6 +2942,12 @@ void cancel_project_save(App& app) {
 void request_project_save(App& app, const bool exit_after_save) {
     if (app.saving_training) return;
     app.checkpoint_save_error.clear();
+    if (!choose_project_save_path(app)) return;
+    if (photara::splat::training_checkpoint_in_use(app.pending_project_save_path)) {
+        app.checkpoint_save_error = "This project is being trained in another process. Stop that task before saving.";
+        set_message(app, app.checkpoint_save_error, theme::warning);
+        return;
+    }
     if (app.job.running() && app.active_job == JobKind::train) {
         try {
             std::filesystem::create_directories(app.layout.training_control.parent_path());
@@ -2863,23 +2976,19 @@ void request_project_save(App& app, const bool exit_after_save) {
         }
         return;
     }
-    assign_default_project_folder(app);
+    ensure_task_cache(app);
     refresh_artifacts(app);
-    if (app.layout.project_file.empty()) {
-        save_project_as(app);
-        if (!app.layout.project_file.empty() && std::filesystem::exists(app.layout.project_file))
-            app.close_approved = exit_after_save;
-        return;
-    }
     if (!app.job.running() && photara::splat::training_checkpoint_in_use(app.layout.project_file)) {
         app.checkpoint_save_error = "This project is being trained in another process. Stop that task before saving.";
         set_message(app, app.checkpoint_save_error, theme::warning); return;
     }
     const bool was_paused = app.job.paused();
     if (app.job.running()) app.job.pause();
-    if (save_project_to_path(app, app.layout.project_file)) {
+    if (save_project_to_path(app, app.pending_project_save_path)) {
+        app.pending_project_save_path.clear();
         app.close_approved = exit_after_save;
         set_message(app, "Project saved", theme::success);
+        if (app.pending_project_action) complete_project_transition(app);
     } else app.checkpoint_save_error = app.message;
     if (app.job.running() && !was_paused) app.job.resume();
 }
@@ -2906,7 +3015,8 @@ void poll_project_save(App& app) {
         return;
     }
     const bool exit_after_save = app.exit_after_save;
-    if (save_project_to_path(app, app.layout.project_file)) {
+    if (save_project_to_path(app, app.pending_project_save_path)) {
+        app.pending_project_save_path.clear();
         if (exit_after_save) {
             app.close_approved = true; // Keep the child at its safe boundary until shutdown.
             app.saving_training = false;
@@ -2962,29 +3072,8 @@ void delete_reconstruction_results(App& app) {
         if (error && failure.empty()) failure = error.message();
     }
 
-    if (!app.layout.project_file.empty()) {
-        try {
-            if (std::filesystem::exists(app.layout.project_file)) {
-                auto archive =
-                    photara::project::Archive::open(app.layout.project_file);
-                archive.erase_chunk(photara::project::ChunkType::training_checkpoint);
-                archive.erase_chunk(photara::project::ChunkType::training_checkpoint_info);
-                archive.erase_chunk(photara::project::ChunkType::training_checkpoint_previous);
-                archive.erase_chunk(photara::project::ChunkType::training_checkpoint_previous_info);
-                archive.erase_chunk(photara::project::ChunkType::training_checkpoint_history);
-                archive.erase_chunk(photara::project::ChunkType::sfm);
-                archive.erase_chunk(photara::project::ChunkType::gaussians);
-                archive.erase_chunk(photara::project::ChunkType::mesh);
-                archive.erase_chunk(photara::project::ChunkType::texture);
-                photara::project::write_settings(
-                    archive, collect_project_settings(app),
-                    app.layout.project_file);
-                archive.save(app.layout.project_file);
-            }
-        } catch (const std::exception& error) {
-            if (failure.empty()) failure = error.what();
-        }
-    }
+    app.saved_results_discarded = true;
+    app.project_results_dirty = true;
 
     // resolve_layout() keeps cache as a child of the project directory.
     // relationship before a recursive removal so a malformed path can never
@@ -3292,9 +3381,9 @@ void start_align(App& app) {
             theme::warning);
         return;
     }
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -3386,7 +3475,6 @@ bool alignment_cache_present(const App& app) {
 bool can_export_sfm(const App& app) {
     return !has_external_dataset(app) &&
            app.settings.images_dir[0] != '\0' &&
-           app.settings.project_dir[0] != '\0' &&
            (app.has_sparse || alignment_cache_present(app));
 }
 
@@ -3442,9 +3530,9 @@ const char* stop_job_label(const JobKind kind) {
 void start_export_sfm(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -3724,9 +3812,9 @@ void export_alignment(App& app) {
 void start_train(App& app, const bool smoke, const bool resume_training) {
     if (app.job.running() || app.pending_train_prepare.valid()) return;
     if (!smoke && !ensure_sam_ready(app)) return;
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -3738,75 +3826,25 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         set_message(app, "This project's training checkpoint is in use by another process.", theme::warning);
         return;
     }
-    if (!smoke && !app.training_project_ready) {
+    if (!smoke && !app.training_inputs_ready) {
         const auto layout = app.layout;
-        const auto settings = collect_project_settings(app);
         const auto images = reconstruction_images_path(app);
-        photara::splat::GaussianModel edited;
-        const bool have_edits = app.splat_edit.dirty() && app.splat_edit.copy_model(edited);
         app.train_prepare_resume = resume_training;
         app.train_preparation = std::make_shared<TrainPreparation>();
         const auto preparation = app.train_preparation;
         app.pending_train_prepare = std::async(std::launch::async,
-            [layout, settings, images, resume_training, have_edits, preparation, edited = std::move(edited)]() mutable {
+            [layout, images, resume_training, preparation] {
                 try {
-                    photara::splat::migrate_training_checkpoints(layout.project_file);
-                    // Serialize preparation with other project writers. One atomic
-                    // save both updates inputs and invalidates a fresh run's state.
-                    photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
-                    if (preparation->cancelled) return std::string{};
-                    auto archive = std::filesystem::exists(layout.project_file)
-                        ? photara::project::Archive::open(layout.project_file)
-                        : photara::project::Archive::create();
-                    bool changed = have_edits;
-                    const auto settings_bytes = photara::project::encode_settings(settings, layout.project_file);
-                    if (!archive.has(photara::project::ChunkType::settings) ||
-                        archive.chunk(photara::project::ChunkType::settings) != settings_bytes) {
-                        archive.set_chunk(photara::project::ChunkType::settings, settings_bytes);
-                        changed = true;
-                    }
-                    if (!layout.working_sfm.empty() && std::filesystem::exists(layout.working_sfm)) {
-                        const auto signature = photara::project::sfm_source_signature(layout.working_sfm, images, layout.project_file);
-                        if (!archive.has(photara::project::ChunkType::sfm) ||
-                            !archive.has(photara::project::ChunkType::sfm_source) ||
-                            archive.chunk(photara::project::ChunkType::sfm_source) != signature) {
-                            if (preparation->cancelled) return std::string{};
-                            preparation->stage = TrainPrepareStage::reading_sfm;
-                            const auto scene = load_working_sfm(layout.working_sfm, images);
-                            if (preparation->cancelled) return std::string{};
-                            preparation->stage = TrainPrepareStage::encoding_sfm;
-                            photara::project::write_sfm(archive, scene, layout.project_file);
-                            archive.set_chunk(photara::project::ChunkType::sfm_source, signature);
-                            changed = true;
-                        }
-                    }
-                    if (have_edits)
-                        archive.set_chunk(photara::project::ChunkType::gaussians,
-                            photara::splat::encode_gaussians(edited));
-                    if (!resume_training) {
-                        for (auto type : {photara::project::ChunkType::training_checkpoint,
-                            photara::project::ChunkType::training_checkpoint_info,
-                            photara::project::ChunkType::training_checkpoint_previous,
-                            photara::project::ChunkType::training_checkpoint_previous_info,
-                            photara::project::ChunkType::training_checkpoint_history})
-                        {
-                            changed |= archive.has(type);
-                            archive.erase_chunk(type);
-                        }
-                    }
-                    // Existing output chunks are already native project data;
-                    // reloading exported models/meshes/textures adds no inputs.
-                    if (preparation->cancelled) return std::string{};
-                    preparation->stage = TrainPrepareStage::saving;
-                    if (changed) archive.save(layout.project_file);
-                    preparation->stage = TrainPrepareStage::ready;
+                    prepare_training_inputs(layout, images, resume_training,
+                        [preparation] { return preparation->cancelled.load(); },
+                        [preparation](TrainPrepareStage stage) { preparation->stage = stage; });
                     return std::string{};
                 } catch (const std::exception& failure) { return std::string(failure.what()); }
             });
         set_message(app, "Checking training inputs...", theme::accent);
         return;
     }
-    app.training_project_ready = false;
+    app.training_inputs_ready = false;
     write_working_subject_bounds(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -3919,6 +3957,7 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         app.log.open(app.layout.train_log);
         app.job.start(command, app.layout.train_log);
         app.active_job = JobKind::train;
+        app.project_results_dirty = true;
         set_message(
             app,
             has_external_dataset(app)
@@ -3943,21 +3982,20 @@ void poll_train_start(App& app) {
     app.train_preparation.reset();
     if (cancelled) { set_message(app, "Training preparation cancelled", theme::text_muted); return; }
     if (!error.empty()) { set_message(app, error, theme::danger); return; }
-    app.project_folder_automatic = false;
     refresh_artifacts(app);
     // A requested close takes precedence over starting a new GPU task.
     if (app.close_requested || app.show_close_confirmation || app.close_approved) return;
-    app.training_project_ready = true;
+    app.training_inputs_ready = true;
     start_train(app, false, app.train_prepare_resume);
-    app.training_project_ready = false;
+    app.training_inputs_ready = false;
 }
 
 void start_splat_mesh(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     if (!alignment_ready(app) && !alignment_cache_present(app)) {
@@ -4014,9 +4052,9 @@ void start_dense(App& app) {
         return;
     }
     if (!ensure_sam_ready(app)) return;
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     if (!alignment_ready(app) && !alignment_cache_present(app)) {
@@ -4064,9 +4102,9 @@ void start_dense(App& app) {
 void start_texture(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    assign_default_project_folder(app);
-    if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Save or choose a project file first", theme::warning);
+    ensure_task_cache(app);
+    if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
+        set_message(app, "Choose an image source or open a project first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -4134,6 +4172,7 @@ void on_job_finished(App& app) {
     const int code = app.job.exit_code();
     app.monitor.mark_finished(code);
     const JobKind kind = app.active_job;
+    if (kind != JobKind::none && kind != JobKind::export_sfm) app.project_results_dirty = true;
     app.active_job = JobKind::none;
     if (kind == JobKind::train && code != 0) {
         // The child is already reaped. Drop inherited-preview resources and
@@ -4170,9 +4209,7 @@ void on_job_finished(App& app) {
 
     if (kind == JobKind::train && !app.smoke_mode) {
         try {
-            // The completed products replace the pending training snapshot.
             photara::splat::remove_training_checkpoint(app.layout.training_checkpoint);
-            if (!save_project_to_path(app, app.layout.project_file)) return;
         } catch (const std::exception& error) {
             set_message(app, error.what(), theme::danger); return;
         }

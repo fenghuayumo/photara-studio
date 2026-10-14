@@ -1123,6 +1123,30 @@ void draw_status_bar(App& app) {
 
 
 void draw_project_lifecycle_modals(App& app) {
+    if (app.show_project_switch_confirmation) {
+        app.show_project_switch_confirmation = false;
+        ImGui::OpenPopup(tr("Save before switching?"));
+    }
+    if (ImGui::BeginPopupModal(tr("Save before switching?"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", tr("Save the current project before changing the dataset or opening another project?"));
+        if (!app.checkpoint_save_error.empty()) ImGui::TextWrapped("%s", app.checkpoint_save_error.c_str());
+        if (ImGui::Button(tr("Save"), {120.F, 32.F})) {
+            request_project_save(app, false);
+            if (!app.pending_project_action) ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Don't Save"), {120.F, 32.F})) {
+            ImGui::CloseCurrentPopup();
+            complete_project_transition(app);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Cancel"), {100.F, 32.F})) {
+            app.pending_project_action = {};
+            app.checkpoint_save_error.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     if (app.show_close_confirmation) {
         app.show_close_confirmation = false;
         ImGui::OpenPopup(tr("Save before closing?"));

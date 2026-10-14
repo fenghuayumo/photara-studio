@@ -47,7 +47,7 @@ bool looks_like_namespace(const std::filesystem::path& path) {
 bool holds_cache_artifacts(const std::filesystem::path& dir) {
     constexpr std::string_view k_names[] = {
         "sfm.bin",       "splat.ply",       "mesh.ply",
-        "dense.ply",     "textured",        "subject_bounds.txt",
+        "dense.ply",     "textured",        "subject_bounds.txt", "training.checkpoint",
         "preview_view",  "preview_camera",  "preview_vis",
         "preview_ack"};
     std::error_code error;

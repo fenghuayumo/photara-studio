@@ -52,7 +52,6 @@ enum class DisplayChannel { color, depth, normal };
 enum class ViewportWorkspace { scene_3d, image_2d };
 enum class StepState { pending, active, done, skipped, failed };
 enum class ClearResultsAction { none, clear_view, delete_generated };
-enum class TrainPrepareStage { checking, reading_sfm, encoding_sfm, saving, ready };
 struct TrainPreparation {
     std::atomic<TrainPrepareStage> stage{TrainPrepareStage::checking};
     std::atomic<bool> cancelled{false};
@@ -150,7 +149,7 @@ struct App {
     std::future<std::string> pending_train_prepare;
     std::shared_ptr<TrainPreparation> train_preparation;
     bool train_prepare_resume{};
-    bool training_project_ready{};
+    bool training_inputs_ready{};
     std::future<SceneLoad> alignment_preview_load;
     std::filesystem::file_time_type alignment_preview_stamp{};
     std::chrono::steady_clock::time_point alignment_preview_poll{};
@@ -214,6 +213,15 @@ struct App {
     bool close_requested{};
     bool close_approved{};
     bool show_close_confirmation{};
+    bool project_results_dirty{};
+    bool saved_results_discarded{};
+    std::vector<std::uint8_t> saved_project_settings;
+    std::uint64_t saved_edit_revision{};
+    std::optional<std::filesystem::file_time_type> saved_sfm_write_time;
+    std::filesystem::path pending_project_save_path;
+    std::function<void()> pending_project_action;
+    bool show_project_switch_confirmation{};
+    bool project_transition_approved{};
     std::optional<photara::splat::TrainingCheckpointInfo> training_checkpoint_info;
     bool saving_training{};
     bool exit_after_save{};
@@ -232,7 +240,6 @@ struct App {
     gpu::PreviewTexture about_icon;
     bool about_icon_ready{};
     bool show_clear_results{};
-    bool project_folder_automatic{};
     bool suppress_scene_auto_load{};
     bool pending_align_viewport_clear{};
 
@@ -344,7 +351,7 @@ void store_path_field(
 void store_utf8_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path);
 void refresh_artifacts(App& app);
-void assign_default_project_folder(App& app);
+void ensure_task_cache(App& app);
 void apply_external_dataset_selection(App& app);
 void clear_loaded_result(App& app);
 void clear_viewport_scene(App& app);
@@ -359,6 +366,12 @@ void request_project_save(App& app, bool exit_after_save);
 void poll_project_save(App& app);
 void cancel_project_save(App& app);
 void save_project_as(App& app);
+bool has_unsaved_project_changes(const App& app);
+void mark_project_saved(App& app);
+bool defer_project_transition(App& app, std::function<void()> action);
+void complete_project_transition(App& app);
+void change_image_source(App& app, const std::filesystem::path& path);
+void change_external_dataset(App& app, const std::filesystem::path& path);
 void request_ascan_scene_load(App& app);
 void consume_dropped_paths(App& app);
 

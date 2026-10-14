@@ -3463,11 +3463,12 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.checkpoint_path = cli.splat_checkpoint.empty()
         ? photara::splat::training_checkpoint_path(cli.output) : cli.splat_checkpoint;
     if (cli.splat_checkpoint.empty()) photara::splat::migrate_training_checkpoints(cli.output);
-    options.checkpoint_project_settings = photara::project::encode_settings(settings_from_cli(cli), options.checkpoint_path);
+    if (!cli.gui)
+        options.checkpoint_project_settings = photara::project::encode_settings(settings_from_cli(cli), options.checkpoint_path);
     const bool checkpoint_keeps_project_sfm = options.checkpoint_path == cli.output &&
         cli.splat_dataset.empty() && std::filesystem::exists(cli.output) &&
         photara::project::Archive::open(cli.output).has(photara::project::ChunkType::sfm);
-    if (checkpoint_keeps_project_sfm) {
+    if (cli.gui || checkpoint_keeps_project_sfm) {
         // The checkpoint writer preserves the existing project input chunk.
         // Do not decode/re-encode the working copy just to supply it again.
     } else if (project_archive && project_archive->has(photara::project::ChunkType::sfm))
@@ -4787,7 +4788,7 @@ int main(int argc, char** argv) {
         if (output_ext == ".mvs") {
             photara::sfm::export_openmvs_interface(scene, cli.output);
         } else if (output_ext == ".ply") {
-            save_ply(scene, cli.output);
+            if (!cli.gui) save_ply(scene, cli.output);
         } else if (output_ext == ".asfm") {
             photara::sfm::save_asfm(scene, cli.output);
             photara::core::Logger::instance().info("asfm=", cli.output);
