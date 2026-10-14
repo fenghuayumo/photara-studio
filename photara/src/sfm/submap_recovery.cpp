@@ -790,6 +790,39 @@ std::vector<Index> recover_stable_resections(
         const auto pose = estimate_absolute_pose(bearings, points, camera, options);
         core::Logger::instance().info("stable resection fit: image=", image.path.filename(),
             " success=", pose.success, " inliers=", pose.num_inliers, '/', points.size());
+        // Pixel-consistent aliases on repetitive structure can rotate a pose
+        // away from the independently verified pair graph. Keep two distinct
+        // frozen rotation witnesses as a non-regression check; this still
+        // permits correcting an already inaccurate inherited orientation.
+        if (pose.success) {
+            std::set<Index> rotation_anchors;
+            double rotation_weight = 0, rotation_before = 0, rotation_after = 0;
+            for (const auto& pair : scene.pairs) {
+                if (!pair.active || !pair.relative_pose || pair.matches.size() < 30) continue;
+                const bool forward = pair.id2 == id && pair.id1 < stable.size() && stable[pair.id1];
+                const bool reverse = pair.id1 == id && pair.id2 < stable.size() && stable[pair.id2];
+                if (!forward && !reverse) continue;
+                const Index anchor = forward ? pair.id1 : pair.id2;
+                const double weight = pair.composite_weight();
+                if (!std::isfinite(weight) || weight <= 0 || !rotation_anchors.insert(anchor).second) continue;
+                const Mat3 before = forward ? Mat3(image.pose.R * scene.images[anchor].pose.R.transpose())
+                                            : Mat3(scene.images[anchor].pose.R * image.pose.R.transpose());
+                const Mat3 after = forward ? Mat3(pose.pose.R * scene.images[anchor].pose.R.transpose())
+                                           : Mat3(scene.images[anchor].pose.R * pose.pose.R.transpose());
+                rotation_before += weight * rotation_error_degrees(before, pair.relative_pose->R);
+                rotation_after += weight * rotation_error_degrees(after, pair.relative_pose->R);
+                rotation_weight += weight;
+            }
+            if (rotation_anchors.size() >= 2 && rotation_weight > 0) {
+                rotation_before /= rotation_weight; rotation_after /= rotation_weight;
+                core::Logger::instance().info("stable resection rotation audit: image=", image.path.filename(),
+                    " anchors=", rotation_anchors.size(), " before_deg=", rotation_before, " after_deg=", rotation_after);
+                if (!std::isfinite(rotation_after) || rotation_after > rotation_before + std::max(0.5, 0.25 * rotation_before)) {
+                    reject("stable_pair_rotation_regressed");
+                    continue;
+                }
+            }
+        }
         // Repetitive structure can leave the robust pixel consensus below
         // one half even when the pose is correct. Independent verified pair
         // baselines provide a second certificate: require the strongest edge
@@ -893,7 +926,10 @@ std::vector<Index> recover_stable_resections(
         core::Logger::instance().info("stable resection validation: image=",image.path.filename(),
             " inliers=",heldout,'/',validation.size()," fit_ratio=",fit_ratio);
         if (heldout < 12 || heldout < minimum_validation_ratio * validation.size()) { reject("heldout_consensus_failed"); continue; }
-        if (cells.size() < 3 || !noncollinear(heldout_points)) { reject("ill_conditioned_validation"); continue; }
+        core::Logger::instance().info("stable resection validation geometry: image=", image.path.filename(),
+            " cells=", cells.size(), " noncollinear=", noncollinear(heldout_points));
+        if (cells.size() < 3) { reject("insufficient_validation_cells"); continue; }
+        if (!noncollinear(heldout_points)) { reject("ill_conditioned_validation_points"); continue; }
         for (const auto& [feature, m] : unique)
             if (supports(scene, {id, feature}, m.point, pose.pose, 2)) accepted[id].push_back(m);
         scene.images[id].pose = pose.pose;

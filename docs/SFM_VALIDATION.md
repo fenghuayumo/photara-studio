@@ -2,6 +2,11 @@
 
 Key findings for future analysis and improvements. See [SFM_ARCHITECTURE.md](SFM_ARCHITECTURE.md) for the algorithm structure.
 
+The complete fixed-track regression and reference-free Alameda recovery probes
+are documented in [SFM_FULL_BASELINE.md](SFM_FULL_BASELINE.md). That baseline
+includes final recovery, BA and audits; the mapping-only comparisons below have
+a different scope.
+
 ## Established Findings
 
 - CUDA block solves, recovery caching, and parallel track splitting provide measurable gains and have numerical regression coverage. Berlin's split peel decreased from about 29.9 s to 1.5 s; further optimization should focus on remaining positioning, BA, and recovery costs.
@@ -17,7 +22,7 @@ Key findings for future analysis and improvements. See [SFM_ARCHITECTURE.md](SFM
 |---|---|---|
 | Short CPU budgets | Timeout, stall, and IRLS convergence are now distinguished. Passes without effective updates or genuine convergence no longer change weights; retries receive larger slices only when the remaining budget permits. | Continue validating quality across hardware and CPU fallback paths. Budget exhaustion does not imply acceptable accuracy. |
 | Optimization objective versus pose accuracy | More iterations and lower residuals did not always improve agreement with the reference on Berlin or Alameda. | Analyze weak constraints, incorrect matches, and robust weights; avoid using a single residual metric as the quality objective. |
-| Alameda local camera-center drift | Maximum center deviation was about 3.19 reference steps. Strong-connection and parallax audits now flag the worst cameras, but PnP from stable-only depths did not pass their repair validation. | Position-unverified status is now persisted. Continue investigating cross-branch constraints; neither a risk flag nor low RMS demonstrates a successful repair. |
+| Alameda local camera-center drift | Maximum center deviation remains about 3.19 reference steps. The nine-frame independent submap reconstructs but fails stable-map similarity consensus (216/723 fit inliers). Layered stable-only resection can worsen rotation despite improving pixel residuals; an independent pair-rotation guard now rejects a demonstrated harmful proposal. | Keep layered propagation offline and retain the geometric gates. Improve independent cross-segment evidence; neither a risk flag nor low RMS demonstrates a successful repair. |
 | Tail quality in multiple clusters and weak branches | Coverage was restored, but indoor multi-cluster center P95 remained about 1.78 steps; the office scene had a maximum rotation difference of about 4° relative to Global. | Continue checking cross-cluster merging, shared intrinsics, and weak-branch recovery. Registration rate and mean error alone are insufficient. |
 | Large scenes and resource fallback | Most experiments used the same RTX 5090. Default multi-cluster runs above 2048 images and low-VRAM comparisons are still missing. | Add real large-scene, target-hardware, and backend-failure fallback tests. |
 

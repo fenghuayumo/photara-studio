@@ -309,6 +309,26 @@ void test_warm_start_geometry_acceptance() {
     expect(detail::warm_start_geometry_rejection(heldout_baseline,
                detail::evaluate_warm_start_geometry(collapsed, optimized)) != nullptr,
            "collapsed camera geometry cannot pass by omitting pair evidence");
+    Scene bulk = scene;
+    bulk.pairs.clear();
+    // Many correct cameras dilute one bad view in whole-scene P90. Retain the
+    // usable bulk initializer, but explicitly nominate the local discrepancy
+    // for the final geometry audit rather than restarting every camera.
+    for (Index repeat = 1; repeat < 5; ++repeat)
+        for (Index view = 0; view < views; ++view) {
+            Image copy = scene.images[view];
+            copy.id = static_cast<Index>(bulk.images.size());
+            bulk.images.push_back(std::move(copy));
+            for (Index point = 0; point < points; ++point)
+                bulk.tracks[point].observations.push_back({bulk.images.back().id, point});
+        }
+    const auto bulk_before = detail::evaluate_warm_start_geometry(bulk, optimized);
+    bulk.images[3].pose.C.y() += 4;
+    const auto bulk_after = detail::evaluate_warm_start_geometry(bulk, optimized);
+    const auto local_risks = detail::warm_start_local_geometry_risks(bulk_before, bulk_after);
+    expect(!detail::warm_start_geometry_rejection(bulk_before, bulk_after) &&
+           std::find(local_risks.begin(), local_risks.end(), 3) != local_risks.end(),
+           "local risk is retained without discarding independently healthy bulk geometry");
     scene.images[0].pose.C.x() = std::numeric_limits<double>::quiet_NaN();
     expect(detail::warm_start_geometry_rejection(baseline,
                detail::evaluate_warm_start_geometry(scene, optimized)) != nullptr,

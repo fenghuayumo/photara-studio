@@ -286,20 +286,33 @@ and evaluate observations excluded from each two-ray fit. Alternate pairs also
 validate the two anchors, so endpoint cameras retain independent scores. No optimized point coordinates,
 IRLS weights or external reference enter this screen. Behind-camera and missing
 predictions remain in the score. Reject nonfinite/collapsed centers, changed
-validation coverage, a positive-depth drop greater than 2%, or held-out angular
-degradation greater than the larger of half a degree and 25% of the initializer's
-error. Check per-camera means as well as whole-scene P90. Two-view translation
-disagreement alone need not veto an independently supported refinement. With
-at least 16 eligible held-out tracks, reject observed independent regressions;
-direction changes at cameras with fewer than three held-out predictions are
-logged as unverified rather than triggering an expensive full retry without
-evidence of degradation. Without sufficient held-out tracks, retain the
-conservative relative-direction screen. Missing evidence is logged and
-does not establish small-scene eligibility. Rejected refinements use the existing
-primary fallback; state restoration also restores track inlier metadata. Cache
-fingerprints invalidate pre-screening reconstructions. These checks detect
-material regressions, not absolute position accuracy; the 512 default is retained
-pending cross-scene validation.
+whole-scene validation coverage, a whole-scene positive-depth drop greater than
+2%, or held-out angular P90 degradation greater than the larger of half a degree
+and 25% of the initializer's error. With at least 16 eligible held-out tracks,
+two-view translation disagreement alone need not veto an independently supported
+refinement. Without sufficient held-out tracks, retain the conservative
+relative-direction screen.
+
+Per-camera depth/angle regressions and direction changes without local coverage
+are logged separately. They do not force an entire scene into a fresh CPU solve
+before triangulation, BA and final position auditing. Full Alameda regression
+showed that such a local veto both increased runtime and degraded final poses.
+These intermediate risk logs do not become a position-accuracy certificate or
+replace the independently computed final persisted observability audit. Missing
+evidence does not establish small-scene eligibility. Rejected whole-scene
+refinements use the existing primary fallback; state restoration also restores
+track inlier metadata. Cache fingerprints invalidate results from older screening
+and resection policies. The 512 default remains pending cross-scene validation.
+
+Stable-only resection additionally compares a proposed rotation to active pair
+rotations from distinct frozen anchors (at least 30 matches and positive finite
+weight). With two witnesses, reject a weighted mean disagreement increase above
+the larger of 0.5 degrees and 25% of the inherited disagreement. This guards
+against repetitive-structure pixel consensuses introducing new rotation errors,
+while permitting correction of an already inaccurate inherited rotation. Existing
+held-out pixel, spatial coverage, noncollinearity and baseline checks still apply.
+Repeated promotion of recovered anchors remains a development-only experiment;
+it is not enabled in the default global reconstruction.
 
 CPU positioning reports IRLS convergence, iteration limit, time limit, stall
 or failure separately from solution usability. Evaluation iteration zero is

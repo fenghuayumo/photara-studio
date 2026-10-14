@@ -33,4 +33,9 @@ const char* warm_start_geometry_rejection(
 unsigned warm_start_unverified_direction_changes(
     const WarmStartGeometry& baseline, const WarmStartGeometry& candidate);
 
+// Local pre-triangulation errors nominate cameras for final geometry auditing;
+// they cannot by themselves justify retrying the whole scene from random points.
+std::vector<Index> warm_start_local_geometry_risks(
+    const WarmStartGeometry& baseline, const WarmStartGeometry& candidate);
+
 } // namespace photara::sfm::detail
