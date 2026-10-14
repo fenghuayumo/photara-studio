@@ -4,6 +4,8 @@
 #include "io/video_frames.hpp"
 #include "sam/model_cache.hpp"
 #include "splat/checkpoint.hpp"
+#include "../../photara/src/splat/checkpoint.hpp"
+#include "project/document.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -689,6 +691,7 @@ void RunMonitor::reset() {
     artifacts_ = {};
     last_error_.clear();
     resumed_ = false;
+    saving_checkpoint_ = false;
     floor_ = 0.F;
     band_begin_ = 0.F;
     band_end_ = 0.F;
@@ -696,6 +699,9 @@ void RunMonitor::reset() {
     clock_running_ = false;
     started_ = {};
     stopped_ = {};
+    training_started_ = {};
+    training_stopped_ = {};
+    training_clock_running_ = false;
 }
 
 void RunMonitor::begin(const JobKind kind, const Stage opening) {
@@ -720,6 +726,13 @@ void RunMonitor::enter_stage(const Stage stage, const float floor) {
 }
 
 void RunMonitor::consume(const std::string& line) {
+    if (line.find("splat_checkpoint_saving iteration=") != std::string::npos) saving_checkpoint_ = true;
+    if (line.find("splat_checkpoint_saved iteration=") != std::string::npos ||
+        line.find("Training checkpoint save failed:") != std::string::npos) saving_checkpoint_ = false;
+    if (line.find("splat_training_completed") != std::string::npos && training_clock_running_) {
+        training_stopped_ = std::chrono::steady_clock::now();
+        training_clock_running_ = false;
+    }
     if (line.find("[error]") != std::string::npos) {
         // Strip the timestamp/level prefix for a readable status message.
         const std::size_t level_end = line.find("] ");
@@ -795,6 +808,10 @@ void RunMonitor::consume(const std::string& line) {
         std::uint64_t current{};
         std::uint64_t total{};
         if (ratio_after(line, "splat iteration=", current, total)) {
+            if (!training_.valid) {
+                training_started_ = std::chrono::steady_clock::now();
+                training_clock_running_ = true;
+            }
             training_.iteration = static_cast<unsigned>(current);
             training_.total_iterations = static_cast<unsigned>(total);
             training_.valid = true;
@@ -925,6 +942,11 @@ void RunMonitor::consume(const std::string& line) {
 }
 
 void RunMonitor::mark_finished(const int exit_code) {
+    saving_checkpoint_ = false;
+    if (training_clock_running_) {
+        training_stopped_ = std::chrono::steady_clock::now();
+        training_clock_running_ = false;
+    }
     task_.active = false;
     if (exit_code == 0) {
         stage_ = Stage::complete;
@@ -951,6 +973,7 @@ void RunMonitor::resume_clock() {
     if (!has_clock_ || clock_running_) return;
     const auto now = std::chrono::steady_clock::now();
     started_ += now - stopped_;
+    if (training_clock_running_) training_started_ += now - stopped_;
     clock_running_ = true;
 }
 
@@ -959,6 +982,14 @@ double RunMonitor::elapsed_seconds() const {
     const auto end = clock_running_ ? std::chrono::steady_clock::now()
                                     : stopped_;
     return std::chrono::duration<double>(end - started_).count();
+}
+
+double RunMonitor::training_elapsed_seconds() const {
+    if (!training_.valid) return -1.0;
+    const auto end = training_clock_running_
+        ? (clock_running_ ? std::chrono::steady_clock::now() : stopped_)
+        : training_stopped_;
+    return std::chrono::duration<double>(end - training_started_).count();
 }
 
 float RunMonitor::fraction() const {
@@ -990,7 +1021,9 @@ double RunMonitor::eta_seconds() const {
 }
 
 std::string RunMonitor::headline() const {
-    std::string text = stage_name(stage_);
+    if (saving_checkpoint_) return i18n::tr("Saving training progress...");
+    std::string text = kind_ == JobKind::train && stage_ == Stage::preparing
+        ? i18n::tr("Initializing training...") : stage_name(stage_);
     if (stage_ == Stage::training && training_.valid) {
         text += "  ";
         text += std::to_string(training_.iteration);
@@ -1219,15 +1252,17 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         layout.project_file = stored;
         layout.root = stored.parent_path();
     } else {
-        layout.root = stored;
-        layout.project_file = stored.empty()
-            ? std::filesystem::path{}
-            : stored / "project.ascan";
+        const auto source = path_from_utf8_field(settings.dataset_source[0]
+            ? settings.dataset_source.data() : settings.images_dir.data());
+        layout.root = stored.empty() ? source.parent_path() : stored;
+        if (!stored.empty()) layout.project_file = stored / "project.ascan";
     }
     if (layout.root.empty() && !layout.project_file.empty())
         layout.root = std::filesystem::current_path();
     const std::filesystem::path stem = layout.project_file.empty()
-        ? std::filesystem::path("project")
+        ? (settings.dataset_source[0] ? path_from_utf8_field(settings.dataset_source.data()).filename() :
+           settings.images_dir[0] ? path_from_utf8_field(settings.images_dir.data()).filename()
+                                  : std::filesystem::path("project"))
         : layout.project_file.stem();
     const auto with_suffix = [&](const char* suffix) {
         std::filesystem::path named = layout.root / stem;
@@ -1239,9 +1274,6 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.sparse_asfm = with_suffix(".asfm");
     layout.sparse_mvs = with_suffix(".mvs");
     layout.sparse_poses = with_suffix("_sfm_diagnostics.csv");
-    layout.model_output = layout.project_file.empty()
-        ? with_suffix(".ply")
-        : layout.project_file;
     layout.splat_ply = with_suffix("_splat.ply");
     layout.splat_sog = with_suffix("_splat.sog");
     layout.splat_spz = with_suffix("_splat.spz");
@@ -1264,19 +1296,25 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     const std::filesystem::path cache_root =
         path_from_utf8_field(settings.cache_dir.data());
     std::filesystem::path runtime_dir = layout.cache;
-    if (!cache_root.empty()) {
-        runtime_dir = cache_root / runtime_cache_key(layout.project_file);
+    const auto runtime_identity = layout.project_file.empty()
+        ? path_from_utf8_field(settings.dataset_source[0] ? settings.dataset_source.data() : settings.images_dir.data())
+        : layout.project_file;
+    if (settings.runtime_dir[0]) {
+        runtime_dir = path_from_utf8_field(settings.runtime_dir.data());
+    } else if (!cache_root.empty()) {
+        runtime_dir = cache_root / runtime_cache_key(runtime_identity);
     } else if (layout.root.empty()) {
         std::error_code temp_error;
         const auto temp = std::filesystem::temp_directory_path(temp_error);
         if (temp_error)
             runtime_dir = std::filesystem::path("photara_cache") /
-                          runtime_cache_key(layout.project_file);
+                          runtime_cache_key(runtime_identity);
         else
             runtime_dir =
-                temp / "Photara" / runtime_cache_key(layout.project_file);
+                temp / "Photara" / runtime_cache_key(runtime_identity);
     }
-    layout.training_checkpoint = photara::splat::training_checkpoint_path(layout.project_file);
+    layout.training_checkpoint = runtime_dir / "training.checkpoint";
+    layout.model_output = runtime_dir / "output.ply";
     layout.working_sfm = runtime_dir / "sfm.bin";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
@@ -1308,6 +1346,53 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.texture_log = layout.session_dir / "texture.log";
     layout.export_log = layout.session_dir / "export.log";
     return layout;
+}
+
+void prepare_training_inputs(const ProjectLayout& layout,
+    const std::filesystem::path& images, const bool resume,
+    const std::function<bool()>& cancelled,
+    const std::function<void(TrainPrepareStage)>& progress) {
+    const auto aborted = [&] { return cancelled && cancelled(); };
+    const auto stage = [&](TrainPrepareStage value) { if (progress) progress(value); };
+    if (aborted()) return;
+    if (layout.training_checkpoint.empty() || layout.training_checkpoint == layout.project_file ||
+        lower_extension(layout.training_checkpoint) == ".ascan")
+        throw std::runtime_error("Training requires an independent task checkpoint");
+    if (!layout.working_sfm.empty())
+        std::filesystem::create_directories(layout.working_sfm.parent_path());
+    if (layout.use_saved_inputs && !std::filesystem::exists(layout.working_sfm) &&
+        !layout.project_file.empty() && std::filesystem::exists(layout.project_file)) {
+        auto archive = photara::project::Archive::open(layout.project_file);
+        if (archive.has(photara::project::ChunkType::sfm)) {
+            stage(TrainPrepareStage::reading_sfm);
+            const auto scene = photara::project::read_sfm(archive);
+            if (aborted()) return;
+            stage(TrainPrepareStage::encoding_sfm);
+            photara::sfm::AsfmOptions options;
+            options.path_base = images;
+            photara::sfm::save_asfm(*scene, layout.working_sfm, options);
+        }
+    }
+    if (aborted()) return;
+    if (resume && layout.use_saved_inputs && !photara::splat::inspect_training_checkpoint(layout.training_checkpoint) &&
+        !layout.project_file.empty() && photara::splat::inspect_training_checkpoint(layout.project_file)) {
+        stage(TrainPrepareStage::restoring_progress);
+        photara::splat::restore_training_checkpoint(
+            photara::splat::training_checkpoint_bytes(layout.project_file), layout.training_checkpoint);
+    }
+    if (aborted()) return;
+    if (resume) {
+        if (!photara::splat::inspect_training_checkpoint(layout.training_checkpoint))
+            throw std::runtime_error("No saved training progress is available.");
+    } else {
+        // A new run replaces only the task checkpoint, never a saved project.
+        if (!aborted()) {
+            photara::splat::remove_training_checkpoint(layout.training_checkpoint);
+            photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
+            std::filesystem::remove(layout.training_checkpoint);
+        }
+    }
+    stage(TrainPrepareStage::ready);
 }
 
 std::filesystem::path path_from_utf8_field(const char* text) {

@@ -1,4 +1,5 @@
 #include "splat/trainer.hpp"
+#include "splat/formats.hpp"
 #include "splat/device.hpp"
 #include "splat/visualize.hpp"
 
@@ -1150,33 +1151,20 @@ GaussianModel Trainer::train(
     detail::TrainingCheckpointLease checkpoint_lease(options_.checkpoint_path);
     const std::uint64_t checkpoint_fingerprint = options_.checkpoint_path.empty()
         ? 0 : detail::training_fingerprint(scene, options_);
-    std::optional<detail::TrainingCheckpoint> restored;
-    if (options_.resume_checkpoint)
-        restored = detail::load_training_checkpoint(options_.checkpoint_path,
-            checkpoint_fingerprint, training_device(options_));
+    std::optional<TrainingCheckpointInfo> warm_start;
+    if (options_.resume_checkpoint) {
+        const auto info = inspect_training_checkpoint(options_.checkpoint_path);
+        if (info && !info->model_path.empty()) {
+            if (info->fingerprint != checkpoint_fingerprint)
+                throw std::runtime_error("Training settings, cameras or input images changed. Start a new training run.");
+            warm_start = info;
+        } else throw std::runtime_error("No supported PLY checkpoint found. Start a new training run.");
+    }
     GaussianModel model = [&] {
-        if (restored) {
-            if (restored->tensors.size() < 7)
-                throw std::runtime_error("Incomplete training checkpoint model");
-            GaussianModel loaded;
-            loaded.sh_degree = options_.sh_degree;
-            std::array<tinytensor::Tensor*, 7> tensors{&loaded.means,
-                &loaded.log_scales, &loaded.quaternions, &loaded.opacity_logits,
-                &loaded.sh, &loaded.normal_features, &loaded.filter_3d};
-            for (std::size_t i = 0; i < tensors.size(); ++i)
-                *tensors[i] = std::move(restored->tensors[i]);
-            const auto rows = restored->info.gaussian_count;
-            const std::array<std::vector<std::size_t>, 5> shapes{
-                std::vector<std::size_t>{rows, 3}, {rows, 3}, {rows, 4},
-                {rows, 1}, {rows, std::size_t(options_.sh_degree + 1) * (options_.sh_degree + 1), 3}};
-            for (std::size_t i = 0; i < shapes.size(); ++i)
-                if (!tensors[i]->is_valid() || tensors[i]->dtype() != tinytensor::DataType::Float32 ||
-                    tensors[i]->shape().dims() != shapes[i])
-                    throw std::runtime_error("Invalid checkpoint Gaussian shape");
-            if (loaded.normal_features.is_valid() &&
-                (loaded.normal_features.dtype() != tinytensor::DataType::Float32 ||
-                 loaded.normal_features.shape().dims() != std::vector<std::size_t>{rows, 4}))
-                throw std::runtime_error("Invalid checkpoint normal features");
+        if (warm_start) {
+            auto loaded = load_gaussians(warm_start->model_path, training_device(options_));
+            if (loaded.size() != warm_start->gaussian_count || loaded.sh_degree != options_.sh_degree)
+                throw std::runtime_error("Checkpoint PLY model does not match its metadata");
             return loaded;
         }
         tinytensor::VramScope scope("model.initialize");
@@ -1192,7 +1180,7 @@ GaussianModel Trainer::train(
         throw std::invalid_argument(
             "Splat evaluation split left no training views");
     float active_resolution_scale =
-        data::progressive_resolution_scale(restored ? std::max(1U, restored->info.iteration) : 1, options_);
+        data::progressive_resolution_scale(warm_start ? std::max(1U, warm_start->iteration) : 1, options_);
     data::TrainingDataLoader view_cache(
         scene.views, options_, active_resolution_scale);
     if (options_.use_mask) {
@@ -1260,7 +1248,7 @@ GaussianModel Trainer::train(
     // The filter is applied only while rasterizing and recomputed after
     // topology changes; repeatedly baking it into scale/opacity causes a
     // cumulative opacity loss.
-    if (use_3d_filter && !restored)
+    if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, splat_filter);
     if (native_non_pinhole) {
@@ -1503,141 +1491,11 @@ GaussianModel Trainer::train(
                   fixed_maximum_scale_fraction * scene_extent, 1e-6F))
             : std::numeric_limits<float>::infinity();
 
-    // The order is part of checkpoint schema v2. Scratch images and gradients
-    // are reconstructed; every persistent optimizer/refinement tensor is saved.
-    std::vector<tinytensor::Tensor*> checkpoint_tensors{
-        &model.means, &model.log_scales, &model.quaternions, &model.opacity_logits,
-        &model.sh, &model.normal_features, &model.filter_3d};
-    for (auto* adam : adam_states) {
-        checkpoint_tensors.push_back(&adam->first);
-        checkpoint_tensors.push_back(&adam->second);
-    }
-    for (auto* tensor : {&sh_quant.first, &sh_quant.packed, &sh_quant.bounds,
-        &densification_stats.gradient, &densification_stats.count,
-        &densification_stats.max_screen_radius, &densification_stats.priority,
-        &densification_stats.geometry_gradient, &densification_stats.first_view,
-        &densification_stats.view_support, &densification_stats.image_error,
-        &ppisp_state.parameters, &ppisp_state.adam.first, &ppisp_state.adam.second,
-        &bilagrid_state.grids, &bilagrid_state.adam.first, &bilagrid_state.adam.second,
-        &multi_view_stability_accumulator}) checkpoint_tensors.push_back(tensor);
     unsigned completed_iteration = 0;
-    const auto write_runtime = [&] {
-        detail::CheckpointWriter writer;
-        writer.pod(normal_features_updates);
-        writer.pod(std::uint64_t(initial_gaussian_count));
-        writer.pod(std::uint64_t(densification_stats.growth_cap));
-        writer.pod(std::uint64_t(shuffled_view_cursor));
-        writer.pod(std::uint64_t(shuffled_views.size()));
-        for (auto index : shuffled_views) writer.pod(std::uint64_t(index));
-        std::ostringstream cpu_random; cpu_random << random;
-        writer.string(cpu_random.str());
-        auto& generator = tinytensor::RandomGenerator::instance();
-        writer.pod(generator.get_seed()); writer.pod(generator.checkpoint_counter());
-        std::ostringstream tensor_random;
-        tensor_random << *static_cast<std::mt19937_64*>(generator.get_generator(tinytensor::Device::CPU));
-        writer.string(tensor_random.str());
-        writer.pod(focus_bounds.valid);
-        writer.raw(focus_bounds.center.data(), sizeof(float) * 3);
-        writer.raw(focus_bounds.axes.data(), sizeof(float) * 9);
-        writer.raw(focus_bounds.half_extent.data(), sizeof(float) * 3);
-        for (const auto* geometry : {&scene_geometry, &refinement_geometry}) {
-            writer.pod(geometry->scale); writer.pod(geometry->maximum_extent);
-            writer.raw(geometry->center.data(), sizeof(float) * 3);
-        }
-        writer.pod(means_learning_rate_scale);
-        writer.pod(minimum_log_scale); writer.pod(maximum_log_scale);
-        const auto scheduler = multi_view_scheduler.checkpoint_state();
-        writer.pod(scheduler.interval); writer.pod(scheduler.stable_refinements);
-        writer.pod(scheduler.has_previous);
-        writer.pod(std::uint64_t(scheduler.previous.gaussian_count));
-        writer.pod(std::uint64_t(scheduler.previous.grown));
-        writer.pod(std::uint64_t(scheduler.previous.pruned));
-        writer.pod(scheduler.previous.depth_consistency);
-        const auto& d = scheduler.previous.distribution;
-        for (float value : {d.opacity_mean, d.opacity_stddev, d.log_scale_mean,
-            d.log_scale_stddev, d.log_anisotropy_mean, d.log_anisotropy_stddev}) writer.pod(value);
-        return writer.bytes;
-    };
-    if (restored) {
-        if (restored->tensors.size() != checkpoint_tensors.size())
-            throw std::runtime_error("Incomplete training checkpoint state");
-        // Validate persistent tensor shapes against the reconstructed runtime.
-        for (std::size_t i = 7; i < checkpoint_tensors.size(); ++i) {
-            const auto& actual = restored->tensors[i];
-            const auto& expected = *checkpoint_tensors[i];
-            if (actual.is_valid() != expected.is_valid() ||
-                (actual.is_valid() && (actual.shape().dims() != expected.shape().dims() ||
-                                      actual.dtype() != expected.dtype())))
-                throw std::runtime_error("Invalid checkpoint optimizer/refinement shape");
-            *checkpoint_tensors[i] = std::move(restored->tensors[i]);
-        }
-        detail::CheckpointReader reader(restored->runtime);
-        normal_features_updates = reader.pod<unsigned>();
-        initial_gaussian_count = reader.pod<std::uint64_t>();
-        densification_stats.growth_cap = reader.pod<std::uint64_t>();
-        shuffled_view_cursor = reader.pod<std::uint64_t>();
-        const auto view_count = reader.pod<std::uint64_t>();
-        if (view_count != view_indices.size() || shuffled_view_cursor > view_count)
-            throw std::runtime_error("Invalid checkpoint camera sampling state");
-        shuffled_views.resize(view_count);
-        for (auto& index : shuffled_views) index = reader.pod<std::uint64_t>();
-        auto sorted = shuffled_views; std::sort(sorted.begin(), sorted.end());
-        if (sorted != view_indices) throw std::runtime_error("Invalid checkpoint camera order");
-        std::istringstream cpu_random(reader.string());
-        if (!(cpu_random >> random)) throw std::runtime_error("Invalid checkpoint random state");
-        const auto seed = reader.pod<std::uint64_t>();
-        const auto counter = reader.pod<std::uint64_t>();
-        auto& generator = tinytensor::RandomGenerator::instance();
-        generator.manual_seed(seed); generator.restore_checkpoint_counter(counter);
-        std::istringstream tensor_random(reader.string());
-        if (!(tensor_random >> *static_cast<std::mt19937_64*>(generator.get_generator(tinytensor::Device::CPU))))
-            throw std::runtime_error("Invalid checkpoint tensor random state");
-        focus_bounds.valid = reader.pod<bool>();
-        const auto read_floats = [&](float* data, std::size_t count) {
-            const auto bytes = reader.take(count * sizeof(float));
-            std::memcpy(data, bytes.data(), bytes.size());
-        };
-        read_floats(focus_bounds.center.data(), 3); read_floats(focus_bounds.axes.data(), 9);
-        read_floats(focus_bounds.half_extent.data(), 3);
-        for (auto* geometry : {&scene_geometry, &refinement_geometry}) {
-            geometry->scale = reader.pod<float>(); geometry->maximum_extent = reader.pod<float>();
-            read_floats(geometry->center.data(), 3);
-        }
-        scene_extent = scene_geometry.scale; scene_center = scene_geometry.center;
-        means_learning_rate_scale = reader.pod<float>();
-        minimum_log_scale = reader.pod<float>(); maximum_log_scale = reader.pod<float>();
-        detail::MultiViewStabilityScheduler::CheckpointState scheduler;
-        scheduler.interval = reader.pod<unsigned>(); scheduler.stable_refinements = reader.pod<unsigned>();
-        scheduler.has_previous = reader.pod<bool>();
-        scheduler.previous.gaussian_count = reader.pod<std::uint64_t>();
-        scheduler.previous.grown = reader.pod<std::uint64_t>();
-        scheduler.previous.pruned = reader.pod<std::uint64_t>();
-        scheduler.previous.depth_consistency = reader.pod<float>();
-        auto& d = scheduler.previous.distribution;
-        for (auto* value : {&d.opacity_mean, &d.opacity_stddev, &d.log_scale_mean,
-            &d.log_scale_stddev, &d.log_anisotropy_mean, &d.log_anisotropy_stddev}) *value = reader.pod<float>();
-        reader.finish(); multi_view_scheduler.restore_checkpoint_state(scheduler);
-        adaptive_multi_view_options.multi_view_geo_weight *= static_cast<float>(scheduler.interval);
-        adaptive_multi_view_options.multi_view_ncc_weight *= static_cast<float>(scheduler.interval);
-        // A restored, unchanged bounds sidecar must not re-run the geometry
-        // update and reset the learned scene/LR bounds on the first resumed step.
-        if (!options_.live_subject_bounds_file.empty()) {
-            mvs::OrientedBoundingBox published;
-            std::error_code error;
-            if (mvs::load_subject_bounds(published, options_.live_subject_bounds_file) &&
-                published.valid == focus_bounds.valid &&
-                published.center.isApprox(focus_bounds.center, 1e-6F) &&
-                published.half_extent.isApprox(focus_bounds.half_extent, 1e-6F) &&
-                published.axes.isApprox(focus_bounds.axes, 1e-6F)) {
-                focus_file_stamp = std::filesystem::last_write_time(options_.live_subject_bounds_file, error);
-                has_focus_file_stamp = !error;
-            }
-        }
-        completed_iteration = restored->info.iteration;
-        view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
-        restored.reset();
-        core::Logger::instance().info("splat_checkpoint_resumed iteration=", completed_iteration,
-            " total=", options_.iterations, " gaussians=", model.size());
+    if (warm_start) {
+        completed_iteration = warm_start->iteration;
+        core::Logger::instance().info("splat_model_resumed iteration=", completed_iteration,
+            " optimizer=reinitialized source=", warm_start->model_path);
     }
     auto last_checkpoint_time = std::chrono::steady_clock::now();
     std::string last_control_request;
@@ -1652,17 +1510,16 @@ GaussianModel Trainer::train(
             if (request == last_control_request) request.clear();
             next_control_poll = now + std::chrono::milliseconds(100);
         }
-        const bool scheduled = iteration == 1 || iteration == options_.iterations || stopping ||
+        const bool scheduled = iteration == options_.iterations || stopping ||
             (options_.checkpoint_interval_iterations && iteration % options_.checkpoint_interval_iterations == 0) ||
             (options_.checkpoint_interval_seconds && now - last_checkpoint_time >=
                 std::chrono::seconds(options_.checkpoint_interval_seconds));
         if (request.empty() && !scheduled) return;
         std::string response;
         try {
-            detail::save_training_checkpoint(options_.checkpoint_path,
-                {iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds},
-                write_runtime(), checkpoint_tensors,
-                options_.checkpoint_project_settings, options_.checkpoint_project_sfm);
+            core::Logger::instance().info("splat_checkpoint_saving iteration=", iteration);
+            const TrainingCheckpointInfo info{iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds};
+            detail::save_model_checkpoint(options_.checkpoint_path, info, model);
             last_checkpoint_time = std::chrono::steady_clock::now();
             response = "saved " + std::to_string(iteration);
             core::Logger::instance().info("splat_checkpoint_saved iteration=", iteration,

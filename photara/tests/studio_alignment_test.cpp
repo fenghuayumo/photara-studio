@@ -1,7 +1,12 @@
 #include "pipeline.hpp"
 #include "sparse_view.hpp"
 #include "sfm/asfm.hpp"
+#include "project/document.hpp"
+#include "splat/checkpoint.hpp"
+#include "splat/trainer.hpp"
+#include "../src/splat/checkpoint.hpp"
 #include <filesystem>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -13,6 +18,26 @@ void require(bool value, const char* message) {
 }
 int main() {
     try {
+        editor::RunMonitor monitor;
+        monitor.begin(editor::JobKind::train);
+        require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
+        require(monitor.headline().find("Initializing") != std::string::npos, "training initialization has an explicit status");
+        monitor.consume("splat iteration=1/10 loss=0.1");
+        require(monitor.training_elapsed_seconds() >= 0, "first iteration starts the training clock");
+        monitor.pause_clock();
+        const auto paused_elapsed = monitor.training_elapsed_seconds();
+        require(monitor.training_elapsed_seconds() == paused_elapsed, "paused training clock is frozen");
+        monitor.resume_clock();
+        monitor.consume("splat_checkpoint_saving iteration=5");
+        require(monitor.saving_checkpoint(), "checkpoint save has an explicit status");
+        monitor.consume("splat_checkpoint_saved iteration=5");
+        require(!monitor.saving_checkpoint(), "checkpoint completion restores the training status");
+        monitor.consume("splat_training_completed iterations=10");
+        const auto completed_elapsed = monitor.training_elapsed_seconds();
+        require(monitor.training_elapsed_seconds() == completed_elapsed, "export does not extend training time");
+        monitor.mark_finished(0);
+        monitor.begin(editor::JobKind::train);
+        require(monitor.training_elapsed_seconds() < 0, "new training resets its clock");
         editor::ProjectSettings settings;
         editor::ProjectLayout layout;
         layout.cache = std::filesystem::temp_directory_path() / "photara alignment test cache";
@@ -50,6 +75,66 @@ int main() {
                                      photara::sfm::PositionAudit::unverified;
         }
         const auto decoded=photara::sfm::decode_asfm(photara::sfm::encode_asfm(source));
+        const auto task_root = std::filesystem::temp_directory_path() /
+            ("photara-transient-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        editor::ProjectSettings transient;
+        const auto put_path = [](auto& field, const std::filesystem::path& path) {
+            const auto text = editor::path_to_utf8(path);
+            std::snprintf(field.data(), field.size(), "%s", text.c_str());
+        };
+        put_path(transient.images_dir, task_root / "dataset_a" / "images");
+        put_path(transient.cache_dir, task_root / "cache");
+        const auto first_task = editor::resolve_layout(transient);
+        require(first_task.project_file.empty(), "dataset selection does not assign a user project file");
+        require(first_task.training_checkpoint.extension() == ".checkpoint" &&
+                first_task.model_output.extension() == ".ply", "training outputs are task cache artifacts");
+        auto train_command = editor::build_train_command("photara.exe", transient, first_task, {});
+        require(train_command.find(".ascan") == std::string::npos,
+                "unsaved training command does not create an ascan project");
+        editor::prepare_training_inputs(first_task, task_root / "dataset_a" / "images", false);
+        require(!std::filesystem::exists(first_task.training_checkpoint), "fresh preparation does not create a project or checkpoint");
+        put_path(transient.images_dir, task_root / "dataset_b" / "images");
+        const auto second_task = editor::resolve_layout(transient);
+        require(second_task.working_sfm.parent_path() != first_task.working_sfm.parent_path(),
+                "different datasets have independent runtime caches");
+        editor::prepare_training_inputs(second_task, {}, false, [] { return true; });
+        require(!std::filesystem::exists(second_task.working_sfm.parent_path()), "cancelled preparation creates no artifacts");
+
+        const auto project = task_root / "saved.ascan";
+        auto archive = photara::project::Archive::create();
+        photara::project::write_sfm(archive, source, project);
+        photara::splat::GaussianModel saved_model;
+        saved_model.sh_degree = 0;
+        const auto cpu = tinytensor::Device::CPU;
+        saved_model.means = tinytensor::Tensor::zeros({2, 3}, cpu);
+        saved_model.log_scales = tinytensor::Tensor::zeros({2, 3}, cpu);
+        saved_model.quaternions = tinytensor::Tensor::from_vector({1.F, 0.F, 0.F, 0.F, 1.F, 0.F, 0.F, 0.F}, {2, 4}, cpu);
+        saved_model.opacity_logits = tinytensor::Tensor::zeros({2, 1}, cpu);
+        saved_model.sh = tinytensor::Tensor::zeros({2, 1, 3}, cpu);
+        archive.set_chunk(photara::project::ChunkType::gaussians, photara::splat::encode_gaussians(saved_model));
+        archive.set_chunk(photara::project::ChunkType::training_model_info,
+            photara::splat::training_checkpoint_info_bytes({3, 10, 2, 42}));
+        archive.save(project);
+        const auto bytes_before = photara::project::Archive::open(project).encode();
+        const auto stamp_before = std::filesystem::last_write_time(project);
+        put_path(transient.project_dir, project);
+        const auto saved_task = editor::resolve_layout(transient);
+        require(saved_task.training_checkpoint != project && saved_task.model_output != project,
+                "opened projects use independent task output and checkpoints");
+        require(editor::build_train_command("photara.exe", transient, saved_task, {}).find(".ascan") == std::string::npos,
+                "saved project is never passed as the training output");
+        editor::prepare_training_inputs(saved_task, task_root / "dataset_b" / "images", true);
+        require(std::filesystem::exists(saved_task.working_sfm), "saved camera data is restored into the task cache");
+        require(photara::splat::inspect_training_checkpoint(saved_task.training_checkpoint)->iteration == 3,
+                "saved progress can resume from an independent task checkpoint");
+        editor::prepare_training_inputs(saved_task, task_root / "dataset_b" / "images", false);
+        require(!std::filesystem::exists(saved_task.training_checkpoint), "new training clears only the task checkpoint");
+        require(photara::project::Archive::open(project).encode() == bytes_before &&
+                std::filesystem::last_write_time(project) == stamp_before,
+                "preparation and resume leave the saved project byte-for-byte unchanged");
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(task_root / "cache"))
+            require(entry.path().extension() != ".ascan", "task cache contains no ascan files");
+        std::filesystem::remove_all(task_root);
         const auto imported=editor::sparse_scene_from_sfm(decoded,false);
         const auto counts=imported.scene.position_audit_counts();
         require(counts.audited==2 && counts.unverified==1 && counts.unaudited==0,

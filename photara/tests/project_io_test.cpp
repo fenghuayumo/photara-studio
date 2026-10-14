@@ -107,7 +107,49 @@ int main() {
 
     const Scene source = make_scene();
     save_asfm(source, asfm_path);
+    const auto signature = sfm_source_signature(asfm_path, dir, dir / "signature.ascan");
+    expect(signature == sfm_source_signature(asfm_path, dir, dir / "signature.ascan"),
+        "unchanged working SfM has a stable source signature");
+    expect(signature != sfm_source_signature(asfm_path, dir / "other_images", dir / "signature.ascan"),
+        "changing image path base invalidates source signature");
+    expect(signature != sfm_source_signature(asfm_path, dir, dir / "other_project" / "signature.ascan"),
+        "save-as path base invalidates source signature");
+    auto signed_archive = Archive::create();
+    signed_archive.set_chunk(ChunkType::sfm_source, signature);
+    write_sfm(signed_archive, source, dir / "signature.ascan");
+    expect(!signed_archive.has(ChunkType::sfm_source), "replacing SfM invalidates its source signature");
+    auto changed_source = source;
+    changed_source.images[0].pose.C.x() += 1;
+    save_asfm(changed_source, asfm_path);
+    expect(signature != sfm_source_signature(asfm_path, dir, dir / "signature.ascan"),
+        "changed working SfM invalidates source signature");
+    save_asfm(source, asfm_path);
     const Scene restored = load_asfm(asfm_path);
+    auto detailed = source;
+    for (auto& image : detailed.images) {
+        image.features.keypoints.resize(1000);
+        for (std::size_t i = 0; i < 1000; ++i)
+            image.features.keypoints[i] = {float(i), float(i * 2), 4.F, 2.F, 3.F};
+    }
+    detailed.tracks[0].observations[0].feature_id = 900;
+    detailed.tracks[0].observations[1].feature_id = 17;
+    detailed.tracks[0].observations.push_back({1, 999}); // Outlier, not a retained observation.
+    AsfmOptions compact_options;
+    compact_options.compact = true;
+    const auto compact_bytes = encode_asfm(detailed, compact_options);
+    const auto compact = decode_asfm(compact_bytes);
+    expect(compact_bytes.size() < encode_asfm(detailed).size() / 20,
+        "compact SfM discards unused keypoints and feature attributes");
+    expect(compact.images[0].features.keypoints.size() == 1 && compact.images[1].features.keypoints.size() == 1,
+        "compact SfM retains only inlier-referenced features");
+    expect(compact.images[0].features.keypoints[0].x == 900 && compact.images[1].features.keypoints[0].y == 34,
+        "compact SfM preserves referenced XY coordinates");
+    expect(compact.tracks[0].observations.size() == 2 && compact.tracks[0].observations[0].feature_id == 0 &&
+        compact.tracks[0].observations[1].feature_id == 0, "compact SfM remaps feature references and drops outliers");
+    expect(compact.images[0].features.keypoints[0].scale == 1 && compact.images[0].features.keypoints[0].response == 0,
+        "compact SfM restores omitted feature attributes to defaults");
+    expect(decode_asfm(encode_asfm(detailed)).images[0].features.keypoints.size() == 1000,
+        "working ASFM caches retain full features");
     expect(restored.cameras.size() == 1, "asfm camera count");
     expect(restored.cameras[0].k1 == 0.1, "asfm distortion");
     expect(restored.images.size() == 2, "asfm image count");
@@ -566,6 +608,30 @@ int main() {
     catch (const std::exception&) { checksum_refused = true; }
     expect(checksum_refused, "in-memory archive validates payload checksums");
 
+    const auto stream_source = dir / "photara_io_stream_source.ascan";
+    const auto stream_target = dir / "photara_io_stream_target.ascan";
+    auto stream_archive = Archive::create();
+    std::vector<std::uint8_t> large_chunk(1024 * 1024 + 17, 83);
+    stream_archive.set_chunk(ChunkType::gaussians, large_chunk);
+    stream_archive.save(stream_source);
+    auto stream_lazy = Archive::open(stream_source);
+    stream_lazy.save(stream_target);
+    expect(Archive::open(stream_target).chunk(ChunkType::gaussians) == large_chunk,
+        "streamed archive copies a chunk across buffer boundaries");
+    {
+        std::fstream corrupt(stream_source, std::ios::binary | std::ios::in | std::ios::out);
+        corrupt.seekp(-1, std::ios::end);
+        corrupt.put(0);
+    }
+    bool stream_refused = false;
+    try { stream_lazy = Archive::open(stream_source); stream_lazy.save(stream_target); }
+    catch (const std::exception&) { stream_refused = true; }
+    expect(stream_refused, "streamed save validates untouched chunk checksums");
+    expect(Archive::open(stream_target).chunk(ChunkType::gaussians) == large_chunk,
+        "failed streamed save preserves the destination");
+    expect(!std::filesystem::exists(stream_target.string() + ".tmp"),
+        "failed streamed save removes its temporary output");
+
     Archive required_unknown = Archive::create();
     write_settings(required_unknown, updated, ascan_path);
     required_unknown.set_chunk(
@@ -603,6 +669,8 @@ int main() {
     std::filesystem::remove(asfm_path, error);
     std::filesystem::remove(ascan_path, error);
     if (failures == 0) {
+        std::filesystem::remove(stream_source, error);
+        std::filesystem::remove(stream_target, error);
         std::cout << "project io tests passed\n";
         return 0;
     }
