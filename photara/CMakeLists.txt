@@ -7,6 +7,7 @@ if(PHOTARA_HAS_INFERENCE)
         src/inference/models/moge/weights.cpp
         src/inference/models/moge/encoder.cpp
         src/inference/models/moge/decoder.cpp
+        src/inference/models/moge/postprocess.cpp
         src/inference/geometry_prior.cpp
         src/inference/runtime/ggml_runtime.cpp)
     add_library(Photara::Inference ALIAS photara_inference)
@@ -1252,6 +1253,33 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         endif()
         photara_exclude_from_default(photara_moge_decoder_test)
         add_dependencies(photara_tests photara_moge_decoder_test)
+        add_executable(photara_moge_geometry_test tests/inference/moge_geometry_test.cpp)
+        target_include_directories(photara_moge_geometry_test PRIVATE src/inference)
+        target_link_libraries(photara_moge_geometry_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_geometry_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_geometry_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_geometry_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        add_test(NAME photara.inference.moge_geometry COMMAND photara_moge_geometry_test)
+        photara_exclude_from_default(photara_moge_geometry_test)
+        add_dependencies(photara_tests photara_moge_geometry_test)
+        add_executable(photara_moge_postprocess_compare tests/inference/moge_postprocess_compare.cpp)
+        target_include_directories(photara_moge_postprocess_compare PRIVATE src/inference)
+        target_link_libraries(photara_moge_postprocess_compare PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_postprocess_compare POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_postprocess_compare>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_postprocess_compare>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        photara_exclude_from_default(photara_moge_postprocess_compare)
+        add_dependencies(photara_tests photara_moge_postprocess_compare)
     endif()
     if(PHOTARA_ENABLE_CUDA AND TARGET Ceres::ceres)
         add_executable(photara_bearing_cuda_test tests/bearing_cuda_test.cpp)
@@ -1443,7 +1471,6 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET photara_studio)
             add_executable(photara_studio_alignment_test
                 tests/studio_alignment_test.cpp
-                src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp
