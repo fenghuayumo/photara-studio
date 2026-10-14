@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -25,6 +26,7 @@ namespace editor {
 // dataset. Downstream jobs (Train 3DGS, dense MVS) consume that product and
 // must not rebuild it.
 enum class JobKind { none, align, train, dense, texture, export_sfm };
+enum class TrainPrepareStage { checking, reading_sfm, encoding_sfm, restoring_progress, ready };
 
 const char* job_name(JobKind kind);
 
@@ -233,6 +235,8 @@ private:
 // ---------------------------------------------------------------------------
 
 struct ProjectSettings {
+    // Pinned task-cache directory; never serialized as a user project setting.
+    std::array<char, 1024> runtime_dir{};
     std::array<char, 1024> images_dir{};
     std::array<char, 1024> project_dir{};  // .ascan path, or legacy folder
 
@@ -348,8 +352,9 @@ struct ProjectSettings {
     bool texture_blend_linear = false;
 };
 
-// Everything the editor reads or writes lives under the project directory.
+// User project location, independent task-cache products and session handshakes.
 struct ProjectLayout {
+    bool use_saved_inputs{true};
     std::filesystem::path root;
     std::filesystem::path project_file;
     std::filesystem::path cache;
@@ -397,6 +402,12 @@ struct ProjectLayout {
     std::filesystem::path working_texture;
     std::filesystem::path texture_log;
 };
+
+// Prepare only task-cache inputs. User project files are strictly read-only.
+void prepare_training_inputs(const ProjectLayout& layout,
+    const std::filesystem::path& images, bool resume,
+    const std::function<bool()>& cancelled = {},
+    const std::function<void(TrainPrepareStage)>& progress = {});
 
 // These follow the Studio build, not the project. A saved choice the binary
 // cannot run falls back when the command is assembled.

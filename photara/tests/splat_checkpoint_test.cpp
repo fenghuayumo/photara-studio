@@ -99,6 +99,18 @@ int main(int argc, char** argv) {
         mvs::save_subject_bounds(scene.subject_bounds, options.live_subject_bounds_file);
         const auto uninterrupted = splat::Trainer(options).train(scene);
         compare(uninterrupted, splat::Trainer(options).train(scene));
+        auto task_options = options;
+        task_options.checkpoint_path = root / "training.checkpoint";
+        task_options.checkpoint_interval_iterations = 0;
+        task_options.checkpoint_interval_seconds = 0;
+        splat::Trainer(task_options).train(scene,
+            [](const splat::TrainingProgress& p) { return p.iteration < 3; });
+        require(splat::inspect_training_checkpoint(task_options.checkpoint_path)->iteration == 3,
+            "Task checkpoint did not retain interrupted progress");
+        task_options.resume_checkpoint = true;
+        compare(uninterrupted, splat::Trainer(task_options).train(scene));
+        for (const auto& entry : std::filesystem::directory_iterator(root))
+            require(entry.path().extension() != ".ascan", "Task training unexpectedly created a project file");
         options.checkpoint_path = splat::training_checkpoint_path(root / "project.ascan");
         options.checkpoint_interval_iterations = 2;
         const auto marker_type = static_cast<project::ChunkType>(100);

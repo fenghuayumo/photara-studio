@@ -46,20 +46,9 @@ Action draw_inspector(App& app) {
         ImGui::BeginDisabled(busy);
         theme::caption("Image source");
         ImGui::SetNextItemWidth(-138.F);
-        if (ImGui::InputText(
-                "##images", app.settings.images_dir.data(),
-                app.settings.images_dir.size())) {
-            clear_loaded_result(app);
-            if (app.project_folder_automatic) {
-                app.settings.project_dir.fill('\0');
-                app.project_folder_automatic = false;
-            }
-            assign_default_project_folder(app);
-            refresh_artifacts(app);
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit() &&
-            is_video_source(app.settings))
-            app.settings.video_frames_dir.fill('\0');
+        auto image_source = app.settings.images_dir;
+        if (ImGui::InputText("##images", image_source.data(), image_source.size(), ImGuiInputTextFlags_EnterReturnsTrue))
+            change_image_source(app, path_from_utf8_field(image_source.data()));
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button(i18n::id("Folder", "##pick_images"), {58.F, 0})) {
             select_image_folder(app);
@@ -201,14 +190,12 @@ Action draw_inspector(App& app) {
             "This build does not include SAM mask generation."));
 #endif
         theme::caption("Project file");
+        if (app.layout.project_file.empty())
+            theme::caption(tr("Unsaved session. Press Ctrl+S to save a project."));
         ImGui::SetNextItemWidth(-30.F);
-        if (ImGui::InputText(
+        ImGui::InputText(
                 "##project", app.settings.project_dir.data(),
-                app.settings.project_dir.size())) {
-            clear_loaded_result(app);
-            app.project_folder_automatic = false;
-            refresh_artifacts(app);
-        }
+                app.settings.project_dir.size(), ImGuiInputTextFlags_ReadOnly);
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("...##pick_project", {24.F, 0})) {
             select_project_folder(app);
@@ -230,25 +217,22 @@ Action draw_inspector(App& app) {
         ImGui::BeginDisabled(busy);
         theme::caption("External SfM dataset (optional)");
         ImGui::SetNextItemWidth(-138.F);
-        if (ImGui::InputText(
-                "##dataset_source", app.settings.dataset_source.data(),
-                app.settings.dataset_source.size())) {
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit())
-            apply_external_dataset_selection(app);
+        auto dataset_source = app.settings.dataset_source;
+        if (ImGui::InputText("##dataset_source", dataset_source.data(), dataset_source.size(), ImGuiInputTextFlags_EnterReturnsTrue))
+            change_external_dataset(app, path_from_utf8_field(dataset_source.data()));
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button(i18n::id("Folder", "##pick_dataset_folder"), {58.F, 0.F}) &&
             pick_folder(
                 L"Select external SfM dataset folder",
-                app.settings.dataset_source)) {
-            apply_external_dataset_selection(app);
+                dataset_source)) {
+            change_external_dataset(app, path_from_utf8_field(dataset_source.data()));
         }
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button(i18n::id("File", "##pick_dataset_file"), {46.F, 0.F}) &&
             pick_dataset_file(
                 L"Select external camera dataset file",
-                app.settings.dataset_source)) {
-            apply_external_dataset_selection(app);
+                dataset_source)) {
+            change_external_dataset(app, path_from_utf8_field(dataset_source.data()));
         }
         if (has_external_dataset(app)) {
             theme::caption(
@@ -272,11 +256,7 @@ Action draw_inspector(App& app) {
                     "Optional dense PLY initializer. COLMAP/OpenMVS sparse points "
                     "are used automatically when available.");
             if (ImGui::Button(tr("Clear external dataset"), {-1.F, 26.F})) {
-                app.settings.dataset_source.fill('\0');
-                app.settings.dataset_initial_cloud.fill('\0');
-                clear_loaded_result(app);
-                refresh_artifacts(app);
-                if (app.has_sparse) request_ascan_scene_load(app);
+                change_external_dataset(app, {});
             }
         }
         ImGui::EndDisabled();

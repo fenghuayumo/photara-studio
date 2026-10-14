@@ -385,7 +385,8 @@ int main(const int argc, char** argv) {
         ImGui::EndDisabled();
         if (app.close_requested && !app.pending_train_prepare.valid()) {
             app.close_requested = false;
-            app.show_close_confirmation = true;
+            if (editor::has_unsaved_project_changes(app)) app.show_close_confirmation = true;
+            else app.close_approved = true;
         }
         const std::string train_preparation_popup = std::string(tr("Preparing Training")) + "###train_preparation";
         const bool show_train_preparation = app.pending_train_prepare.valid() && app.train_preparation &&
@@ -397,8 +398,8 @@ int main(const int argc, char** argv) {
                 const auto stage = preparation ? preparation->stage.load() : editor::TrainPrepareStage::checking;
                 const char* label = "Checking training inputs...";
                 if (stage == editor::TrainPrepareStage::reading_sfm) label = "Reading updated camera data...";
-                if (stage == editor::TrainPrepareStage::encoding_sfm) label = "Updating project camera data...";
-                if (stage == editor::TrainPrepareStage::saving) label = "Saving updated training inputs...";
+                if (stage == editor::TrainPrepareStage::encoding_sfm) label = "Preparing cached camera data...";
+                if (stage == editor::TrainPrepareStage::restoring_progress) label = "Restoring saved training progress...";
                 ImGui::TextUnformatted(tr(label));
                 if (preparation) {
                     ImGui::Text(tr("Preparation elapsed: %.1f s"),

@@ -1050,6 +1050,7 @@ void SplatEdit::undo(App& app) {
         redo_.push_back(std::move(current));
         upload_model(app);
         dirty_ = true;
+        ++edit_revision_;
         return;
     }
     if (step.kind == Snapshot::Kind::volume) {
@@ -1080,6 +1081,7 @@ void SplatEdit::redo(App& app) {
         undo_.push_back(std::move(step));
         upload_model(app);
         dirty_ = true;
+        ++edit_revision_;
         return;
     }
     if (step.kind == Snapshot::Kind::replace) {
@@ -1089,6 +1091,7 @@ void SplatEdit::redo(App& app) {
         undo_.push_back(std::move(current));
         upload_model(app);
         dirty_ = true;
+        ++edit_revision_;
         return;
     }
     if (step.kind == Snapshot::Kind::volume) {
@@ -1270,6 +1273,7 @@ void SplatEdit::replace_from_model(
         return;
     }
     dirty_ = true;
+    ++edit_revision_;
     if (app.scene.has_gaussians()) {
         app.scene.points.clear();
         app.scene.colours.clear();
@@ -1325,6 +1329,7 @@ void SplatEdit::delete_selected(App& app) {
         return;
     }
     dirty_ = true;
+    ++edit_revision_;
     if (app.scene.has_gaussians()) {
         app.scene.points.clear();
         app.scene.colours.clear();
