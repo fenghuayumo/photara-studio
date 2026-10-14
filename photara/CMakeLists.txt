@@ -1,6 +1,36 @@
 find_package(OpenMP)
 find_package(CGAL QUIET)
 
+if(PHOTARA_HAS_INFERENCE)
+    add_library(photara_inference STATIC
+        src/inference/model_cache.cpp
+        src/inference/models/moge/weights.cpp
+        src/inference/models/moge/encoder.cpp
+        src/inference/models/moge/decoder.cpp
+        src/inference/geometry_prior.cpp
+        src/inference/runtime/ggml_runtime.cpp)
+    add_library(Photara::Inference ALIAS photara_inference)
+    target_include_directories(photara_inference PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/inference)
+    target_compile_features(photara_inference PUBLIC cxx_std_20)
+    target_compile_definitions(photara_inference PUBLIC PHOTARA_HAS_INFERENCE=1)
+    target_link_libraries(photara_inference PRIVATE ggml)
+    if(TARGET ggml-vulkan)
+        target_compile_definitions(photara_inference PRIVATE PHOTARA_INFERENCE_HAS_VULKAN=1)
+    endif()
+    set_target_properties(photara_inference PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# Cache/licence APIs remain available even in builds without inference/SAM.
+add_library(photara_sam_cache STATIC src/sam/model_cache.cpp)
+add_library(Photara::SAMCache ALIAS photara_sam_cache)
+target_include_directories(photara_sam_cache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(photara_sam_cache PUBLIC cxx_std_20)
+if(TARGET photara_inference)
+    target_link_libraries(photara_sam_cache PRIVATE Photara::Inference)
+endif()
+
 set(PHOTARA_BA_SOURCES
     src/ba/linearizer_cpu.cpp
     src/ba/optimizer_cpu.cpp)
@@ -616,13 +646,20 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_glb.cpp
+            src/splat/formats_usdc.cpp
             src/splat/simplify.cpp
+            src/splat/deployment.cpp
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
             src/splat/checkpoint.cpp
             src/splat/trainer.cpp)
         add_library(Photara::Splat ALIAS photara_splat)
+        if(PHOTARA_ENABLE_USDC)
+            include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PhotaraUsd.cmake")
+            target_link_libraries(photara_splat PRIVATE lightusd::next)
+            target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_USDC=1)
+        endif()
         target_include_directories(photara_splat
             PUBLIC
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -644,6 +681,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/rasterizer_vulkan.cpp
                 src/splat/geometry_vulkan.cpp
                 src/splat/pam_vulkan.cpp
+                src/splat/deployment_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
@@ -659,6 +697,7 @@ if(PHOTARA_ENABLE_FEATURES)
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/deployment.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
@@ -797,18 +836,24 @@ if(PHOTARA_ENABLE_FEATURES)
     endif()
 
 if(TARGET photara_features)
+    add_library(photara_sam STATIC src/sam/masks.cpp)
+    add_library(Photara::SAM ALIAS photara_sam)
+    target_link_libraries(photara_sam PUBLIC Photara::SAMCache PRIVATE Photara::SfM)
+    target_include_directories(photara_sam PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(photara_sam PUBLIC cxx_std_20)
+    if(PHOTARA_HAS_SAM)
+        target_link_libraries(photara_sam PRIVATE photara_sam3)
+        target_compile_definitions(photara_sam PRIVATE PHOTARA_HAS_SAM=1)
+    endif()
     add_library(photara_cxxopts INTERFACE)
     add_library(cxxopts::cxxopts ALIAS photara_cxxopts)
     target_include_directories(photara_cxxopts INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
 
     add_executable(photara
-        src/tools/reconstruct.cpp
-        src/tools/sam_model_cache.cpp
-        src/tools/sam_masks.cpp)
-    target_link_libraries(photara PRIVATE Photara::MVS cxxopts::cxxopts)
+        src/tools/reconstruct.cpp)
+    target_link_libraries(photara PRIVATE Photara::MVS Photara::SAM cxxopts::cxxopts)
     if(PHOTARA_HAS_SAM)
-        target_link_libraries(photara PRIVATE photara_sam3)
         target_compile_definitions(photara PRIVATE PHOTARA_HAS_SAM=1)
     endif()
     if(TARGET photara_splat)
@@ -898,7 +943,6 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/main.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
                 ${PHOTARA_STUDIO_DIR}/sam_model.cpp
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/splat_edit.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp
@@ -935,7 +979,7 @@ if(TARGET photara_features)
             target_include_directories(photara_studio PRIVATE
                 ${PHOTARA_STUDIO_DIR})
             target_link_libraries(photara_studio PRIVATE
-                photara_imgui Photara::SfM Photara::Splat
+                photara_imgui Photara::SfM Photara::Splat Photara::SAMCache
                 photara::splat_render photara_vk::photara_vk
                 Vulkan::Vulkan glfw)
             if(PHOTARA_HAS_TEXTURE AND TARGET Photara::Texture)
@@ -1105,6 +1149,110 @@ endif()
 
 if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     add_custom_target(photara_tests)
+    add_executable(photara_model_import_test tests/model_import_test.cpp)
+    target_include_directories(photara_model_import_test PRIVATE ../apps/editor)
+    target_compile_features(photara_model_import_test PRIVATE cxx_std_20)
+    add_test(NAME photara.studio.model_import COMMAND photara_model_import_test)
+    photara_exclude_from_default(photara_model_import_test)
+    add_dependencies(photara_tests photara_model_import_test)
+    if(TARGET photara_studio)
+        get_target_property(_session_sources photara_studio SOURCES)
+        list(FILTER _session_sources EXCLUDE REGEX "(main\\.cpp|\\.rc)$")
+        get_target_property(_session_links photara_studio LINK_LIBRARIES)
+        get_target_property(_session_definitions photara_studio COMPILE_DEFINITIONS)
+        add_executable(photara_gaussian_session_test tests/gaussian_session_test.cpp ${_session_sources})
+        target_include_directories(photara_gaussian_session_test PRIVATE ${PHOTARA_STUDIO_DIR})
+        target_link_libraries(photara_gaussian_session_test PRIVATE ${_session_links})
+        target_compile_features(photara_gaussian_session_test PRIVATE cxx_std_20)
+        if(_session_definitions)
+            target_compile_definitions(photara_gaussian_session_test PRIVATE ${_session_definitions})
+        endif()
+        if(MSVC)
+            target_compile_options(photara_gaussian_session_test PRIVATE /utf-8)
+        endif()
+        add_test(NAME photara.studio.gaussian_session COMMAND photara_gaussian_session_test)
+        add_test(NAME photara.studio.gaussian_session_vulkan COMMAND photara_gaussian_session_test --vulkan)
+        set_tests_properties(photara.studio.gaussian_session_vulkan PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+        set_tests_properties(photara.studio.gaussian_session PROPERTIES TIMEOUT 30)
+        photara_exclude_from_default(photara_gaussian_session_test)
+        add_dependencies(photara_tests photara_gaussian_session_test)
+        add_executable(photara_mesh_preview_test
+            tests/mesh_preview_test.cpp
+            ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
+            ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp
+            ${PHOTARA_STUDIO_DIR}/theme.cpp
+            ${PHOTARA_STUDIO_DIR}/i18n.cpp)
+        target_include_directories(photara_mesh_preview_test PRIVATE ${PHOTARA_STUDIO_DIR})
+        target_link_libraries(photara_mesh_preview_test PRIVATE
+            photara_imgui Photara::SfM Photara::Splat Vulkan::Vulkan glfw photara_vk::photara_vk)
+        target_compile_features(photara_mesh_preview_test PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(photara_mesh_preview_test PRIVATE /utf-8)
+        endif()
+        add_test(NAME photara.studio.mesh_preview COMMAND photara_mesh_preview_test)
+        add_test(NAME photara.studio.mesh_preview_vulkan COMMAND photara_mesh_preview_test --vulkan)
+        set_tests_properties(photara.studio.mesh_preview_vulkan PROPERTIES SKIP_RETURN_CODE 77)
+        photara_exclude_from_default(photara_mesh_preview_test)
+        add_dependencies(photara_tests photara_mesh_preview_test)
+    endif()
+    if(TARGET photara_inference)
+        add_executable(photara_inference_test tests/inference/inference_test.cpp)
+        target_include_directories(photara_inference_test PRIVATE src/inference)
+        target_link_libraries(photara_inference_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_inference_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_inference_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_inference_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        add_test(NAME photara.inference.contracts COMMAND photara_inference_test)
+        add_test(NAME photara.inference.vulkan COMMAND photara_inference_test --vulkan)
+        set_tests_properties(photara.inference.vulkan PROPERTIES SKIP_RETURN_CODE 77)
+        photara_exclude_from_default(photara_inference_test)
+        add_dependencies(photara_tests photara_inference_test)
+        # Manual real-checkpoint gate; never downloads model files via ctest.
+        add_executable(photara_moge_weights_test tests/inference/moge_weights_test.cpp)
+        target_include_directories(photara_moge_weights_test PRIVATE src/inference)
+        target_link_libraries(photara_moge_weights_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_weights_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_weights_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_weights_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        photara_exclude_from_default(photara_moge_weights_test)
+        add_dependencies(photara_tests photara_moge_weights_test)
+        add_executable(photara_moge_encoder_test tests/inference/moge_encoder_test.cpp)
+        target_include_directories(photara_moge_encoder_test PRIVATE src/inference)
+        target_link_libraries(photara_moge_encoder_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_encoder_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_encoder_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_encoder_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        photara_exclude_from_default(photara_moge_encoder_test)
+        add_dependencies(photara_tests photara_moge_encoder_test)
+        add_executable(photara_moge_decoder_test tests/inference/moge_decoder_test.cpp)
+        target_include_directories(photara_moge_decoder_test PRIVATE src/inference)
+        target_link_libraries(photara_moge_decoder_test PRIVATE Photara::Inference ggml)
+        if(WIN32)
+            add_custom_command(TARGET photara_moge_decoder_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_decoder_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_decoder_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                VERBATIM)
+        endif()
+        photara_exclude_from_default(photara_moge_decoder_test)
+        add_dependencies(photara_tests photara_moge_decoder_test)
+    endif()
     if(PHOTARA_ENABLE_CUDA AND TARGET Ceres::ceres)
         add_executable(photara_bearing_cuda_test tests/bearing_cuda_test.cpp)
         target_link_libraries(photara_bearing_cuda_test PRIVATE Photara::BA Ceres::ceres)
@@ -1151,6 +1299,38 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
         endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
+        if(PHOTARA_ENABLE_USDC)
+            add_executable(photara_splat_usdc_test tests/splat_usdc_test.cpp)
+            target_link_libraries(photara_splat_usdc_test PRIVATE Photara::Splat)
+            add_test(NAME photara.splat.usdc COMMAND photara_splat_usdc_test)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_usdc_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_splat_usdc_test>
+                        $<TARGET_FILE_DIR:photara_splat_usdc_test> COMMAND_EXPAND_LISTS)
+            endif()
+        endif()
+        add_executable(photara_splat_deployment_test tests/splat_deployment_test.cpp)
+        target_link_libraries(photara_splat_deployment_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.deployment COMMAND photara_splat_deployment_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.deployment_vulkan COMMAND photara_splat_deployment_test --vulkan)
+        endif()
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_deployment_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_deployment_test>
+                    $<TARGET_FILE_DIR:photara_splat_deployment_test> COMMAND_EXPAND_LISTS)
+        endif()
+        add_executable(photara_splat_merge_test tests/splat_merge_test.cpp)
+        target_link_libraries(photara_splat_merge_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.merge COMMAND photara_splat_merge_test)
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_merge_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_merge_test>
+                    $<TARGET_FILE_DIR:photara_splat_merge_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
@@ -1269,6 +1449,11 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_mvs_test tests/mvs_test.cpp)
         target_link_libraries(photara_mvs_test PRIVATE Photara::MVS)
         add_test(NAME photara.mvs.pipeline COMMAND photara_mvs_test)
+        add_executable(photara_mesh_load_test tests/mesh_load_test.cpp)
+        target_link_libraries(photara_mesh_load_test PRIVATE Photara::MVS)
+        add_test(NAME photara.mesh.load COMMAND photara_mesh_load_test)
+        photara_exclude_from_default(photara_mesh_load_test)
+        add_dependencies(photara_tests photara_mesh_load_test)
     endif()
     set(_photara_test_targets
         photara_bearing_cuda_test
@@ -1278,6 +1463,9 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_logging_test
         photara_splat_checkpoint_test
         photara_splat_test
+        photara_splat_usdc_test
+        photara_splat_deployment_test
+        photara_splat_merge_test
         photara_splat_quality_eval
         photara_splat_vulkan_forward_test
         photara_splat_vulkan_parity

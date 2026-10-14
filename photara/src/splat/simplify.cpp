@@ -1,4 +1,5 @@
 #include "splat/simplify.hpp"
+#include "deployment_vulkan.hpp"
 
 #include "core/logging.hpp"
 
@@ -569,9 +570,39 @@ GaussianModel simplify_gaussians(
             for (unsigned n = 0; n < knn; ++n) {
                 const std::uint32_t j = graph[i][n];
                 if (j == ~0U || j <= i || j >= set.n) continue;
-                edges.push_back({pair_cost(set, i, j),
+                edges.push_back({options.vulkan ? 0.F : pair_cost(set, i, j),
                     static_cast<std::uint32_t>(i), j});
             }
+        }
+        if (options.vulkan && !edges.empty()) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+            std::vector<float> values(set.n * 16, 0.F);
+            for (std::size_t i = 0; i < set.n; ++i) {
+                float* row = values.data() + i * 16;
+                std::copy_n(mean_at(set, i), 3, row);
+                row[3] = mass_of(set, i);
+                covariance(&set.quat[i*4], &set.scale[i*3], row+4);
+                float eval[3], evec[9];
+                jacobi_eigen_spd(row+4, eval, evec);
+                row[10] = std::log(eval[0]*eval[1]*eval[2]);
+                std::copy_n(set.sh.data()+i*set.sh_dim, 3, row+11);
+            }
+            // Bound transient edge buffers; evaluate costs in GPU batches.
+            constexpr std::size_t batch = 262144;
+            for (std::size_t start = 0; start < edges.size(); start += batch) {
+                if (cancelled(options)) return to_model(set);
+                const auto count = std::min(batch, edges.size()-start);
+                std::vector<std::int32_t> pairs(count*2);
+                for (std::size_t i=0;i<count;++i) {
+                    pairs[i*2]=static_cast<std::int32_t>(edges[start+i].a);
+                    pairs[i*2+1]=static_cast<std::int32_t>(edges[start+i].b);
+                }
+                const auto costs=detail::lod_costs_vulkan(values,pairs);
+                for (std::size_t i=0;i<count;++i) edges[start+i].cost=costs[i];
+            }
+#else
+            throw std::runtime_error("Vulkan simplification was not compiled");
+#endif
         }
         std::sort(edges.begin(), edges.end(),
             [](const Edge& a, const Edge& b) { return a.cost < b.cost; });

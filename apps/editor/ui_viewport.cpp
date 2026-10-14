@@ -859,9 +859,9 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     if (!app.loading_scene && !app.scene.has_points() && !app.mesh.has() &&
         (aligning || !app.has_sparse || app.suppress_scene_auto_load)) {
-        const char* headline = tr("Drop photos, a video, or a reconstruction");
+        const char* headline = tr("Drop photos, a video, 3DGS, or a mesh");
         const char* hint = tr(
-            "Drop an image folder, photos, a video, .asfm, or .ascan onto this view");
+            "Drop photos, video, 3DGS (PLY/SOG/SPZ/GLB/USDC), mesh (PLY/OBJ), .asfm, or .ascan");
         if (aligning) {
             const Stage stage = app.monitor.stage();
             if (stage == Stage::preparing) {
@@ -1021,7 +1021,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             ? tr("Previous result cleared")
             : app.has_sparse
             ? tr("Reading sparse.ply...")
-            : tr("Drop a photo folder, .asfm, or .ascan here");
+            : tr("Drop photos, 3DGS, mesh, .asfm, or .ascan here");
         draw->AddText(
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
     }

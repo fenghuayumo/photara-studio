@@ -1239,10 +1239,12 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.splat_sog = with_suffix("_splat.sog");
     layout.splat_spz = with_suffix("_splat.spz");
     layout.splat_glb = with_suffix("_splat.glb");
+    layout.splat_usdc = with_suffix("_splat.usdc");
     layout.splat_model = settings.splat_format == 2
         ? layout.splat_sog
         : settings.splat_format == 3 ? layout.splat_spz
-        : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
+        : settings.splat_format == 4 ? layout.splat_glb
+        : settings.splat_format == 5 ? layout.splat_usdc : layout.splat_ply;
     layout.mesh_ply = with_suffix("_splat_mesh.ply");
     layout.mvs_mesh_ply = with_suffix("_mesh.ply");
     layout.mvs_raw_mesh_ply = with_suffix("_mvs_mesh.ply");
