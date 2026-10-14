@@ -1,6 +1,7 @@
 #include "app.hpp"
 #include "cli_path.hpp"
 #include "file_dialogs.hpp"
+#include "model_import.hpp"
 
 #include "i18n.hpp"
 
@@ -40,6 +41,7 @@
 
 namespace editor {
 using i18n::tr;
+photara::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh);
 
 bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
@@ -116,7 +118,7 @@ void frame_reconstruction(App& app) {
 }
 
 std::filesystem::path existing_splat_model(const App& app) {
-    const std::filesystem::path imported(app.settings.splat_model_source.data());
+    const auto imported = path_from_utf8_field(app.settings.splat_model_source.data());
     std::error_code error;
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
@@ -278,8 +280,8 @@ void refresh_artifacts(App& app) {
         app.has_sparse = false;
         app.has_asfm = false;
         app.has_mvs = false;
-        app.has_model = false;
-        app.has_mesh = false;
+        app.has_model = !existing_splat_model(app).empty();
+        app.has_mesh = !app.imported_mesh_source.empty();
         app.has_texture = false;
         app.project_writer_version = 0;
         app.project_min_reader_version = 0;
@@ -295,6 +297,7 @@ void refresh_artifacts(App& app) {
         std::filesystem::exists(app.layout.sparse_ply, error);
     app.has_model = !existing_splat_model(app).empty();
     app.has_mesh =
+        !app.imported_mesh_source.empty() ||
         std::filesystem::exists(app.layout.working_mesh, error) ||
         std::filesystem::exists(app.layout.mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
@@ -729,6 +732,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             app.layout.working_mesh, app.layout.mesh_ply,
             app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply};
         for (const auto& mesh_path : mesh_candidates) {
+            if (!app.imported_mesh_source.empty()) break;
             if (mesh_path.empty() ||
                 !std::filesystem::exists(mesh_path, working_error))
                 continue;
@@ -741,8 +745,19 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
             break;
         }
+        if (!app.imported_mesh_source.empty() && app.mesh.has()) {
+            const auto imported = preview_mesh_to_mvs(app.mesh);
+            archive.set_chunk(photara::project::ChunkType::mesh,
+                photara::mvs::encode_mesh(imported));
+            // Keep the project-owned working geometry in sync: reopen prefers
+            // this cache over the archive chunk.
+            if (!app.layout.working_mesh.empty())
+                photara::mvs::save_mesh_ply(imported, app.layout.working_mesh);
+            archive.erase_chunk(photara::project::ChunkType::texture);
+        }
 #if defined(PHOTARA_HAS_TEXTURE)
-        if (textured_mesh_on_disk(app.layout.working_texture)) {
+        if (app.imported_mesh_source.empty() &&
+            textured_mesh_on_disk(app.layout.working_texture)) {
             try {
                 archive.set_chunk(
                     photara::project::ChunkType::texture,
@@ -771,6 +786,7 @@ void clear_viewport_scene(App& app) {
     app.qa_camera_valid = false;
     app.scene.clear();
     app.mesh.clear();
+    app.imported_mesh_source.clear();
     app.mesh_load_failed = false;
     app.mesh_gpu_positions.clear();
     app.mesh_gpu_normals.clear();
@@ -1063,6 +1079,7 @@ void select_video_file(App& app) {
 
 void open_project_from_path(App& app, const std::filesystem::path& path);
 void open_asfm_from_path(App& app, const std::filesystem::path& asfm);
+void request_gaussian_scene_load(App& app);
 
 void apply_dropped_image_source(
     App& app, const std::vector<std::string>& dropped) {
@@ -1107,6 +1124,59 @@ void apply_dropped_image_source(
 }
 
 void apply_dropped_paths(App& app, const std::vector<std::string>& dropped) {
+    // Validate the whole selection before replacing the displayed model.
+    std::filesystem::path model;
+    ModelImportKind kind = ModelImportKind::none;
+    try {
+        for (const auto& text : dropped) {
+            if (text.empty()) continue;
+            const auto path = path_from_drop(text);
+            const auto candidate = model_import_kind(path);
+            if (candidate == ModelImportKind::none) continue;
+            if (!model.empty() || dropped.size() != 1) {
+                set_message(app, tr("Drop a single 3DGS or mesh model"), theme::warning);
+                return;
+            }
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(path, error))
+                throw std::runtime_error("Model file does not exist");
+            model = path;
+            kind = candidate;
+        }
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+        return;
+    }
+    if (!model.empty()) {
+        if (app.job.running() || app.loading_scene || app.splat_export.job.valid() ||
+            app.splat_simplify.running) {
+            set_message(app, tr("Wait for the current operation before importing a model"), theme::warning);
+            return;
+        }
+        if (app.splat_edit.dirty()) {
+            set_message(app, tr("Export Gaussian edits, then start a new project before importing another model"), theme::warning);
+            return;
+        }
+        if (kind == ModelImportKind::gaussians &&
+            path_to_utf8(model).size() >= app.settings.splat_model_source.size()) {
+            set_message(app, "Model path is too long", theme::danger);
+            return;
+        }
+        clear_loaded_result(app);
+        app.workspace = ViewportWorkspace::scene_3d;
+        if (kind == ModelImportKind::gaussians) {
+            store_utf8_path_field(app.settings.splat_model_source, model);
+            refresh_artifacts(app);
+            app.view_mode = VisualizationMode::splat;
+            request_gaussian_scene_load(app);
+        } else {
+            app.imported_mesh_source = model;
+            refresh_artifacts(app);
+            app.suppress_scene_auto_load = true;
+            show_mesh_view(app, true);
+        }
+        return;
+    }
     std::vector<std::filesystem::path> projects;
     std::vector<std::filesystem::path> asfms;
     std::vector<std::string> remainder;
@@ -1164,7 +1234,7 @@ void consume_dropped_paths(App& app) {
     if (!mouse_over_viewport(app)) {
         set_message(
             app,
-            "Drop photos, a video, an .asfm scene, or an .ascan project on the viewport",
+            "Drop photos, a video, 3DGS, mesh, .asfm, or .ascan on the viewport",
             theme::warning);
         return;
     }
@@ -1288,6 +1358,7 @@ void ensure_gaussian_scene(App& app) {
 }
 
 std::filesystem::path existing_mesh_path(const App& app) {
+    if (!app.imported_mesh_source.empty()) return app.imported_mesh_source;
     std::error_code error;
     const auto exists = [&](const std::filesystem::path& path) {
         return !path.empty() && std::filesystem::exists(path, error);
@@ -1308,7 +1379,8 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     const auto ply = existing_mesh_path(app);
     const auto ascan = app.layout.project_file;
     const auto textured = app.layout.working_texture;
-    const bool have_textured = textured_mesh_on_disk(textured);
+    const bool have_textured = app.imported_mesh_source.empty() &&
+        textured_mesh_on_disk(textured);
     if (ply.empty() && ascan.empty() && !have_textured) {
         app.mesh_load_failed = true;
         set_message(app, "No mesh found to preview", theme::warning);
@@ -1612,6 +1684,7 @@ bool can_export_sparse(const App& app) {
 bool can_export_model(const App& app) { return app.has_model; }
 
 bool can_export_textured_mesh(const App& app) {
+    if (!app.imported_mesh_source.empty()) return false;
     return app.has_texture || textured_mesh_on_disk(app.layout.working_texture);
 }
 
@@ -1758,6 +1831,7 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
 }
 
 std::filesystem::path ensure_textured_stem(App& app) {
+    if (!app.imported_mesh_source.empty()) return {};
     if (textured_mesh_on_disk(app.layout.working_texture))
         return app.layout.working_texture;
 #if defined(PHOTARA_HAS_TEXTURE)
@@ -1779,6 +1853,11 @@ std::filesystem::path ensure_textured_stem(App& app) {
 
 photara::mvs::Mesh load_geometry_mesh(App& app) {
     const auto ply = existing_mesh_path(app);
+    if (!app.imported_mesh_source.empty()) {
+        const auto loaded = load_preview_mesh(ply, {});
+        if (!loaded.ok) throw std::runtime_error(loaded.error);
+        return preview_mesh_to_mvs(loaded.mesh);
+    }
     if (!ply.empty()) return photara::mvs::load_mesh_ply(ply);
     if (!app.layout.project_file.empty()) {
         const auto archive =

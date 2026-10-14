@@ -129,6 +129,7 @@ struct App {
     bool has_mvs{};
     bool has_model{};
     bool has_mesh{};
+    std::filesystem::path imported_mesh_source;
     bool has_texture{};
     gpu::PreviewTexture atlas_preview;
     std::filesystem::path atlas_preview_path;
