@@ -322,28 +322,21 @@ DenseCloud load_dense_ply(const std::filesystem::path& path) {
 }
 
 Mesh load_mesh_ply(const std::filesystem::path& path) {
-    // Reuse the point loader for its validated vertex conversion, then make a
-    // second streaming pass for the face element. Mesh PLYs are small enough
-    // compared with the dense cloud that this keeps the parser straightforward
-    // without adding a second set of subtly different vertex conversions.
-    DenseCloud cloud = load_dense_ply(path);
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("Failed to open mesh PLY: " + path.string());
-
     std::string line;
-    if (!std::getline(in, line))
-        throw std::runtime_error("Invalid mesh PLY header: " + path.string());
-    bool ascii = false;
-    bool binary_little = false;
-    bool in_vertex = false;
-    bool in_face = false;
-    bool saw_end_header = false;
-    std::size_t vertex_count = 0;
-    std::size_t face_count = 0;
-    std::vector<PlyProperty> vertex_properties;
-    std::vector<PlyProperty> face_properties;
+    if (!std::getline(in, line)) throw std::runtime_error("Invalid mesh PLY header");
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line != "ply") throw std::runtime_error("Invalid mesh PLY header");
+
+    struct Element {
+        std::string name;
+        std::size_t count{};
+        std::vector<PlyProperty> properties;
+    };
+    std::vector<Element> elements;
+    bool ascii = false, binary = false, complete = false;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
         std::istringstream tokens(line);
         std::string keyword;
         tokens >> keyword;
@@ -351,25 +344,20 @@ Mesh load_mesh_ply(const std::filesystem::path& path) {
             std::string format;
             tokens >> format;
             ascii = format == "ascii";
-            binary_little = format == "binary_little_endian";
-            if (!ascii && !binary_little)
-                throw std::runtime_error(
-                    "Mesh PLY must be ASCII or binary little endian");
+            binary = format == "binary_little_endian";
+            if (!ascii && !binary)
+                throw std::runtime_error("Mesh PLY must be ASCII or binary little endian");
         } else if (keyword == "element") {
-            std::string name;
-            std::size_t count = 0;
-            tokens >> name >> count;
-            in_vertex = name == "vertex";
-            in_face = name == "face";
-            if (in_vertex) vertex_count = count;
-            if (in_face) face_count = count;
-        } else if (keyword == "property" && (in_vertex || in_face)) {
+            Element element;
+            if (!(tokens >> element.name >> element.count))
+                throw std::runtime_error("Invalid mesh PLY element");
+            elements.push_back(std::move(element));
+        } else if (keyword == "property" && !elements.empty()) {
             std::string type;
             tokens >> type;
             PlyProperty property;
             if (type == "list") {
-                std::string count_type;
-                std::string value_type;
+                std::string count_type, value_type;
                 tokens >> count_type >> value_type >> property.name;
                 property.list = true;
                 property.count_type = parse_ply_scalar(count_type);
@@ -378,115 +366,137 @@ Mesh load_mesh_ply(const std::filesystem::path& path) {
                 tokens >> property.name;
                 property.value_type = parse_ply_scalar(type);
             }
-            (in_vertex ? vertex_properties : face_properties)
-                .push_back(std::move(property));
+            if (property.name.empty()) throw std::runtime_error("Invalid mesh PLY property");
+            elements.back().properties.push_back(std::move(property));
         } else if (keyword == "end_header") {
-            saw_end_header = true;
+            complete = true;
             break;
         }
     }
-    if (!saw_end_header || (!ascii && !binary_little) ||
-        vertex_count != cloud.points.size() || face_count == 0 ||
-        face_properties.empty())
-        throw std::runtime_error(
-            "PLY has no readable mesh face element: " + path.string());
+    if (!complete || (!ascii && !binary) || elements.empty() ||
+        elements.front().name != "vertex" || elements.front().count == 0)
+        throw std::runtime_error("Mesh PLY must begin with a nonempty vertex element");
+    const auto& vertices = elements.front();
+    const auto has = [&](const char* name) {
+        return std::any_of(vertices.properties.begin(), vertices.properties.end(),
+            [name](const PlyProperty& p) { return !p.list && p.name == name; });
+    };
+    if (!has("x") || !has("y") || !has("z"))
+        throw std::runtime_error("Mesh PLY is missing x/y/z properties");
+    const auto face_element = std::find_if(elements.begin(), elements.end(),
+        [](const Element& e) { return e.name == "face" && e.count > 0; });
+    if (face_element == elements.end()) throw std::runtime_error("PLY has no mesh faces");
+    const std::size_t vertex_count = vertices.count;
+    if (vertex_count > static_cast<std::size_t>((std::numeric_limits<Index>::max)()))
+        throw std::runtime_error("Mesh PLY exceeds supported vertex index range");
 
+    // Read the payload once. Scalar properties and ignored lists do not allocate
+    // temporary vectors, and no intermediate DenseCloud is constructed.
     std::vector<char> payload;
     std::size_t offset = 0;
-    if (binary_little) {
-        const auto start = in.tellg();
+    if (binary) {
+        const auto begin = in.tellg();
         in.seekg(0, std::ios::end);
         const auto end = in.tellg();
-        if (start < 0 || end < start)
-            throw std::runtime_error("Unable to size binary mesh PLY payload");
-        payload.resize(static_cast<std::size_t>(end - start));
-        in.seekg(start);
-        if (!payload.empty())
-            in.read(payload.data(), static_cast<std::streamsize>(payload.size()));
+        if (begin < 0 || end < begin) throw std::runtime_error("Invalid mesh PLY payload size");
+        payload.resize(static_cast<std::size_t>(end - begin));
+        in.seekg(begin);
+        in.read(payload.data(), static_cast<std::streamsize>(payload.size()));
         if (!in) throw std::runtime_error("Failed to read binary mesh PLY payload");
     }
-    const auto read_scalar = [&](const PlyScalar type) {
-        double value = 0.0;
-        if (ascii) {
-            if (!(in >> value))
-                throw std::runtime_error("Unexpected end of ASCII mesh PLY");
-        } else {
-            value = read_ply_binary_scalar(payload, offset, type);
-        }
+    const auto scalar = [&](PlyScalar type) -> double {
+        if (binary) return read_ply_binary_scalar(payload, offset, type);
+        double value;
+        if (!(in >> value)) throw std::runtime_error("Unexpected end of ASCII mesh PLY");
         return value;
     };
-    const auto read_property = [&](const PlyProperty& property) {
-        std::vector<double> values;
-        if (!property.list) {
-            values.push_back(read_scalar(property.value_type));
-            return values;
-        }
-        const double count_value = read_scalar(property.count_type);
-        if (!std::isfinite(count_value) || count_value < 0.0 ||
-            count_value > 100'000'000.0)
+    const auto list_count = [&](const PlyProperty& p) {
+        const double raw = scalar(p.count_type);
+        if (!std::isfinite(raw) || raw < 0 || raw > 100'000'000 || std::trunc(raw) != raw)
             throw std::runtime_error("Invalid mesh PLY list length");
-        const auto count = static_cast<std::size_t>(count_value);
-        values.reserve(count);
-        for (std::size_t item = 0; item < count; ++item)
-            values.push_back(read_scalar(property.value_type));
-        return values;
+        return static_cast<std::size_t>(raw);
+    };
+    const auto skip = [&](const PlyProperty& p) {
+        const auto count = p.list ? list_count(p) : 1U;
+        if (binary) {
+            const auto size = ply_scalar_size(p.value_type);
+            if (count > (payload.size() - offset) / size)
+                throw std::runtime_error("Unexpected end of binary mesh PLY");
+            offset += count * size;
+        } else {
+            for (std::size_t i = 0; i < count; ++i) static_cast<void>(scalar(p.value_type));
+        }
     };
 
-    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex)
-        for (const PlyProperty& property : vertex_properties)
-            static_cast<void>(read_property(property));
-
+    // Bind property names once, not for every scalar of every vertex.
+    constexpr std::array<const char*, 9> names{"x", "y", "z", "nx", "ny", "nz", "red", "green", "blue"};
+    std::vector<int> attributes(vertices.properties.size(), -1);
+    for (std::size_t p = 0; p < vertices.properties.size(); ++p)
+        if (!vertices.properties[p].list)
+            for (std::size_t a = 0; a < names.size(); ++a)
+                if (vertices.properties[p].name == names[a]) attributes[p] = static_cast<int>(a);
     Mesh mesh;
     mesh.vertices.reserve(vertex_count);
-    const auto has_vertex_property = [&](const char* name) {
-        return std::any_of(
-            vertex_properties.begin(), vertex_properties.end(),
-            [name](const PlyProperty& property) {
-                return !property.list && property.name == name;
-            });
-    };
-    const bool has_normals =
-        has_vertex_property("nx") && has_vertex_property("ny") &&
-        has_vertex_property("nz");
-    const bool has_colors =
-        has_vertex_property("red") && has_vertex_property("green") &&
-        has_vertex_property("blue");
-    if (has_normals) mesh.normals.reserve(vertex_count);
-    if (has_colors) mesh.colors.reserve(vertex_count);
-    for (DensePoint& point : cloud.points) {
-        mesh.vertices.push_back(point.position);
-        if (has_normals) mesh.normals.push_back(point.normal);
-        if (has_colors) mesh.colors.push_back(point.color);
-    }
-
-    mesh.faces.reserve(face_count);
-    for (std::size_t face = 0; face < face_count; ++face) {
-        std::vector<Index> polygon;
-        for (const PlyProperty& property : face_properties) {
-            std::vector<double> values = read_property(property);
-            if (!property.list ||
-                (property.name != "vertex_indices" &&
-                 property.name != "vertex_index"))
-                continue;
-            polygon.reserve(values.size());
-            for (const double value : values) {
-                if (!std::isfinite(value) || value < 0.0 ||
-                    value >= static_cast<double>(vertex_count) ||
-                    value > static_cast<double>(
-                        (std::numeric_limits<Index>::max)()))
-                    throw std::runtime_error("Mesh PLY face index is out of range");
-                polygon.push_back(static_cast<Index>(value));
+    const bool normals = has("nx") && has("ny") && has("nz");
+    const bool colors = has("red") && has("green") && has("blue");
+    if (normals) mesh.normals.reserve(vertex_count);
+    if (colors) mesh.colors.reserve(vertex_count);
+    mesh.faces.reserve(face_element->count);
+    for (std::size_t v = 0; v < vertex_count; ++v) {
+        std::array<float, 9> value{0.F, 0.F, 0.F, 0.F, 0.F, 0.F, 0.5F, 0.5F, 0.5F};
+        for (std::size_t p = 0; p < vertices.properties.size(); ++p) {
+            const auto& property = vertices.properties[p];
+            const int a = attributes[p];
+            if (a < 0) { skip(property); continue; }
+            float raw = static_cast<float>(scalar(property.value_type));
+            if (a >= 6) {
+                if (ply_integer_type(property.value_type) || raw > 1.F) raw /= 255.F;
+                raw = std::clamp(raw, 0.F, 1.F);
             }
+            value[static_cast<std::size_t>(a)] = raw;
         }
-        if (polygon.size() < 3) continue;
-        for (std::size_t corner = 1; corner + 1 < polygon.size(); ++corner)
-            mesh.faces.emplace_back(
-                static_cast<int>(polygon[0]),
-                static_cast<int>(polygon[corner]),
-                static_cast<int>(polygon[corner + 1]));
+        const Vec3f position{value[0], value[1], value[2]};
+        // Reject invalid positions instead of deleting vertices and changing
+        // the meaning of face indices.
+        if (!position.allFinite() || (position.array().abs() >= 1e10F).any())
+            throw std::runtime_error("Mesh PLY contains an invalid vertex position");
+        mesh.vertices.push_back(position);
+        if (normals) {
+            Vec3f normal{value[3], value[4], value[5]};
+            if (!normal.allFinite()) normal.setZero();
+            mesh.normals.push_back(normal);
+        }
+        if (colors) mesh.colors.emplace_back(value[6], value[7], value[8]);
     }
-    if (mesh.faces.empty())
-        throw std::runtime_error("Mesh PLY contains no valid triangles");
+    std::vector<Index> polygon;
+    polygon.reserve(4);
+    for (std::size_t e = 1; e < elements.size(); ++e) {
+        const auto& element = elements[e];
+        for (std::size_t row = 0; row < element.count; ++row) {
+            polygon.clear();
+            for (const auto& property : element.properties) {
+                if (element.name != "face" || !property.list ||
+                    (property.name != "vertex_indices" && property.name != "vertex_index")) {
+                    skip(property);
+                    continue;
+                }
+                const auto count = list_count(property);
+                if (binary && count > (payload.size() - offset) / ply_scalar_size(property.value_type))
+                    throw std::runtime_error("Unexpected end of binary mesh PLY face");
+                polygon.reserve(count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const double index = scalar(property.value_type);
+                    if (!std::isfinite(index) || index < 0 || index >= static_cast<double>(vertex_count) ||
+                        std::trunc(index) != index)
+                        throw std::runtime_error("Mesh PLY face index is out of range");
+                    polygon.push_back(static_cast<Index>(index));
+                }
+            }
+            for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+                mesh.faces.emplace_back(polygon[0], polygon[i], polygon[i + 1]);
+        }
+    }
+    if (mesh.faces.empty()) throw std::runtime_error("Mesh PLY contains no valid triangles");
     return mesh;
 }
 

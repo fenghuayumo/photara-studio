@@ -2,6 +2,7 @@
 
 #include <array>
 #include <filesystem>
+#include <vector>
 
 namespace editor {
 
@@ -18,6 +19,8 @@ bool pick_point_cloud_file(
     const wchar_t* title, std::array<char, 1024>& destination);
 bool pick_splat_model_file(
     const wchar_t* title, std::array<char, 1024>& destination);
+bool pick_splat_model_files(
+    const wchar_t* title, std::vector<std::filesystem::path>& destination);
 bool pick_video_file(
     const wchar_t* title, std::array<char, 1024>& destination);
 bool pick_export_path(

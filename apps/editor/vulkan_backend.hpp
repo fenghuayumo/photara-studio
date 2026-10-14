@@ -8,6 +8,7 @@
 #endif
 
 #include "io/image.hpp"
+#include "mesh_gpu_data.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -176,13 +177,8 @@ public:
     MeshPreviewRenderer& operator=(const MeshPreviewRenderer&) = delete;
     ~MeshPreviewRenderer() { reset(); }
 
-    void set_mesh(
-        const std::vector<float>& positions,
-        const std::vector<float>& normals,
-        const std::vector<float>& colours,
-        const std::vector<std::uint32_t>& indices,
-        const std::vector<float>& uvs = {});
-    void set_albedo(const photara::io::RgbImage& atlas);
+    void set_mesh(std::shared_ptr<const MeshGpuData> data);
+    void set_albedo(const MeshGpuTexture& atlas);
     bool draw(
         std::uint32_t width, std::uint32_t height,
         const MeshPreviewUniforms& uniforms);
@@ -208,6 +204,7 @@ private:
     };
 
     void destroy_mesh_buffers();
+    void ensure_wireframe();
     void destroy_frames();
     void destroy_pipeline();
     void destroy_albedo();
@@ -241,6 +238,7 @@ private:
     VkDeviceMemory edge_memory_{};
     std::uint32_t index_count_{};
     std::uint32_t edge_count_{};
+    std::shared_ptr<const MeshGpuData> mesh_data_;
     std::uint32_t width_{};
     std::uint32_t height_{};
     int write_{};

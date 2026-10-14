@@ -251,7 +251,8 @@ NB_MODULE(photara, module) {
         .value("PLY", splat::GaussianFormat::ply)
         .value("SOG", splat::GaussianFormat::sog)
         .value("SPZ", splat::GaussianFormat::spz)
-        .value("GLB", splat::GaussianFormat::glb);
+        .value("GLB", splat::GaussianFormat::glb)
+        .value("USDC", splat::GaussianFormat::usdc);
 
     nb::enum_<splat::AlphaMode>(module, "AlphaMode")
         .value("MASKED", splat::AlphaMode::masked)

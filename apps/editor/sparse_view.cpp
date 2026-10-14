@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -30,6 +31,7 @@
 #include <sstream>
 #include <system_error>
 #include <utility>
+#include <unordered_map>
 
 namespace editor {
 namespace {
@@ -1265,10 +1267,20 @@ bool parse_obj_corner(
 PreviewMesh preview_mesh_from_obj(const std::filesystem::path& path) {
     std::ifstream input(path);
     if (!input) throw std::runtime_error("Failed to open OBJ: " + path.string());
-    std::vector<Vec3> positions;
-    std::vector<Vec3> normals;
+    std::vector<Vec3> positions, normals;
     std::vector<Vec2> texcoords;
     PreviewMesh mesh;
+    struct CornerHash {
+        std::size_t operator()(const std::array<int, 3>& corner) const noexcept {
+            std::size_t hash = 0;
+            for (int index : corner)
+                hash ^= std::hash<int>{}(index) + 0x9e3779b9U + (hash << 6U) + (hash >> 2U);
+            return hash;
+        }
+    };
+    std::unordered_map<std::array<int, 3>, std::uint32_t, CornerHash> corners;
+    std::vector<std::array<int, 3>> polygon;
+    bool have_normals = true, have_uvs = false;
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -1282,69 +1294,66 @@ PreviewMesh preview_mesh_from_obj(const std::filesystem::path& path) {
         } else if (tag == "vt") {
             Vec2 uv;
             stream >> uv.x >> uv.y;
-            // OBJ V is up; the albedo PNG and Vulkan both sample V down.
-            texcoords.push_back({uv.x, 1.F - uv.y});
+            // OBJ uses bottom-left UVs; image sampling uses top-left.
+            uv.y = 1.F - uv.y;
+            texcoords.push_back(uv);
         } else if (tag == "vn") {
             Vec3 n;
             stream >> n.x >> n.y >> n.z;
             normals.push_back(n);
         } else if (tag == "f") {
-            std::vector<std::array<int, 3>> corners;
+            if (mesh.vertices.empty()) {
+                mesh.vertices.reserve(positions.size());
+                mesh.normals.reserve(positions.size());
+                mesh.uvs.reserve(positions.size());
+            }
+            polygon.clear();
             std::string token;
             while (stream >> token) {
                 int vertex = 0, tex = 0, normal = 0;
                 if (!parse_obj_corner(token, vertex, tex, normal)) continue;
-                corners.push_back({vertex, tex, normal});
+                polygon.push_back({obj_index(vertex, static_cast<int>(positions.size())),
+                    obj_index(tex, static_cast<int>(texcoords.size())),
+                    obj_index(normal, static_cast<int>(normals.size()))});
             }
-            if (corners.size() < 3) continue;
-            for (std::size_t i = 1; i + 1 < corners.size(); ++i) {
-                const std::array<std::array<int, 3>, 3> tri = {
-                    corners[0], corners[i], corners[i + 1]};
-                const std::size_t begin = mesh.vertices.size();
-                std::array<std::uint32_t, 3> face{};
-                bool ok = true;
-                for (int c = 0; c < 3; ++c) {
-                    const int vi = obj_index(
-                        tri[static_cast<std::size_t>(c)][0],
-                        static_cast<int>(positions.size()));
-                    const int ti = obj_index(
-                        tri[static_cast<std::size_t>(c)][1],
-                        static_cast<int>(texcoords.size()));
-                    const int ni = obj_index(
-                        tri[static_cast<std::size_t>(c)][2],
-                        static_cast<int>(normals.size()));
-                    if (vi < 0 ||
-                        static_cast<std::size_t>(vi) >= positions.size()) {
-                        ok = false;
-                        break;
+            for (std::size_t k = 1; k + 1 < polygon.size(); ++k) {
+                const std::array<std::array<int, 3>, 3> tri{polygon[0], polygon[k], polygon[k + 1]};
+                if (std::any_of(tri.begin(), tri.end(), [&](const auto& c) {
+                    return c[0] < 0 || static_cast<std::size_t>(c[0]) >= positions.size();
+                })) continue;
+                std::array<std::uint32_t, 3> face;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    const int vi = tri[c][0];
+                    const int ti = tri[c][1] >= 0 && static_cast<std::size_t>(tri[c][1]) < texcoords.size()
+                        ? tri[c][1] : -1;
+                    const int ni = tri[c][2] >= 0 && static_cast<std::size_t>(tri[c][2]) < normals.size()
+                        ? tri[c][2] : -1;
+                    // Share only identical position/UV/normal tuples. Keep
+                    // triangles without normals separate for the existing flat
+                    // shading behavior; preserve UV seams and hard normal edges.
+                    auto index = static_cast<std::uint32_t>(mesh.vertices.size());
+                    bool inserted = true;
+                    if (ni >= 0) {
+                        if (corners.empty()) corners.reserve(positions.size());
+                        auto result = corners.try_emplace(std::array<int, 3>{vi, ti, ni}, index);
+                        index = result.first->second;
+                        inserted = result.second;
                     }
-                    face[static_cast<std::size_t>(c)] =
-                        static_cast<std::uint32_t>(mesh.vertices.size());
-                    mesh.vertices.push_back(
-                        positions[static_cast<std::size_t>(vi)]);
-                    if (ti >= 0 &&
-                        static_cast<std::size_t>(ti) < texcoords.size())
-                        mesh.uvs.push_back(
-                            texcoords[static_cast<std::size_t>(ti)]);
-                    else
-                        mesh.uvs.push_back({});
-                    if (ni >= 0 &&
-                        static_cast<std::size_t>(ni) < normals.size())
-                        mesh.normals.push_back(
-                            normals[static_cast<std::size_t>(ni)]);
+                    if (inserted) {
+                        mesh.vertices.push_back(positions[static_cast<std::size_t>(vi)]);
+                        mesh.uvs.push_back(ti >= 0 ? texcoords[static_cast<std::size_t>(ti)] : Vec2{});
+                        mesh.normals.push_back(ni >= 0 ? normals[static_cast<std::size_t>(ni)] : Vec3{});
+                    }
+                    have_normals = have_normals && ni >= 0;
+                    have_uvs = have_uvs || ti >= 0;
+                    face[c] = index;
                 }
-                if (ok) mesh.faces.push_back(face);
-                else {
-                    mesh.vertices.resize(begin);
-                    mesh.uvs.resize(begin);
-                    if (mesh.normals.size() > begin)
-                        mesh.normals.resize(begin);
-                }
+                mesh.faces.push_back(face);
             }
         }
     }
-    if (mesh.uvs.size() != mesh.vertices.size()) mesh.uvs.clear();
-    if (mesh.normals.size() != mesh.vertices.size()) mesh.compute_normals();
+    if (!have_uvs) mesh.uvs.clear();
+    if (!have_normals) mesh.compute_normals();
     mesh.compute_bounds();
     return mesh;
 }
@@ -1380,8 +1389,20 @@ MeshLoad load_preview_mesh(
     try {
         std::error_code error;
         if (!mesh_ply.empty() && std::filesystem::exists(mesh_ply, error)) {
-            loaded.mesh = preview_mesh_from_mvs(
-                photara::mvs::load_mesh_ply(mesh_ply));
+            auto extension = mesh_ply.extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension == ".obj") {
+                auto stem = mesh_ply;
+                stem.replace_extension();
+                loaded.mesh = preview_mesh_from_obj(mesh_ply);
+                auto albedo = stem;
+                albedo += "_albedo.png";
+                if (std::filesystem::exists(albedo, error))
+                    loaded.mesh.albedo_path = albedo;
+            } else {
+                loaded.mesh = preview_mesh_from_mvs(photara::mvs::load_mesh_ply(mesh_ply));
+            }
         } else if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
             const auto archive = photara::project::Archive::open(ascan);
             if (!archive.has(photara::project::ChunkType::mesh)) {
@@ -1399,6 +1420,64 @@ MeshLoad load_preview_mesh(
         if (!loaded.ok) loaded.error = "Mesh has no faces";
     } catch (const std::exception& failure) {
         loaded.error = failure.what();
+    }
+    return loaded;
+}
+
+MeshLoad prepare_mesh_preview(MeshLoad loaded, const bool fit_box) {
+    if (!loaded.ok) return loaded;
+    try {
+        const auto& mesh = loaded.mesh;
+        auto data = std::make_shared<gpu::MeshGpuData>();
+        data->vertices.resize(mesh.vertices.size());
+        const bool normals = mesh.normals.size() == mesh.vertices.size();
+        const bool colors = mesh.colours.size() == mesh.vertices.size();
+        const bool uvs = mesh.uvs.size() == mesh.vertices.size();
+        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+            auto& v = data->vertices[i];
+            v.px = mesh.vertices[i].x; v.py = mesh.vertices[i].y; v.pz = mesh.vertices[i].z;
+            if (normals) {
+                v.nx = mesh.normals[i].x; v.ny = mesh.normals[i].y; v.nz = mesh.normals[i].z;
+            }
+            if (colors) {
+                const auto c = mesh.colours[i];
+                v.r = float((c >> IM_COL32_R_SHIFT) & 255U) / 255.F;
+                v.g = float((c >> IM_COL32_G_SHIFT) & 255U) / 255.F;
+                v.b = float((c >> IM_COL32_B_SHIFT) & 255U) / 255.F;
+            }
+            if (uvs) { v.u = mesh.uvs[i].x; v.v = mesh.uvs[i].y; }
+        }
+        data->indices.reserve(mesh.faces.size() * 3U);
+        for (const auto& face : mesh.faces)
+            data->indices.insert(data->indices.end(), face.begin(), face.end());
+        loaded.gpu_data = std::move(data);
+        if (!mesh.albedo_path.empty()) {
+            // Match the existing preview's fallback when an optional texture
+            // is missing or unreadable, but perform decoding off the UI thread.
+            try {
+                const auto rgb = photara::io::load_rgb(mesh.albedo_path);
+                loaded.albedo.width = rgb.width;
+                loaded.albedo.height = rgb.height;
+                const auto count = static_cast<std::size_t>(rgb.width) * rgb.height;
+                loaded.albedo.pixels.resize(count * 4U);
+                for (std::size_t i = 0; i < count; ++i) {
+                    loaded.albedo.pixels[4U * i] = rgb.pixels[3U * i];
+                    loaded.albedo.pixels[4U * i + 1U] = rgb.pixels[3U * i + 1U];
+                    loaded.albedo.pixels[4U * i + 2U] = rgb.pixels[3U * i + 2U];
+                    loaded.albedo.pixels[4U * i + 3U] = 255;
+                }
+            }
+            catch (const std::exception&) { loaded.albedo = {}; }
+        }
+        if (fit_box) {
+            ReconstructionBox box;
+            fit_reconstruction_box(box, mesh.vertices);
+            loaded.reconstruction_bounds = {box.min, box.max};
+            loaded.reconstruction_bounds_valid = box.valid;
+        }
+    } catch (const std::exception& failure) {
+        loaded.error = failure.what();
+        loaded.ok = false;
     }
     return loaded;
 }
