@@ -1885,13 +1885,6 @@ const char* warm_start_geometry_rejection(
             return "heldout_positive_depth_regression";
         if (regressed(baseline.heldout_p90_radians, candidate.heldout_p90_radians, half_degree))
             return "heldout_angle_regression";
-        for (std::size_t id = 0; id < baseline.camera_heldout_observations.size(); ++id) {
-            if (baseline.camera_heldout_observations[id] < 3) continue;
-            if (candidate.camera_positive_observations[id] < 0.98 * baseline.camera_positive_observations[id])
-                return "heldout_camera_depth_regression";
-            if (regressed(baseline.camera_heldout_radians[id], candidate.camera_heldout_radians[id], half_degree))
-                return "heldout_camera_angle_regression";
-        }
     }
     if (baseline.pair_constraints >= 3) {
         if (baseline.heldout_tracks < 16 &&
@@ -1900,11 +1893,28 @@ const char* warm_start_geometry_rejection(
             return "translation_direction_regression";
         // Missing local evidence is uncertainty, not proof of degradation.
         // With enough held-out tracks, retain the existing fast path unless
-        // its independent global/per-camera checks above actually regress.
+        // its independent whole-scene checks above actually regress. Local
+        // errors are separately nominated for final triangulation/BA/auditing.
         // Unobserved direction changes are logged separately and cannot justify
         // extending the 512-camera policy to smaller scenes.
     }
     return nullptr;
+}
+
+std::vector<Index> warm_start_local_geometry_risks(
+    const WarmStartGeometry& baseline, const WarmStartGeometry& candidate) {
+    std::vector<Index> risks;
+    if (!candidate.finite_centers || baseline.heldout_tracks < 16) return risks;
+    constexpr double half_degree = 0.008726646259971648;
+    for (Index id = 0; id < baseline.camera_heldout_observations.size(); ++id) {
+        if (baseline.camera_heldout_observations[id] < 3) continue;
+        if (candidate.camera_positive_observations[id] < 0.98 * baseline.camera_positive_observations[id] ||
+            !std::isfinite(candidate.camera_heldout_radians[id]) ||
+            candidate.camera_heldout_radians[id] > baseline.camera_heldout_radians[id] +
+                std::max(half_degree, 0.25 * baseline.camera_heldout_radians[id]))
+            risks.push_back(id);
+    }
+    return risks;
 }
 
 unsigned warm_start_unverified_direction_changes(
@@ -2023,9 +2033,11 @@ GlobalPositioningSummary solve_global_positions(
                 if (bearing_summary.success) {
                     const auto candidate_geometry = detail::evaluate_warm_start_geometry(scene, selected_tracks);
                     const auto reason = detail::warm_start_geometry_rejection(baseline_geometry, candidate_geometry);
+                    const auto local_risks = detail::warm_start_local_geometry_risks(baseline_geometry, candidate_geometry);
                     core::Logger::instance().info(
                         "global positioning warm-start geometry: accepted=", reason ? 0 : 1,
-                        " reason=", reason ? reason : "no_material_regression",
+                        " reason=", reason ? reason : local_risks.empty()
+                            ? "no_material_regression" : "local_checks_deferred_to_final_geometry",
                         " pairs=", candidate_geometry.pair_constraints,
                         " pair_p90_rad=", baseline_geometry.pair_p90_radians, '/', candidate_geometry.pair_p90_radians,
                         " camera_tail_rad=", baseline_geometry.worst_camera_pair_radians, '/', candidate_geometry.worst_camera_pair_radians,
@@ -2034,7 +2046,14 @@ GlobalPositioningSummary solve_global_positions(
                         " heldout_p90_rad=", baseline_geometry.heldout_p90_radians, '/', candidate_geometry.heldout_p90_radians,
                         " unverified_direction_cameras=",
                         candidate_geometry.finite_centers ? detail::warm_start_unverified_direction_changes(
-                            baseline_geometry, candidate_geometry) : scene.registered_count());
+                            baseline_geometry, candidate_geometry) : scene.registered_count(),
+                        " local_geometry_risk_cameras=", local_risks.size());
+                    for (auto id : local_risks)
+                        core::Logger::instance().warning("warm-start local geometry risk: image=", scene.images[id].path.filename(),
+                            " observations=", baseline_geometry.camera_heldout_observations[id],
+                            " before_rad=", baseline_geometry.camera_heldout_radians[id],
+                            " after_rad=", candidate_geometry.camera_heldout_radians[id],
+                            " pending_final_geometry_audit=1");
                     if (!reason) return bearing_summary;
                     // The next primary attempt restores all pre-attempt state.
                     // Keep only the validated initializer for final recovery.

@@ -198,6 +198,48 @@ int main() {
         photara::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
+        {
+            const auto add_witnesses = [](Scene& source) {
+                const Pose3D target{Mat3::Identity(), Vec3(1.5, 0, 0)};
+                for (Index anchor : {0u, 1u}) {
+                    ImagePair pair(anchor, 6);
+                    pair.relative_pose = target / source.images[anchor].pose;
+                    pair.relative_pose->C.normalize(); pair.weight_spatial = 1;
+                    for (Index p = 0; p < 160; ++p) pair.matches.push_back({p, p});
+                    source.pairs.push_back(std::move(pair));
+                }
+            };
+            Scene conflict = fixture();
+            add_witnesses(conflict);
+            conflict.images[6].pose.R = Mat3::Identity();
+            const auto original = conflict.images[6].pose;
+            const Mat3 aliased_rotation = Eigen::AngleAxisd(0.14, Vec3::UnitY()).toRotationMatrix();
+            std::vector<Vec3> alias_bearings, alias_points;
+            for (Index p = 0; p < 160; ++p) {
+                Track anchor;
+                for (Index id = 0; id < 4; ++id) anchor.observations.push_back({id, p});
+                expect(triangulate_track(anchor, conflict) >= 3, "rotation test uses independently triangulated anchor depths");
+                const Vec2 pixel = conflict.cameras[0].project(aliased_rotation * (anchor.position - Vec3(1.5, 0, 0)));
+                conflict.images[6].features.keypoints[p].x = static_cast<float>(pixel.x());
+                conflict.images[6].features.keypoints[p].y = static_cast<float>(pixel.y());
+                alias_bearings.push_back(conflict.cameras[0].unproject(pixel));
+                alias_points.push_back(anchor.position);
+            }
+            const auto pixel_only = estimate_absolute_pose(alias_bearings, alias_points, conflict.cameras[0]);
+            expect(pixel_only.success && pixel_only.num_inliers >= 150,
+                   "ambiguous hypothesis passes pixel consensus before independent rotation auditing");
+            const auto rejected = recover_stable_resections(conflict, stable);
+            expect(std::find(rejected.begin(), rejected.end(), 6) == rejected.end() &&
+                   conflict.images[6].pose.C == original.C && conflict.images[6].pose.R == original.R,
+                   "pixel-consistent aliases cannot override two frozen relative-rotation witnesses");
+            Scene correctable = fixture();
+            add_witnesses(correctable);
+            correctable.images[6].pose.R = Eigen::AngleAxisd(0.3, Vec3::UnitY()).toRotationMatrix();
+            const auto recovered = recover_stable_resections(correctable, stable);
+            expect(std::find(recovered.begin(), recovered.end(), 6) != recovered.end() &&
+                   (correctable.images[6].pose.R - Mat3::Identity()).norm() < 1e-3,
+                   "rotation witnesses allow correcting an inaccurate inherited orientation");
+        }
         Scene weak_loop=fixture();
         ImagePair weak_closure(2,5);
         weak_closure.relative_pose=Pose3D::identity();

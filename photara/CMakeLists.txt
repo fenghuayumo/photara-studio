@@ -1071,6 +1071,23 @@ if(PHOTARA_BUILD_BENCHMARKS)
         add_executable(photara_sfm_realign src/tools/sfm_realign.cpp)
         add_executable(photara_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
         add_executable(photara_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
+        add_executable(photara_sfm_reconstruction_benchmark src/tools/sfm_reconstruction_benchmark.cpp)
+        target_link_libraries(photara_sfm_reconstruction_benchmark PRIVATE Photara::SfM)
+        add_executable(photara_sfm_position_diagnostics src/tools/sfm_position_diagnostics.cpp)
+        target_link_libraries(photara_sfm_position_diagnostics PRIVATE Photara::SfM)
+        add_executable(photara_sfm_position_recovery_probe src/tools/sfm_position_recovery_probe.cpp)
+        target_link_libraries(photara_sfm_position_recovery_probe PRIVATE Photara::SfM)
+        add_executable(photara_sfm_stable_resection_probe src/tools/sfm_stable_resection_probe.cpp)
+        target_link_libraries(photara_sfm_stable_resection_probe PRIVATE Photara::SfM)
+        if(WIN32)
+            foreach(_sfm_tool photara_sfm_reconstruction_benchmark photara_sfm_position_diagnostics photara_sfm_position_recovery_probe photara_sfm_stable_resection_probe)
+                add_custom_command(TARGET ${_sfm_tool} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:${_sfm_tool}>
+                        $<TARGET_FILE_DIR:${_sfm_tool}>
+                    COMMAND_EXPAND_LISTS)
+            endforeach()
+        endif()
         add_executable(photara_sfm_feature_compare
             src/tools/sfm_feature_compare.cpp)
         target_link_libraries(photara_sfm_feature_compare PRIVATE Photara::SfM)
@@ -1141,6 +1158,10 @@ if(PHOTARA_BUILD_BENCHMARKS)
         photara_sfm_realign
         photara_sfm_match_benchmark
         photara_sfm_positioning_benchmark
+        photara_sfm_reconstruction_benchmark
+        photara_sfm_position_diagnostics
+        photara_sfm_position_recovery_probe
+        photara_sfm_stable_resection_probe
         photara_sfm_feature_compare
         photara_sfm_reference_eval
         photara_triangulation_benchmark

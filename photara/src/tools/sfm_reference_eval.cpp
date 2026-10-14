@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -69,10 +70,12 @@ struct Correspondence {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 4)
+        if (argc != 4 && argc != 5)
             throw std::runtime_error(
                 "Usage: photara_sfm_reference_eval REFERENCE_SPARSE "
-                "IMAGE_DIRECTORY RECONSTRUCTION.asfm");
+                "IMAGE_DIRECTORY RECONSTRUCTION.asfm [NEW_PER_CAMERA.csv]");
+        if (argc == 5 && std::filesystem::exists(argv[4]))
+            throw std::runtime_error("Per-camera evaluation output already exists");
 
         const auto reference = photara::splat::load_colmap_scene(argv[1], argv[2]);
         const auto reconstruction = photara::sfm::load_asfm(argv[3]);
@@ -191,6 +194,18 @@ int main(int argc, char** argv) {
                 focal_relative.push_back(
                     std::abs(common[i].source_focal - common[i].reference_focal) /
                     common[i].reference_focal);
+        }
+
+        if (argc == 5) {
+            std::ofstream output(argv[4]);
+            if (!output) throw std::runtime_error("Cannot write per-camera evaluation CSV");
+            output << std::setprecision(12) << "name,center_error_steps,rotation_error_deg\n";
+            for (std::size_t i = 0; i < common.size(); ++i) {
+                std::string escaped;
+                for (char c : common[i].name) { if (c == '"') escaped += '"'; escaped += c; }
+                output << '"' << escaped << "\"," << centers[i] << ',' << rotations[i] << '\n';
+            }
+            if (!output) throw std::runtime_error("Failed writing per-camera evaluation CSV");
         }
 
         std::size_t triangulated = 0;
