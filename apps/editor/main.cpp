@@ -387,14 +387,31 @@ int main(const int argc, char** argv) {
             app.close_requested = false;
             app.show_close_confirmation = true;
         }
-        if (app.pending_train_prepare.valid()) {
-            ImGui::OpenPopup("Preparing Training");
-            if (ImGui::BeginPopupModal("Preparing Training", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::TextUnformatted("Saving project inputs before training...");
-                ImGui::TextUnformatted("Large projects may take a moment.");
+        const std::string train_preparation_popup = std::string(tr("Preparing Training")) + "###train_preparation";
+        const bool show_train_preparation = app.pending_train_prepare.valid() && app.train_preparation &&
+            std::chrono::steady_clock::now() - app.train_preparation->started >= std::chrono::milliseconds(250);
+        if (show_train_preparation) {
+            ImGui::OpenPopup(train_preparation_popup.c_str());
+            if (ImGui::BeginPopupModal(train_preparation_popup.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                const auto preparation = app.train_preparation;
+                const auto stage = preparation ? preparation->stage.load() : editor::TrainPrepareStage::checking;
+                const char* label = "Checking training inputs...";
+                if (stage == editor::TrainPrepareStage::reading_sfm) label = "Reading updated camera data...";
+                if (stage == editor::TrainPrepareStage::encoding_sfm) label = "Updating project camera data...";
+                if (stage == editor::TrainPrepareStage::saving) label = "Saving updated training inputs...";
+                ImGui::TextUnformatted(tr(label));
+                if (preparation) {
+                    ImGui::Text(tr("Preparation elapsed: %.1f s"),
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - preparation->started).count());
+                    if (preparation->cancelled) {
+                        ImGui::TextUnformatted(tr("Cancelling after the current step..."));
+                    } else if (ImGui::Button(tr("Cancel"))) {
+                        preparation->cancelled = true;
+                    }
+                }
                 ImGui::EndPopup();
             }
-        } else if (ImGui::BeginPopupModal("Preparing Training", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        } else if (ImGui::BeginPopupModal(train_preparation_popup.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
@@ -408,6 +425,7 @@ int main(const int argc, char** argv) {
 
         // Preparation runs off the UI thread; launch only after the submitted
         // frame no longer references preview resources that start_train drops.
+        if (app.close_requested && app.train_preparation) app.train_preparation->cancelled = true;
         editor::poll_train_start(app);
 
         // Now the frame is submitted and the stale preview descriptors are

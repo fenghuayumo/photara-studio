@@ -692,7 +692,9 @@ Action draw_toolbar(App& app) {
     if (training) {
         icons::labeled_button(
             "##training", icons::Icon::train,
-            app.job.paused() ? tr("Paused") : tr("Training..."), {126.F, 32.F},
+            app.job.paused() ? tr("Paused") :
+                app.monitor.saving_checkpoint() ? tr("Saving training progress...") :
+                app.monitor.training().valid ? tr("Training...") : tr("Initializing training..."), {126.F, 32.F},
             icons::ButtonStyle::primary, false, true,
             tr("Use Stop to abort training so you can change images or parameters."));
     } else {
@@ -1016,11 +1018,15 @@ void draw_status_bar(App& app) {
         }
     }
 
-    const double elapsed = app.monitor.elapsed_seconds();
+    const double training_elapsed = app.monitor.training_elapsed_seconds();
+    const double elapsed = training_elapsed >= 0.0
+        ? training_elapsed : app.monitor.elapsed_seconds();
     if (elapsed >= 0.0) {
         char elapsed_text[64];
         std::snprintf(
-            elapsed_text, sizeof(elapsed_text), tr("Elapsed %s"),
+            elapsed_text, sizeof(elapsed_text),
+            tr(training_elapsed >= 0.0 ? "Training elapsed %s" :
+                busy && app.active_job == JobKind::train ? "Preparation elapsed %s" : "Elapsed %s"),
             format_duration(elapsed).c_str());
         const float elapsed_width = status_segment_width(elapsed_text);
         right -= elapsed_width + 22.F;

@@ -159,12 +159,14 @@ public:
     [[nodiscard]] const ArtifactFlags& artifacts() const { return artifacts_; }
     [[nodiscard]] const std::string& last_error() const { return last_error_; }
     [[nodiscard]] bool resumed_from_cache() const { return resumed_; }
+    [[nodiscard]] bool saving_checkpoint() const { return saving_checkpoint_; }
 
     // Overall progress of the running job. Negative means indeterminate.
     [[nodiscard]] float fraction() const;
     [[nodiscard]] double eta_seconds() const;
     // Wall time since begin(); frozen after mark_finished(). Negative if no job.
     [[nodiscard]] double elapsed_seconds() const;
+    [[nodiscard]] double training_elapsed_seconds() const;
     [[nodiscard]] std::string headline() const;
 
 private:
@@ -177,6 +179,7 @@ private:
     ArtifactFlags artifacts_;
     std::string last_error_;
     bool resumed_{};
+    bool saving_checkpoint_{};
     // Monotonic floor so a finished sub-task never lets the bar slide back.
     float floor_{};
     float band_begin_{};
@@ -185,6 +188,9 @@ private:
     bool clock_running_{};
     std::chrono::steady_clock::time_point started_{};
     std::chrono::steady_clock::time_point stopped_{};
+    std::chrono::steady_clock::time_point training_started_{};
+    std::chrono::steady_clock::time_point training_stopped_{};
+    bool training_clock_running_{};
 };
 
 // Child process with stdout and stderr redirected to a log file. Handles are

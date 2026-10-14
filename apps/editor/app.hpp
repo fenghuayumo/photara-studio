@@ -52,6 +52,12 @@ enum class DisplayChannel { color, depth, normal };
 enum class ViewportWorkspace { scene_3d, image_2d };
 enum class StepState { pending, active, done, skipped, failed };
 enum class ClearResultsAction { none, clear_view, delete_generated };
+enum class TrainPrepareStage { checking, reading_sfm, encoding_sfm, saving, ready };
+struct TrainPreparation {
+    std::atomic<TrainPrepareStage> stage{TrainPrepareStage::checking};
+    std::atomic<bool> cancelled{false};
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+};
 enum class AlignmentExportFormat { asfm, colmap, nerfstudio, openmvs };
 
 enum class Action {
@@ -142,6 +148,7 @@ struct App {
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
     std::future<std::string> pending_train_prepare;
+    std::shared_ptr<TrainPreparation> train_preparation;
     bool train_prepare_resume{};
     bool training_project_ready{};
     std::future<SceneLoad> alignment_preview_load;

@@ -23,12 +23,13 @@ enum class ChunkType : std::uint32_t {
     training_checkpoint_previous_info = 9,
     training_checkpoint_history = 10,
     gaussian_sources = 11,
+    sfm_source = 12,
 };
 
 [[nodiscard]] inline bool known_chunk_type(const ChunkType type) noexcept {
     const auto id = static_cast<std::uint32_t>(type);
     return id >= static_cast<std::uint32_t>(ChunkType::settings) &&
-           id <= static_cast<std::uint32_t>(ChunkType::gaussian_sources);
+           id <= static_cast<std::uint32_t>(ChunkType::sfm_source);
 }
 
 // Chunked single-file Photara project (.ascan). Unread blobs stay on disk

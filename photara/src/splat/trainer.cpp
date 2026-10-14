@@ -1652,13 +1652,14 @@ GaussianModel Trainer::train(
             if (request == last_control_request) request.clear();
             next_control_poll = now + std::chrono::milliseconds(100);
         }
-        const bool scheduled = iteration == 1 || iteration == options_.iterations || stopping ||
+        const bool scheduled = iteration == options_.iterations || stopping ||
             (options_.checkpoint_interval_iterations && iteration % options_.checkpoint_interval_iterations == 0) ||
             (options_.checkpoint_interval_seconds && now - last_checkpoint_time >=
                 std::chrono::seconds(options_.checkpoint_interval_seconds));
         if (request.empty() && !scheduled) return;
         std::string response;
         try {
+            core::Logger::instance().info("splat_checkpoint_saving iteration=", iteration);
             detail::save_training_checkpoint(options_.checkpoint_path,
                 {iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds},
                 write_runtime(), checkpoint_tensors,

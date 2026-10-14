@@ -13,6 +13,26 @@ void require(bool value, const char* message) {
 }
 int main() {
     try {
+        editor::RunMonitor monitor;
+        monitor.begin(editor::JobKind::train);
+        require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
+        require(monitor.headline().find("Initializing") != std::string::npos, "training initialization has an explicit status");
+        monitor.consume("splat iteration=1/10 loss=0.1");
+        require(monitor.training_elapsed_seconds() >= 0, "first iteration starts the training clock");
+        monitor.pause_clock();
+        const auto paused_elapsed = monitor.training_elapsed_seconds();
+        require(monitor.training_elapsed_seconds() == paused_elapsed, "paused training clock is frozen");
+        monitor.resume_clock();
+        monitor.consume("splat_checkpoint_saving iteration=5");
+        require(monitor.saving_checkpoint(), "checkpoint save has an explicit status");
+        monitor.consume("splat_checkpoint_saved iteration=5");
+        require(!monitor.saving_checkpoint(), "checkpoint completion restores the training status");
+        monitor.consume("splat_training_completed iterations=10");
+        const auto completed_elapsed = monitor.training_elapsed_seconds();
+        require(monitor.training_elapsed_seconds() == completed_elapsed, "export does not extend training time");
+        monitor.mark_finished(0);
+        monitor.begin(editor::JobKind::train);
+        require(monitor.training_elapsed_seconds() < 0, "new training resets its clock");
         editor::ProjectSettings settings;
         editor::ProjectLayout layout;
         layout.cache = std::filesystem::temp_directory_path() / "photara alignment test cache";
