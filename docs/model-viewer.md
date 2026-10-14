@@ -19,11 +19,59 @@ files are not overwritten by dropping them. Mesh geometry can use existing
 mesh export and can be stored in the project; imported OBJ materials are not
 packaged when saving the project.
 
-Drop a single model at a time. Import replaces the displayed scene; it does
-not append or merge models. Wait for active jobs/loads/exports/simplification
-to finish. If Gaussian edits are pending, export the result and start a new
-project before importing another model. Multi-model scene management and
-Gaussian merging are separate future features.
+Dropping several Gaussian files at once (or dropping more onto an existing
+Gaussian session) adds every model to the Scene panel's **Gaussian Models**
+list. Meshes stay single-file: one mesh per drop, never mixed with other
+inputs. Wait for active jobs/loads/exports/simplification to finish. If
+Gaussian edits are pending, export the result before changing the model set.
+
+## Multi-model management and merging
+
+Every imported Gaussian model gets a row in the Scene panel:
+
+- The eye toggle hides a model in the composed preview without unloading it.
+- `X` removes a model from the session. Removing every model falls back to the
+  project's trained working copy, if one exists.
+- Offset XYZ and a uniform scale place a model before merging. Scale composes
+  in log space, so Gaussian anisotropy is preserved; placement is applied on
+  top of the file's own coordinates. The preview reloads when a drag ends.
+
+The viewport always renders the **composition** of all visible models: files
+are loaded, transformed, concatenated, and uploaded as one Gaussian cloud
+(this also drives the Gaussian edit tools and splat/ring rendering). The
+source models stay cached on the CPU. Moving the controls does not reload
+files or re-upload the composition; releasing a drag commits one background
+rebuild using those cached sources.
+
+Saving a project stores the ordered model list, names, visibility, placement,
+and embedded snapshots of every source (including hidden sources). Reopening
+does not depend on the original files still being present, and hidden models
+can be shown and merged again. Source snapshots and the composed Gaussian
+chunk increase project size. Screen-space edits operate on the composed cloud;
+when saving those edits, the project restores them as one editable embedded
+model named **Edited composition**, rather than reverting to the original
+source list. Old project settings remain readable.
+
+**Merge Models...** writes every visible model (with its placement) into one
+new splat file, then loads that file as the session's single model. SH bands
+are zero-padded to the widest input degree, and optional fields
+(`normal_features`, Mip-Splatting `filter_3d`) are kept only when every input
+carries them. Merging runs on a background thread with progress in the Scene
+panel; the merged model loads automatically once the session is idle (if you
+were mid-edit, finish or export the edits first). `merge_gaussians` and
+`transform_gaussians` in `photara::splat` are the library primitives; the
+`photara.splat.merge` test covers placement math, SH padding, ordering, and a
+merged-file round trip.
+
+Export always matches the composed preview: a multi-model session exports the
+merged composition (or the edited composition when edits are pending), never
+just the first file.
+
+`photara.studio.gaussian_session` covers project reopening with deleted source
+files, hidden models, source-cache reuse, merge reload, and removing an open
+model row through actual ImGui mouse input. The Vulkan variant also checks
+that live drags do not re-upload the cloud, committed changes do update it,
+saved edits survive reopening, and exports ignore stale working files.
 
 ## Mesh load performance
 

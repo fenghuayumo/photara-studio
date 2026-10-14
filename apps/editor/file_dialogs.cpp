@@ -203,6 +203,52 @@ bool pick_splat_model_file(
     const wchar_t* title, std::array<char, 1024>& destination) {
     return pick_file(title, destination, false, FilePickKind::splat_model);
 }
+
+bool pick_splat_model_files(
+    const wchar_t* title, std::vector<std::filesystem::path>& destination) {
+    bool picked = false;
+    const HRESULT initialised =
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(
+            CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(
+            options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST |
+            FOS_ALLOWMULTISELECT);
+        dialog->SetTitle(title);
+        COMDLG_FILTERSPEC filters[] = {
+            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb;*.usdc)",
+             L"*.ply;*.sog;*.spz;*.glb;*.usdc"},
+            {L"All files (*.*)", L"*.*"}};
+        dialog->SetFileTypes(2, filters);
+        if (SUCCEEDED(dialog->Show(nullptr))) {
+            IShellItemArray* items = nullptr;
+            if (SUCCEEDED(dialog->GetResults(&items))) {
+                DWORD count = 0;
+                items->GetCount(&count);
+                for (DWORD index = 0; index < count; ++index) {
+                    IShellItem* item = nullptr;
+                    if (FAILED(items->GetItemAt(index, &item))) continue;
+                    PWSTR wide = nullptr;
+                    if (SUCCEEDED(
+                            item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+                        destination.emplace_back(std::wstring(wide));
+                        picked = true;
+                        CoTaskMemFree(wide);
+                    }
+                    item->Release();
+                }
+                items->Release();
+            }
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(initialised)) CoUninitialize();
+    return picked;
+}
 bool pick_video_file(
     const wchar_t* title, std::array<char, 1024>& destination) {
     return pick_file(title, destination, false, FilePickKind::video);
@@ -494,6 +540,39 @@ bool pick_point_cloud_file(
 bool pick_splat_model_file(
     const wchar_t* title, std::array<char, 1024>& destination) {
     return pick_file(title, destination, false, FilePickKind::splat_model);
+}
+
+bool pick_splat_model_files(
+    const wchar_t* title, std::vector<std::filesystem::path>& destination) {
+    if (dialog_tool() != DialogTool::zenity) {
+        // kdialog has no portable multi-file separator; fall back to one
+        // selection per invocation.
+        std::array<char, 1024> picked{};
+        if (!pick_splat_model_file(title, picked)) return false;
+        destination.push_back(std::filesystem::path(picked.data()));
+        return true;
+    }
+    const std::string title_utf8 = wide_to_utf8(title);
+    const Captured captured = run_capture(
+        {"zenity", "--file-selection", "--multiple", "--separator=\n",
+         "--title=" + title_utf8,
+         "--file-filter=Gaussian splat | *.ply *.sog *.spz *.glb *.usdc",
+         "--file-filter=All files | *"});
+    if (captured.status != 0) return false;
+    std::string remainder = captured.output;
+    bool picked = false;
+    while (!remainder.empty()) {
+        const std::size_t newline = remainder.find('\n');
+        std::string line = remainder.substr(0, newline);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) {
+            destination.push_back(std::filesystem::path(line));
+            picked = true;
+        }
+        if (newline == std::string::npos) break;
+        remainder.erase(0, newline + 1);
+    }
+    return picked;
 }
 
 bool pick_video_file(
