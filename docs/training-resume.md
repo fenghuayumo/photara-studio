@@ -1,97 +1,75 @@
 # Training recovery
 
-Photara Studio saves a complete 3DGS training checkpoint after the first iteration,
-every 120 seconds, and at the last iteration. Checkpoint I/O runs at an iteration
-boundary and temporarily adds to that iteration's time. A failed automatic save
-is logged and training continues; the previous successful checkpoint is retained.
+Train 3DGS prepares its task cache and starts a new run without saving a project.
+Only Save Project / Ctrl+S, Save As, or an explicitly chosen Save and Exit writes
+an `.ascan` file. A clean window closes directly; unsaved changes prompt the user
+to save, discard, or cancel.
 
-**Preferences > Storage > Training autosave** changes the interval in seconds
-(default 120; 0 disables periodic autosave). This preference is saved on this
-computer, survives creating/opening projects, and is passed to the next training
-or resume process. Stop training before changing it. Manual saves and first/final
-iteration checkpoints remain enabled; there is no iteration-cadence control in Studio.
+## Storage
 
-**Save Project** / **Ctrl+S** during training asks the trainer to finish its current
-iteration, save its state and hold at that boundary. The editor embeds the checkpoint
-in the `.ascan` project, then lets training continue. A paused training process is
-briefly resumed to serve the request and is paused again afterwards.
+Training recovery uses a small `.checkpoint` manifest and an independent binary
+PLY model in the task cache. The manifest contains the PLY path, iteration, total
+iterations, Gaussian count, input/settings fingerprint, and focus bounds.
+Optimizer moments, random-generator state, appearance-correction state and
+refinement statistics are not stored.
 
-Closing the window or choosing Exit opens **Save and Exit / Exit Without Saving /
-Cancel**. Save and Exit waits for the trainer's acknowledgement and a successful
-project save before terminating the task. On failure the window stays open. Cancel
-releases a pending save request; Exit Without Saving retains any earlier automatic
-checkpoints, but does not promise to preserve the latest iterations.
+Automatic checkpoints run at iteration boundaries every 120 seconds by default,
+on interruption, and at the final iteration. There is no forced first-iteration
+save. Preferences > Storage > Training autosave changes the periodic interval;
+zero disables periodic saves. A failed save is logged and training continues.
+The new PLY is flushed before the manifest is atomically replaced; a failed
+publication retains the previous successful manifest and model. A process lease
+prevents concurrent writers.
 
-Train 3DGS always starts a new training run directly, including after Stop. It replaces
-the old pending checkpoint. Before launching, Studio saves the current training inputs
-and clears the old checkpoint in one atomic project write on a background worker.
-The preparation indicator keeps the window responsive; project-changing actions are
-disabled until publication finishes. A failed save prevents launch, and closing the
-window during preparation takes precedence over launching the trainer. Existing
-project model, mesh and texture chunks are preserved without reloading exports.
-Recovery is a separate **Resume Training** action in the
-toolbar, Reconstruction menu and inspector. Reopening a project exposes its saved
-progress without opening a recovery dialog. Automatic
-training state and the previous good generation are stored as checksummed chunks
-inside the native `.ascan` project. No independent checkpoint or backup files are
-created, and no `.photara-recovery` folder is needed. Automatic saves atomically
-rewrite the project while retaining its settings, aligned cameras, completed
-models, meshes, textures and unknown optional chunks. A temporary write file may
-exist during publication; it is not a second saved project.
+Ctrl+S during training asks the trainer to save and hold at a completed iteration.
+Studio embeds that model and small progress metadata in the user-selected project,
+then releases the trainer. Saved projects also contain compact SfM data: cameras,
+poses, triangulated points, valid inlier observations, and only referenced XY
+features. Unused features and feature scale/orientation/response are omitted.
+Original working SfM caches are not compacted.
 
-Opening an older project merges its embedded or external recovery records into
-native project chunks. The merged records are read back and validated before old
-visible/hidden recovery files are removed. Different historical runs are retained
-inside a project history chunk. An active older trainer prevents migration.
-Copying or using Save Project As on the `.ascan` file carries the training state
-with it; original images/datasets must still be available.
+A saved `.ascan` contains the model and SfM data needed to restore the result even
+after deleting the task cache. Opening it recreates an independent PLY checkpoint
+when resuming; the saved project itself is not modified. Original images and any
+other training inputs must still be available to continue optimization.
 
-The checkpoint preserves model tensors, FP32 and quantized SH Adam moments,
-normal-feature update counts, PPISP/bilateral-grid parameters and Adam moments,
-densification statistics, camera order and cursor, CPU/device random-generator state,
-focus bounds, geometry/learning-rate bounds and adaptive multi-view scheduler state.
-Preview images, decoded image caches, gradients and other scratch buffers are rebuilt.
+## Resume semantics
 
-Resume validates the training-state ABI, backend, numerical training settings,
-cameras, initial cloud and image/mask contents. A mismatch produces an error; it does
-not silently start over. Changing the total iteration count also requires a new run.
-A corrupt current checkpoint falls back to the previous valid generation. Checkpoints
-use the versioned `.ascan` container with per-chunk checksums, atomic replacement and
-filesystem flushes. An OS-released process lease prevents concurrent training writers.
-Training completion publishes the final products and clears the pending checkpoint.
+Resume Training continues at the next iteration using the saved PLY model.
+Optimizer, sampling, appearance-correction and refinement state are initialized
+again: this is model-based continuation, not numerically identical interrupted
+training. Inputs, cameras and numerical training settings are fingerprinted; a
+mismatch requires a new training run.
 
-Crash recovery returns to the last successful automatic checkpoint, not necessarily
-the exact iteration at which the process crashed. The original images/dataset must
-still be available. SFm alignment continues to use its existing stage caches;
-mesh extraction and texture baking do not gain iteration-level resume from this change.
-During preprocessing, Save and Exit may wait until 3DGS reaches its first iteration;
-the dialog can be cancelled without terminating the task.
+Retired full-tensor checkpoints, embedded optimizer checkpoints and external
+legacy recovery files are not read, migrated, or used as a fallback. Start a new
+run for those formats; opening a project does not delete old recovery files.
+
+Training completion publishes the final result and clears pending task recovery
+artifacts. Crash recovery returns to the last successful checkpoint. SfM stage
+caches, mesh extraction and texture baking retain their own existing behavior.
 
 ## CLI
 
 ```powershell
-photara --images IMAGES --splat-dataset DATASET --output project.ascan --splat
-photara --images IMAGES --splat-dataset DATASET --output project.ascan --splat --splat-resume
+photara --images IMAGES --splat-dataset DATASET --output result.ply --splat
+photara --images IMAGES --splat-dataset DATASET --output result.ply --splat --splat-resume
 ```
 
-The same Resume Training action resumes an OS-paused process while training is
-running, or loads a persisted checkpoint while idle. Train 3DGS starts a new run.
-Storage and UI changes preserve checkpoint compatibility; incompatible changes
-in training-state semantics require an explicit ABI/schema change.
+Use the same numerical training arguments for both commands.
 
-Use the same numerical training arguments for both commands. Optional controls:
+- `--splat-checkpoint PATH`: independent manifest path; defaults to the output path
+  with its extension replaced by `.checkpoint`. It must not be the project/output
+  file itself.
+- `--splat-checkpoint-seconds N`: periodic save interval (default 120; zero disables
+  periodic saves without disabling interruption/final saves).
+- `--splat-checkpoint-control PATH`: editor save/hold acknowledgement channel.
 
-- `--splat-checkpoint PATH`: override the checkpoint file (default: native `.ascan` project).
-- `--splat-checkpoint-seconds N`: periodic automatic save cadence (default 120;
-  zero disables periodic saves, while first/last iteration saves remain enabled).
-- `--splat-checkpoint-control PATH`: editor integration request sidecar; not needed
-  for ordinary CLI runs.
+CLI output explicitly requested as `.ascan` still produces a completed project;
+automatic training checkpoints remain separate PLY references.
 
-`photara_splat_checkpoint_test` verifies interrupted/continuous training equivalence,
-correct resumed iteration, topology changes, quantized optimizer state, appearance
-correction, progressive resolution, checksum fallback, single-file project preservation, migration, invalidation,
-write failures and cooperative save/hold/cancel. Run it with `--vulkan` for the Vulkan
-backend. `training_resume_process_test.py` also kills an actual CLI process and
-verifies that a fresh process resumes the saved iteration and that a concurrent
-writer is rejected. The corresponding CTest names are `photara.splat.checkpoint` and
-`photara.splat.checkpoint_vulkan`; the process test is `photara.splat.process_resume`.
+`photara_splat_checkpoint_test` covers PLY continuation, next-iteration progress,
+portable model snapshots, retired-format rejection, fingerprint invalidation,
+single-writer leases, publication failures, and cooperative save/hold/cancel.
+Run with `--vulkan` for the Vulkan backend. The process test kills an actual CLI
+trainer and verifies recovery and concurrent-writer rejection.

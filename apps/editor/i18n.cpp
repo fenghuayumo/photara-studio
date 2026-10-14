@@ -99,6 +99,7 @@ constexpr Entry k_entries[] = {
     {"Re-align Photos", "重新对齐照片", "写真を再アライメント", "사진 재정렬"},
     {"Train 3DGS", "训练 3DGS", "3DGS を学習", "3DGS 학습"},
     {"Preparing Training", "准备训练", "学習の準備", "학습 준비"},
+    {"Continue from the saved PLY model. Optimizer state will be reinitialized.", "从已保存的 PLY 模型继续训练，优化器状态将重新初始化。", "保存した PLY モデルから続行します。オプティマイザは再初期化されます。", "저장된 PLY 모델에서 계속 학습합니다. 옵티마이저 상태는 초기화됩니다."},
     {"Unsaved session. Press Ctrl+S to save a project.", "当前为未保存会话，按 Ctrl+S 保存项目。", "未保存のセッションです。Ctrl+S でプロジェクトを保存します。", "저장되지 않은 세션입니다. Ctrl+S로 프로젝트를 저장하세요."},
     {"Preparing cached camera data...", "准备相机数据缓存…", "カメラデータのキャッシュを準備中…", "카메라 데이터 캐시 준비 중…"},
     {"Restoring saved training progress...", "恢复已保存的训练进度…", "保存された学習進捗を復元中…", "저장된 학습 진행 상황 복원 중…"},

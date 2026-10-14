@@ -34,7 +34,7 @@ def run(executable):
             '2 0.2 0 2 128 128 128 0.01 1 1 2 1 3 1\n')
         control = root / 'control'; control.write_text('process-save\n')
         output = root / 'project.ascan'
-        checkpoint = output
+        checkpoint = output.with_suffix('.checkpoint')
         args = [str(executable), '--images', str(images), '--splat', '--splat-dataset', str(root), '--output', str(output),
                 '--splat-checkpoint-control', str(control),
                 '--splat-iterations', '12', '--splat-log-interval', '1', '--splat-use-mask=false',
@@ -57,6 +57,9 @@ def run(executable):
             else:
                 raise AssertionError('Training save request timed out')
             assert checkpoint.exists(), 'No checkpoint was published'
+            assert not output.exists(), 'Training preparation/automatic save created a project'
+            assert checkpoint.stat().st_size < 4096, 'Checkpoint contains model or optimizer tensors'
+            assert list(root.glob('project.model.*.ply')), 'Checkpoint has no independent PLY model'
             assert not Path(str(output) + '.training.ascan').exists(), 'Automatic save created a visible project sidecar'
             # A second process must not overwrite the held training state.
             contender = subprocess.run(args + ['--splat-resume'], capture_output=True, text=True,
@@ -71,7 +74,7 @@ def run(executable):
                                    timeout=45, **kwargs)
         (root / 'resumed.log').write_text(restarted.stdout + restarted.stderr)
         assert restarted.returncode == 0, 'Restart failed after process termination'
-        assert 'splat_checkpoint_resumed iteration=1' in restarted.stdout, 'Saved progress was not loaded'
+        assert 'splat_model_resumed iteration=1' in restarted.stdout, 'Saved progress was not loaded'
         assert 'splat iteration=2/12' in restarted.stdout, 'Restart did not continue at the next iteration'
         assert 'splat iteration=1/12' not in restarted.stdout, 'Restart began training from scratch'
         assert output.exists(), 'Completed project was not published'
@@ -82,7 +85,8 @@ def run(executable):
             header = project.read(24)
             count = struct.unpack('<I', header[16:20])[0]
             kinds = [struct.unpack('<IIQQQ', project.read(32))[0] for _ in range(count)]
-        assert 3 in kinds and not set(kinds).intersection({6, 7, 8, 9}), 'Completed project retained pending training state'
+        assert 3 in kinds and not set(kinds).intersection({6, 7, 8, 9, 10, 13}), 'Completed project retained pending training state'
+        assert not checkpoint.exists() and not list(root.glob('project.model.*.ply')), 'Completed training left pending recovery artifacts'
         print('Process crash/restart and concurrent-writer recovery tests passed')
         shutil.rmtree(root)
     except BaseException:

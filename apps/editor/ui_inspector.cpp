@@ -1271,6 +1271,7 @@ Action draw_inspector(App& app) {
     if (!busy && app.training_checkpoint_info) {
         const auto& info = *app.training_checkpoint_info;
         ImGui::Text("%s: %u / %u", tr("Saved Training Progress"), info.iteration, info.total_iterations);
+        ImGui::TextWrapped("%s", tr("Continue from the saved PLY model. Optimizer state will be reinitialized."));
         if (theme::primary_button("Resume Training##checkpoint", {-1.F, 40.F}, true)) {
             action = Action::continue_training;
         }
