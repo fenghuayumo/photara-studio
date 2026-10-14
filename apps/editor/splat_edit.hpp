@@ -43,6 +43,7 @@ public:
         return synced_ && key_ == key;
     }
     [[nodiscard]] bool dirty() const noexcept { return dirty_; }
+    [[nodiscard]] std::uint64_t edit_revision() const noexcept { return edit_revision_; }
     // CPU copy of the splats currently in the viewport, including deletions.
     bool copy_model(photara::splat::GaussianModel& model) const;
     [[nodiscard]] std::uint32_t selected_count() const noexcept {
@@ -187,6 +188,7 @@ private:
     std::string key_;
     bool synced_{};
     bool dirty_{};
+    std::uint64_t edit_revision_{};
     std::uint32_t count_{};
     std::uint32_t selected_count_{};
     std::uint32_t sh_degree_{};

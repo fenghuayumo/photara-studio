@@ -2,14 +2,9 @@
 #include "encoder.hpp"
 
 namespace photara::inference::detail {
-struct DecoderResult {
-    std::uint32_t width = 0, height = 0;
+struct DecoderResult : MogeRawGeometry {
     // Raw head outputs, row-major HWC. No output resize, point remapping,
     // normal normalization, sigmoid, metric exp or camera recovery yet.
-    std::vector<float> points;
-    std::vector<float> normals;
-    std::vector<float> mask_logits;
-    float log_metric_scale = 0;
     std::vector<EncoderStage> stages; // Optional token-major diagnostic maps.
 };
 

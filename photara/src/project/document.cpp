@@ -8,6 +8,8 @@
 #include <limits>
 #include <system_error>
 #include <utility>
+#include <fstream>
+#include <array>
 
 namespace photara::project {
 namespace {
@@ -345,7 +347,28 @@ void write_sfm(
     const std::filesystem::path& project_file) {
     sfm::AsfmOptions options;
     options.path_base = project_directory(project_file);
+    options.compact = true;
     archive.set_chunk(ChunkType::sfm, sfm::encode_asfm(scene, options));
+    archive.erase_chunk(ChunkType::sfm_source);
+}
+
+std::vector<std::uint8_t> sfm_source_signature(
+    const std::filesystem::path& working_sfm,
+    const std::filesystem::path& image_directory,
+    const std::filesystem::path& project_file) {
+    std::ifstream input(working_sfm, std::ios::binary);
+    std::array<char, 32> header{};
+    if (!input.read(header.data(), header.size()))
+        throw std::runtime_error("Cannot read working SfM signature");
+    BufferWriter writer;
+    writer.value(std::uint32_t{2});
+    writer.string(path_utf8(std::filesystem::weakly_canonical(working_sfm)));
+    writer.string(path_utf8(std::filesystem::weakly_canonical(image_directory)));
+    writer.string(path_utf8(std::filesystem::weakly_canonical(project_file.parent_path())));
+    writer.value(std::filesystem::file_size(working_sfm));
+    writer.value(std::filesystem::last_write_time(working_sfm).time_since_epoch().count());
+    writer.bytes(header.data(), header.size());
+    return writer.take();
 }
 
 std::optional<sfm::Scene> read_sfm(const Archive& archive) {

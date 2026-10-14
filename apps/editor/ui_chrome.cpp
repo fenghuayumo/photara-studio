@@ -692,7 +692,9 @@ Action draw_toolbar(App& app) {
     if (training) {
         icons::labeled_button(
             "##training", icons::Icon::train,
-            app.job.paused() ? tr("Paused") : tr("Training..."), {126.F, 32.F},
+            app.job.paused() ? tr("Paused") :
+                app.monitor.saving_checkpoint() ? tr("Saving training progress...") :
+                app.monitor.training().valid ? tr("Training...") : tr("Initializing training..."), {126.F, 32.F},
             icons::ButtonStyle::primary, false, true,
             tr("Use Stop to abort training so you can change images or parameters."));
     } else {
@@ -735,6 +737,7 @@ Action draw_toolbar(App& app) {
                 const auto& info = *app.training_checkpoint_info;
                 ImGui::SetTooltip("%s: %u / %u", tr("Saved Training Progress"),
                     info.iteration, info.total_iterations);
+                ImGui::SetTooltip("%s", tr("Continue from the saved PLY model. Optimizer state will be reinitialized."));
             }
         }
     }
@@ -1016,11 +1019,15 @@ void draw_status_bar(App& app) {
         }
     }
 
-    const double elapsed = app.monitor.elapsed_seconds();
+    const double training_elapsed = app.monitor.training_elapsed_seconds();
+    const double elapsed = training_elapsed >= 0.0
+        ? training_elapsed : app.monitor.elapsed_seconds();
     if (elapsed >= 0.0) {
         char elapsed_text[64];
         std::snprintf(
-            elapsed_text, sizeof(elapsed_text), tr("Elapsed %s"),
+            elapsed_text, sizeof(elapsed_text),
+            tr(training_elapsed >= 0.0 ? "Training elapsed %s" :
+                busy && app.active_job == JobKind::train ? "Preparation elapsed %s" : "Elapsed %s"),
             format_duration(elapsed).c_str());
         const float elapsed_width = status_segment_width(elapsed_text);
         right -= elapsed_width + 22.F;
@@ -1117,6 +1124,30 @@ void draw_status_bar(App& app) {
 
 
 void draw_project_lifecycle_modals(App& app) {
+    if (app.show_project_switch_confirmation) {
+        app.show_project_switch_confirmation = false;
+        ImGui::OpenPopup(tr("Save before switching?"));
+    }
+    if (ImGui::BeginPopupModal(tr("Save before switching?"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", tr("Save the current project before changing the dataset or opening another project?"));
+        if (!app.checkpoint_save_error.empty()) ImGui::TextWrapped("%s", app.checkpoint_save_error.c_str());
+        if (ImGui::Button(tr("Save"), {120.F, 32.F})) {
+            request_project_save(app, false);
+            if (!app.pending_project_action) ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Don't Save"), {120.F, 32.F})) {
+            ImGui::CloseCurrentPopup();
+            complete_project_transition(app);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Cancel"), {100.F, 32.F})) {
+            app.pending_project_action = {};
+            app.checkpoint_save_error.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     if (app.show_close_confirmation) {
         app.show_close_confirmation = false;
         ImGui::OpenPopup(tr("Save before closing?"));
