@@ -274,6 +274,33 @@ Vulkan share the bearing-Schur formulation, robust IRLS passes, gauge
 constraints, and stopping rules so backend comparisons preserve the mapping
 semantics.
 
+Camera warm-start selection remains internal to CLI and Studio with the existing
+512 registered-camera default. Research comparisons use the dedicated positioning
+benchmark and existing low-level library fields, not new product switches.
+Before accepting the warm-start bearing refinement, compare its geometry to the
+camera initializer using unweighted original relative-translation directions,
+including the worst per-camera mean angle. Independently sample up to four tracks
+per registered camera (minimum sample target 256, cap 4096 tracks)
+excluded from positioning (up to 32 observations each), fit two separated rays
+and evaluate observations excluded from each two-ray fit. Alternate pairs also
+validate the two anchors, so endpoint cameras retain independent scores. No optimized point coordinates,
+IRLS weights or external reference enter this screen. Behind-camera and missing
+predictions remain in the score. Reject nonfinite/collapsed centers, changed
+validation coverage, a positive-depth drop greater than 2%, or held-out angular
+degradation greater than the larger of half a degree and 25% of the initializer's
+error. Check per-camera means as well as whole-scene P90. Two-view translation
+disagreement alone need not veto an independently supported refinement. With
+at least 16 eligible held-out tracks, reject observed independent regressions;
+direction changes at cameras with fewer than three held-out predictions are
+logged as unverified rather than triggering an expensive full retry without
+evidence of degradation. Without sufficient held-out tracks, retain the
+conservative relative-direction screen. Missing evidence is logged and
+does not establish small-scene eligibility. Rejected refinements use the existing
+primary fallback; state restoration also restores track inlier metadata. Cache
+fingerprints invalidate pre-screening reconstructions. These checks detect
+material regressions, not absolute position accuracy; the 512 default is retained
+pending cross-scene validation.
+
 CPU positioning reports IRLS convergence, iteration limit, time limit, stall
 or failure separately from solution usability. Evaluation iteration zero is
 excluded from accepted updates. A pass without an accepted update cannot
