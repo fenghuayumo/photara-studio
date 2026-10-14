@@ -4,6 +4,8 @@
 #include "../io/binary_codec.hpp"
 
 #include <stdexcept>
+#include <cmath>
+#include <limits>
 #include <system_error>
 #include <utility>
 
@@ -123,6 +125,14 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::uint8_t>(settings.mesh_remesh));
     writer.value(settings.mesh_remesh_target_faces);
     writer.value(static_cast<std::int32_t>(settings.mesh_remesh_smooth_iterations));
+    writer.value_size(settings.gaussian_models.size());
+    for (const auto& model : settings.gaussian_models) {
+        writer.string(store_path(model.path, base));
+        writer.string(model.name);
+        writer.value(static_cast<std::uint8_t>(model.visible));
+        for (float value : model.offset) writer.value(value);
+        writer.value(model.scale);
+    }
     return writer.take();
 }
 
@@ -270,7 +280,50 @@ Settings decode_settings(
         if (settings.mesh_remesh_smooth_iterations < 0 || settings.mesh_remesh_smooth_iterations > 10)
             settings.mesh_remesh_smooth_iterations = 1;
     }
+    if (version >= 8) {
+        const auto count = reader.size(33, 100'000);
+        settings.gaussian_models.resize(count);
+        for (auto& model : settings.gaussian_models) {
+            model.path = load_path(reader.string(), base);
+            model.name = reader.string();
+            model.visible = reader.value<std::uint8_t>() != 0;
+            for (float& value : model.offset) {
+                value = reader.value<float>();
+                if (!std::isfinite(value)) throw std::runtime_error("Invalid Gaussian placement");
+            }
+            model.scale = reader.value<float>();
+            if (!std::isfinite(model.scale) || model.scale <= 0.F)
+                throw std::runtime_error("Invalid Gaussian scale");
+        }
+    }
     return settings;
+}
+
+void write_gaussian_sources(Archive& archive,
+    const std::vector<std::vector<std::uint8_t>>& sources) {
+    if (sources.empty()) { archive.erase_chunk(ChunkType::gaussian_sources); return; }
+    BufferWriter writer;
+    writer.value(std::uint32_t{1});
+    writer.value_size(sources.size());
+    for (const auto& source : sources) {
+        writer.value_size(source.size());
+        writer.bytes(source.data(), source.size());
+    }
+    archive.set_chunk(ChunkType::gaussian_sources, writer.take());
+}
+
+std::vector<std::vector<std::uint8_t>> read_gaussian_sources(const Archive& archive) {
+    if (!archive.has(ChunkType::gaussian_sources)) return {};
+    const auto bytes = archive.chunk(ChunkType::gaussian_sources);
+    BufferReader reader(bytes);
+    if (reader.value<std::uint32_t>() != 1) throw std::runtime_error("Unsupported Gaussian sources version");
+    std::vector<std::vector<std::uint8_t>> sources(reader.size(8, 100'000));
+    for (auto& source : sources) {
+        source.resize(reader.size(1, (std::numeric_limits<std::uint64_t>::max)()));
+        reader.bytes(source.data(), source.size());
+    }
+    if (reader.remaining()) throw std::runtime_error("Invalid Gaussian sources payload");
+    return sources;
 }
 
 void write_settings(

@@ -1,6 +1,7 @@
 #include "app.hpp"
 #include "cli_path.hpp"
 #include "file_dialogs.hpp"
+#include "model_import.hpp"
 
 #include "i18n.hpp"
 
@@ -40,6 +41,9 @@
 
 namespace editor {
 using i18n::tr;
+photara::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh);
+std::string gaussian_source_cache_key(const GaussianModelEntry& entry);
+std::shared_ptr<const photara::splat::GaussianModel> gaussian_source_model(const GaussianModelEntry& entry);
 
 bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
@@ -116,13 +120,13 @@ void frame_reconstruction(App& app) {
 }
 
 std::filesystem::path existing_splat_model(const App& app) {
-    const std::filesystem::path imported(app.settings.splat_model_source.data());
+    const auto imported = path_from_utf8_field(app.settings.splat_model_source.data());
     std::error_code error;
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
-    const std::array<std::filesystem::path, 6> candidates = {
+    const std::array<std::filesystem::path, 7> candidates = {
         app.layout.working_splat, app.layout.splat_model, app.layout.splat_ply,
-        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb};
+        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc};
     for (const auto& candidate : candidates)
         if (std::filesystem::exists(candidate, error)) return candidate;
     return {};
@@ -278,8 +282,9 @@ void refresh_artifacts(App& app) {
         app.has_sparse = false;
         app.has_asfm = false;
         app.has_mvs = false;
-        app.has_model = false;
-        app.has_mesh = false;
+        app.has_model = gaussian_models_managed(app)
+            ? visible_gaussian_model_count(app) > 0 : !existing_splat_model(app).empty();
+        app.has_mesh = !app.imported_mesh_source.empty();
         app.has_texture = false;
         app.project_writer_version = 0;
         app.project_min_reader_version = 0;
@@ -293,8 +298,10 @@ void refresh_artifacts(App& app) {
     app.has_sparse =
         std::filesystem::exists(app.layout.working_sfm, error) ||
         std::filesystem::exists(app.layout.sparse_ply, error);
-    app.has_model = !existing_splat_model(app).empty();
+    app.has_model = gaussian_models_managed(app)
+        ? visible_gaussian_model_count(app) > 0 : !existing_splat_model(app).empty();
     app.has_mesh =
+        !app.imported_mesh_source.empty() ||
         std::filesystem::exists(app.layout.working_mesh, error) ||
         std::filesystem::exists(app.layout.mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
@@ -311,9 +318,8 @@ void refresh_artifacts(App& app) {
         app.project_min_reader_version = archive.min_reader_version();
         app.has_sparse =
             archive.has(photara::project::ChunkType::sfm) || app.has_sparse;
-        app.has_model =
-            archive.has(photara::project::ChunkType::gaussians) ||
-            app.has_model;
+        if (!gaussian_models_managed(app))
+            app.has_model = archive.has(photara::project::ChunkType::gaussians) || app.has_model;
         app.has_mesh =
             archive.has(photara::project::ChunkType::mesh) || app.has_mesh;
         app.has_texture =
@@ -383,6 +389,23 @@ photara::project::Settings collect_project_settings(const App& app) {
         path_from_utf8_field(app.settings.dataset_initial_cloud.data());
     settings.splat_model_source =
         path_from_utf8_field(app.settings.splat_model_source.data());
+    if (gaussian_models_managed(app)) {
+        // The embedded composition is the legacy reader's authoritative model.
+        settings.splat_model_source.clear();
+        if (app.splat_edit.dirty()) {
+            photara::project::GaussianSource edited;
+            edited.name = "Edited composition";
+            settings.gaussian_models.push_back(std::move(edited));
+        } else {
+            for (const auto& entry : app.gaussian_models) {
+                photara::project::GaussianSource source;
+                source.path = entry.path; source.name = entry.name; source.visible = entry.visible;
+                std::copy_n(entry.offset, 3, source.offset);
+                source.scale = entry.scale;
+                settings.gaussian_models.push_back(std::move(source));
+            }
+        }
+    }
     settings.video_frames_dir =
         path_from_utf8_field(app.settings.video_frames_dir.data());
     settings.video_fps = app.settings.video_fps;
@@ -396,7 +419,8 @@ photara::project::Settings collect_project_settings(const App& app) {
         : app.settings.splat_format == 2
             ? "sog"
             : app.settings.splat_format == 3 ? "spz"
-            : app.settings.splat_format == 4 ? "glb" : "auto";
+            : app.settings.splat_format == 4 ? "glb"
+            : app.settings.splat_format == 5 ? "usdc" : "auto";
     settings.camera_model = app.settings.camera_model;
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
@@ -459,6 +483,14 @@ void apply_project_settings(
     store_path_field(
         app.settings.dataset_initial_cloud, settings.dataset_initial_cloud);
     store_path_field(app.settings.splat_model_source, settings.splat_model_source);
+    app.gaussian_models.clear();
+    for (const auto& source : settings.gaussian_models) {
+        GaussianModelEntry entry;
+        entry.path = source.path; entry.name = source.name; entry.visible = source.visible;
+        std::copy_n(source.offset, 3, entry.offset);
+        entry.scale = source.scale;
+        app.gaussian_models.push_back(std::move(entry));
+    }
     store_path_field(app.settings.video_frames_dir, settings.video_frames_dir);
     app.settings.video_fps = settings.video_fps;
     app.settings.video_sharp_window = settings.video_sharp_window;
@@ -474,6 +506,8 @@ void apply_project_settings(
         app.settings.splat_format = 3;
     else if (settings.splat_output_format == "glb")
         app.settings.splat_format = 4;
+    else if (settings.splat_output_format == "usdc")
+        app.settings.splat_format = 5;
     else
         app.settings.splat_format = 0;
     app.settings.camera_model = settings.camera_model;
@@ -630,7 +664,8 @@ void ensure_dataset_scene_loaded(App& app) {
     const bool imported_views_visible =
         !app.scene.views.empty() &&
         (app.scene_source == "External dataset" ||
-         app.scene_source == "Gaussian centres");
+         app.scene_source == "Gaussian centres" ||
+         app.scene_source == "Gaussian models");
     if (imported_views_visible) return;
     if (external_dataset_signature(app) == app.dataset_scene_key) return;
     request_dataset_scene_load(app);
@@ -676,6 +711,10 @@ void request_ascan_scene_load(App& app) {
         });
 }
 
+// Composes visible imported models into one; defined with the export flow.
+photara::splat::GaussianModel load_export_model(
+    const App& app, tinytensor::Device device);
+
 bool save_project_to_path(App& app, const std::filesystem::path& path) {
     try {
         std::error_code error;
@@ -703,29 +742,51 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                     photara::project::ChunkType::gaussians,
                     photara::splat::encode_gaussians(edited));
                 const bool project_owned =
-                    edited.size() > 0 && !splat.empty() &&
+                    !gaussian_models_managed(app) && edited.size() > 0 && !splat.empty() &&
                     (splat == app.layout.working_splat ||
                      splat == app.layout.splat_ply ||
                      splat == app.layout.splat_model ||
                      splat == app.layout.splat_sog ||
                      splat == app.layout.splat_spz ||
-                     splat == app.layout.splat_glb);
+                     splat == app.layout.splat_glb || splat == app.layout.splat_usdc);
                 if (project_owned)
                     photara::splat::save_gaussians(edited, splat);
             }
+        } else if (gaussian_models_managed(app)) {
+            if (visible_gaussian_model_count(app)) {
+                archive.set_chunk(photara::project::ChunkType::gaussians,
+                    photara::splat::encode_gaussians(load_export_model(app, tinytensor::Device::CPU)));
+            } else archive.erase_chunk(photara::project::ChunkType::gaussians);
         } else if (!splat.empty()) {
             try {
+                const photara::splat::GaussianModel model =
+                    gaussian_models_managed(app)
+                        ? load_export_model(app, tinytensor::Device::CUDA)
+                        : photara::splat::load_gaussians(splat);
                 archive.set_chunk(
                     photara::project::ChunkType::gaussians,
-                    photara::splat::encode_gaussians(
-                        photara::splat::load_gaussians(splat)));
+                    photara::splat::encode_gaussians(model));
             } catch (...) {
             }
         }
+        std::vector<std::vector<std::uint8_t>> sources;
+        if (gaussian_models_managed(app)) {
+            if (app.splat_edit.dirty()) {
+                photara::splat::GaussianModel edited;
+                if (!app.splat_edit.copy_model(edited))
+                    throw std::runtime_error("Cannot save edited composition");
+                sources.push_back(photara::splat::encode_gaussians(edited));
+            } else {
+                for (const auto& entry : app.gaussian_models)
+                    sources.push_back(photara::splat::encode_gaussians(*gaussian_source_model(entry)));
+            }
+        }
+        photara::project::write_gaussian_sources(archive, sources);
         const std::array<std::filesystem::path, 4> mesh_candidates = {
             app.layout.working_mesh, app.layout.mesh_ply,
             app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply};
         for (const auto& mesh_path : mesh_candidates) {
+            if (!app.imported_mesh_source.empty()) break;
             if (mesh_path.empty() ||
                 !std::filesystem::exists(mesh_path, working_error))
                 continue;
@@ -738,8 +799,19 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
             break;
         }
+        if (!app.imported_mesh_source.empty() && app.mesh.has()) {
+            const auto imported = preview_mesh_to_mvs(app.mesh);
+            archive.set_chunk(photara::project::ChunkType::mesh,
+                photara::mvs::encode_mesh(imported));
+            // Keep the project-owned working geometry in sync: reopen prefers
+            // this cache over the archive chunk.
+            if (!app.layout.working_mesh.empty())
+                photara::mvs::save_mesh_ply(imported, app.layout.working_mesh);
+            archive.erase_chunk(photara::project::ChunkType::texture);
+        }
 #if defined(PHOTARA_HAS_TEXTURE)
-        if (textured_mesh_on_disk(app.layout.working_texture)) {
+        if (app.imported_mesh_source.empty() &&
+            textured_mesh_on_disk(app.layout.working_texture)) {
             try {
                 archive.set_chunk(
                     photara::project::ChunkType::texture,
@@ -768,15 +840,12 @@ void clear_viewport_scene(App& app) {
     app.qa_camera_valid = false;
     app.scene.clear();
     app.mesh.clear();
+    app.imported_mesh_source.clear();
     app.mesh_load_failed = false;
-    app.mesh_gpu_positions.clear();
-    app.mesh_gpu_normals.clear();
-    app.mesh_gpu_colours.clear();
-    app.mesh_gpu_uvs.clear();
-    app.mesh_gpu_indices.clear();
+    app.mesh_gpu_data.reset();
     app.mesh_gpu_uploaded = false;
     app.mesh_gpu_failed = false;
-    app.mesh_renderer.set_mesh({}, {}, {}, {});
+    app.mesh_renderer.set_mesh({});
     app.mesh_renderer.set_albedo({});
     app.splat_renderer.clear_model();
     app.splat_edit.clear();
@@ -790,10 +859,21 @@ void clear_viewport_scene(App& app) {
     app.view_mode = VisualizationMode::points;
     ++app.scene_load_generation;
     app.loading_scene = false;
+    app.gaussian_composition_reload = false;
 }
 
 void clear_loaded_result(App& app) {
     clear_viewport_scene(app);
+    app.gaussian_models.clear();
+    app.composed_model.reset();
+    app.composed_model_key.clear();
+    // A running merge cannot be interrupted without blocking the UI thread;
+    // mark its result for discard and let poll_gaussian_merge finish it.
+    if (app.gaussian_merge.running) {
+        app.gaussian_merge.discard = true;
+    } else {
+        app.gaussian_merge = {};
+    }
     app.monitor.reset();
     app.log.clear();
     app.console = {};
@@ -1060,6 +1140,7 @@ void select_video_file(App& app) {
 
 void open_project_from_path(App& app, const std::filesystem::path& path);
 void open_asfm_from_path(App& app, const std::filesystem::path& asfm);
+void request_gaussian_scene_load(App& app);
 
 void apply_dropped_image_source(
     App& app, const std::vector<std::string>& dropped) {
@@ -1104,6 +1185,63 @@ void apply_dropped_image_source(
 }
 
 void apply_dropped_paths(App& app, const std::vector<std::string>& dropped) {
+    // Validate the whole selection before touching the displayed models.
+    std::vector<std::filesystem::path> gaussians;
+    std::filesystem::path mesh;
+    try {
+        for (const auto& text : dropped) {
+            if (text.empty()) continue;
+            const auto path = path_from_drop(text);
+            const auto candidate = model_import_kind(path);
+            if (candidate == ModelImportKind::none) continue;
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(path, error))
+                throw std::runtime_error("Model file does not exist");
+            if (candidate == ModelImportKind::gaussians)
+                gaussians.push_back(path);
+            else if (mesh.empty())
+                mesh = path;
+        }
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+        return;
+    }
+
+    if (!gaussians.empty() || !mesh.empty()) {
+        const std::size_t model_items =
+            gaussians.size() + (mesh.empty() ? 0U : 1U);
+        // Model drops must be pure: no photos, projects, or meshes mixed in,
+        // and a mesh stays a single file.
+        if (model_items != dropped.size() ||
+            (!mesh.empty() && model_items > 1)) {
+            set_message(app, tr("Drop a single 3DGS or mesh model"), theme::warning);
+            return;
+        }
+        if (app.job.running() || app.loading_scene ||
+            app.splat_export.job.valid() || app.splat_simplify.running ||
+            app.gaussian_merge.running) {
+            set_message(app, tr("Wait for the current operation before importing a model"), theme::warning);
+            return;
+        }
+        if (app.splat_edit.dirty()) {
+            set_message(app, tr("Export Gaussian edits, then start a new project before importing another model"), theme::warning);
+            return;
+        }
+
+        if (!gaussians.empty()) {
+            // Dropping onto an existing list adds models so a merge can be
+            // assembled incrementally; the first drop starts a fresh scene.
+            if (app.gaussian_models.empty()) clear_loaded_result(app);
+            import_gaussian_models(app, gaussians);
+        } else {
+            clear_loaded_result(app);
+            app.imported_mesh_source = mesh;
+            refresh_artifacts(app);
+            app.suppress_scene_auto_load = true;
+            show_mesh_view(app, true);
+        }
+        return;
+    }
     std::vector<std::filesystem::path> projects;
     std::vector<std::filesystem::path> asfms;
     std::vector<std::string> remainder;
@@ -1161,7 +1299,7 @@ void consume_dropped_paths(App& app) {
     if (!mouse_over_viewport(app)) {
         set_message(
             app,
-            "Drop photos, a video, an .asfm scene, or an .ascan project on the viewport",
+            "Drop photos, a video, 3DGS, mesh, .asfm, or .ascan on the viewport",
             theme::warning);
         return;
     }
@@ -1201,26 +1339,246 @@ std::filesystem::path write_edited_splat_file(App& app) {
     }
 }
 
+bool gaussian_models_managed(const App& app) {
+    return !app.gaussian_models.empty();
+}
+
+std::size_t visible_gaussian_model_count(const App& app) {
+    std::size_t visible = 0;
+    for (const GaussianModelEntry& entry : app.gaussian_models)
+        if (entry.visible) ++visible;
+    return visible;
+}
+
+photara::splat::GaussianTransform gaussian_entry_transform(
+    const GaussianModelEntry& entry) {
+    photara::splat::GaussianTransform transform;
+    transform.translation = {entry.offset[0], entry.offset[1], entry.offset[2]};
+    transform.scale = std::max(entry.scale, 1e-6F);
+    return transform;
+}
+
+std::filesystem::path normalized_model_key(const std::filesystem::path& path) {
+    std::error_code error;
+    auto key = std::filesystem::absolute(path, error);
+    if (error) return path.lexically_normal();
+    return key.lexically_normal();
+}
+
+std::string gaussian_source_cache_key(const GaussianModelEntry& entry) {
+    if (entry.cached_model && !entry.cached_key.empty()) return entry.cached_key;
+    if (entry.embedded)
+        return "embedded:" + std::to_string(reinterpret_cast<std::uintptr_t>(entry.embedded.get()));
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(entry.path, error);
+    if (error) throw std::runtime_error("Cannot read Gaussian source: " + path_to_utf8(entry.path));
+    return path_to_utf8(entry.path) + ':' + std::to_string(stamp.time_since_epoch().count());
+}
+
+std::shared_ptr<const photara::splat::GaussianModel> gaussian_source_model(const GaussianModelEntry& entry) {
+    if (entry.cached_model) return entry.cached_model;
+    auto model = entry.embedded
+        ? photara::splat::decode_gaussians(*entry.embedded, tinytensor::Device::CPU)
+        : photara::splat::load_gaussians(entry.path, tinytensor::Device::CPU);
+    return std::make_shared<const photara::splat::GaussianModel>(std::move(model));
+}
+
+// Cache key of the composed preview: every visible source file, its stamp,
+// and its placement. Any change reloads the merged cloud.
+// The legacy single-model field follows the first list entry so project
+// settings, exports, and save keep working with one source of truth.
+void sync_gaussian_model_settings(App& app) {
+    if (app.gaussian_models.empty()) {
+        app.settings.splat_model_source.fill('\0');
+        return;
+    }
+    store_utf8_path_field(
+        app.settings.splat_model_source, app.gaussian_models.front().path);
+}
+
+// Drops every preview derived from the composed model so the next ensure
+// pass reloads the current model list.
+void reset_gaussian_preview(App& app) {
+    // Import/remove paths are rejected while a load is in flight, so the
+    // pending future is either invalid or complete and can be dropped.
+    app.pending_load = {};
+    app.composed_model.reset();
+    app.composed_model_key.clear();
+    app.scene.clear();
+    ++app.scene_load_generation;
+    app.loading_scene = false;
+    app.splat_renderer.clear_model();
+    app.splat_edit.clear();
+    app.splat_load_failed_key.clear();
+    app.photos.clear();
+    app.image_qa_session.clear();
+    app.qa_preview_view = ~0U;
+    app.qa_camera_valid = false;
+    invalidate_reconstruction_box(app.reconstruction_box);
+}
+
+void import_gaussian_models(
+    App& app, const std::vector<std::filesystem::path>& paths,
+    const bool announce) {
+    if (paths.empty()) return;
+    if (app.job.running() || app.loading_scene ||
+        app.splat_export.job.valid() || app.splat_simplify.running ||
+        app.gaussian_merge.running) {
+        set_message(
+            app, tr("Wait for the current operation before importing a model"),
+            theme::warning);
+        return;
+    }
+    if (app.splat_edit.dirty()) {
+        set_message(
+            app,
+            tr("Export Gaussian edits, then start a new project before importing another model"),
+            theme::warning);
+        return;
+    }
+    std::size_t added = 0;
+    std::string failure;
+    for (const std::filesystem::path& path : paths) {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error)) {
+            failure = "Model file does not exist";
+            continue;
+        }
+        try {
+            if (model_import_kind(path) != ModelImportKind::gaussians) {
+                continue;
+            }
+        } catch (const std::exception& reject) {
+            failure = reject.what();
+            continue;
+        }
+        const auto key = normalized_model_key(path);
+        bool duplicate = false;
+        for (const GaussianModelEntry& entry : app.gaussian_models)
+            if (normalized_model_key(entry.path) == key) duplicate = true;
+        if (duplicate) {
+            continue;
+        }
+        if (app.gaussian_models.empty() &&
+            path_to_utf8(path).size() >=
+                app.settings.splat_model_source.size()) {
+            failure = "Model path is too long";
+            continue;
+        }
+        GaussianModelEntry entry;
+        entry.path = path;
+        entry.name = path_to_utf8(path.filename());
+        app.gaussian_models.push_back(std::move(entry));
+        ++added;
+    }
+    if (added == 0) {
+        set_message(
+            app,
+            failure.empty() ? tr("Model is already loaded") : failure,
+            theme::warning);
+        return;
+    }
+    sync_gaussian_model_settings(app);
+    refresh_artifacts(app);
+    reset_gaussian_preview(app);
+    app.workspace = ViewportWorkspace::scene_3d;
+    app.view_mode = VisualizationMode::splat;
+    request_gaussian_scene_load(app);
+    if (announce) {
+        const std::string caption =
+            "Imported " + std::to_string(added) + " Gaussian model" +
+            (added == 1 ? "" : "s") + " (" +
+            std::to_string(app.gaussian_models.size()) + " total)";
+        set_message(app, caption, theme::success);
+    }
+}
+
+void remove_gaussian_model(App& app, const std::size_t index) {
+    if (index >= app.gaussian_models.size()) return;
+    if (app.gaussian_merge.running || app.job.running() || app.loading_scene ||
+        app.splat_export.job.valid() || app.splat_simplify.running) {
+        set_message(
+            app, tr("Wait for the current operation before importing a model"),
+            theme::warning);
+        return;
+    }
+    if (app.splat_edit.dirty()) {
+        set_message(
+            app,
+            tr("Export Gaussian edits, then start a new project before importing another model"),
+            theme::warning);
+        return;
+    }
+    app.gaussian_models.erase(
+        app.gaussian_models.begin() + static_cast<std::ptrdiff_t>(index));
+    sync_gaussian_model_settings(app);
+    refresh_artifacts(app);
+    reset_gaussian_preview(app);
+    if (!app.gaussian_models.empty() || app.has_model) {
+        // With an empty list this falls back to the project's trained
+        // working copy, if one exists.
+        request_gaussian_scene_load(app);
+    } else {
+        app.view_mode = VisualizationMode::points;
+    }
+}
+
+// Rebuilds the composed preview after a visibility or placement change.
+void refresh_gaussian_composition(App& app) {
+    if (app.gaussian_models.empty()) return;
+    if (app.splat_edit.dirty()) {
+        set_message(
+            app,
+            tr("Export Gaussian edits, then start a new project before importing another model"),
+            theme::warning);
+        return;
+    }
+    app.splat_renderer.clear_model();
+    app.splat_edit.clear();
+    app.splat_load_failed_key.clear();
+    app.composed_model.reset();
+    app.composed_model_key.clear();
+    ++app.scene_load_generation;
+    if (app.loading_scene) {
+        // Invalidate the in-flight result and retry once it lands; dropping
+        // the future here would block the UI thread on file IO.
+        app.gaussian_composition_reload = true;
+        return;
+    }
+    request_gaussian_scene_load(app);
+}
+
 void request_gaussian_scene_load(App& app) {
     if (app.loading_scene) return;
     std::filesystem::path model_path = existing_splat_model(app);
-    if (const auto edited = write_edited_splat_file(app); !edited.empty())
-        model_path = edited;
+    const auto edited = write_edited_splat_file(app);
+    if (!edited.empty()) model_path = edited;
     const auto ascan = app.layout.project_file;
     const auto poses = app.layout.sparse_poses;
-    if (model_path.empty() && ascan.empty()) return;
+    if (model_path.empty() && ascan.empty() && !gaussian_models_managed(app)) return;
     const bool dataset = has_external_dataset(app);
     const std::filesystem::path dataset_source(app.settings.dataset_source.data());
     const std::filesystem::path dataset_initial_cloud(
         app.settings.dataset_initial_cloud.data());
     const std::filesystem::path dataset_images = reconstruction_images_path(app);
+    const auto composition = edited.empty() ? app.gaussian_models : std::vector<GaussianModelEntry>{};
+    if (!composition.empty()) app.has_model = visible_gaussian_model_count(app) > 0;
+    const std::string composition_key = "composition:" + std::to_string(app.scene_load_generation);
+    if (!composition.empty() && visible_gaussian_model_count(app) == 0) {
+        app.scene.clear();
+        app.composed_model.reset();
+        invalidate_reconstruction_box(app.reconstruction_box);
+        return;
+    }
     app.suppress_scene_auto_load = false;
     app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
-    app.scene_source = "Gaussian centres";
+    app.scene_source = composition.empty() || composition.size() == 1
+        ? "Gaussian centres"
+        : "Gaussian models";
     app.pending_load = std::async(
         std::launch::async,
-        [model_path, ascan, poses, dataset, dataset_source,
+        [composition, composition_key, model_path, ascan, poses, dataset, dataset_source,
          dataset_initial_cloud, dataset_images] {
             const auto merge_dataset_views = [&](SceneLoad& loaded) {
                 // External-dataset training uses the imported cameras, not
@@ -1236,6 +1594,28 @@ void request_gaussian_scene_load(App& app) {
                 loaded.scene.total_views = imported.scene.total_views;
             };
             try {
+                if (!composition.empty()) {
+                    SceneLoad loaded;
+                    loaded.source_models.resize(composition.size());
+                    loaded.source_keys.resize(composition.size());
+                    std::vector<photara::splat::GaussianModel> parts;
+                    for (std::size_t i = 0; i < composition.size(); ++i) {
+                        const auto& entry = composition[i];
+                        if (!entry.visible) continue;
+                        loaded.source_keys[i] = gaussian_source_cache_key(entry);
+                        loaded.source_models[i] = gaussian_source_model(entry);
+                        parts.push_back(photara::splat::transform_gaussians(
+                            *loaded.source_models[i], gaussian_entry_transform(entry)));
+                    }
+                    loaded.composed_model = std::make_shared<const photara::splat::GaussianModel>(
+                        photara::splat::merge_gaussians(parts));
+                    auto scene = gaussian_scene_from_model(*loaded.composed_model, poses);
+                    loaded.scene = std::move(scene.scene);
+                    loaded.ok = scene.ok; loaded.error = std::move(scene.error);
+                    loaded.composed_key = composition_key;
+                    merge_dataset_views(loaded);
+                    return loaded;
+                }
                 if (!model_path.empty())
                 {
                     SceneLoad loaded = load_gaussian_scene(model_path, poses);
@@ -1280,11 +1660,14 @@ void ensure_sparse_loaded(App& app) {
 }
 
 void ensure_gaussian_scene(App& app) {
-    if (app.scene.has_gaussians() || app.loading_scene || !app.has_model) return;
+    if (app.scene.has_gaussians() || app.loading_scene || !app.has_model ||
+        app.gaussian_merge.running)
+        return;
     request_gaussian_scene_load(app);
 }
 
 std::filesystem::path existing_mesh_path(const App& app) {
+    if (!app.imported_mesh_source.empty()) return app.imported_mesh_source;
     std::error_code error;
     const auto exists = [&](const std::filesystem::path& path) {
         return !path.empty() && std::filesystem::exists(path, error);
@@ -1305,7 +1688,8 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     const auto ply = existing_mesh_path(app);
     const auto ascan = app.layout.project_file;
     const auto textured = app.layout.working_texture;
-    const bool have_textured = textured_mesh_on_disk(textured);
+    const bool have_textured = app.imported_mesh_source.empty() &&
+        textured_mesh_on_disk(textured);
     if (ply.empty() && ascan.empty() && !have_textured) {
         app.mesh_load_failed = true;
         set_message(app, "No mesh found to preview", theme::warning);
@@ -1315,11 +1699,13 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     app.mesh_load_failed = false;
     app.frame_mesh_on_load = frame_when_ready;
     app.pending_scene_load_generation = app.scene_load_generation;
+    const bool fit_box = !app.scene.has_points() && !app.reconstruction_box.user_set;
     app.pending_mesh_load = std::async(
         std::launch::async,
-        [ply, ascan, textured, have_textured] {
-            if (have_textured) return load_preview_textured_mesh(textured);
-            return load_preview_mesh(ply, ascan);
+        [ply, ascan, textured, have_textured, fit_box] {
+            return prepare_mesh_preview(
+                have_textured ? load_preview_textured_mesh(textured)
+                              : load_preview_mesh(ply, ascan), fit_box);
         });
 }
 
@@ -1353,6 +1739,7 @@ photara::splat::GaussianFormat splat_export_format(const App& app) {
         case 1: return photara::splat::GaussianFormat::sog;
         case 2: return photara::splat::GaussianFormat::spz;
         case 3: return photara::splat::GaussianFormat::glb;
+        case 6: return photara::splat::GaussianFormat::usdc;
         default: return photara::splat::GaussianFormat::ply;
     }
 }
@@ -1362,6 +1749,7 @@ const wchar_t* splat_export_extension_wide(const App& app) {
         case 1: return L"sog";
         case 2: return L"spz";
         case 3: return L"glb";
+        case 6: return L"usdc";
         default: return L"ply";
     }
 }
@@ -1371,6 +1759,12 @@ int splat_export_format_from_settings(const int settings_format) {
         case 2: return 1;
         case 3: return 2;
         case 4: return 3;
+        case 5:
+#ifdef PHOTARA_HAS_USDC
+            return 6;
+#else
+            return 0;
+#endif
         default: return 0;
     }
 }
@@ -1380,6 +1774,7 @@ int splat_settings_format_from_export(const int export_format) {
         case 1: return 2;
         case 2: return 3;
         case 3: return 4;
+        case 6: return 5;
         default: return 1;
     }
 }
@@ -1395,6 +1790,9 @@ std::filesystem::path suggested_splat_export_path(
         case 1: path += ".sog"; break;
         case 2: path += ".spz"; break;
         case 3: path += ".glb"; break;
+        case 4: path += "_lod"; break;
+        case 5: path += "_collision"; break;
+        case 6: path += ".usdc"; break;
         default: path += ".ply"; break;
     }
     return path;
@@ -1411,6 +1809,12 @@ void sync_splat_export_path(App& app, const bool force) {
         auto parent = current.parent_path();
         if (!parent.empty()) directory = parent;
         auto current_stem = current.stem();
+        if (app.splat_export.path_format == 4 || app.splat_export.path_format == 5) {
+            auto name = current.filename().wstring();
+            const std::wstring suffix = app.splat_export.path_format == 4 ? L"_lod" : L"_collision";
+            if (name.ends_with(suffix)) name.resize(name.size() - suffix.size());
+            current_stem = name;
+        }
         const std::wstring text = current_stem.wstring();
         constexpr wchar_t suffix[] = L"_splat";
         const std::size_t suffix_n = 6;
@@ -1426,6 +1830,13 @@ void sync_splat_export_path(App& app, const bool force) {
 
 bool browse_splat_export_path(App& app) {
     sync_splat_export_path(app, false);
+    if (app.splat_export.format == 4 || app.splat_export.format == 5) {
+        std::array<char, 1024> folder{};
+        if (!pick_folder(L"Choose parent folder for export", folder)) return false;
+        const auto current = path_from_utf8_field(app.splat_export.path.data());
+        store_path_field(app.splat_export.path, path_from_utf8_field(folder.data()) / current.filename());
+        return true;
+    }
     const wchar_t* extension = splat_export_extension_wide(app);
     const auto current = path_from_utf8_field(app.splat_export.path.data());
     const std::wstring name = current.filename().empty()
@@ -1498,6 +1909,149 @@ void poll_splat_simplify(App& app) {
     } catch (const std::exception& error) {
         app.splat_simplify.error = error.what();
         set_message(app, error.what(), theme::danger);
+    }
+}
+
+void start_gaussian_merge(App& app, const std::filesystem::path& output) {
+    if (app.gaussian_merge.running) return;
+    if (app.job.running() || app.loading_scene ||
+        app.splat_export.job.valid() || app.splat_simplify.running) {
+        set_message(
+            app, tr("Wait for the current operation before importing a model"),
+            theme::warning);
+        return;
+    }
+    if (app.splat_edit.dirty()) {
+        set_message(
+            app,
+            tr("Export Gaussian edits, then start a new project before importing another model"),
+            theme::warning);
+        return;
+    }
+    if (output.empty()) return;
+    std::vector<GaussianModelEntry> inputs;
+    for (const GaussianModelEntry& entry : app.gaussian_models) {
+        if (!entry.visible) continue;
+        inputs.push_back(entry);
+    }
+    if (inputs.size() < 2) {
+        set_message(
+            app, tr("Select at least two visible models to merge"),
+            theme::warning);
+        return;
+    }
+    auto progress = std::make_shared<std::atomic<float>>(0.F);
+    app.gaussian_merge.progress_atom = progress;
+    app.gaussian_merge.running = true;
+    app.gaussian_merge.discard = false;
+    app.gaussian_merge.progress = 0.F;
+    app.gaussian_merge.input_count =
+        static_cast<std::uint32_t>(inputs.size());
+    app.gaussian_merge.output = output;
+    app.gaussian_merge.error.clear();
+    app.gaussian_merge.job = std::async(
+        std::launch::async, [inputs, output, progress] {
+            GaussianMergeJob result;
+            try {
+                std::vector<photara::splat::GaussianModel> parts;
+                parts.reserve(inputs.size());
+                for (std::size_t index = 0; index < inputs.size(); ++index) {
+                    progress->store(
+                        static_cast<float>(index) /
+                            static_cast<float>(inputs.size()),
+                        std::memory_order_relaxed);
+                    parts.push_back(photara::splat::transform_gaussians(
+                        *gaussian_source_model(inputs[index]),
+                        gaussian_entry_transform(inputs[index])));
+                }
+                const auto merged = photara::splat::merge_gaussians(parts);
+                progress->store(0.92F, std::memory_order_relaxed);
+                std::error_code error;
+                if (output.has_parent_path())
+                    std::filesystem::create_directories(
+                        output.parent_path(), error);
+                photara::splat::save_gaussians(merged, output);
+                progress->store(1.F, std::memory_order_relaxed);
+                result.splat_count = merged.size();
+            } catch (const std::exception& failure) {
+                result.error = failure.what();
+            }
+            return result;
+        });
+}
+
+void apply_merged_result(
+    App& app, const GaussianMergeJob& result,
+    const std::filesystem::path& output, const std::uint32_t input_count) {
+    // Replace the list with the merged file so exports and future edits see
+    // one ordinary model.
+    app.gaussian_models.clear();
+    GaussianModelEntry entry;
+    entry.path = output;
+    entry.name = path_to_utf8(output.filename());
+    entry.splat_count = result.splat_count;
+    app.gaussian_models.push_back(std::move(entry));
+    sync_gaussian_model_settings(app);
+    refresh_artifacts(app);
+    reset_gaussian_preview(app);
+    app.workspace = ViewportWorkspace::scene_3d;
+    app.view_mode = VisualizationMode::splat;
+    request_gaussian_scene_load(app);
+    set_message(
+        app,
+        "Merged " + std::to_string(input_count) + " models (" +
+            format_count(result.splat_count) + " splats) into " +
+            path_to_utf8(output.filename()),
+        theme::success);
+}
+
+bool gaussian_merge_can_apply(const App& app) {
+    return !app.job.running() && !app.loading_scene &&
+           !app.splat_export.job.valid() && !app.splat_simplify.running &&
+           !app.splat_edit.dirty();
+}
+
+void poll_gaussian_merge(App& app) {
+    if (app.gaussian_merge.running) {
+        if (app.gaussian_merge.progress_atom)
+            app.gaussian_merge.progress = std::clamp(
+                app.gaussian_merge.progress_atom->load(
+                    std::memory_order_relaxed),
+                0.F, 1.F);
+        if (!app.gaussian_merge.job.valid() ||
+            app.gaussian_merge.job.wait_for(std::chrono::seconds(0)) !=
+                std::future_status::ready)
+            return;
+        const GaussianMergeJob result = app.gaussian_merge.job.get();
+        const bool discard = app.gaussian_merge.discard;
+        app.gaussian_merge.running = false;
+        app.gaussian_merge.progress_atom.reset();
+        if (discard) {
+            app.gaussian_merge = {};
+            return;
+        }
+        if (!result.error.empty()) {
+            app.gaussian_merge.error = result.error;
+            set_message(app, "Merge failed: " + result.error, theme::danger);
+            return;
+        }
+        app.gaussian_merge.pending = result;
+        app.gaussian_merge.apply_pending = true;
+        if (!gaussian_merge_can_apply(app)) {
+            set_message(
+                app,
+                tr("Merge written. Finish or export the current edits, then "
+                "the merged model loads automatically."),
+                theme::accent);
+        }
+    }
+    if (app.gaussian_merge.apply_pending && gaussian_merge_can_apply(app)) {
+        const GaussianMergeJob result = app.gaussian_merge.pending;
+        const auto output = app.gaussian_merge.output;
+        const auto input_count = app.gaussian_merge.input_count;
+        app.gaussian_merge.pending = {};
+        app.gaussian_merge.apply_pending = false;
+        apply_merged_result(app, result, output, input_count);
     }
 }
 
@@ -1584,6 +2138,7 @@ bool can_export_sparse(const App& app) {
 bool can_export_model(const App& app) { return app.has_model; }
 
 bool can_export_textured_mesh(const App& app) {
+    if (!app.imported_mesh_source.empty()) return false;
     return app.has_texture || textured_mesh_on_disk(app.layout.working_texture);
 }
 
@@ -1591,8 +2146,47 @@ bool can_export_mesh_file(const App& app) {
     return app.has_mesh || app.mesh.has() || can_export_textured_mesh(app);
 }
 
+void poll_splat_export(App& app) {
+    auto& state = app.splat_export;
+    if (!state.job.valid() || state.job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    try {
+        state.job.get();
+        state.error.clear();
+        set_message(app, "Exported splat assets: " + path_to_utf8(state.output), theme::success);
+    } catch (const std::exception& error) {
+        state.error = error.what();
+        set_message(app, state.error, theme::danger);
+    }
+    state.cancel.reset();
+    state.progress.reset();
+}
+
+// Export source model. A multi-model session composes the same merged cloud
+// the viewport shows, so exported files always match the preview.
+photara::splat::GaussianModel load_export_model(
+    const App& app, const tinytensor::Device device) {
+    if (gaussian_models_managed(app)) {
+        if (app.composed_model) return *app.composed_model;
+        std::vector<photara::splat::GaussianModel> parts;
+        for (const GaussianModelEntry& entry : app.gaussian_models) {
+            if (!entry.visible) continue;
+            parts.push_back(photara::splat::transform_gaussians(
+                *gaussian_source_model(entry),
+                gaussian_entry_transform(entry)));
+        }
+        return photara::splat::merge_gaussians(parts);
+    }
+    const auto source = existing_splat_model(app);
+    if (!source.empty())
+        return photara::splat::load_gaussians(source, device);
+    const auto archive =
+        photara::project::Archive::open(app.layout.project_file);
+    return photara::splat::decode_gaussians(
+        archive.chunk(photara::project::ChunkType::gaussians));
+}
+
 void export_trained_model(App& app) {
-    if (app.job.running() || !can_export_model(app)) return;
+    if (app.job.running() || app.splat_export.job.valid() || !can_export_model(app)) return;
     const auto format = splat_export_format(app);
     const auto* extension = splat_export_extension_wide(app);
     app.splat_export.sh_degree = std::clamp(app.splat_export.sh_degree, 0, 3);
@@ -1603,7 +2197,7 @@ void export_trained_model(App& app) {
         out = path_from_utf8_field(app.splat_export.path.data());
     }
     if (out.empty()) return;
-    if (out.extension().empty()) {
+    if (app.splat_export.format != 4 && app.splat_export.format != 5 && out.extension().empty()) {
         out += ".";
         out += std::filesystem::path(extension);
         store_path_field(app.splat_export.path, out);
@@ -1613,22 +2207,44 @@ void export_trained_model(App& app) {
         photara::splat::GaussianModel model;
         const bool from_edit =
             app.splat_edit.dirty() && app.splat_edit.copy_model(model);
+        // Embedded or cached sources can differ from the original file, even
+        // for a single untransformed model. Always export the loaded cloud.
+        const bool composed_export = gaussian_models_managed(app);
         if (!from_edit) {
-            if (!source.empty()) {
-                model = photara::splat::load_gaussians(source);
-            } else {
-                const auto archive =
-                    photara::project::Archive::open(app.layout.project_file);
-                model = photara::splat::decode_gaussians(
-                    archive.chunk(photara::project::ChunkType::gaussians));
-            }
+            model = load_export_model(
+                app, app.splat_export.format >= 4 ? tinytensor::Device::CPU
+                                                  : tinytensor::Device::CUDA);
         }
         const unsigned export_degree =
             std::min(model.sh_degree,
                      static_cast<unsigned>(app.splat_export.sh_degree));
+        if (app.splat_export.format == 4 || app.splat_export.format == 5) {
+            photara::splat::restrict_sh_degree(model, export_degree);
+            auto cancel = std::make_shared<std::atomic<bool>>(false);
+            auto progress = std::make_shared<std::atomic<float>>(0.F);
+            auto lod = app.splat_export.lod;
+            auto collision = app.splat_export.collision;
+            collision.fill = static_cast<photara::splat::CollisionOptions::Fill>(app.splat_export.fill_mode);
+            lod.cancelled = collision.cancelled = [cancel] { return cancel->load(); };
+            lod.progress = collision.progress = [progress](float p) { progress->store(p); };
+            app.splat_export.cancel = cancel;
+            app.splat_export.progress = progress;
+            app.splat_export.output = std::filesystem::absolute(out);
+            app.splat_export.error.clear();
+            const bool mesh = app.splat_export.format == 5;
+            app.splat_export.job = std::async(std::launch::async,
+                [model = std::move(model), out = app.splat_export.output, lod, collision, mesh] {
+                    if (mesh) photara::splat::export_collision(model, out, collision);
+                    else photara::splat::export_streamed_sog(model, out, lod);
+                });
+            app.splat_export.show = true;
+            set_message(app, "Processing splat assets on Vulkan...", theme::success);
+            return;
+        }
         const auto dest_ext = lower_path_extension(out);
         const auto source_ext = lower_path_extension(source);
-        if (!from_edit && export_degree >= model.sh_degree && !source.empty() &&
+        if (!from_edit && !composed_export &&
+            export_degree >= model.sh_degree && !source.empty() &&
             source_ext == dest_ext && copy_existing_file(source, out)) {
             app.settings.splat_format =
                 splat_settings_format_from_export(app.splat_export.format);
@@ -1691,6 +2307,7 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
 }
 
 std::filesystem::path ensure_textured_stem(App& app) {
+    if (!app.imported_mesh_source.empty()) return {};
     if (textured_mesh_on_disk(app.layout.working_texture))
         return app.layout.working_texture;
 #if defined(PHOTARA_HAS_TEXTURE)
@@ -1712,6 +2329,11 @@ std::filesystem::path ensure_textured_stem(App& app) {
 
 photara::mvs::Mesh load_geometry_mesh(App& app) {
     const auto ply = existing_mesh_path(app);
+    if (!app.imported_mesh_source.empty()) {
+        const auto loaded = load_preview_mesh(ply, {});
+        if (!loaded.ok) throw std::runtime_error(loaded.error);
+        return preview_mesh_to_mvs(loaded.mesh);
+    }
     if (!ply.empty()) return photara::mvs::load_mesh_ply(ply);
     if (!app.layout.project_file.empty()) {
         const auto archive =
@@ -1848,75 +2470,6 @@ void export_mesh_file(App& app) {
         set_message(app, failure.what(), theme::danger);
     }
 }
-
-void pack_mesh_gpu_buffers(App& app) {
-    app.mesh_gpu_positions.clear();
-    app.mesh_gpu_normals.clear();
-    app.mesh_gpu_colours.clear();
-    app.mesh_gpu_uvs.clear();
-    app.mesh_gpu_indices.clear();
-    app.mesh_gpu_uploaded = false;
-    if (!app.mesh.has()) {
-        app.mesh_renderer.set_mesh({}, {}, {}, {});
-        app.mesh_renderer.set_albedo({});
-        return;
-    }
-    const std::size_t count = app.mesh.vertices.size();
-    app.mesh_gpu_positions.resize(count * 3U);
-    for (std::size_t i = 0; i < count; ++i) {
-        app.mesh_gpu_positions[3U * i] = app.mesh.vertices[i].x;
-        app.mesh_gpu_positions[3U * i + 1U] = app.mesh.vertices[i].y;
-        app.mesh_gpu_positions[3U * i + 2U] = app.mesh.vertices[i].z;
-    }
-    if (app.mesh.normals.size() == count) {
-        app.mesh_gpu_normals.resize(count * 3U);
-        for (std::size_t i = 0; i < count; ++i) {
-            app.mesh_gpu_normals[3U * i] = app.mesh.normals[i].x;
-            app.mesh_gpu_normals[3U * i + 1U] = app.mesh.normals[i].y;
-            app.mesh_gpu_normals[3U * i + 2U] = app.mesh.normals[i].z;
-        }
-    }
-    if (app.mesh.colours.size() == count) {
-        app.mesh_gpu_colours.resize(count * 3U);
-        for (std::size_t i = 0; i < count; ++i) {
-            const std::uint32_t packed = app.mesh.colours[i];
-            app.mesh_gpu_colours[3U * i] =
-                static_cast<float>((packed >> IM_COL32_R_SHIFT) & 255U) / 255.F;
-            app.mesh_gpu_colours[3U * i + 1U] =
-                static_cast<float>((packed >> IM_COL32_G_SHIFT) & 255U) / 255.F;
-            app.mesh_gpu_colours[3U * i + 2U] =
-                static_cast<float>((packed >> IM_COL32_B_SHIFT) & 255U) / 255.F;
-        }
-    }
-    if (app.mesh.uvs.size() == count) {
-        app.mesh_gpu_uvs.resize(count * 2U);
-        for (std::size_t i = 0; i < count; ++i) {
-            app.mesh_gpu_uvs[2U * i] = app.mesh.uvs[i].x;
-            app.mesh_gpu_uvs[2U * i + 1U] = app.mesh.uvs[i].y;
-        }
-    }
-    app.mesh_gpu_indices.reserve(app.mesh.faces.size() * 3U);
-    for (const auto& face : app.mesh.faces) {
-        app.mesh_gpu_indices.push_back(face[0]);
-        app.mesh_gpu_indices.push_back(face[1]);
-        app.mesh_gpu_indices.push_back(face[2]);
-    }
-    app.mesh_renderer.set_mesh(
-        app.mesh_gpu_positions, app.mesh_gpu_normals, app.mesh_gpu_colours,
-        app.mesh_gpu_indices, app.mesh_gpu_uvs);
-    if (!app.mesh.albedo_path.empty()) {
-        try {
-            app.mesh_renderer.set_albedo(
-                photara::io::load_rgb(app.mesh.albedo_path));
-        } catch (...) {
-            app.mesh_renderer.set_albedo({});
-        }
-    } else {
-        app.mesh_renderer.set_albedo({});
-    }
-    app.mesh_gpu_uploaded = true;
-}
-
 std::array<float, 16> mesh_world_to_clip(
     const SplatPreviewCamera& camera, const float near_z, const float far_z) {
     const float* m = camera.world_to_camera.data();
@@ -1953,7 +2506,8 @@ std::array<float, 16> mesh_world_to_clip(
 }
 
 bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
-    if (!app.mesh.has() || app.mesh_gpu_failed || app.mesh_gpu_indices.empty())
+    if (!app.mesh.has() || app.mesh_gpu_failed || !app.mesh_gpu_data ||
+        app.mesh_gpu_data->indices.empty())
         return false;
     std::uint32_t width = static_cast<std::uint32_t>(
         std::max(1.F, std::floor(max.x - min.x)));
@@ -1977,9 +2531,7 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
     uniforms.wireframe = app.view_options.mesh_wireframe;
     try {
         if (!app.mesh_gpu_uploaded) {
-            app.mesh_renderer.set_mesh(
-                app.mesh_gpu_positions, app.mesh_gpu_normals,
-                app.mesh_gpu_colours, app.mesh_gpu_indices, app.mesh_gpu_uvs);
+            app.mesh_renderer.set_mesh(app.mesh_gpu_data);
             app.mesh_gpu_uploaded = true;
         }
         return app.mesh_renderer.draw(width, height, uniforms);
@@ -2091,6 +2643,14 @@ void apply_opened_project(App& app) {
         auto archive =
             photara::project::Archive::open(app.layout.project_file);
         apply_project_settings(app, photara::project::read_settings(archive));
+        auto sources = photara::project::read_gaussian_sources(archive);
+        if (!sources.empty() && sources.size() != app.gaussian_models.size())
+            throw std::runtime_error("Project Gaussian source count does not match its model list");
+        for (std::size_t i = 0; i < sources.size(); ++i)
+            app.gaussian_models[i].embedded =
+                std::make_shared<const std::vector<std::uint8_t>>(std::move(sources[i]));
+        if (gaussian_models_managed(app)) request_gaussian_scene_load(app);
+
         photara::splat::migrate_training_checkpoints(app.layout.project_file);
         archive = photara::project::Archive::open(app.layout.project_file);
         refresh_artifacts(app);
@@ -2373,10 +2933,10 @@ void delete_reconstruction_results(App& app) {
 
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 24> generated_files = {
+    const std::array<std::filesystem::path, 25> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
-        app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
+        app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc, app.layout.mesh_ply,
         app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
         app.layout.dense_ply, app.layout.working_splat, app.layout.working_mesh,
         app.layout.working_dense, textured_obj_path(app.layout.working_texture),
@@ -2517,11 +3077,28 @@ void poll_mesh_load(App& app) {
         return;
     }
     app.mesh = std::move(loaded.mesh);
-    invalidate_reconstruction_box(app.reconstruction_box);
+    app.mesh_gpu_data = std::move(loaded.gpu_data);
     app.mesh_load_failed = false;
     if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
-    pack_mesh_gpu_buffers(app);
-    ensure_reconstruction_box(app);
+    // A mesh mode switch does not change the Gaussian cloud the existing
+    // subject box was fitted to. Preserve that cached fit instead of walking
+    // millions of Gaussian centres again on the UI thread.
+    if (!app.scene.has_points() && !app.reconstruction_box.user_set) {
+        app.reconstruction_box.min = loaded.reconstruction_bounds[0];
+        app.reconstruction_box.max = loaded.reconstruction_bounds[1];
+        app.reconstruction_box.valid = loaded.reconstruction_bounds_valid;
+        app.reconstruction_box.auto_fitted = true;
+    }
+    try {
+        app.mesh_renderer.set_mesh(app.mesh_gpu_data);
+        app.mesh_renderer.set_albedo(loaded.albedo);
+        app.mesh_gpu_uploaded = true;
+        app.mesh_gpu_failed = false;
+    } catch (const std::exception& failure) {
+        app.mesh_gpu_failed = true;
+        set_message(app, std::string("Mesh GPU upload: ") + failure.what(), theme::danger);
+        return;
+    }
     // Frame only when this load was requested with framing intent (fresh
     // mesh from extraction or first session entry). A load triggered by
     // switching to the mesh tab keeps the current camera for 3DGS/mesh
@@ -2546,7 +3123,13 @@ void poll_scene_load(App& app) {
         return;
     SceneLoad loaded = app.pending_load.get();
     app.loading_scene = false;
-    if (app.pending_scene_load_generation != app.scene_load_generation) return;
+    if (app.pending_scene_load_generation != app.scene_load_generation) {
+        if (app.gaussian_composition_reload) {
+            app.gaussian_composition_reload = false;
+            request_gaussian_scene_load(app);
+        }
+        return;
+    }
     if (!loaded.ok) {
         set_message(app, "Point cloud: " + loaded.error, theme::danger);
         return;
@@ -2555,6 +3138,16 @@ void poll_scene_load(App& app) {
     app.image_qa_session.clear();
     app.qa_preview_view = ~0U;
     app.qa_camera_valid = false;
+    if (loaded.composed_model) {
+        app.composed_model = std::move(loaded.composed_model);
+        app.composed_model_key = std::move(loaded.composed_key);
+        for (std::size_t i = 0; i < loaded.source_models.size() && i < app.gaussian_models.size(); ++i) {
+            if (!loaded.source_models[i]) continue;
+            app.gaussian_models[i].cached_model = std::move(loaded.source_models[i]);
+            app.gaussian_models[i].cached_key = std::move(loaded.source_keys[i]);
+            app.gaussian_models[i].splat_count = app.gaussian_models[i].cached_model->size();
+        }
+    }
     app.scene = std::move(loaded.scene);
     invalidate_reconstruction_box(app.reconstruction_box);
     app.alignment_preview_seen = false;
@@ -2562,7 +3155,8 @@ void poll_scene_load(App& app) {
     // allow the next ensure pass to restore the dataset view poses, which are
     // the ones training actually uses.
     if (app.scene_source != "External dataset" &&
-        app.scene_source != "Gaussian centres")
+        app.scene_source != "Gaussian centres" &&
+        app.scene_source != "Gaussian models")
         app.dataset_scene_key.clear();
     if (app.image_qa.selected >= static_cast<int>(app.scene.views.size()))
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
@@ -3652,8 +4246,17 @@ bool ensure_splat_renderer(App& app) {
     std::string key;
     try {
         photara::splat::GaussianModel model;
-        const auto path = existing_splat_model(app);
-        if (!path.empty()) {
+        if (gaussian_models_managed(app)) {
+            // Rendering never inspects live drag values or reads source files.
+            // Only a completed background composition changes this cache key.
+            if (!app.composed_model) return false;
+            key = app.composed_model_key;
+            if (key == app.splat_load_failed_key) return false;
+            if (key == app.splat_renderer.source_key() && app.splat_edit.bound_to(key))
+                return app.splat_renderer.supported();
+            model = *app.composed_model;
+        } else if (const auto path = existing_splat_model(app);
+                   !path.empty()) {
             std::error_code error;
             const auto stamp = std::filesystem::last_write_time(path, error);
             key = path.string();
