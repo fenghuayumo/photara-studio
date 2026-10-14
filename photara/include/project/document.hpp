@@ -132,6 +132,12 @@ void write_sfm(
     Archive& archive,
     const sfm::Scene& scene,
     const std::filesystem::path& project_file);
+// Cheap identity of a working ASFM generation and its path interpretation.
+// Store alongside sfm only after successfully importing that generation.
+std::vector<std::uint8_t> sfm_source_signature(
+    const std::filesystem::path& working_sfm,
+    const std::filesystem::path& image_directory,
+    const std::filesystem::path& project_file);
 std::optional<sfm::Scene> read_sfm(const Archive& archive);
 
 // Replace the SfM stage and drop later stages that depended on it.

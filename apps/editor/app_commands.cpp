@@ -730,9 +730,15 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
         std::error_code working_error;
         if (!app.layout.working_sfm.empty() &&
             std::filesystem::exists(app.layout.working_sfm, working_error)) {
-            const auto scene = load_working_sfm(
-                app.layout.working_sfm, reconstruction_images_path(app));
-            photara::project::write_sfm(archive, scene, path);
+            const auto images = reconstruction_images_path(app);
+            const auto signature = photara::project::sfm_source_signature(app.layout.working_sfm, images, path);
+            if (!archive.has(photara::project::ChunkType::sfm) ||
+                !archive.has(photara::project::ChunkType::sfm_source) ||
+                archive.chunk(photara::project::ChunkType::sfm_source) != signature) {
+                const auto scene = load_working_sfm(app.layout.working_sfm, images);
+                photara::project::write_sfm(archive, scene, path);
+                archive.set_chunk(photara::project::ChunkType::sfm_source, signature);
+            }
         }
         const auto splat = existing_splat_model(app);
         if (app.splat_edit.dirty()) {
@@ -3739,20 +3745,41 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         photara::splat::GaussianModel edited;
         const bool have_edits = app.splat_edit.dirty() && app.splat_edit.copy_model(edited);
         app.train_prepare_resume = resume_training;
+        app.train_preparation = std::make_shared<TrainPreparation>();
+        const auto preparation = app.train_preparation;
         app.pending_train_prepare = std::async(std::launch::async,
-            [layout, settings, images, resume_training, have_edits, edited = std::move(edited)]() mutable {
+            [layout, settings, images, resume_training, have_edits, preparation, edited = std::move(edited)]() mutable {
                 try {
                     photara::splat::migrate_training_checkpoints(layout.project_file);
                     // Serialize preparation with other project writers. One atomic
                     // save both updates inputs and invalidates a fresh run's state.
                     photara::splat::detail::TrainingCheckpointLease lease(layout.training_checkpoint);
+                    if (preparation->cancelled) return std::string{};
                     auto archive = std::filesystem::exists(layout.project_file)
                         ? photara::project::Archive::open(layout.project_file)
                         : photara::project::Archive::create();
-                    photara::project::write_settings(archive, settings, layout.project_file);
-                    if (!layout.working_sfm.empty() && std::filesystem::exists(layout.working_sfm))
-                        photara::project::write_sfm(archive,
-                            load_working_sfm(layout.working_sfm, images), layout.project_file);
+                    bool changed = have_edits;
+                    const auto settings_bytes = photara::project::encode_settings(settings, layout.project_file);
+                    if (!archive.has(photara::project::ChunkType::settings) ||
+                        archive.chunk(photara::project::ChunkType::settings) != settings_bytes) {
+                        archive.set_chunk(photara::project::ChunkType::settings, settings_bytes);
+                        changed = true;
+                    }
+                    if (!layout.working_sfm.empty() && std::filesystem::exists(layout.working_sfm)) {
+                        const auto signature = photara::project::sfm_source_signature(layout.working_sfm, images, layout.project_file);
+                        if (!archive.has(photara::project::ChunkType::sfm) ||
+                            !archive.has(photara::project::ChunkType::sfm_source) ||
+                            archive.chunk(photara::project::ChunkType::sfm_source) != signature) {
+                            if (preparation->cancelled) return std::string{};
+                            preparation->stage = TrainPrepareStage::reading_sfm;
+                            const auto scene = load_working_sfm(layout.working_sfm, images);
+                            if (preparation->cancelled) return std::string{};
+                            preparation->stage = TrainPrepareStage::encoding_sfm;
+                            photara::project::write_sfm(archive, scene, layout.project_file);
+                            archive.set_chunk(photara::project::ChunkType::sfm_source, signature);
+                            changed = true;
+                        }
+                    }
                     if (have_edits)
                         archive.set_chunk(photara::project::ChunkType::gaussians,
                             photara::splat::encode_gaussians(edited));
@@ -3762,15 +3789,21 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
                             photara::project::ChunkType::training_checkpoint_previous,
                             photara::project::ChunkType::training_checkpoint_previous_info,
                             photara::project::ChunkType::training_checkpoint_history})
+                        {
+                            changed |= archive.has(type);
                             archive.erase_chunk(type);
+                        }
                     }
                     // Existing output chunks are already native project data;
                     // reloading exported models/meshes/textures adds no inputs.
-                    archive.save(layout.project_file);
+                    if (preparation->cancelled) return std::string{};
+                    preparation->stage = TrainPrepareStage::saving;
+                    if (changed) archive.save(layout.project_file);
+                    preparation->stage = TrainPrepareStage::ready;
                     return std::string{};
                 } catch (const std::exception& failure) { return std::string(failure.what()); }
             });
-        set_message(app, "Preparing training: saving project inputs...", theme::accent);
+        set_message(app, "Checking training inputs...", theme::accent);
         return;
     }
     app.training_project_ready = false;
@@ -3906,6 +3939,9 @@ void poll_train_start(App& app) {
     if (!app.pending_train_prepare.valid() ||
         app.pending_train_prepare.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     const auto error = app.pending_train_prepare.get();
+    const bool cancelled = app.train_preparation && app.train_preparation->cancelled;
+    app.train_preparation.reset();
+    if (cancelled) { set_message(app, "Training preparation cancelled", theme::text_muted); return; }
     if (!error.empty()) { set_message(app, error, theme::danger); return; }
     app.project_folder_automatic = false;
     refresh_artifacts(app);

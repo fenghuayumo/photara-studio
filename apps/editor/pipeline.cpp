@@ -689,6 +689,7 @@ void RunMonitor::reset() {
     artifacts_ = {};
     last_error_.clear();
     resumed_ = false;
+    saving_checkpoint_ = false;
     floor_ = 0.F;
     band_begin_ = 0.F;
     band_end_ = 0.F;
@@ -696,6 +697,9 @@ void RunMonitor::reset() {
     clock_running_ = false;
     started_ = {};
     stopped_ = {};
+    training_started_ = {};
+    training_stopped_ = {};
+    training_clock_running_ = false;
 }
 
 void RunMonitor::begin(const JobKind kind, const Stage opening) {
@@ -720,6 +724,13 @@ void RunMonitor::enter_stage(const Stage stage, const float floor) {
 }
 
 void RunMonitor::consume(const std::string& line) {
+    if (line.find("splat_checkpoint_saving iteration=") != std::string::npos) saving_checkpoint_ = true;
+    if (line.find("splat_checkpoint_saved iteration=") != std::string::npos ||
+        line.find("Training checkpoint save failed:") != std::string::npos) saving_checkpoint_ = false;
+    if (line.find("splat_training_completed") != std::string::npos && training_clock_running_) {
+        training_stopped_ = std::chrono::steady_clock::now();
+        training_clock_running_ = false;
+    }
     if (line.find("[error]") != std::string::npos) {
         // Strip the timestamp/level prefix for a readable status message.
         const std::size_t level_end = line.find("] ");
@@ -795,6 +806,10 @@ void RunMonitor::consume(const std::string& line) {
         std::uint64_t current{};
         std::uint64_t total{};
         if (ratio_after(line, "splat iteration=", current, total)) {
+            if (!training_.valid) {
+                training_started_ = std::chrono::steady_clock::now();
+                training_clock_running_ = true;
+            }
             training_.iteration = static_cast<unsigned>(current);
             training_.total_iterations = static_cast<unsigned>(total);
             training_.valid = true;
@@ -925,6 +940,11 @@ void RunMonitor::consume(const std::string& line) {
 }
 
 void RunMonitor::mark_finished(const int exit_code) {
+    saving_checkpoint_ = false;
+    if (training_clock_running_) {
+        training_stopped_ = std::chrono::steady_clock::now();
+        training_clock_running_ = false;
+    }
     task_.active = false;
     if (exit_code == 0) {
         stage_ = Stage::complete;
@@ -951,6 +971,7 @@ void RunMonitor::resume_clock() {
     if (!has_clock_ || clock_running_) return;
     const auto now = std::chrono::steady_clock::now();
     started_ += now - stopped_;
+    if (training_clock_running_) training_started_ += now - stopped_;
     clock_running_ = true;
 }
 
@@ -959,6 +980,14 @@ double RunMonitor::elapsed_seconds() const {
     const auto end = clock_running_ ? std::chrono::steady_clock::now()
                                     : stopped_;
     return std::chrono::duration<double>(end - started_).count();
+}
+
+double RunMonitor::training_elapsed_seconds() const {
+    if (!training_.valid) return -1.0;
+    const auto end = training_clock_running_
+        ? (clock_running_ ? std::chrono::steady_clock::now() : stopped_)
+        : training_stopped_;
+    return std::chrono::duration<double>(end - training_started_).count();
 }
 
 float RunMonitor::fraction() const {
@@ -990,7 +1019,9 @@ double RunMonitor::eta_seconds() const {
 }
 
 std::string RunMonitor::headline() const {
-    std::string text = stage_name(stage_);
+    if (saving_checkpoint_) return i18n::tr("Saving training progress...");
+    std::string text = kind_ == JobKind::train && stage_ == Stage::preparing
+        ? i18n::tr("Initializing training...") : stage_name(stage_);
     if (stage_ == Stage::training && training_.valid) {
         text += "  ";
         text += std::to_string(training_.iteration);

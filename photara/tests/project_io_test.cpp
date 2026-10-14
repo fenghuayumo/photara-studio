@@ -107,6 +107,23 @@ int main() {
 
     const Scene source = make_scene();
     save_asfm(source, asfm_path);
+    const auto signature = sfm_source_signature(asfm_path, dir, dir / "signature.ascan");
+    expect(signature == sfm_source_signature(asfm_path, dir, dir / "signature.ascan"),
+        "unchanged working SfM has a stable source signature");
+    expect(signature != sfm_source_signature(asfm_path, dir / "other_images", dir / "signature.ascan"),
+        "changing image path base invalidates source signature");
+    expect(signature != sfm_source_signature(asfm_path, dir, dir / "other_project" / "signature.ascan"),
+        "save-as path base invalidates source signature");
+    auto signed_archive = Archive::create();
+    signed_archive.set_chunk(ChunkType::sfm_source, signature);
+    write_sfm(signed_archive, source, dir / "signature.ascan");
+    expect(!signed_archive.has(ChunkType::sfm_source), "replacing SfM invalidates its source signature");
+    auto changed_source = source;
+    changed_source.images[0].pose.C.x() += 1;
+    save_asfm(changed_source, asfm_path);
+    expect(signature != sfm_source_signature(asfm_path, dir, dir / "signature.ascan"),
+        "changed working SfM invalidates source signature");
+    save_asfm(source, asfm_path);
     const Scene restored = load_asfm(asfm_path);
     expect(restored.cameras.size() == 1, "asfm camera count");
     expect(restored.cameras[0].k1 == 0.1, "asfm distortion");
@@ -566,6 +583,30 @@ int main() {
     catch (const std::exception&) { checksum_refused = true; }
     expect(checksum_refused, "in-memory archive validates payload checksums");
 
+    const auto stream_source = dir / "photara_io_stream_source.ascan";
+    const auto stream_target = dir / "photara_io_stream_target.ascan";
+    auto stream_archive = Archive::create();
+    std::vector<std::uint8_t> large_chunk(1024 * 1024 + 17, 83);
+    stream_archive.set_chunk(ChunkType::gaussians, large_chunk);
+    stream_archive.save(stream_source);
+    auto stream_lazy = Archive::open(stream_source);
+    stream_lazy.save(stream_target);
+    expect(Archive::open(stream_target).chunk(ChunkType::gaussians) == large_chunk,
+        "streamed archive copies a chunk across buffer boundaries");
+    {
+        std::fstream corrupt(stream_source, std::ios::binary | std::ios::in | std::ios::out);
+        corrupt.seekp(-1, std::ios::end);
+        corrupt.put(0);
+    }
+    bool stream_refused = false;
+    try { stream_lazy = Archive::open(stream_source); stream_lazy.save(stream_target); }
+    catch (const std::exception&) { stream_refused = true; }
+    expect(stream_refused, "streamed save validates untouched chunk checksums");
+    expect(Archive::open(stream_target).chunk(ChunkType::gaussians) == large_chunk,
+        "failed streamed save preserves the destination");
+    expect(!std::filesystem::exists(stream_target.string() + ".tmp"),
+        "failed streamed save removes its temporary output");
+
     Archive required_unknown = Archive::create();
     write_settings(required_unknown, updated, ascan_path);
     required_unknown.set_chunk(
@@ -603,6 +644,8 @@ int main() {
     std::filesystem::remove(asfm_path, error);
     std::filesystem::remove(ascan_path, error);
     if (failures == 0) {
+        std::filesystem::remove(stream_source, error);
+        std::filesystem::remove(stream_target, error);
         std::cout << "project io tests passed\n";
         return 0;
     }

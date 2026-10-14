@@ -254,23 +254,14 @@ void Archive::erase_chunk(const ChunkType type) {
 }
 
 void Archive::save(const std::filesystem::path& path) const {
-    std::vector<Slot> ordered = slots_;
+    std::vector<const Slot*> ordered;
+    for (const auto& slot : slots_) ordered.push_back(&slot);
     std::sort(
         ordered.begin(), ordered.end(),
-        [](const Slot& a, const Slot& b) {
-            return static_cast<std::uint32_t>(a.type) <
-                   static_cast<std::uint32_t>(b.type);
+        [](const Slot* a, const Slot* b) {
+            return static_cast<std::uint32_t>(a->type) <
+                   static_cast<std::uint32_t>(b->type);
         });
-
-    std::vector<std::vector<std::uint8_t>> payloads;
-    payloads.reserve(ordered.size());
-    for (const Slot& slot : ordered) {
-        if (slot.replacement) {
-            payloads.push_back(*slot.replacement);
-        } else {
-            payloads.push_back(chunk(slot.type));
-        }
-    }
 
     FileHeader header{k_magic, k_ascan_version, 0,
                       static_cast<std::uint32_t>(ordered.size()),
@@ -280,43 +271,67 @@ void Archive::save(const std::filesystem::path& path) const {
     std::vector<FileEntry> entries(ordered.size());
     for (std::size_t index = 0; index < ordered.size(); ++index) {
         cursor = align8(cursor);
-        entries[index].type = static_cast<std::uint32_t>(ordered[index].type);
-        entries[index].flags = ordered[index].flags;
+        entries[index].type = static_cast<std::uint32_t>(ordered[index]->type);
+        entries[index].flags = ordered[index]->flags;
         entries[index].offset = cursor;
-        entries[index].size = payloads[index].size();
-        entries[index].checksum = checksum_bytes(payloads[index]);
-        cursor += payloads[index].size();
+        entries[index].size = ordered[index]->size;
+        entries[index].checksum = ordered[index]->checksum;
+        cursor += ordered[index]->size;
     }
 
     if (!path.parent_path().empty())
         std::filesystem::create_directories(path.parent_path());
     auto temporary = path;
     temporary += ".tmp";
-    {
+    bool temporary_created = false;
+    try {
+      {
+        std::ifstream source;
+        std::vector<char> copy_buffer(1024 * 1024);
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output)
             throw std::runtime_error("Failed to create .ascan: " + path.string());
+        temporary_created = true;
         write_pod(output, &header, sizeof(header));
         for (const FileEntry& entry : entries)
             write_pod(output, &entry, sizeof(entry));
         std::uint64_t written = k_header_size +
             static_cast<std::uint64_t>(entries.size()) * k_entry_size;
-        for (std::size_t index = 0; index < payloads.size(); ++index) {
+        for (std::size_t index = 0; index < ordered.size(); ++index) {
             const std::uint64_t aligned = align8(written);
             while (written < aligned) {
                 const char zero = 0;
                 write_pod(output, &zero, 1);
                 ++written;
             }
-            if (!payloads[index].empty())
-                write_pod(output, payloads[index].data(), payloads[index].size());
-            written += payloads[index].size();
+            const Slot& slot = *ordered[index];
+            if (slot.replacement) {
+                write_pod(output, slot.replacement->data(), slot.replacement->size());
+            } else {
+                if (!source.is_open()) {
+                    source.open(source_, std::ios::binary);
+                    if (!source) throw std::runtime_error("Failed to read .ascan source");
+                }
+                source.seekg(static_cast<std::streamoff>(slot.source_offset));
+                std::uint64_t remaining = slot.size;
+                std::uint64_t checksum = k_fnv_offset;
+                while (remaining) {
+                    const auto count = static_cast<std::size_t>(
+                        std::min<std::uint64_t>(remaining, copy_buffer.size()));
+                    read_pod(source, copy_buffer.data(), count);
+                    hash_bytes(checksum, copy_buffer.data(), count);
+                    write_pod(output, copy_buffer.data(), count);
+                    remaining -= count;
+                }
+                if (checksum != slot.checksum)
+                    throw std::runtime_error(".ascan chunk checksum mismatch");
+            }
+            written += slot.size;
         }
         output.flush();
         if (!output)
             throw std::runtime_error("Failed while writing .ascan: " + path.string());
-    }
-    try {
+      }
         atomic_replace(temporary, path);
         // A same-file rewrite can change every source offset. Refresh the lazy
         // cache so subsequent stage saves read the newly published container.
@@ -330,7 +345,7 @@ void Archive::save(const std::filesystem::path& path) const {
         }
     } catch (...) {
         std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
+        if (temporary_created) std::filesystem::remove(temporary, ignored);
         throw;
     }
 }

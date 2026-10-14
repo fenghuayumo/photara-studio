@@ -3464,7 +3464,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         ? photara::splat::training_checkpoint_path(cli.output) : cli.splat_checkpoint;
     if (cli.splat_checkpoint.empty()) photara::splat::migrate_training_checkpoints(cli.output);
     options.checkpoint_project_settings = photara::project::encode_settings(settings_from_cli(cli), options.checkpoint_path);
-    if (project_archive && project_archive->has(photara::project::ChunkType::sfm))
+    const bool checkpoint_keeps_project_sfm = options.checkpoint_path == cli.output &&
+        cli.splat_dataset.empty() && std::filesystem::exists(cli.output) &&
+        photara::project::Archive::open(cli.output).has(photara::project::ChunkType::sfm);
+    if (checkpoint_keeps_project_sfm) {
+        // The checkpoint writer preserves the existing project input chunk.
+        // Do not decode/re-encode the working copy just to supply it again.
+    } else if (project_archive && project_archive->has(photara::project::ChunkType::sfm))
         options.checkpoint_project_sfm = project_archive->chunk(photara::project::ChunkType::sfm);
     else if (!cli.working_sfm.empty() && std::filesystem::exists(cli.working_sfm)) {
         photara::sfm::AsfmOptions read_options; read_options.path_base = cli.images_dir;
@@ -4755,7 +4761,7 @@ int main(int argc, char** argv) {
             photara::core::Logger::instance().warning(
                 "Alignment needs position review: ", summary.position_unverified_views,
                 " registered cameras lack independent translation support. Low reprojection error does not verify their global positions.");
-        save_working_sfm(cli, scene);
+        if (!loaded_project_sfm) save_working_sfm(cli, scene);
 
         // The first SAM pass creates coarse masks; using them for alignment
         // is opt-in. Once the camera ring and sparse cloud exist, repeat selection with

@@ -112,7 +112,12 @@ int main(int argc, char** argv) {
         for (unsigned stop_iteration : {3U, 4U}) {
             splat::remove_training_checkpoint(options.checkpoint_path);
             options.resume_checkpoint = false;
-            splat::Trainer(options).train(scene, [=](const splat::TrainingProgress& p) { return p.iteration < stop_iteration; });
+            splat::Trainer(options).train(scene, [=](const splat::TrainingProgress& p) {
+                if (p.iteration == 2)
+                    require(!splat::inspect_training_checkpoint(options.checkpoint_path),
+                        "First iteration unexpectedly forced a checkpoint save");
+                return p.iteration < stop_iteration;
+            });
             const auto saved = splat::inspect_training_checkpoint(options.checkpoint_path);
             require(saved && saved->iteration == stop_iteration && saved->focus_bounds.valid,
                 "Interrupted iteration or focus bounds were not saved");
