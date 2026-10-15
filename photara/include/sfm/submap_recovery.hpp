@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sfm/hierarchical.hpp"
+#include "sfm/checkpoint.hpp"
 #include <functional>
 #include <string>
 
@@ -17,6 +18,13 @@ std::vector<Index> recover_stable_resections(Scene& scene);
 // contribute depths used to estimate or validate their own replacement poses.
 std::vector<Index> recover_stable_resections(
     Scene& scene, const std::vector<std::uint8_t>& stable);
+// Local frozen-map proposals, never pair geometry. Two-view depths need >=2deg
+// parallax, fit and held-out support from >=3 anchor cameras, >=12 held-out
+// inliers and >=30 final observations. The ordinary overload keeps its stricter
+// per-depth three-view requirement. Only unregistered targets may enter here.
+std::vector<Index> recover_stable_resections(
+    Scene& scene, const std::vector<std::uint8_t>& stable,
+    const std::vector<RawPairMatches>& tentative_matches);
 // Screen connections relative to each view's strongest pair, recover weak
 // branches from independently validated anchors, and unregister unsupported
 // poses. Strong-component poses and camera intrinsics stay fixed.

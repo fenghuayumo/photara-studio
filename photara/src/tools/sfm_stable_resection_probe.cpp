@@ -12,7 +12,9 @@
 int main(int argc, char** argv) {
     try {
         using namespace photara::sfm;
-        if (argc != 3) throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm");
+        if (argc != 3 && !(argc == 4 && std::string_view(argv[3]) == "--descriptor-map"))
+            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map]");
+        const bool descriptor_map = argc == 4;
         const std::filesystem::path input(argv[1]), output(argv[2]);
         const auto reports = std::filesystem::path(output.string() + ".rounds.csv");
         if (std::filesystem::exists(output) || std::filesystem::exists(reports))
@@ -32,15 +34,37 @@ int main(int argc, char** argv) {
         const auto audit = analyze_position_observability(scene);
         if (audit.reliable_views < 3) throw std::runtime_error("No frozen stable map available");
         auto stable = audit.reliable;
+        if (descriptor_map)
+            for (Index id = 0; id < scene.images.size(); ++id) stable[id] = scene.images[id].registered;
         const auto cameras = scene.cameras;
         std::vector<Pose3D> original;
         for (const auto& image : scene.images) original.push_back(image.pose);
+        const auto original_track_count = scene.tracks.size();
+        const auto map_fingerprint = [&] {
+            FingerprintBuilder hash;
+            for (std::size_t t = 0; t < original_track_count; ++t) {
+                const auto& track = scene.tracks.at(t);
+                hash.append_bytes(track.position.data(), 3 * sizeof(double));
+                hash.append(track.num_inliers);
+                hash.append(track.observations.size());
+                for (const auto& obs : track.observations) { hash.append(obs.image_id); hash.append(obs.feature_id); }
+            }
+            return hash.value();
+        };
+        const auto original_map = descriptor_map ? map_fingerprint() : 0;
         std::ofstream csv(reports);
         if (!csv) throw std::runtime_error("Cannot write resection reports");
         csv << "round,frozen_anchors,accepted,names\n";
         unsigned total = 0;
         for (unsigned round = 0; round < 3; ++round) {
-            const auto recovered = recover_stable_resections(scene, stable);
+            std::vector<Index> recovered;
+            if (descriptor_map) {
+                recover_missing_views(scene);
+                if (map_fingerprint() != original_map)
+                    throw std::runtime_error("Original landmarks or observations changed during missing-view recovery");
+                for (Index id = 0; id < scene.images.size(); ++id)
+                    if (scene.images[id].registered && !stable[id]) recovered.push_back(id);
+            } else recovered = recover_stable_resections(scene, stable);
             unsigned anchors = 0;
             for (auto flag : stable) anchors += flag != 0;
             csv << round << ',' << anchors << ',' << recovered.size() << ",\"";
@@ -50,7 +74,7 @@ int main(int argc, char** argv) {
             }
             csv << "\"\n"; csv.flush();
             for (Index id = 0; id < scene.images.size(); ++id)
-                if (audit.reliable[id] && ((scene.images[id].pose.C - original[id].C).norm() != 0 ||
+                if ((descriptor_map ? stable[id] : audit.reliable[id]) && ((scene.images[id].pose.C - original[id].C).norm() != 0 ||
                                           (scene.images[id].pose.R - original[id].R).norm() != 0))
                     throw std::runtime_error("Original stable pose changed during resection");
             for (Index id = 0; id < scene.cameras.size(); ++id) {
@@ -63,11 +87,13 @@ int main(int argc, char** argv) {
             if (recovered.empty()) break;
             total += static_cast<unsigned>(recovered.size());
             for (auto id : recovered) stable[id] = 1;
+            if (descriptor_map) break;
         }
         audit_position_support(scene);
         save_asfm(scene, output);
         if (!csv) throw std::runtime_error("Failed writing resection reports");
         std::cout << "recovered_views=" << total << " original_anchors_unchanged=1 intrinsics_unchanged=1\n";
+        if (descriptor_map) std::cout << "original_landmarks_unchanged=1\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
