@@ -341,7 +341,7 @@ Action draw_menu_bar(App& app) {
     if (ImGui::BeginMenu(tr("View"))) {
         ImGui::MenuItem(tr("Scene"), nullptr, &app.show_scene);
         ImGui::MenuItem(tr("Viewport"), nullptr, &app.show_viewport);
-        ImGui::MenuItem(tr("Inspector"), nullptr, &app.show_inspector);
+        ImGui::MenuItem(tr("Reconstruction settings"), nullptr, &app.show_inspector);
         ImGui::MenuItem(tr("Console"), nullptr, &app.show_console);
         ImGui::MenuItem(tr("Status Bar"), nullptr, &app.show_status_bar);
         ImGui::Separator();

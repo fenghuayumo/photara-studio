@@ -51,6 +51,7 @@ enum class VisualizationMode { points, splat, rings, mesh };
 enum class DisplayChannel { color, depth, normal };
 enum class ViewportWorkspace { scene_3d, image_2d };
 enum class StepState { pending, active, done, skipped, failed };
+enum class InspectorSection { automatic, project, alignment, training, mesh, texture };
 enum class ClearResultsAction { none, clear_view, delete_generated };
 struct TrainPreparation {
     std::atomic<TrainPrepareStage> stage{TrainPrepareStage::checking};
@@ -269,6 +270,7 @@ struct App {
     bool show_viewport{true};
     bool show_console{true};
     bool show_inspector{true};
+    InspectorSection inspector_section{InspectorSection::automatic};
     bool show_status_bar{true};
     bool reset_dock_layout{};
 

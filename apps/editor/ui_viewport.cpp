@@ -107,6 +107,71 @@ const char* display_channel_label(const DisplayChannel channel) {
     }
 }
 
+float draw_view_settings_button(App& app, const ImVec2 origin,
+    const float width, const float controls_end) {
+    const bool compact = width - controls_end < 130.F;
+    const float button_width = compact ? 30.F
+        : ImGui::CalcTextSize(tr("View settings")).x + 42.F;
+    const float x = std::max(controls_end + 8.F, width - button_width - 12.F);
+    ImGui::SetCursorScreenPos({origin.x + x, origin.y + 4.F});
+    if (icons::labeled_button("##view_settings", icons::Icon::sliders,
+            compact ? "" : tr("View settings"), {button_width, 28.F},
+            icons::ButtonStyle::normal, true,
+            ImGui::IsPopupOpen("##view_settings_popup"), tr("View settings")))
+        ImGui::OpenPopup("##view_settings_popup");
+    const float controls_right = ImGui::GetItemRectMax().x - origin.x;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float popup_width = std::min(340.F, viewport->WorkSize.x - 24.F);
+    ImGui::SetNextWindowSize({popup_width, 0.F}, ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints({popup_width, 0.F},
+        {popup_width, std::max(100.F, viewport->WorkSize.y - 80.F)});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.F, 14.F});
+    ImGui::PushStyleColor(ImGuiCol_Header, {0.F, 0.F, 0.F, 0.F});
+    if (ImGui::BeginPopup("##view_settings_popup")) {
+        ImGui::TextUnformatted(tr("View settings"));
+        ImGui::Separator();
+        auto& options = app.display_options;
+        if (app.workspace == ViewportWorkspace::scene_3d &&
+            app.display_channel == DisplayChannel::depth) {
+            if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
+                const auto range = live_preview_active(app)
+                    ? std::array{options.depth_near, options.depth_far}
+                    : app.splat_renderer->depth_range();
+                options.depth_near = range[0]; options.depth_far = range[1];
+            }
+            if (!options.automatic_depth) {
+                ImGui::SetNextItemWidth(115.F);
+                ImGui::DragFloat(tr("Near"), &options.depth_near, 0.01F, 0.F,
+                                 std::max(0.F, options.depth_far - 0.001F), "%.3f");
+                ImGui::SetNextItemWidth(115.F);
+                ImGui::DragFloat(tr("Far"), &options.depth_far, 0.05F,
+                                 options.depth_near + 0.001F, 1e8F, "%.3f");
+                options.depth_near = std::max(0.F, options.depth_near);
+                options.depth_far = std::max(options.depth_near + 0.001F, options.depth_far);
+            }
+            ImGui::Checkbox(tr("Grayscale"), &options.grayscale_depth);
+            ImGui::TextDisabled("%s", tr("Depth uses scene units"));
+        } else if (app.workspace == ViewportWorkspace::scene_3d &&
+                   app.display_channel == DisplayChannel::normal) {
+            ImGui::SetNextItemWidth(140.F);
+            if (ImGui::BeginCombo("##normal_space", options.world_normals ? tr("World space") : tr("Camera space"))) {
+                if (ImGui::Selectable(tr("World space"), options.world_normals)) options.world_normals = true;
+                if (ImGui::Selectable(tr("Camera space"), !options.world_normals)) options.world_normals = false;
+                ImGui::EndCombo();
+            }
+            ImGui::TextWrapped("%s", tr("Rasterized Gaussian footprint normals"));
+        }
+        if (app.workspace == ViewportWorkspace::scene_3d &&
+            app.display_channel != DisplayChannel::color)
+            ImGui::Checkbox(tr("Show legend"), &app.show_display_legend);
+        draw_view_settings(app);
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    return controls_right;
+}
+
 float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
     const auto previous_channel = app.display_channel;
     const auto previous_options = app.display_options;
@@ -174,54 +239,8 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Channel"));
     }
-    ImGui::SameLine(0.F, 8.F);
-    if (icons::ghost_button("##display_settings", icons::Icon::sliders, {28.F, 28.F},
-                           ImGui::IsPopupOpen("##display_settings_popup"), true,
-                           tr("Display settings")))
-        ImGui::OpenPopup("##display_settings_popup");
-    const float controls_right = ImGui::GetItemRectMax().x - origin.x;
-    ImGui::SetNextWindowSize({280.F, 0.F}, ImGuiCond_Always);
-    if (ImGui::BeginPopup("##display_settings_popup")) {
-        ImGui::TextUnformatted(tr("Display settings"));
-        ImGui::Separator();
-        auto& options = app.display_options;
-        if (app.display_channel == DisplayChannel::depth) {
-            if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
-                const auto range = live_preview_active(app)
-                    ? std::array{options.depth_near, options.depth_far}
-                    : app.splat_renderer->depth_range();
-                options.depth_near = range[0]; options.depth_far = range[1];
-            }
-            if (!options.automatic_depth) {
-                ImGui::SetNextItemWidth(115.F);
-                ImGui::DragFloat(tr("Near"), &options.depth_near, 0.01F, 0.F,
-                                 std::max(0.F, options.depth_far - 0.001F), "%.3f");
-                ImGui::SetNextItemWidth(115.F);
-                ImGui::DragFloat(tr("Far"), &options.depth_far, 0.05F,
-                                 options.depth_near + 0.001F, 1e8F, "%.3f");
-                options.depth_near = std::max(0.F, options.depth_near);
-                options.depth_far = std::max(options.depth_near + 0.001F, options.depth_far);
-            }
-            ImGui::Checkbox(tr("Grayscale"), &options.grayscale_depth);
-            ImGui::TextDisabled("%s", tr("Depth uses scene units"));
-        } else if (app.display_channel == DisplayChannel::normal) {
-            ImGui::SetNextItemWidth(140.F);
-            if (ImGui::BeginCombo("##normal_space", options.world_normals ? tr("World space") : tr("Camera space"))) {
-                if (ImGui::Selectable(tr("World space"), options.world_normals)) options.world_normals = true;
-                if (ImGui::Selectable(tr("Camera space"), !options.world_normals)) options.world_normals = false;
-                ImGui::EndCombo();
-            }
-            ImGui::TextWrapped("%s", tr("Rasterized Gaussian footprint normals"));
-        } else {
-            ImGui::Checkbox(tr("Show ground grid"), &app.view_options.show_grid);
-            bool cameras = app.view_options.show_views;
-            if (ImGui::Checkbox(tr("Show camera frustums"), &cameras))
-                set_camera_overlays(app.view_options, cameras);
-        }
-        if (app.display_channel != DisplayChannel::color)
-            ImGui::Checkbox(tr("Show legend"), &app.show_display_legend);
-        ImGui::EndPopup();
-    }
+    const float controls_end = ImGui::GetItemRectMax().x - origin.x;
+    const float controls_right = draw_view_settings_button(app, origin, width, controls_end);
     ImGui::PopStyleVar(2);
     if (previous_channel != app.display_channel || previous_options != app.display_options)
         publish_preview_vis(app);
@@ -1529,7 +1548,7 @@ void draw_viewport_panel(App& app) {
     ImGui::GetWindowDrawList()->AddRectFilled(
         header_origin,
         {header_origin.x + header_width, header_origin.y + k_header_height},
-        theme::u32(theme::surface_3));
+        theme::u32(theme::surface_1));
     if (!align_steps)
         ImGui::GetWindowDrawList()->AddLine(
             {header_origin.x, header_origin.y + k_header_height - 1.F},
@@ -1541,6 +1560,8 @@ void draw_viewport_panel(App& app) {
     float controls_right = 128.F;
     if (app.workspace == ViewportWorkspace::scene_3d)
         controls_right = draw_display_toolbar(app, header_origin, header_width);
+    else
+        controls_right = draw_view_settings_button(app, header_origin, header_width, controls_right);
 
     const char* state = job_state_caption(app);
     if (app.workspace == ViewportWorkspace::image_2d) {

@@ -961,6 +961,7 @@ void clear_viewport_scene(App& app) {
 }
 
 void clear_loaded_result(App& app) {
+    app.inspector_section = InspectorSection::automatic;
     clear_viewport_scene(app);
     app.gaussian_models.clear();
     app.composed_model.reset();

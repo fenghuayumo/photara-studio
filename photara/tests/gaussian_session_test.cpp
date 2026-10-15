@@ -5,6 +5,7 @@
 #include "splat/formats.hpp"
 #include "project/document.hpp"
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <thread>
 #define GLFW_INCLUDE_NONE
@@ -91,17 +92,17 @@ int test_gpu_session(const std::filesystem::path& folder,
         editor::refresh_artifacts(gpu);
         editor::request_gaussian_scene_load(gpu); wait_load(gpu);
         require(editor::ensure_splat_renderer(gpu), "composition GPU upload");
-        const auto epoch = gpu.splat_renderer.frames_epoch();
-        const auto key = gpu.splat_renderer.source_key();
+        const auto epoch = gpu.splat_renderer->frames_epoch();
+        const auto key = gpu.splat_renderer->source_key();
         const auto source = gpu.gaussian_models[0].cached_model;
         for (int i = 0; i < 20; ++i) {
             gpu.gaussian_models[0].offset[0] += 0.05F;
             require(editor::ensure_splat_renderer(gpu), "live drag GPU preview");
-            require(gpu.splat_renderer.frames_epoch() == epoch && gpu.splat_renderer.source_key() == key,
+            require(gpu.splat_renderer->frames_epoch() == epoch && gpu.splat_renderer->source_key() == key,
                     "live drag re-uploaded the composition");
         }
         editor::refresh_gaussian_composition(gpu); wait_load(gpu);
-        require(editor::ensure_splat_renderer(gpu) && gpu.splat_renderer.source_key() != key &&
+        require(editor::ensure_splat_renderer(gpu) && gpu.splat_renderer->source_key() != key &&
                 gpu.gaussian_models[0].cached_model == source, "committed drag GPU refresh/cache reuse");
         gpu.splat_edit.replace_from_model(gpu, model(17.F), false);
         require(gpu.splat_edit.dirty(), "edit fixture did not bind to composed cloud");
@@ -127,7 +128,94 @@ int test_gpu_session(const std::filesystem::path& folder,
     return 0;
 }
 
+// Drive the production Inspector with ImGui input, without starting jobs or a
+// graphics device. In particular, an existing mesh must not redirect the Train
+// step's primary action to texture baking, and scrolling must not hide actions.
+void test_inspector_workflow() {
+    using namespace editor;
+    ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = {1000.F, 800.F};
+    io.DeltaTime = 1.F / 60.F;
+    io.Fonts->AddFontDefault(); io.Fonts->Build();
+    theme::apply_style();
+    App app;
+    store_path_field(app.settings.images_dir, "images");
+    app.has_sparse = true;
+    app.has_mesh = true;
+    app.settings.build_mesh = true;
+    Action action = Action::none;
+    ImGuiWindow* footer = nullptr;
+    const auto frame = [&] {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({10.F, 10.F});
+        ImGui::SetNextWindowSize({340.F, 660.F});
+        action = draw_inspector(app);
+        footer = nullptr;
+        for (auto* window : ImGui::GetCurrentContext()->Windows)
+            if (window->Active && std::strstr(window->Name, "##inspector_actions"))
+                footer = window;
+        ImGui::Render();
+        require(footer != nullptr, "Inspector footer missing");
+    };
+    const auto click_primary = [&] {
+        frame(); frame();
+        const float x = footer->WorkRect.Min.x + 40.F;
+        const float y = footer->DC.CursorPosPrevLine.y + 20.F;
+        require(y < footer->InnerClipRect.Max.y, "primary action is clipped");
+        io.AddMousePosEvent(x, y); frame();
+        io.AddMouseButtonEvent(0, true); frame();
+        io.AddMouseButtonEvent(0, false); frame();
+        return action;
+    };
+    require(current_inspector_section(app) == InspectorSection::texture,
+        "automatic step should follow available artifacts");
+    select_inspector_section(app, InspectorSection::training);
+    require(click_primary() == Action::train, "Train step dispatched another stage");
+    // Force a long parameter page to its end; the separate footer stays put.
+    for (auto* window : ImGui::GetCurrentContext()->Windows)
+        if (std::strstr(window->Name, "##inspector_parameters_"))
+            window->Scroll.y = window->ScrollMax.y;
+    require(click_primary() == Action::train, "scrolling hid the Train action");
+    select_inspector_section(app, InspectorSection::mesh);
+    require(click_primary() == Action::dense, "Mesh step dispatched another stage");
+    app.has_sparse = false;
+    require(click_primary() == Action::none, "Mesh action accepted missing alignment");
+    select_inspector_section(app, InspectorSection::alignment);
+    require(click_primary() == Action::align, "Alignment step dispatched another stage");
+    select_inspector_section(app, InspectorSection::texture);
+#if defined(PHOTARA_HAS_TEXTURE)
+    require(click_primary() == Action::texture, "Texture step dispatched another stage");
+#endif
+    app.has_mesh = false;
+    require(click_primary() == Action::none, "Texture action accepted a missing mesh");
+    // Every view-settings branch must render with balanced ImGui stacks.
+    for (const auto workspace : {ViewportWorkspace::scene_3d, ViewportWorkspace::image_2d}) {
+        app.workspace = workspace;
+        for (const auto mode : {VisualizationMode::points, VisualizationMode::mesh, VisualizationMode::splat}) {
+            app.view_mode = mode;
+            ImGui::NewFrame();
+            ImGui::SetNextWindowSize({340.F, 660.F});
+            ImGui::Begin("View settings test");
+            draw_view_settings(app);
+            ImGui::End(); ImGui::Render();
+        }
+    }
+    ImGui::DestroyContext();
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--inspector-only") {
+        try {
+            test_inspector_workflow();
+            std::cout << "Inspector workflow checks passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     const auto folder = std::filesystem::temp_directory_path() / ("photara_session_" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(folder);

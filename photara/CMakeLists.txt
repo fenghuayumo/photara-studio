@@ -952,6 +952,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/ui_chrome.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_export.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_inspector.cpp
+                ${PHOTARA_STUDIO_DIR}/ui_view_settings.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_preferences.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_scene.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_viewport.cpp
@@ -1195,6 +1196,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             target_compile_options(photara_gaussian_session_test PRIVATE /utf-8)
         endif()
         add_test(NAME photara.studio.gaussian_session COMMAND photara_gaussian_session_test)
+        add_test(NAME photara.studio.inspector_workflow COMMAND photara_gaussian_session_test --inspector-only)
         add_test(NAME photara.studio.gaussian_session_vulkan COMMAND photara_gaussian_session_test --vulkan)
         set_tests_properties(photara.studio.gaussian_session_vulkan PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
         set_tests_properties(photara.studio.gaussian_session PROPERTIES TIMEOUT 30)
