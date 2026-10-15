@@ -234,7 +234,9 @@ struct ReconstructCli {
     unsigned splat_geometry_from_iter{7'000};
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
-    float splat_max_scale_ratio{0.F};
+    std::optional<float> splat_shape_erank_reg;
+    float splat_shape_axis_ratio_reg{0.F};
+    float splat_shape_max_axis_ratio{100.F};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
     float splat_growth_factor{0.F};
@@ -494,7 +496,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-geometry-from-iter N  start geometry loss (default 7000)\n"
               << "  --splat-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --splat-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
-              << "  --splat-max-scale-ratio R  hard anisotropy clamp (default 0 = no limit)\n"
+              << "  --splat-shape-erank-reg W  effective-rank penalty weight (0 disables)\n"
+              << "  --splat-shape-axis-ratio-reg W  soft axis-ratio penalty weight (0 disables)\n"
+              << "  --splat-shape-max-axis-ratio R  soft penalty threshold (default 100)\n"
               << "  --splat-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --splat-bilateral-grid=BOOL  spatially-varying affine colour "
                  "correction (default false)\n"
@@ -994,9 +998,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.0001"))
         ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
-        ("splat-max-scale-ratio",
-         "Maximum Gaussian axis ratio (0 disables; default 0 = no limit)",
+        ("splat-shape-axis-ratio-reg", "Soft axis-ratio penalty weight (0 disables)",
          cxxopts::value<float>()->default_value("0"))
+        ("splat-shape-max-axis-ratio", "Axis-ratio soft penalty threshold (at least 1)",
+         cxxopts::value<float>()->default_value("100"))
+        ("splat-shape-erank-reg",
+         "Effective-rank penalty weight (0 disables; default follows strategy)",
+         cxxopts::value<float>())
         ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-bilateral-grid",
@@ -1616,8 +1624,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-min-scale-fraction"].as<float>();
     cli.splat_max_scale_fraction =
         result["splat-max-scale-fraction"].as<float>();
-    cli.splat_max_scale_ratio =
-        result["splat-max-scale-ratio"].as<float>();
+    cli.splat_shape_axis_ratio_reg = result["splat-shape-axis-ratio-reg"].as<float>();
+    cli.splat_shape_max_axis_ratio = result["splat-shape-max-axis-ratio"].as<float>();
+    if (result.count("splat-shape-erank-reg"))
+        cli.splat_shape_erank_reg = result["splat-shape-erank-reg"].as<float>();
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
     cli.splat_bilateral_grid = result["splat-bilateral-grid"].as<bool>();
     cli.splat_bilateral_grid_shared =
@@ -1998,9 +2008,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_max_scale_fraction < cli.splat_min_scale_fraction)
         throw std::invalid_argument(
             "Splat scale fractions must satisfy 0 < min <= max");
-    if (cli.splat_max_scale_ratio != 0.F && cli.splat_max_scale_ratio < 1.F)
+    if (!std::isfinite(cli.splat_shape_axis_ratio_reg) || cli.splat_shape_axis_ratio_reg < 0.F ||
+        !std::isfinite(cli.splat_shape_max_axis_ratio) || cli.splat_shape_max_axis_ratio < 1.F)
+        throw std::invalid_argument("Axis-ratio penalty requires non-negative finite weight and finite threshold >= 1");
+    if (cli.splat_shape_erank_reg &&
+        (!std::isfinite(*cli.splat_shape_erank_reg) || *cli.splat_shape_erank_reg < 0.F))
         throw std::invalid_argument(
-            "--splat-max-scale-ratio must be 0 or >= 1");
+            "--splat-shape-erank-reg must be finite and non-negative");
     if (cli.splat_strategy != "adc_plus" &&
         cli.splat_strategy != "adc_igs" &&
         cli.splat_strategy != "emc")
@@ -3670,9 +3684,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     // forcing it for every dense input clips tangential splats and removes
     // legitimate surface coverage in sparsely sampled detail regions.
     options.constrain_scale_range = cli.splat_constrain_scales;
-    // Every strategy now shares the CLI clamp: ADC+/ADC-IGS follow Brush and
-    // leave the axis ratio unconstrained unless the user asks for a limit.
-    options.max_scale_ratio = cli.splat_max_scale_ratio;
+    if (cli.splat_shape_erank_reg)
+        options.shape_erank_reg = *cli.splat_shape_erank_reg;
+    options.shape_axis_ratio_reg = cli.splat_shape_axis_ratio_reg;
+    options.shape_max_axis_ratio = cli.splat_shape_max_axis_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.use_depth_normal_loss = cli.mesh &&
@@ -3834,7 +3849,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " scale_fraction=[", options.minimum_scale_fraction,
         ',', options.maximum_scale_fraction, ']',
         " constrain_scales=", options.constrain_scale_range,
-        " max_scale_ratio=", options.max_scale_ratio,
+        " shape_erank_reg=", options.shape_erank_reg,
+        " shape_axis_ratio_reg=", options.shape_axis_ratio_reg,
+        " shape_max_axis_ratio=", options.shape_max_axis_ratio,
         " views=", scene.views.size());
     const std::filesystem::path out_dir = cli.output.parent_path().empty()
         ? std::filesystem::current_path()

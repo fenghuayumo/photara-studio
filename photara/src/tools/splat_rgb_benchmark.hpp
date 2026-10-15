@@ -151,7 +151,6 @@ int run_rgb_benchmark(int argc, char** argv) {
                 o.means_lr, o.scales_lr, o.quaternions_lr, o.opacities_lr,
                 o.beta1, o.beta2, su.correction1, su.correction2, o.adam_epsilon};
             st.minimum_log_scale = -12.F; st.maximum_log_scale = 4.F;
-            st.max_log_scale_ratio = o.max_scale_ratio > 1.F ? std::log(o.max_scale_ratio) : 0.F;
             if (!streamed) sync();
             const auto start = std::chrono::steady_clock::now();
             auto rendered = rasterizer.forward(model, view.camera, ro);

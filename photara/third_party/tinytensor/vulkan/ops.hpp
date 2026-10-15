@@ -92,6 +92,10 @@ public:
     static Tensor alias(const Tensor& source, TensorShape shape, std::size_t logical_dim0);
 };
 
+void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
+    Tensor& scale_gradients, Tensor& quaternion_gradients,
+    float scale_weight, float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);
+
 bool is_vulkan_tensor(const Tensor& tensor);
 void fill(Tensor& tensor, float value);
 // Expands a packed [H, W] Int32 RGBA image (r | g << 8 | b << 16 | a << 24)
@@ -133,10 +137,6 @@ void panorama_sizes(const Tensor& means, const Tensor& log_scales,
                     const Tensor& quaternions, Tensor& sizes,
                     float camera_x, float camera_y, float camera_z,
                     float angular_normalization, float scale_modifier);
-// Projects each Gaussian's [N,3] log scales into a maximum longest/shortest
-// axis ratio, preserving the row's log-scale midpoint. maximum_ratio must
-// exceed 1; rows already inside the bound are left untouched.
-void constrain_scale_ratio(Tensor& log_scales, float maximum_ratio);
 std::size_t count_nonzero(const Tensor& src);
 Tensor nonzero(const Tensor& src);
 Tensor masked_select(const Tensor& src, const Tensor& mask);

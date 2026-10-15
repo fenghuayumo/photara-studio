@@ -113,7 +113,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.sam_max_size));
     writer.value(static_cast<std::int32_t>(settings.mask_mode == 1 ? 1 : 0));
     writer.value(static_cast<std::uint8_t>(settings.texture_blend_linear));
-    writer.value(settings.max_scale_ratio);
+    writer.value(0.F);  // Reserved legacy field for binary compatibility.
     writer.value(static_cast<std::uint8_t>(settings.sam_use_mask_for_sfm));
     writer.value(static_cast<std::int32_t>(settings.mesh_quality));
     writer.value(static_cast<std::int32_t>(settings.training_mode));
@@ -135,6 +135,9 @@ std::vector<std::uint8_t> encode_settings(
         for (float value : model.offset) writer.value(value);
         writer.value(model.scale);
     }
+    writer.value(settings.shape_erank_reg);
+    writer.value(settings.shape_axis_ratio_reg);
+    writer.value(settings.shape_max_axis_ratio);
     return writer.take();
 }
 
@@ -235,10 +238,14 @@ Settings decode_settings(
         settings.mask_mode = reader.value<std::int32_t>() == 1 ? 1 : 0;
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.texture_blend_linear = reader.value<std::uint8_t>() != 0;
-    if (reader.remaining() >= sizeof(float))
-        settings.max_scale_ratio = reader.value<float>();
-    if (!(settings.max_scale_ratio == 0.F || settings.max_scale_ratio >= 1.F))
-        settings.max_scale_ratio = 0.F;
+    if (reader.remaining() >= sizeof(float)) {
+        const float legacy_ratio = reader.value<float>();
+        // Migrate an enabled legacy hard limit to the independent soft penalty.
+        if (std::isfinite(legacy_ratio) && legacy_ratio >= 1.F) {
+            settings.shape_max_axis_ratio = legacy_ratio;
+            settings.shape_axis_ratio_reg = 0.001F;
+        }
+    }
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.sam_use_mask_for_sfm = reader.value<std::uint8_t>() != 0;
     if (reader.remaining() >= sizeof(std::int32_t))
@@ -298,6 +305,17 @@ Settings decode_settings(
                 throw std::runtime_error("Invalid Gaussian scale");
         }
     }
+    if (version >= 9) {
+        settings.shape_erank_reg = reader.value<float>();
+        settings.shape_axis_ratio_reg = reader.value<float>();
+        settings.shape_max_axis_ratio = reader.value<float>();
+    }
+    if (!std::isfinite(settings.shape_erank_reg) || settings.shape_erank_reg < 0.F)
+        settings.shape_erank_reg = 0.F;
+    if (!std::isfinite(settings.shape_axis_ratio_reg) || settings.shape_axis_ratio_reg < 0.F)
+        settings.shape_axis_ratio_reg = 0.F;
+    if (!std::isfinite(settings.shape_max_axis_ratio) || settings.shape_max_axis_ratio < 1.F)
+        settings.shape_max_axis_ratio = 100.F;
     return settings;
 }
 

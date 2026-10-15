@@ -47,11 +47,11 @@ enum class ShaderId : std::uint32_t {
     ReduceAllArg,
     ReduceAxis,
     CumsumScan,
-    ConstrainScaleRatio,
     ShAdamQuant,
     QuantileBounds,
     CountMasks,
     RemapAppend,
+    ShapeRegularizers,
     Count
 };
 

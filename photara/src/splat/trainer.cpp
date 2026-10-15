@@ -1100,6 +1100,10 @@ GaussianModel initialize_from_dense_cloud(
 
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
+    if (!std::isfinite(options_.shape_erank_reg) || options_.shape_erank_reg < 0.F ||
+        !std::isfinite(options_.shape_axis_ratio_reg) || options_.shape_axis_ratio_reg < 0.F ||
+        !std::isfinite(options_.shape_max_axis_ratio) || options_.shape_max_axis_ratio < 1.F)
+        throw std::invalid_argument("Shape regularizers require finite non-negative weights and axis-ratio threshold >= 1");
     if (options_.speedy_pruning) {
         if (options_.speedy_every == 0 || options_.speedy_start == 0 ||
             options_.speedy_stop < options_.speedy_start ||
@@ -2208,7 +2212,8 @@ GaussianModel Trainer::train(
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
         const bool fused_structure = (!vulkan_backend ||
             (fused_sh && options_.shape_scale_reg <= 0.F && options_.shape_erank_reg <= 0.F &&
-             options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F)) && !normal_field_active &&
+             options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F &&
+             options_.shape_axis_ratio_reg <= 0.F)) && !normal_field_active &&
             !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
@@ -2234,8 +2239,6 @@ GaussianModel Trainer::train(
             1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
             1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
             options_.adam_epsilon, minimum_log_scale, maximum_log_scale,
-            options_.max_scale_ratio > 1.F
-                ? std::log(options_.max_scale_ratio) : 0.F,
             std::max(options_.opacity_regularization_weight * remaining, 0.F) *
                 inverse_count,
             std::max(options_.log_scale_regularization_weight *
@@ -2246,7 +2249,8 @@ GaussianModel Trainer::train(
             options_.shape_erank_reg * inverse_count,
             options_.shape_erank_s3_reg * inverse_count,
             options_.shape_quat_norm_reg * inverse_count,
-            report_progress && !vulkan_backend};
+            report_progress && !vulkan_backend,
+            options_.shape_axis_ratio_reg * inverse_count, options_.shape_max_axis_ratio};
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map, fused_sh ? &sh_update : nullptr,
@@ -2342,13 +2346,14 @@ GaussianModel Trainer::train(
             if (options_.shape_scale_reg > 0.F ||
                 options_.shape_erank_reg > 0.F ||
                 options_.shape_erank_s3_reg > 0.F ||
-                options_.shape_quat_norm_reg > 0.F) {
+                options_.shape_quat_norm_reg > 0.F || options_.shape_axis_ratio_reg > 0.F) {
                 detail::apply_shape_regularizers(
                     model, gradients,
                     options_.shape_scale_reg * shape_decay * inverse_count,
                     options_.shape_erank_reg * inverse_count,
                     options_.shape_erank_s3_reg * inverse_count,
-                    options_.shape_quat_norm_reg * inverse_count);
+                    options_.shape_quat_norm_reg * inverse_count,
+                    options_.shape_axis_ratio_reg * inverse_count, options_.shape_max_axis_ratio);
             }
             detail::adam_step_structure(model, gradients, means_state, scales_state,
                 rotations_state, opacity_state, means_lr, iteration, options_,
@@ -2469,11 +2474,6 @@ GaussianModel Trainer::train(
                 options_, random, adam_states);
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
-            // The optimizer projects existing rows when structure is active.
-            // Refinement can introduce new rows or alter scales afterward.
-            if (refinement_happened)
-                detail::constrain_scale_ratio(
-                    model.log_scales, options_.max_scale_ratio);
             if (refinement_happened && focus_bounds.valid) {
                 if (!prune_to_focus(focus_bounds, iteration))
                     reseed_focus(focus_bounds, iteration);

@@ -495,29 +495,35 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
                 "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
                 "Requires full training resolution."));
-        bool limit_axis_ratio = app.settings.max_scale_ratio >= 1.F;
-        if (ImGui::Checkbox(
-                tr("Limit Gaussian axis ratio"), &limit_axis_ratio))
-            app.settings.max_scale_ratio = limit_axis_ratio ? 100.F : 0.F;
+        theme::caption("Effective-rank weight");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputFloat("##shape_erank_reg", &app.settings.shape_erank_reg,
+            0.0001F, 0.001F, "%.6f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
-                "Clamps each Gaussian's longest/shortest scale ratio.\n"
-                "Prevents extreme needle/pancake Gaussians that amplify "
-                "float gradients and hurt rendering.\n"
-                "Typical values: 20-160."));
-        if (limit_axis_ratio) {
-            theme::caption("Max axis ratio");
+                "Softly penalizes needle-like Gaussians with effective rank below 2.\n"
+                "Allows thin surface Gaussians. 0 disables the penalty.\n"
+                "Suggested starting weight: 0.001."));
+        app.settings.shape_erank_reg = std::isfinite(app.settings.shape_erank_reg)
+            ? std::max(app.settings.shape_erank_reg, 0.F) : 0.F;
+        bool axis_ratio_penalty = app.settings.shape_axis_ratio_reg > 0.F;
+        if (ImGui::Checkbox(tr("Axis-ratio soft penalty"), &axis_ratio_penalty))
+            app.settings.shape_axis_ratio_reg = axis_ratio_penalty ? 0.001F : 0.F;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Penalizes extreme longest/shortest axis ratios above the threshold.\n"
+                "Soft gradient penalty; does not hard-clamp scales."));
+        if (axis_ratio_penalty) {
+            theme::caption("Axis-ratio threshold");
             ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputFloat(
-                "##max_scale_ratio", &app.settings.max_scale_ratio, 10.F,
-                100.F, "%.0f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tr(
-                    "Hard upper bound for longest/shortest axis ratio.\n"
-                    "Must be at least 1."));
-            app.settings.max_scale_ratio =
-                std::max(app.settings.max_scale_ratio, 1.F);
+            ImGui::InputFloat("##shape_max_axis_ratio", &app.settings.shape_max_axis_ratio, 10.F, 100.F, "%.1f");
+            theme::caption("Axis-ratio weight");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputFloat("##shape_axis_ratio_reg", &app.settings.shape_axis_ratio_reg, 0.0001F, 0.001F, "%.6f");
         }
+        app.settings.shape_axis_ratio_reg = std::isfinite(app.settings.shape_axis_ratio_reg)
+            ? std::max(app.settings.shape_axis_ratio_reg, 0.F) : 0.F;
+        app.settings.shape_max_axis_ratio = std::isfinite(app.settings.shape_max_axis_ratio)
+            ? std::max(app.settings.shape_max_axis_ratio, 1.F) : 100.F;
         theme::caption("SH degree");
         ImGui::SetNextItemWidth(-1.F);
         const char* sh_degrees[] = {"0", "1", "2", "3"};

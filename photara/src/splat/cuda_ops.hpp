@@ -333,14 +333,14 @@ void inject_emc_noise(
     GaussianModel& model, const tinytensor::Tensor& radii,
     float scaler, unsigned seed);
 
-// EMC per-splat regularizer gradients: linear pressure on the floored log
+// Per-splat shape regularizer gradients: linear pressure on the floored log
 // scale, the effective-rank (entropy) penalty on the relative squared scale
-// shares, and the quaternion norm pull toward unit length. Weights arrive
+// shares, the soft log-axis-ratio hinge, and quaternion norm pull. Weights arrive
 // already decay-scheduled and divided by the splat count.
 void apply_shape_regularizers(
     GaussianModel& model, ModelGradients& gradients,
     float scale_weight, float erank_weight, float erank_s3_weight,
-    float quat_weight);
+    float quat_weight, float axis_ratio_weight = 0.F, float max_axis_ratio = 100.F);
 
 // EMC soft on-screen limit: over the limit, each step spends
 // penalty * log2(screen / limit) shares of one scale learning-rate step,

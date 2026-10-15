@@ -428,7 +428,9 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
-    settings.max_scale_ratio = app.settings.max_scale_ratio;
+    settings.shape_erank_reg = app.settings.shape_erank_reg;
+    settings.shape_axis_ratio_reg = app.settings.shape_axis_ratio_reg;
+    settings.shape_max_axis_ratio = app.settings.shape_max_axis_ratio;
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
     settings.use_mask = app.settings.use_mask;
@@ -516,10 +518,9 @@ void apply_project_settings(
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
-    app.settings.max_scale_ratio =
-        settings.max_scale_ratio == 0.F || settings.max_scale_ratio >= 1.F
-            ? settings.max_scale_ratio
-            : 0.F;
+    app.settings.shape_erank_reg = settings.shape_erank_reg;
+    app.settings.shape_axis_ratio_reg = settings.shape_axis_ratio_reg;
+    app.settings.shape_max_axis_ratio = settings.shape_max_axis_ratio;
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;

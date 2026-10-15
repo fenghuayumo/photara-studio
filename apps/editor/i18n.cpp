@@ -868,25 +868,25 @@ constexpr Entry k_entries[] = {
      "致密化过程中的高斯数量上限。\n初始化使用全部源点云。\n默认 3,000,000。",
      "稠密化中のガウシアン数上限。\n初期化は入力点群をすべて使います。\n既定 3,000,000。",
      "밀집화 중 가우시안 수 상한.\n초기화는 원본 점군을 전부 사용합니다.\n기본 3,000,000."},
-    {"Max axis ratio", "最大长短轴比", "最大軸比", "최대 축비"},
-    {"Limit Gaussian axis ratio", "限制高斯长短轴比", "ガウシアンの軸比を制限", "가우시안 축비 제한"},
-    {"Clamps each Gaussian's longest/shortest scale ratio.\n"
-     "Prevents extreme needle/pancake Gaussians that amplify float gradients and hurt rendering.\n"
-     "Typical values: 20-160.",
-     "限制每个高斯的最长/最短轴比。\n"
-     "避免极端针状/薄饼状高斯——它们会放大浮点梯度并影响渲染质量。\n"
-     "常用值 20-160。",
-     "各ガウシアンの最長/最短軸比を制限します。\n"
-     "浮動小数点勾配を増幅して描画品質を損なう極端な針状/薄板状ガウシアンを防ぎます。\n"
-     "推奨値は 20-160。",
-     "각 가우시안의 최장/최단 축비를 제한합니다.\n"
-     "부동소수점 기울기를 증폭하고 렌더링 품질을 해치는 극단적인 침상/판상 가우시안을 방지합니다.\n"
-     "권장 값 20-160."},
-    {"Hard upper bound for longest/shortest axis ratio.\n"
-     "Must be at least 1.",
-     "最长/最短轴比的硬上界。\n最小值为 1。",
-     "最長/最短軸比の上限。\n最小値は 1 です。",
-     "최장/최단 축비의 상한.\n최소값은 1입니다."},
+    {"Axis-ratio soft penalty", "轴比软约束", "軸比のソフト制約", "축비 소프트 제약"},
+    {"Axis-ratio threshold", "轴比惩罚阈值", "軸比しきい値", "축비 임계값"},
+    {"Axis-ratio weight", "轴比约束权重", "軸比の重み", "축비 가중치"},
+    {"Penalizes extreme longest/shortest axis ratios above the threshold.\n"
+     "Soft gradient penalty; does not hard-clamp scales.",
+     "仅惩罚超过阈值的极端长短轴比。\n通过梯度施加软约束，不直接截断尺度。",
+     "しきい値を超える極端な軸比にペナルティを適用。\n勾配によるソフト制約。",
+     "임계값을 초과하는 극단적인 축비에 페널티 적용.\n기울기를 통한 소프트 제약."},
+    {"Effective-rank weight", "有效秩约束权重", "有効ランクの重み", "유효 랭크 가중치"},
+    {"Softly penalizes needle-like Gaussians with effective rank below 2.\n"
+     "Allows thin surface Gaussians. 0 disables the penalty.\n"
+     "Suggested starting weight: 0.001.",
+     "对有效秩低于 2 的针状高斯施加软约束。\n"
+     "允许贴合表面的薄片高斯，0 表示关闭。\n"
+     "建议起始权重：0.001。",
+     "有効ランクが 2 未満の針状ガウシアンにソフト制約を適用。\n"
+     "薄い表面ガウシアンを許容。0 で無効。\n推奨初期値: 0.001。",
+     "유효 랭크가 2 미만인 침상 가우시안에 소프트 제약 적용.\n"
+     "얇은 표면 가우시안 허용. 0은 비활성화.\n권장 초기값: 0.001."},
     {"Spherical-harmonic colour bands.\n"
      "0 is diffuse only. 3 is the training default.",
      "球谐颜色阶。\n0 仅为漫反射。3 为训练默认。",

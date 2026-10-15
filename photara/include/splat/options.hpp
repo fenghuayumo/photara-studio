@@ -134,6 +134,9 @@ struct TrainingOptions {
     float shape_scale_reg{0.F};
     float shape_scale_reg_decay_power{0.4F};
     float shape_erank_reg{0.F};
+    // Soft penalty only above the axis-ratio threshold; zero weight disables it.
+    float shape_axis_ratio_reg{0.F};
+    float shape_max_axis_ratio{100.F};
     float shape_erank_s3_reg{0.F};
     float shape_quat_norm_reg{0.F};
     // Strategy-neutral on-screen size control: every step spends a share
@@ -318,10 +321,6 @@ struct TrainingOptions {
     std::filesystem::path mask_dir;
     float minimum_scale_fraction{1e-4F};
     float maximum_scale_fraction{0.002F};
-    // Hard anisotropy clamp; 0 disables it. Flat "pancake" splats are the
-    // correct model for thin surfaces, so the best-quality default does not
-    // clamp them.
-    float max_scale_ratio{0.F};
     bool constrain_scale_range{true};
     float geometry_epsilon{1e-3F};
     // Classic rasterization. A positive kernel enables antialiasing and must

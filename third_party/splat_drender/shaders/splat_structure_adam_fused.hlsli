@@ -36,22 +36,12 @@ void update_structure_row(uint row) {
         means_m[i] = m; means_v[i] = v;
         float previous = raw_log_scales[i];
         float grad = model_grad[11u + axis];
-        if (structure_settings[13] > 0.0f && isfinite(previous) && previous > -40.0f)
-            grad += structure_settings[13] * exp(previous);
+        if (structure_settings[12] > 0.0f && isfinite(previous) && previous > -40.0f)
+            grad += structure_settings[12] * exp(previous);
         m = scales_m[i]; v = scales_v[i];
         raw_log_scales[i] = structure_step(previous, grad, m, v,
             structure_settings[1], lo, hi);
         scales_m[i] = m; scales_v[i] = v;
-    }
-    float3 s = float3(raw_log_scales[3u*row], raw_log_scales[3u*row+1u], raw_log_scales[3u*row+2u]);
-    float minimum = min(s.x, min(s.y, s.z)), maximum = max(s.x, max(s.y, s.z));
-    float ratio = structure_settings[11];
-    if (ratio > 0.0f && maximum - minimum > ratio) {
-        float midpoint = 0.5f * (minimum + maximum);
-        s = clamp(s, midpoint - 0.5f * ratio, midpoint + 0.5f * ratio);
-        raw_log_scales[3u*row] = s.x;
-        raw_log_scales[3u*row+1u] = s.y;
-        raw_log_scales[3u*row+2u] = s.z;
     }
     [unroll] for (uint axis = 0u; axis < 4u; ++axis) {
         uint i = 4u * row + axis;
@@ -61,9 +51,9 @@ void update_structure_row(uint row) {
         rotations_m[i] = m; rotations_v[i] = v;
     }
     float previous = opacity_logits[row], grad = model_grad[18];
-    if (structure_settings[12] > 0.0f && isfinite(previous)) {
+    if (structure_settings[11] > 0.0f && isfinite(previous)) {
         float alpha = 1.0f / (1.0f + exp(-previous));
-        grad += structure_settings[12] * alpha * (1.0f - alpha);
+        grad += structure_settings[11] * alpha * (1.0f - alpha);
     }
     float m = opacity_m[row], v = opacity_v[row];
     opacity_logits[row] = structure_step(previous, grad, m, v,

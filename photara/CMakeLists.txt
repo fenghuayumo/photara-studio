@@ -1384,6 +1384,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
+        add_test(NAME photara.splat.shape_regularizers COMMAND photara_splat_test --erank-only)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)
