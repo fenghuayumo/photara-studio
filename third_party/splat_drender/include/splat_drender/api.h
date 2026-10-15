@@ -135,7 +135,6 @@ struct StructureAdam {
     float beta1 = .9f, beta2 = .999f;
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-15f;
     float minimum_log_scale = -1.e30f, maximum_log_scale = 1.e30f;
-    float max_log_scale_ratio = 0.f;
     float opacity_reg = 0.f;
     float log_scale_reg = 0.f;
     float shape_scale_reg = 0.f;
@@ -143,6 +142,8 @@ struct StructureAdam {
     float shape_erank_s3_reg = 0.f;
     float shape_quat_norm_reg = 0.f;
     float* opacity_gradient = nullptr;
+    float shape_axis_ratio_reg{};
+    float shape_max_axis_ratio{100.F};
 };
 
 struct ModelGradients {

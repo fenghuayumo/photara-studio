@@ -1503,9 +1503,9 @@ std::string build_train_command(
         command << " --splat-speedy-start 9000 --splat-speedy-every 3000"
                 << " --splat-speedy-stop 30000 --splat-speedy-soft-ratio 0.3"
                 << " --splat-speedy-hard-ratio 0.2";
-    if (settings.max_scale_ratio >= 1.F)
-        command << " --splat-max-scale-ratio "
-                << settings.max_scale_ratio;
+    command << " --splat-shape-erank-reg " << settings.shape_erank_reg
+            << " --splat-shape-axis-ratio-reg " << settings.shape_axis_ratio_reg
+            << " --splat-shape-max-axis-ratio " << settings.shape_max_axis_ratio;
     command << " --splat-sh-degree "
             << std::clamp(settings.sh_degree, 0, 3)
             << " --splat-preview-interval " << settings.preview_interval

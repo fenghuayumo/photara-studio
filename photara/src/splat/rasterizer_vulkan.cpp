@@ -400,7 +400,7 @@ ModelGradients vulkan_raster_backward(
         : std::chrono::steady_clock::time_point{};
     if (structure_adam && (!sh_adam || structure_adam->shape_scale_reg > 0.F ||
         structure_adam->shape_erank_reg > 0.F || structure_adam->shape_erank_s3_reg > 0.F ||
-        structure_adam->shape_quat_norm_reg > 0.F))
+        structure_adam->shape_quat_norm_reg > 0.F || structure_adam->shape_axis_ratio_reg > 0.F))
         throw std::invalid_argument("Vulkan fused structure Adam requires fused SH and no shape regularizers");
     if (densify_map.is_valid() && densify_map.numel() != 0)
         throw std::invalid_argument(
@@ -467,7 +467,7 @@ ModelGradients vulkan_raster_backward(
             structure_adam->beta1, structure_adam->beta2, structure_adam->correction1,
             structure_adam->correction2, structure_adam->epsilon,
             structure_adam->minimum_log_scale, structure_adam->maximum_log_scale,
-            structure_adam->max_log_scale_ratio, structure_adam->opacity_reg, structure_adam->log_scale_reg};
+            structure_adam->opacity_reg, structure_adam->log_scale_reg};
         structure_update.capture_opacity_gradient = structure_adam->capture_opacity_gradient;
     }
     tinytensor::vulkan::submit_async();

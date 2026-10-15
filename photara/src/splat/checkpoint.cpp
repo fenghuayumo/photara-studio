@@ -314,6 +314,8 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.shape_scale_reg);
     hash.append(options.shape_scale_reg_decay_power);
     hash.append(options.shape_erank_reg);
+    hash.append(options.shape_axis_ratio_reg);
+    hash.append(options.shape_max_axis_ratio);
     hash.append(options.shape_erank_s3_reg);
     hash.append(options.shape_quat_norm_reg);
     hash.append(options.oversize_screen_limit);
@@ -413,7 +415,6 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.match_alpha_weight);
     hash.append(options.minimum_scale_fraction);
     hash.append(options.maximum_scale_fraction);
-    hash.append(options.max_scale_ratio);
     hash.append(options.constrain_scale_range);
     hash.append(options.geometry_epsilon);
     hash.append(options.kernel_size);

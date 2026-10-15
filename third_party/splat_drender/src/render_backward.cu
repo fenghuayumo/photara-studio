@@ -602,6 +602,21 @@ __device__ inline void add_shape_regularizer_grads(
                 grad_quat[c] += factor * quaternions[4 * i + c];
         }
     }
+    // Soft hinge in log-ratio space; no parameter projection after Adam.
+    if (a.shape_axis_ratio_reg > 0.F) {
+        int longest = 0, shortest = 0;
+        for (int axis = 1; axis < 3; ++axis) {
+            if (log_scales[3 * i + axis] > log_scales[3 * i + longest]) longest = axis;
+            if (log_scales[3 * i + axis] < log_scales[3 * i + shortest]) shortest = axis;
+        }
+        const float excess = log_scales[3 * i + longest] -
+            log_scales[3 * i + shortest] - logf(a.shape_max_axis_ratio);
+        if (excess > 0.F && isfinite(excess)) {
+            grad_log[longest] += a.shape_axis_ratio_reg * excess;
+            grad_log[shortest] -= a.shape_axis_ratio_reg * excess;
+        }
+    }
+
     if (a.shape_erank_reg <= 0.f && a.shape_erank_s3_reg <= 0.f) return;
     float log_scale[3]{};
     int largest = 0;
@@ -722,18 +737,6 @@ __device__ inline void update_structure_adam_row(
         adam_scalar(a.log_scales, mi, grad_log[c], a.scales_first, a.scales_second,
                     a.scales_lr, a.beta1, a.beta2, a.correction1, a.correction2,
                     a.epsilon, a.minimum_log_scale, a.maximum_log_scale);
-    }
-    if (a.max_log_scale_ratio > 0.f) {
-        float* v = a.log_scales + 3 * i;
-        const float minimum = fminf(v[0], fminf(v[1], v[2]));
-        const float maximum = fmaxf(v[0], fmaxf(v[1], v[2]));
-        if (maximum - minimum > a.max_log_scale_ratio) {
-            const float midpoint = 0.5f * (minimum + maximum);
-            const float half_range = 0.5f * a.max_log_scale_ratio;
-            for (int c = 0; c < 3; ++c)
-                v[c] = fminf(fmaxf(v[c], midpoint - half_range),
-                             midpoint + half_range);
-        }
     }
     for (int c = 0; c < 4; ++c)
         adam_scalar(a.quaternions, 4 * i + c, grad_quat[c], a.rotations_first,

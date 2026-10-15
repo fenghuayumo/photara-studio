@@ -28,7 +28,7 @@ std::vector<std::uint8_t> encode_settings_v6(
     const Settings& settings, const std::filesystem::path& project) {
     auto bytes = encode_settings(settings, project);
     // Version 7 appends two ints, two booleans and two uint64 budgets.
-    bytes.resize(bytes.size() - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
+    bytes.resize(bytes.size() - 3 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
     const std::uint32_t version = 6;
     std::memcpy(bytes.data(), &version, sizeof(version));
@@ -273,6 +273,9 @@ int main() {
     settings.video_rotate = 90;
     settings.camera_model = 2;
     settings.strategy = 1;
+    settings.shape_erank_reg = 0.00125F;
+    settings.shape_axis_ratio_reg = 0.002F;
+    settings.shape_max_axis_ratio = 160.F;
     settings.densification_cap = 2'500'000;
     settings.training_mode = 0;
     settings.speedy_pruning = true;
@@ -343,6 +346,9 @@ int main() {
     expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.training_mode == 0 && round_trip.speedy_pruning,
            "training mode and pruning survive project roundtrip");
+    expect(round_trip.shape_erank_reg == settings.shape_erank_reg &&
+        round_trip.shape_axis_ratio_reg == settings.shape_axis_ratio_reg &&
+        round_trip.shape_max_axis_ratio == settings.shape_max_axis_ratio, "shape regularizer settings round trip");
     expect(round_trip.mask_mode == 1, "settings mask mode");
     expect(round_trip.sam_use_mask_for_sfm, "SAM alignment mask opt-in round trip");
     expect(round_trip.sam_masks && round_trip.sam_text == "glass cup",
@@ -425,6 +431,18 @@ int main() {
                restored.densification_cap == selected.densification_cap &&
                restored.speedy_pruning == selected.speedy_pruning,
                "3DGS presets survive project roundtrip");
+    }
+    {
+        auto old = encode_settings(settings, ascan_path);
+        old.resize(old.size() - 3 * sizeof(float));
+        const std::uint32_t version = 8;
+        std::memcpy(old.data(), &version, sizeof(version));
+        expect(decode_settings(old, ascan_path).shape_erank_reg == 0.F,
+            "legacy project does not reinterpret retired axis ratio as rank weight");
+        auto invalid = settings;
+        invalid.shape_erank_reg = -1.F;
+        expect(decode_settings(encode_settings(invalid, ascan_path), ascan_path).shape_erank_reg == 0.F,
+            "invalid rank weight is disabled");
     }
     auto old_training = encode_settings_v6(settings, ascan_path);
     old_training.resize(old_training.size() - 3 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));

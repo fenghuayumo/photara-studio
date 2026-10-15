@@ -345,9 +345,9 @@ struct SplatSHAdamUpdate {
 // Moment views are means/scales/rotations/opacity, first then second per group.
 struct SplatStructureAdamUpdate {
     std::array<SplatBufferView, 8> moments;
-    // LRs (4), beta1/2, corrections1/2, epsilon, scale min/max/ratio,
+    // LRs (4), beta1/2, corrections1/2, epsilon, scale min/max,
     // opacity regularization, scale regularization.
-    std::array<float, 14> settings{};
+    std::array<float, 13> settings{};
     bool capture_opacity_gradient{};
 };
 

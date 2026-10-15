@@ -3,8 +3,8 @@
 
 Reads standard 3DGS binary PLY output (Photara layout included) with numpy
 only, and reports the longest/shortest per-axis scale ratio quantiles plus
-the fraction of Gaussians above configurable ratio thresholds. Used to
-verify the effect of --splat-max-scale-ratio.
+the fraction of Gaussians above configurable ratio thresholds for shape
+diagnostics.
 """
 
 from __future__ import annotations

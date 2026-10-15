@@ -2179,7 +2179,7 @@ void test_vulkan_fused_sh_adam() {
 
 photara::splat::GaussianModel test_fused_structure_adam(
     tinytensor::Device device = tinytensor::Device::CUDA, unsigned sh_degree = 1,
-    std::size_t storage_bases = 0) {
+    std::size_t storage_bases = 0, bool shape_penalties = false) {
     using namespace photara::splat;
     using photara::CameraModel;
     using tinytensor::Tensor;
@@ -2261,8 +2261,12 @@ photara::splat::GaussianModel test_fused_structure_adam(
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
     training.log_scale_regularization_weight = .03F;
-    training.max_scale_ratio = 1.05F;
     training.adam_epsilon = 1e-15F;
+    if (shape_penalties) {
+        training.shape_erank_reg = 0.001F;
+        training.shape_axis_ratio_reg = 0.003F;
+        training.shape_max_axis_ratio = 1.1F;
+    }
     auto reference_sh = detail::make_sh_adam_quant(n, int(stride), device);
     auto fused_sh = detail::make_sh_adam_quant(n, int(stride), device);
     for (unsigned step : {7U, 8U, 9U}) {
@@ -2278,10 +2282,13 @@ photara::splat::GaussianModel test_fused_structure_adam(
             training.beta1, training.beta2,
             1.F - std::pow(training.beta1, float(step)),
             1.F - std::pow(training.beta2, float(step)),
-            training.adam_epsilon, -.8F, -.4F, std::log(training.max_scale_ratio),
+            training.adam_epsilon, -.8F, -.4F,
             training.opacity_regularization_weight * inverse,
             training.log_scale_regularization_weight * inverse / 3.F,
             0.F, 0.F, 0.F, 0.F, true};
+        update.shape_erank_reg = training.shape_erank_reg * inverse;
+        update.shape_axis_ratio_reg = training.shape_axis_ratio_reg * inverse;
+        update.shape_max_axis_ratio = training.shape_max_axis_ratio;
         SHAdamUpdate sh_update;
         sh_update.first = fused_sh.first; sh_update.packed = fused_sh.packed;
         sh_update.bounds = fused_sh.bounds;
@@ -2320,6 +2327,9 @@ photara::splat::GaussianModel test_fused_structure_adam(
         } else detail::add_geometry_regularization(
             model, g, training.opacity_regularization_weight,
             training.log_scale_regularization_weight);
+        if (shape_penalties)
+            detail::apply_shape_regularizers(model, g, 0.F, update.shape_erank_reg,
+                0.F, 0.F, update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
         require(fg.opacity_logits.is_valid(),
             "Fused structure diagnostics dropped opacity gradients");
         compare(g.opacity_logits, fg.opacity_logits,
@@ -4664,11 +4674,9 @@ void test_structure_adam_parity() {
     g.means = tensor(3, true); g.log_scales = tensor(3, true);
     g.quaternions = tensor(4, true); g.opacity_logits = tensor(1, true);
     TrainingOptions options;
-    options.max_scale_ratio = 3.F;
     for (unsigned step = 1; step <= 3; ++step) {
         detail::adam_step(model[0].means, g.means, states[0][0], 0.01F, step, options);
         detail::adam_step(model[0].log_scales, g.log_scales, states[0][1], options.scales_lr, step, options, 0, 0.F, -8.F, 2.F);
-        detail::constrain_scale_ratio(model[0].log_scales, options.max_scale_ratio);
         detail::adam_step(model[0].quaternions, g.quaternions, states[0][2], options.quaternions_lr, step, options);
         detail::adam_step(model[0].opacity_logits, g.opacity_logits, states[0][3], options.opacities_lr, step, options, 0, 0.F, -12.F, 12.F);
         detail::adam_step_structure(model[1], g, states[1][0], states[1][1], states[1][2], states[1][3], 0.01F, step, options, -8.F, 2.F);
@@ -5885,7 +5893,7 @@ void test_ssim_metric_large_reduction() {
     }
 }
 
-void test_ssim_loss_and_scale_constraint() {
+void test_ssim_loss() {
     using namespace photara::splat;
     constexpr std::size_t side = 13;
     constexpr std::size_t pixels = side * side;
@@ -5947,17 +5955,6 @@ void test_ssim_loss_and_scale_constraint() {
         std::abs(gradient_sum - 0.004020121F) < 2e-5F &&
             std::abs(gradient_abs_sum - 0.301243156F) < 2e-5F,
         "fused SSIM gradient field differs from the Python CUDA reference");
-
-    auto log_scales = tinytensor::Tensor::from_vector(
-        std::vector<float>{std::log(0.01F), std::log(1.F), std::log(0.001F)},
-        {1, 3}, tinytensor::Device::CUDA);
-    detail::constrain_scale_ratio(log_scales, 10.F);
-    const auto constrained = log_scales.to_vector();
-    const auto [minimum, maximum] = std::minmax_element(
-        constrained.begin(), constrained.end());
-    require(
-        std::exp(*maximum - *minimum) <= 10.0001F,
-        "Gaussian scale-ratio constraint was not applied");
 }
 
 void test_gggs_depth_normal_consistency(tinytensor::Device device = tinytensor::Device::CUDA) {
@@ -6978,6 +6975,69 @@ void test_emc_revised_noise_gates_and_scales() {
     require((dx + dy + dz) > 1e-12F && dx < 1.F && dy < 1.F && dz < 1.F,
             "EMC revised noise ignored the low-opacity gate or scale axes");
     require_finite(model.means, "EMC revised noise produced non-finite means");
+}
+
+void test_effective_rank_regularizer(tinytensor::Device device) {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    const std::vector<float> scales{-2.F, -4.F, -6.F, -2.F, -2.F, -9.F, -2.F, -2.F, -2.F};
+    GaussianModel model;
+    model.means = Tensor::zeros({3, 3}, device);
+    model.log_scales = Tensor::from_vector(scales, {3, 3}, device);
+    model.quaternions = Tensor::from_vector(std::vector<float>{1,0,0,0, 1,0,0,0, 1,0,0,0}, {3, 4}, device);
+    ModelGradients gradients;
+    gradients.log_scales = Tensor::zeros_like(model.log_scales);
+    gradients.quaternions = Tensor::zeros_like(model.quaternions);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F);
+    for (float g : gradients.log_scales.to_vector()) require(g == 0.F, "disabled rank penalty changed gradient");
+    constexpr float weight = 0.001F;
+    detail::apply_shape_regularizers(model, gradients, 0.F, weight, 0.F, 0.F);
+    const auto g = gradients.log_scales.to_vector();
+    const auto loss = [](std::vector<float> v) {
+        double sum = 0, entropy = 0;
+        for (int i=0; i<3; ++i) sum += std::exp(2.0 * v[i]);
+        for (int i=0; i<3; ++i) {
+            const double p = std::exp(2.0 * v[i]) / sum;
+            entropy -= p * std::log(p);
+        }
+        return double(weight) * std::max(-std::log(std::exp(entropy) - 0.99999), 0.0);
+    };
+    for (int axis=0; axis<3; ++axis) {
+        auto up = scales, down = scales;
+        up[axis] += 0.001F; down[axis] -= 0.001F;
+        const double fd = (loss(up) - loss(down)) / 0.002;
+        require(std::isfinite(g[axis]) && std::abs(fd-g[axis]) < 1e-5,
+            "effective-rank gradient differs from finite differences");
+    }
+    require(g[0] > 0.F && g[1] < 0.F, "rank penalty does not suppress needle shape");
+    for (int i=3; i<9; ++i) require(std::abs(g[i]) < 1e-7F, "rank penalty altered plane or sphere");
+    require(model.log_scales.to_vector() == scales, "rank regularizer directly changed scales");
+    // A very thin planar splat can have rank near two and an extreme axis ratio.
+    // The independent ratio penalty must still act, smoothly and only above threshold.
+    auto ratio_scales = scales;
+    ratio_scales[4] = -2.2F;
+    model.log_scales = Tensor::from_vector(ratio_scales, {3, 3}, device);
+    gradients.log_scales = Tensor::zeros_like(model.log_scales);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F, 0.002F, 100.F);
+    const auto ratio_grad = gradients.log_scales.to_vector();
+    const float excess = 7.F - std::log(100.F);
+    require(std::abs(ratio_grad[3] - 0.002F * excess) < 1e-7F &&
+        std::abs(ratio_grad[5] + 0.002F * excess) < 1e-7F && ratio_grad[4] == 0.F,
+        "axis-ratio gradient did not penalize extreme planar splat");
+    for (int i : {0, 1, 2, 6, 7, 8})
+        require(ratio_grad[i] == 0.F, "axis-ratio penalty affected splat below threshold");
+    const auto ratio_loss = [](float longest, float shortest) {
+        const double e = std::max(double(longest) - shortest - std::log(100.0), 0.0);
+        return 0.001 * e * e;
+    };
+    const double fd = (ratio_loss(-1.999F, -9.F) - ratio_loss(-2.001F, -9.F)) / 0.002;
+    require(std::abs(ratio_grad[3] - fd) < 1e-6, "soft ratio gradient differs from finite differences");
+    require(model.log_scales.to_vector() == ratio_scales, "soft ratio penalty hard-clamped scales");
+    gradients.log_scales = Tensor::zeros_like(model.log_scales);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F, 0.002F, 10000.F);
+    for (float value : gradients.log_scales.to_vector())
+        require(value == 0.F, "axis-ratio threshold does not control penalty");
+
 }
 
 void test_emc_regularizers_match_finite_differences() {
@@ -8098,7 +8158,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
         try {
             test_ssim_metric_large_reduction();
-            test_ssim_loss_and_scale_constraint();
+            test_ssim_loss();
             test_masked_photometric_gradient();
             std::cout << "SSIM metric tests passed\n";
             return 0;
@@ -8344,6 +8404,13 @@ int main(int argc, char** argv) {
             std::cout << "Geometry tests passed\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--erank-only") {
+            test_effective_rank_regularizer(tinytensor::Device::CUDA);
+            test_effective_rank_regularizer(tinytensor::Device::Vulkan);
+            test_fused_structure_adam(tinytensor::Device::CUDA, 1, 0, true);
+            std::cout << "Shape regularizer tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--structure-adam-only") {
             for (unsigned degree : {0U, 2U, 3U})
                 test_fused_structure_adam(tinytensor::Device::Vulkan, degree);
@@ -8488,7 +8555,7 @@ int main(int argc, char** argv) {
         test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
         test_ssim_metric_large_reduction();
-        test_ssim_loss_and_scale_constraint();
+        test_ssim_loss();
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
@@ -8501,6 +8568,8 @@ int main(int argc, char** argv) {
         test_emc_long_axis_split_math();
         test_emc_refine_relocates_and_grows();
         test_emc_revised_noise_gates_and_scales();
+        test_effective_rank_regularizer(tinytensor::Device::CUDA);
+        test_effective_rank_regularizer(tinytensor::Device::Vulkan);
         test_emc_regularizers_match_finite_differences();
         test_densify_statistics_and_oversize_weights();
         test_vulkan_adc_fused();

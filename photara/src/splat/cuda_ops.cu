@@ -1286,12 +1286,11 @@ struct AdamGroup {
     float clamp_max;
 };
 
-// One owner per Gaussian allows scale-ratio projection immediately after
-// all three scale updates, without an inter-kernel dependency.
+// One owner per Gaussian updates all structure parameters.
 __global__ void adam_structure_kernel(AdamGroup means, AdamGroup scales,
     AdamGroup rotations, AdamGroup opacity, std::size_t count,
     float beta1, float beta2, float correction1, float correction2,
-    float epsilon, float maximum_log_ratio) {
+    float epsilon) {
     const std::size_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= count) return;
     const auto update = [&](AdamGroup g, std::size_t index) {
@@ -1303,18 +1302,6 @@ __global__ void adam_structure_kernel(AdamGroup means, AdamGroup scales,
     for (int c = 0; c < 3; ++c) {
         update(means, row * 3 + c);
         update(scales, row * 3 + c);
-    }
-    if (maximum_log_ratio > 0.F) {
-        float* v = scales.parameter + row * 3;
-        const float minimum = fminf(v[0], fminf(v[1], v[2]));
-        const float maximum = fmaxf(v[0], fmaxf(v[1], v[2]));
-        if (maximum - minimum > maximum_log_ratio) {
-            const float midpoint = 0.5F * (minimum + maximum);
-            const float half_range = 0.5F * maximum_log_ratio;
-#pragma unroll
-            for (int c = 0; c < 3; ++c)
-                v[c] = fminf(fmaxf(v[c], midpoint - half_range), midpoint + half_range);
-        }
     }
 #pragma unroll
     for (int c = 0; c < 4; ++c) update(rotations, row * 4 + c);
@@ -1453,20 +1440,6 @@ __global__ void adam_active_prefix_kernel(
     parameter[index] = isfinite(candidate) ? candidate : previous;
 }
 
-__global__ void constrain_scale_ratio_kernel(
-    float* log_scales, const std::size_t count, const float maximum_log_ratio) {
-    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count) return;
-    float* values = log_scales + 3 * index;
-    const float minimum = fminf(values[0], fminf(values[1], values[2]));
-    const float maximum = fmaxf(values[0], fmaxf(values[1], values[2]));
-    if (maximum - minimum <= maximum_log_ratio) return;
-    const float midpoint = 0.5F * (minimum + maximum);
-    const float half_range = 0.5F * maximum_log_ratio;
-    for (int axis = 0; axis < 3; ++axis)
-        values[axis] = fminf(fmaxf(values[axis], midpoint - half_range),
-                             midpoint + half_range);
-}
 
 __global__ void accumulate_densification_kernel(
     const float* refine_weight, const float* visibility, const int* radii,
@@ -2937,7 +2910,7 @@ void adam_step_structure_cuda(GaussianModel& model, const ModelGradients& gradie
         group(model.quaternions, gradient.quaternions, rotations, options.quaternions_lr, -inf, inf),
         group(model.opacity_logits, gradient.opacity_logits, opacity, options.opacities_lr, -12.F, 12.F),
         model.size(), options.beta1, options.beta2, correction1, correction2,
-        options.adam_epsilon, options.max_scale_ratio > 1.F ? std::log(options.max_scale_ratio) : 0.F);
+        options.adam_epsilon);
     check_cuda(cudaGetLastError(), "GGGS fused structure Adam update");
 }
 
@@ -3016,15 +2989,6 @@ void adam_step_active_prefix_cuda(
     check_cuda(cudaGetLastError(), "GGGS active-prefix Adam update");
 }
 
-void constrain_scale_ratio_cuda(
-    tinytensor::Tensor& log_scales, const float maximum_ratio) {
-    if (maximum_ratio <= 1.F || log_scales.numel() == 0) return;
-    const std::size_t count = log_scales.numel() / 3;
-    constrain_scale_ratio_kernel<<<
-        (count + k_threads - 1) / k_threads, k_threads>>>(
-        log_scales.ptr<float>(), count, std::log(maximum_ratio));
-    check_cuda(cudaGetLastError(), "constrain GGGS scale ratio");
-}
 
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, const float weight) {
@@ -3301,7 +3265,7 @@ __global__ void apply_shape_regularizers_kernel(
     float* scale_gradients, float* quaternion_gradients,
     const std::size_t count, const float scale_weight,
     const float erank_weight, const float erank_s3_weight,
-    const float quat_weight) {
+    const float quat_weight, const float axis_ratio_weight, const float max_axis_ratio) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
 
@@ -3326,6 +3290,21 @@ __global__ void apply_shape_regularizers_kernel(
             for (int component = 0; component < 4; ++component)
                 quaternion_gradients[4 * index + component] +=
                     factor * quaternions[4 * index + component];
+        }
+    }
+
+    // Soft hinge in log-ratio space; no parameter projection after Adam.
+    if (axis_ratio_weight > 0.F) {
+        int longest = 0, shortest = 0;
+        for (int axis = 1; axis < 3; ++axis) {
+            if (log_scales[3 * index + axis] > log_scales[3 * index + longest]) longest = axis;
+            if (log_scales[3 * index + axis] < log_scales[3 * index + shortest]) shortest = axis;
+        }
+        const float excess = log_scales[3 * index + longest] -
+            log_scales[3 * index + shortest] - logf(max_axis_ratio);
+        if (excess > 0.F && isfinite(excess)) {
+            scale_gradients[3 * index + longest] += axis_ratio_weight * excess;
+            scale_gradients[3 * index + shortest] -= axis_ratio_weight * excess;
         }
     }
 
@@ -3413,14 +3392,21 @@ __global__ void apply_shape_regularizers_kernel(
 void apply_shape_regularizers(
     GaussianModel& model, ModelGradients& gradients,
     const float scale_weight, const float erank_weight,
-    const float erank_s3_weight, const float quat_weight) {
+    const float erank_s3_weight, const float quat_weight,
+    const float axis_ratio_weight, const float max_axis_ratio) {
     if (model.size() == 0) return;
+    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
+        tinytensor::vulkan::apply_shape_regularizers(model.log_scales, model.quaternions,
+            gradients.log_scales, gradients.quaternions,
+            scale_weight, erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
+        return;
+    }
     apply_shape_regularizers_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
         gradients.log_scales.ptr<float>(),
         gradients.quaternions.ptr<float>(), model.size(), scale_weight,
-        erank_weight, erank_s3_weight, quat_weight);
+        erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
     check_cuda(cudaGetLastError(), "apply EMC regularizers");
 }
 

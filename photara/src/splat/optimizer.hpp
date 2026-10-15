@@ -41,7 +41,5 @@ void adam_step_active_prefix(
     std::size_t active_row_stride, float secondary_learning_rate,
     float grouped_rest_regularization = 0.F);
 
-void constrain_scale_ratio(
-    tinytensor::Tensor& log_scales, float maximum_ratio);
 
 }  // namespace photara::splat::detail

@@ -570,13 +570,13 @@ ModelGradients Rasterizer::backward(
                 structure_adam->correction1, structure_adam->correction2,
                 structure_adam->epsilon, structure_adam->minimum_log_scale,
                 structure_adam->maximum_log_scale,
-                structure_adam->max_log_scale_ratio,
                 structure_adam->opacity_reg, structure_adam->log_scale_reg,
                 structure_adam->shape_scale_reg, structure_adam->shape_erank_reg,
                 structure_adam->shape_erank_s3_reg,
                 structure_adam->shape_quat_norm_reg,
                 gradients.opacity_logits.is_valid()
-                    ? gradients.opacity_logits.ptr<float>() : nullptr};
+                    ? gradients.opacity_logits.ptr<float>() : nullptr,
+                structure_adam->shape_axis_ratio_reg, structure_adam->shape_max_axis_ratio};
         }
         grads.means = fuse_structure ? nullptr : gradients.means.ptr<float>();
         grads.sh = context.colors_precomp.is_valid()

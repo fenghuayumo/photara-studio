@@ -1097,8 +1097,6 @@ NB_MODULE(photara, module) {
             "maximum_scale_fraction",
             &splat::TrainingOptions::maximum_scale_fraction)
         .def_rw(
-            "max_scale_ratio", &splat::TrainingOptions::max_scale_ratio)
-        .def_rw(
             "constrain_scale_range",
             &splat::TrainingOptions::constrain_scale_range)
         .def_rw(
@@ -1160,6 +1158,8 @@ NB_MODULE(photara, module) {
         .def_rw("shape_scale_reg", &splat::TrainingOptions::shape_scale_reg)
         .def_rw("shape_scale_reg_decay_power", &splat::TrainingOptions::shape_scale_reg_decay_power)
         .def_rw("shape_erank_reg", &splat::TrainingOptions::shape_erank_reg)
+        .def_rw("shape_axis_ratio_reg", &splat::TrainingOptions::shape_axis_ratio_reg)
+        .def_rw("shape_max_axis_ratio", &splat::TrainingOptions::shape_max_axis_ratio)
         .def_rw("shape_erank_s3_reg", &splat::TrainingOptions::shape_erank_s3_reg)
         .def_rw("shape_quat_norm_reg", &splat::TrainingOptions::shape_quat_norm_reg)
         .def_rw("oversize_screen_limit", &splat::TrainingOptions::oversize_screen_limit)

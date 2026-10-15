@@ -12,7 +12,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 8;
+inline constexpr std::uint32_t k_settings_version = 9;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -59,9 +59,11 @@ struct Settings {
     int preview_interval = 50;
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.
     int strategy = 0;
-    // Hard clamp on the per-Gaussian longest/shortest scale ratio.
-    // 0 disables the clamp (training default); values must be >= 1.
-    float max_scale_ratio = 0.F;
+    // Soft penalty on effective rank below two; zero disables it.
+    float shape_erank_reg = 0.F;
+    // Soft penalty only above the axis-ratio threshold; zero weight disables it.
+    float shape_axis_ratio_reg{0.F};
+    float shape_max_axis_ratio{100.F};
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;

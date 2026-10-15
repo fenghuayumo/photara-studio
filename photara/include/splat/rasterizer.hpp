@@ -67,7 +67,6 @@ struct StructureAdamUpdate {
     float correction1{1.F}, correction2{1.F}, epsilon{1e-15F};
     float minimum_log_scale{-std::numeric_limits<float>::infinity()};
     float maximum_log_scale{std::numeric_limits<float>::infinity()};
-    float max_log_scale_ratio{};
     float opacity_reg{};
     float log_scale_reg{};
     float shape_scale_reg{};
@@ -77,6 +76,8 @@ struct StructureAdamUpdate {
     // Logging-only: retain the fused opacity-logit gradient without bringing
     // back the other structure-gradient tensors.
     bool capture_opacity_gradient{};
+    float shape_axis_ratio_reg{};
+    float shape_max_axis_ratio{100.F};
 };
 
 // An extraction-local snapshot for immutable Gaussians/cameras. Recreate this

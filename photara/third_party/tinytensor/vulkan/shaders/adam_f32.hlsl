@@ -21,7 +21,6 @@ struct PushConstants
     float clamp_min;
     float clamp_max;
     float grouped_rest_regularization;
-    float maximum_log_ratio;
 };
 
 [[vk::binding(0, 0)]] RWByteAddressBuffer parameter;
@@ -75,30 +74,5 @@ void update_one(uint index)
 [numthreads(256, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
-    if (pc.maximum_log_ratio > 0.0f)
-    {
-        const uint row = dtid.x;
-        if (row >= pc.count / 3u) return;
-        const uint base = row * 3u;
-        [unroll]
-        for (uint axis = 0u; axis < 3u; ++axis)
-            update_one(base + axis);
-
-        const uint address = pc.parameter_offset + base * 4u;
-        const float x = asfloat(parameter.Load(address));
-        const float y = asfloat(parameter.Load(address + 4u));
-        const float z = asfloat(parameter.Load(address + 8u));
-        const float minimum = min(x, min(y, z));
-        const float maximum = max(x, max(y, z));
-        if (maximum - minimum > pc.maximum_log_ratio)
-        {
-            const float midpoint = 0.5f * (minimum + maximum);
-            const float half_range = 0.5f * pc.maximum_log_ratio;
-            parameter.Store(address, asuint(clamp(x, midpoint - half_range, midpoint + half_range)));
-            parameter.Store(address + 4u, asuint(clamp(y, midpoint - half_range, midpoint + half_range)));
-            parameter.Store(address + 8u, asuint(clamp(z, midpoint - half_range, midpoint + half_range)));
-        }
-        return;
-    }
     if (dtid.x < pc.count) update_one(dtid.x);
 }
