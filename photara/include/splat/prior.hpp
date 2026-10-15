@@ -5,7 +5,8 @@
 
 namespace photara::splat {
 // Pinhole camera-Z depth in scene units, and camera-space predicted unit normals.
-// Zero depth/normal means unavailable. Prior validity never masks RGB fitting.
+// Either map may be empty when not requested. Zero pixels mean unavailable.
+// Prior validity never masks RGB fitting.
 struct TrainingPrior {
     Camera camera;
     std::vector<float> depth;
@@ -17,6 +18,7 @@ struct TrainingPrior {
 void save_training_prior(const std::filesystem::path& path,
     const std::filesystem::path& source_image, const TrainingPrior& prior);
 [[nodiscard]] TrainingPrior load_training_prior(const std::filesystem::path& path,
-    const std::filesystem::path& source_image, const Camera& full_camera);
+    const std::filesystem::path& source_image, const Camera& full_camera,
+    bool require_depth = true, bool require_normals = true);
 [[nodiscard]] TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& camera);
 } // namespace photara::splat

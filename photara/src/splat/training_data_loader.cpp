@@ -865,7 +865,8 @@ HostTrainingView load_host_training_view(
     std::vector<float> normals;
     if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
         const auto full_camera = training_data::training_camera(view, options, 1.F);
-        auto prior = load_training_prior(training_prior_path(options.prior_directory, view.id), view.path, full_camera);
+        auto prior = load_training_prior(training_prior_path(options.prior_directory, view.id), view.path, full_camera,
+            options.lambda_d > 0.F, options.lambda_n > 0.F);
         if (camera.width != full_camera.width || camera.height != full_camera.height)
             prior = resize_training_prior(prior, camera);
         if (options.lambda_d > 0.F) depth = std::move(prior.depth);

@@ -55,9 +55,19 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
 #endif
     try {
-        if (argc != 8) {
-            std::cerr << "Usage: photara_splat_prior_prepare dataset images model.gguf output-dir max-resolution tokens eval-split-every\n";
+        if (argc != 8 && argc != 10) {
+            std::cerr << "Usage: photara_splat_prior_prepare dataset images model.gguf output-dir max-resolution tokens eval-split-every [lambda_d lambda_n]\n"
+                         "Weights default to zero: no inference or cache creation when both are disabled.\n";
             return 1;
+        }
+        const float lambda_d = argc == 10 ? std::stof(argv[8]) : 0.F;
+        const float lambda_n = argc == 10 ? std::stof(argv[9]) : 0.F;
+        if (!std::isfinite(lambda_d) || lambda_d < 0.F || !std::isfinite(lambda_n) || lambda_n < 0.F)
+            throw std::invalid_argument("lambda_d and lambda_n must be finite and nonnegative");
+        const bool need_depth = lambda_d > 0.F, need_normals = lambda_n > 0.F;
+        if (!need_depth && !need_normals) {
+            std::cout << "Prior preparation skipped: lambda_d=0 lambda_n=0\n";
+            return 0;
         }
         photara::splat::DatasetLoadRequest request;
         request.source = argv[1]; request.image_directory = argv[2];
@@ -74,7 +84,8 @@ int main(int argc, char** argv) {
         auto predictor = photara::inference::create_moge_predictor(argv[3], options);
         std::ofstream manifest(output/"alignment.tsv");
         manifest << "# model=" << predictor->model_info().id << " revision=" << predictor->model_info().revision
-            << " tokens=" << options.num_tokens << " eval_split_every=" << split << '\n';
+            << " tokens=" << options.num_tokens << " eval_split_every=" << split
+            << " lambda_d=" << lambda_d << " lambda_n=" << lambda_n << '\n';
         manifest << "view\tscale\tlog_ratio_mad\tsparse_inliers\tvalid_fraction\tseconds\n";
         for (std::size_t i = 0; i < loaded.scene.views.size(); ++i) {
             if (split != 0 && i % split == 0) continue; // No held-out image prediction or supervision.
@@ -87,18 +98,24 @@ int main(int argc, char** argv) {
             photara::inference::GeometryInput input{image, photara::inference::PinholeIntrinsics{
                 camera.fx,camera.fy,camera.cx,camera.cy}};
             const auto prediction = predictor->predict(input);
-            const auto alignment = align(loaded.scene, i, camera, prediction);
+            // Camera-space normals have no scene-scale ambiguity. Sparse depth
+            // alignment is only needed when depth supervision is requested.
+            const auto alignment = need_depth ? align(loaded.scene, i, camera, prediction) : Alignment{1.,0.,0};
             photara::splat::TrainingPrior prior;
             prior.camera = camera;
             const auto count = prediction.depth.size();
-            prior.depth.resize(count); prior.normals.resize(3*count);
+            if (need_depth) prior.depth.resize(count);
+            if (need_normals) prior.normals.resize(3*count);
             std::size_t valid = 0;
             for (std::size_t pixel = 0; pixel < count; ++pixel) {
                 if (!prediction.valid[pixel]) continue;
-                const double depth = prediction.depth[pixel]*alignment.scale;
-                if (!(depth > 0) || depth > std::numeric_limits<float>::max()) continue;
-                prior.depth[pixel] = static_cast<float>(depth);
-                for (int c = 0; c < 3; ++c) prior.normals[c*count+pixel] = prediction.normals[pixel][c];
+                if (need_depth) {
+                    const double depth = prediction.depth[pixel]*alignment.scale;
+                    if (!(depth > 0) || depth > std::numeric_limits<float>::max()) continue;
+                    prior.depth[pixel] = static_cast<float>(depth);
+                }
+                if (need_normals)
+                    for (int c = 0; c < 3; ++c) prior.normals[c*count+pixel] = prediction.normals[pixel][c];
                 ++valid;
             }
             photara::splat::save_training_prior(photara::splat::training_prior_path(output, view.id), view.path, prior);
