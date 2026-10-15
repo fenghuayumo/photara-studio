@@ -445,6 +445,7 @@ int main() {
     for (int mode : {0, 1, 2}) {
         const auto preset = photara::splat::training_preset(
             static_cast<photara::splat::TrainingMode>(mode));
+        expect(!preset.speedy_pruning, "all training presets default to pruning disabled");
         auto selected = settings;
         photara::splat::apply_training_loss_preset(selected,
             static_cast<photara::splat::TrainingMode>(mode));

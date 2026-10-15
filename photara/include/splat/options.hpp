@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -69,10 +70,12 @@ struct TrainingOptions {
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
-    // Speedy-Splat sensitivity pruning (CUDA/Vulkan). Absolute iteration schedule;
-    // zero score_views evaluates every training camera, never held-out views.
+    // Speedy-Splat sensitivity pruning (CUDA/Vulkan), opt-in in every mode.
+    // start=0 selects two soft and two hard events scaled to the growth/tail
+    // phases. A nonzero start selects the explicit periodic CLI schedule.
+    // Zero score_views evaluates every training camera, never held-out views.
     bool speedy_pruning{false};
-    unsigned speedy_start{6'000};
+    unsigned speedy_start{0};
     unsigned speedy_every{3'000};
     unsigned speedy_stop{30'000};
     unsigned speedy_score_views{0};
@@ -438,6 +441,39 @@ void apply_strategy_defaults(TrainingOptions& options);
             DensificationStrategy::dense_adaptive
         ? 15'000U
         : std::max(1U, options.iterations / 2);
+}
+
+enum class SpeedyPruningPhase { none, soft, hard };
+
+[[nodiscard]] inline SpeedyPruningPhase speedy_pruning_phase(
+    const TrainingOptions& options, const unsigned iteration,
+    const bool densification_enabled) {
+    if (!options.speedy_pruning || iteration == 0 || iteration > options.iterations)
+        return SpeedyPruningPhase::none;
+    const unsigned growth_end = std::min(grow_stop_iteration(options), options.iterations);
+    if (options.speedy_start != 0) {
+        if (options.speedy_every == 0 || iteration < options.speedy_start ||
+            iteration >= options.speedy_stop ||
+            (iteration - options.speedy_start) % options.speedy_every != 0)
+            return SpeedyPruningPhase::none;
+        return densification_enabled && iteration < growth_end
+            ? SpeedyPruningPhase::soft : SpeedyPruningPhase::hard;
+    }
+    // Use integer ratios and disjoint phase ranges so short runs never
+    // duplicate an event or prune at the final training step.
+    const auto fraction = [](unsigned steps, unsigned numerator) {
+        return static_cast<unsigned>(std::uint64_t{steps} * numerator / 5);
+    };
+    if (densification_enabled && iteration < growth_end &&
+        (iteration == fraction(growth_end, 3) ||
+         iteration == fraction(growth_end, 4)))
+        return SpeedyPruningPhase::soft;
+    const unsigned tail = options.iterations - growth_end;
+    if (iteration > growth_end && iteration < options.iterations &&
+        (iteration == growth_end + fraction(tail, 1) ||
+         iteration == growth_end + fraction(tail, 3)))
+        return SpeedyPruningPhase::hard;
+    return SpeedyPruningPhase::none;
 }
 
 // fine-tuning phase, so its strength decays linearly to zero over the run

@@ -46,6 +46,7 @@ def run(executable, backend):
                 encoding='utf-8', errors='replace', timeout=45, **kwargs)
             log = result.stdout + result.stderr
             assert result.returncode == 0, log[-4000:]
+            assert ' speedy_pruning=0 ' in log, (mode, 'pruning must be opt-in', log[-4000:])
             objective = re.search(r'splat_objective ([^\r\n]+)', log)
             assert objective, log
             weights = {k: float(v) for k, v in (item.split('=') for item in objective[1].split())}
@@ -63,7 +64,20 @@ def run(executable, backend):
                 assert weights['splat-scale-reg'] == (0 if extra else .01)
                 assert weights['splat-shape-erank-reg'] == (0 if extra else .001)
             assert 'splat iteration=3/3' in log, log[-4000:]
-        print(f'{backend}: Standard/High quality defaults, explicit disable, and Fast override suppression passed')
+        # Explicitly opting in must still work in Fast mode. A short full-
+        # resolution run exercises the same automatic phase-scaled schedule.
+        pruning = list(base)
+        pruning[pruning.index('--splat-iterations') + 1] = '30'
+        pruning[pruning.index('--splat-densification=false')] = '--splat-densification=true'
+        result = subprocess.run(pruning + ['--output', str(root / 'pruning.ply'),
+            '--splat-mode', 'fast', '--splat-speedy-pruning=true'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=45, **kwargs)
+        log = result.stdout + result.stderr
+        assert result.returncode == 0, log[-4000:]
+        assert ' speedy_pruning=1 ' in log and 'speedy_schedule=two_soft_two_hard' in log, log
+        events = re.findall(r'Speedy-Splat prune iteration=(\d+) phase=(soft|hard)', log)
+        assert events == [('9', 'soft'), ('12', 'soft'), ('18', 'hard'), ('24', 'hard')], events
+        print(f'{backend}: mode defaults, Fast override suppression, and opt-in two-soft/two-hard pruning passed')
 
 
 if __name__ == '__main__':
