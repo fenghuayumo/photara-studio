@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,29 @@ bool objective_field_visible(const ProjectSettings& settings,
     return true;
 }
 
+void objective_field_tooltip(const photara::splat::TrainingLossField& field) {
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.F);
+    ImGui::TextUnformatted(tr(field.help));
+    ImGui::Spacing();
+    if (field.default_value == 0.F)
+        ImGui::Text("%s: %s (0)", tr("Default value"), tr("Off"));
+    else
+        ImGui::Text("%s: %.5g", tr("Default value"), field.default_value);
+    if (field.has_tuning_range()) {
+        ImGui::Text("%s: %.5g - %.5g", tr("Suggested range"),
+            field.tuning_minimum, field.tuning_maximum);
+    }
+    if (field.tuning_note) ImGui::TextUnformatted(tr(field.tuning_note));
+    ImGui::Spacing();
+    if (field.maximum == std::numeric_limits<float>::max())
+        ImGui::TextDisabled("%s: >= %.5g", tr("Allowed range"), field.minimum);
+    else
+        ImGui::TextDisabled("%s: %.5g - %.5g", tr("Allowed range"), field.minimum, field.maximum);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
 void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced) {
     if (!ImGui::BeginTable("##objective_fields", 2,
             ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) return;
@@ -64,10 +88,15 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
+        ImGui::BeginGroup();
         ImGui::PushTextWrapPos(0.F);
         ImGui::TextUnformatted(tr(field.label));
+        if (field.has_tuning_range())
+            ImGui::TextDisabled("%s %.5g - %.5g", tr(field.default_value == 0.F
+                ? "When enabled" : "Suggested"), field.tuning_minimum, field.tuning_maximum);
         ImGui::PopTextWrapPos();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(field.help));
+        ImGui::EndGroup();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) objective_field_tooltip(field);
         ImGui::TableNextColumn();
         const bool alpha_disabled = field.value == &TrainingLossSettings::match_alpha_weight &&
             (!(settings.use_mask || settings.sam_masks) || settings.mask_mode != 1 ||
@@ -78,7 +107,7 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputFloat("##value", &(settings.*field.value), 0.F, 0.F, "%.5g");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(field.help));
+            objective_field_tooltip(field);
         ImGui::EndDisabled();
         ImGui::PopID();
     }

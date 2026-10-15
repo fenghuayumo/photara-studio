@@ -66,6 +66,32 @@ by default; colour-model-specific controls appear only when that model is enable
 Weights, bounds and descriptions share one definition in `splat/loss_settings.hpp`.
 The same definition drives CLI validation, project persistence and engine mapping.
 
+Controls show suggested tuning ranges below their labels. Hover a label or
+value for the default, legal input bounds, starting value and adjustment advice.
+Suggested ranges do not clamp input or enable disabled constraints. Keep the
+image weight at 1 while adjusting the relative strengths of other terms.
+
+Shared constraints follow Spirula's `TrainConfig.h` defaults and presets:
+SSIM 0.2, opacity sparsity 0.005, erank 0.001 (0.01 in its 360-camera preset),
+flatness 0.01 in its meshing preset, quaternion normalization 0.01, SH 0.001,
+bilateral TV 10, and the six PPISP regularizer defaults. The displayed intervals
+are Photara tuning guidance around these reference values, rather than copied
+input limits. Spirula's log-scale shrinkage is different from Photara's actual-
+scale compactness term; its 0.01 weight is not treated as an equivalent strength.
+
+A real-capture tuning round used 32 registered views (four held out), seed 42,
+5,000 initial Gaussians, SH degree 1, a 192-pixel image limit and no densification.
+Fourteen 600-step runs covered actual-scale weights 0.001/0.01/0.1, axis-ratio
+strengths 0.001/0.01, projected-size strengths 0.01/0.1, and low/high geometry
+settings, including CUDA and Vulkan checks. Eight additional 3,000-step runs
+covered both backends with colour-bound endpoints, PPISP/grid regularizer
+endpoints and a 0.1 projected-size limit. All completed with finite metrics.
+The 600-step CUDA baseline scored 24.3674 dB / 0.752425 SSIM; scale weight 0.1
+scored 24.3889 / 0.762777. Low/high geometry combinations scored 24.3357 /
+0.751264 and 23.5842 / 0.722161, respectively, supporting advice to start small.
+These short comparisons retain the existing training defaults and establish
+starting guidance for this scene and training budget.
+
 Surface consistency can be enabled independently of mesh extraction with
 `--splat-geometry-loss=true`; Gaussian mesh extraction also enables it automatically.
 Normal-field alignment has its own activation and start step. Inactive settings
