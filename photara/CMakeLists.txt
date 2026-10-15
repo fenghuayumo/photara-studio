@@ -656,6 +656,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
+            src/splat/prior.cpp
             src/splat/checkpoint.cpp
             src/splat/model_handoff.cpp
             src/splat/trainer.cpp)
@@ -679,6 +680,18 @@ if(PHOTARA_ENABLE_FEATURES)
             ZLIB::ZLIB
             zstd::libzstd)
         target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_SPLAT=1)
+        if(TARGET Photara::Inference)
+            add_executable(photara_splat_prior_prepare src/tools/splat_prior_prepare.cpp)
+            target_include_directories(photara_splat_prior_prepare PRIVATE src/splat)
+            target_link_libraries(photara_splat_prior_prepare PRIVATE Photara::Splat Photara::Inference)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_prior_prepare POST_BUILD
+                    COMMAND ${CMAKE_COMMAND}
+                        "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_splat_prior_prepare>,|>"
+                        "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_splat_prior_prepare>"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake" VERBATIM)
+            endif()
+        endif()
         if(TARGET splat_drender::vulkan)
             target_sources(photara_splat_cuda PRIVATE
                 src/splat/optimizer_vulkan.cpp
@@ -1354,6 +1367,20 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     target_link_libraries(photara_logging_test PRIVATE Photara::BA)
     add_test(NAME photara.core.logging COMMAND photara_logging_test)
     if(TARGET photara_splat)
+        add_executable(photara_splat_prior_test tests/splat_prior_test.cpp)
+        target_include_directories(photara_splat_prior_test PRIVATE src/splat)
+        target_link_libraries(photara_splat_prior_test PRIVATE Photara::Splat)
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_prior_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_splat_prior_test>,|>"
+                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_splat_prior_test>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake" VERBATIM)
+        endif()
+        add_test(NAME photara.splat.ai_prior COMMAND photara_splat_prior_test)
+        if(PHOTARA_ENABLE_VULKAN_COMPUTE)
+            add_test(NAME photara.splat.ai_prior_vulkan COMMAND photara_splat_prior_test --vulkan)
+        endif()
         add_executable(photara_splat_checkpoint_test tests/splat_checkpoint_test.cpp)
         target_link_libraries(photara_splat_checkpoint_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.checkpoint COMMAND photara_splat_checkpoint_test)

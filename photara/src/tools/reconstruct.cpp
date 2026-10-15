@@ -158,6 +158,9 @@ struct ReconstructCli {
     bool splat_focus_region = false;
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
+    std::filesystem::path splat_prior_directory;
+    float splat_lambda_d{0.F};
+    float splat_lambda_n{0.F};
     std::filesystem::path dense_ply;
     std::string backend{"cuda"};
     std::filesystem::path splat_checkpoint;
@@ -440,6 +443,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-mesh-only  mesh an existing trained splat; does not run the optimizer\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
+              << "  --splat-prior-dir PATH  aligned AI prior cache; no MVS required\n"
+              << "  --splat-lambda-d W  AI depth constraint weight (default 0)\n"
+              << "  --splat-lambda-n W  AI normal constraint weight (default 0)\n"
               << "  --splat-mode NAME  fast, standard (default), high-quality\n"
               << "  --splat-iterations N  override preset optimizer steps (standard 30000)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
@@ -813,6 +819,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
+        ("splat-prior-dir", "Aligned AI depth/normal cache (independent of MVS and DN)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-lambda-d", "AI depth prior weight; zero disables (default: 0)",
+         cxxopts::value<float>()->default_value("0"))
+        ("splat-lambda-n", "AI normal prior weight; zero disables (default: 0)",
+         cxxopts::value<float>()->default_value("0"))
         ("splat-mode", "Training preset: fast, standard, high-quality",
          cxxopts::value<std::string>()->default_value("standard"))
         ("splat-checkpoint", "Training checkpoint file (default: beside output)",
@@ -1463,6 +1475,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());
+    cli.splat_prior_directory = utf8_to_path(result["splat-prior-dir"].as<std::string>());
+    cli.splat_lambda_d = result["splat-lambda-d"].as<float>();
+    cli.splat_lambda_n = result["splat-lambda-n"].as<float>();
+    if (!std::isfinite(cli.splat_lambda_d) || cli.splat_lambda_d < 0.F ||
+        !std::isfinite(cli.splat_lambda_n) || cli.splat_lambda_n < 0.F)
+        throw std::invalid_argument("--splat-lambda-d and --splat-lambda-n must be finite and nonnegative");
+    if ((cli.splat_lambda_d > 0.F || cli.splat_lambda_n > 0.F) && cli.splat_prior_directory.empty())
+        throw std::invalid_argument("Positive AI prior weights require --splat-prior-dir");
     const auto splat_preset = photara::splat::training_preset(cli.splat_mode);
     cli.splat_checkpoint = utf8_to_path(result["splat-checkpoint"].as<std::string>());
     cli.splat_checkpoint_control = utf8_to_path(result["splat-checkpoint-control"].as<std::string>());
@@ -3495,6 +3515,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.use_source_resolution = true;
     options.undistort_to_pinhole = cli.splat_undistort;
     options.max_image_dimension = cli.splat_max_resolution;
+    options.lambda_d = cli.splat_lambda_d;
+    options.lambda_n = cli.splat_lambda_n;
+    options.prior_directory = cli.splat_prior_directory;
     options.kernel_size = cli.splat_kernel_size;
     options.progressive_resolution = cli.splat_progressive_resolution;
     options.progressive_resolution_interval =
@@ -3738,6 +3761,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
          options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
     photara::splat::enforce_training_loss_mode(options, cli.splat_mode);
+    photara::core::Logger::instance().info("splat_ai_priors lambda_d=", options.lambda_d,
+        " lambda_n=", options.lambda_n, " enabled=", options.lambda_d > 0.F || options.lambda_n > 0.F);
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
         : cli.splat_strategy.c_str();

@@ -250,6 +250,11 @@ struct TrainingOptions {
     bool ppisp_before_bilagrid{true};
     float depth_weight{0.05F};
     float normal_weight{0.01F};
+    // Independent AI priors, already aligned to scene units and training cameras.
+    // Zero disables loading/rendering for that prior. Does not enable DN/meshing.
+    float lambda_d{0.F};
+    float lambda_n{0.F};
+    std::filesystem::path prior_directory;
     // GGGS meshing loss from the Python reference: cosine consistency between
     // the rasterized Gaussian normal and the normal differentiated from the
     // rendered median-depth map.

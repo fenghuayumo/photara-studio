@@ -1138,6 +1138,14 @@ GaussianModel Trainer::train(
     if (scene.views.empty())
         throw std::invalid_argument("Splat training requires at least one MVS view");
     const bool vulkan_backend = options_.backend == TrainingBackend::vulkan;
+    const bool use_ai_prior = options_.lambda_d > 0.F || options_.lambda_n > 0.F;
+    if (!std::isfinite(options_.lambda_d) || options_.lambda_d < 0.F ||
+        !std::isfinite(options_.lambda_n) || options_.lambda_n < 0.F)
+        throw std::invalid_argument("lambda_d and lambda_n must be finite and nonnegative");
+    if (use_ai_prior && (options_.prior_directory.empty() || options_.use_mvs_depth || options_.use_mvs_normals))
+        throw std::invalid_argument("AI priors require a prior directory and cannot share targets with MVS supervision");
+    if (options_.lambda_d > 0.F && (!std::isfinite(options_.geometry_epsilon) || options_.geometry_epsilon <= 0.F))
+        throw std::invalid_argument("AI depth supervision requires a finite positive geometry epsilon");
     if (vulkan_backend) {
         if (options_.enable_densification &&
             options_.densification_strategy != DensificationStrategy::adc_igs)
@@ -1790,7 +1798,7 @@ GaussianModel Trainer::train(
         // One flag drives the render channels and the matching loss-gradient
         // tensors: when it is false the depth/normal images, their gradients
         // and the rasterizer's per-Gaussian geometry scratch are all skipped.
-        const bool need_geometry_channels = options_.use_mvs_depth ||
+        const bool need_geometry_channels = use_ai_prior || options_.use_mvs_depth ||
                                             options_.use_mvs_normals ||
                                             depth_normal_active ||
                                             normal_field_active ||
@@ -2042,6 +2050,8 @@ GaussianModel Trainer::train(
                 detail::add_depth_normal_loss_vulkan(rendered, target.camera,
                     depth_normal_active ? options_.depth_normal_weight : 0.F,
                     loss, report_progress);
+            if (use_ai_prior)
+                detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
         } else {
             loss = detail::compute_training_loss(
                 loss_render, target, options_, report_progress,
@@ -2762,7 +2772,11 @@ GaussianModel Trainer::train(
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,
     const std::filesystem::path& path, const TrainingOptions& training_options) {
-    const TrainingView target = make_training_view(view, training_options);
+    // Held-out evaluation uses RGB/cameras only. It must neither request an AI
+    // prediction for a held-out image nor load its geometry supervision cache.
+    auto evaluation_options = training_options;
+    evaluation_options.lambda_d = evaluation_options.lambda_n = 0.F;
+    const TrainingView target = make_training_view(view, evaluation_options);
     RasterizeOptions options;
     options.active_sh_degree = model.sh_degree;
     options.kernel_size = training_options.kernel_size;

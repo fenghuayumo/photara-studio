@@ -1,4 +1,5 @@
 #include "training_data_loader.hpp"
+#include "splat/prior.hpp"
 #include "splat/device.hpp"
 
 #include "core/camera_projection.hpp"
@@ -712,6 +713,10 @@ std::size_t packed_training_view_bytes(
     const bool can_use_mvs_maps =
         full_working_resolution &&
         !uses_native_splat_projection(camera.model);
+    if (options.lambda_d > 0.F)
+        bytes = saturate_add(bytes, saturate_multiply(pixels, sizeof(float)));
+    if (options.lambda_n > 0.F)
+        bytes = saturate_add(bytes, saturate_multiply(pixels, 3 * sizeof(float)));
     if (can_use_mvs_maps && options.use_mvs_depth &&
         view.depth_map.depth.size() ==
             saturate_multiply(
@@ -858,6 +863,14 @@ HostTrainingView load_host_training_view(
 
     std::vector<float> depth;
     std::vector<float> normals;
+    if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
+        const auto full_camera = training_data::training_camera(view, options, 1.F);
+        auto prior = load_training_prior(training_prior_path(options.prior_directory, view.id), view.path, full_camera);
+        if (camera.width != full_camera.width || camera.height != full_camera.height)
+            prior = resize_training_prior(prior, camera);
+        if (options.lambda_d > 0.F) depth = std::move(prior.depth);
+        if (options.lambda_n > 0.F) normals = std::move(prior.normals);
+    }
     if (!uses_native_splat_projection(camera.model) && options.use_mvs_depth &&
         camera.width == view.width && camera.height == view.height &&
         view.depth_map.depth.size() == pixels)
@@ -948,6 +961,22 @@ TrainingView upload_training_view(
 }  // namespace
 
 namespace training_data {
+
+io::RgbImage prior_input_image(const mvs::MvsView& view, const TrainingOptions& options) {
+    auto image_options = options;
+    image_options.lambda_d = image_options.lambda_n = 0.F;
+    image_options.use_mvs_depth = image_options.use_mvs_normals = false;
+    const auto host = load_host_training_view(view, image_options, 1.F);
+    io::RgbImage image{host.camera.width, host.camera.height, {}};
+    image.pixels.resize(host.rgba.size()*3);
+    for (std::size_t i = 0; i < host.rgba.size(); ++i) {
+        const auto packed = std::bit_cast<std::uint32_t>(host.rgba[i]);
+        image.pixels[3*i] = static_cast<std::uint8_t>(packed);
+        image.pixels[3*i+1] = static_cast<std::uint8_t>(packed >> 8);
+        image.pixels[3*i+2] = static_cast<std::uint8_t>(packed >> 16);
+    }
+    return image;
+}
 
 struct TrainingDataLoader::Impl {
     Impl(

@@ -185,6 +185,45 @@ void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& ca
     }
 }
 
+void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
+    const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms) {
+    if (!(options.lambda_d > 0.F || options.lambda_n > 0.F)) return;
+    auto push = camera_push(11, target.camera);
+    const auto check = [&](const Tensor& tensor, std::size_t count) {
+        if (!tensor.is_valid() || tensor.device() != device || !tensor.is_contiguous() ||
+            tensor.dtype() != tinytensor::DataType::Float32 || tensor.numel() != count)
+            throw std::invalid_argument("Missing or mismatched Vulkan AI prior maps");
+    };
+    geometry_gradients(rendered, gradients);
+    const bool mask = target.has_mask && (options.use_mask || target.mask_is_validity);
+    if (mask) check(target.mask, push.count);
+    push.euclidean = mask;
+    push.camera_count = collect_scalar_terms;
+    push.focal = options.geometry_epsilon;
+    const auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
+    if (options.lambda_d > 0.F) {
+        check(rendered.median_depth, push.count); check(target.depth, push.count);
+        push.weight = options.lambda_d;
+        launch(push, {rendered.median_depth, target.depth, target.mask, gradients.depth, {}, terms});
+        if (collect_scalar_terms) {
+            const float value = terms.sum().to_vector()[0];
+            gradients.depth_value += value; gradients.total += value;
+        }
+    }
+    if (options.lambda_n > 0.F) {
+        check(rendered.normal, 3ull*push.count); check(target.normal, 3ull*push.count);
+        push.mode = 12; push.weight = options.lambda_n;
+        // A separate zeroed term image is necessary when the depth dispatch
+        // skipped pixels that are valid in the independent normal prior.
+        const auto normal_terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
+        launch(push, {rendered.normal, target.normal, target.mask, gradients.normal, {}, normal_terms});
+        if (collect_scalar_terms) {
+            const float value = normal_terms.sum().to_vector()[0];
+            gradients.normal_value += value; gradients.total += value;
+        }
+    }
+}
+
 Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& cameras,
     float minimum_scale_factor, bool all_camera_euclidean) {
     if (means.dtype() != tinytensor::DataType::Float32 || means.shape().rank() != 2 ||

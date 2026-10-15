@@ -17,6 +17,8 @@ LossGradients compute_normal_field_loss_vulkan(
 void add_depth_normal_loss_vulkan(
     const RenderResult& rendered, const Camera& camera, float weight,
     LossGradients& gradients, bool collect_scalar_terms);
+void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
+    const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms);
 tinytensor::Tensor compute_3d_filter_vulkan(
     const tinytensor::Tensor& means, const std::vector<Camera>& cameras,
     float minimum_scale_factor, bool all_camera_euclidean);

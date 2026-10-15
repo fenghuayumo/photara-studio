@@ -205,6 +205,7 @@ inline void enforce_training_loss_mode(TrainingOptions& options, TrainingMode mo
     options.use_normal_field = false;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
+    options.lambda_d = options.lambda_n = 0.F;
     options.use_ppisp = false;
     options.use_bilateral_grid = false;
     options.depth_weight = 0.F;
