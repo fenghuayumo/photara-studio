@@ -23,6 +23,7 @@
 #include "splat/dataset.hpp"
 #include "splat/cuda_vulkan_preview.hpp"
 #include "splat/formats.hpp"
+#include "splat/model_handoff.hpp"
 #include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #include "splat/checkpoint.hpp"
@@ -105,6 +106,7 @@ struct ReconstructCli {
     bool gui{false};
     std::filesystem::path working_sfm;
     std::filesystem::path working_splat;
+    std::filesystem::path final_model_handoff;
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;
     std::filesystem::path working_texture;
@@ -675,6 +677,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("working-splat",
          "Gaussian file used by --gui training and --splat-view",
+         cxxopts::value<std::string>()->default_value(""))
+        ("final-model-handoff", "Shared-memory final-model manifest for the editor",
          cxxopts::value<std::string>()->default_value(""))
         ("working-mesh",
          "Mesh working copy used by --gui instead of a sidecar PLY",
@@ -1394,6 +1398,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["working-splat"].as<std::string>();
     if (!working_splat_text.empty())
         cli.working_splat = utf8_to_path(working_splat_text);
+    cli.final_model_handoff = utf8_to_path(result["final-model-handoff"].as<std::string>());
     const std::string working_mesh_text =
         result["working-mesh"].as<std::string>();
     if (!working_mesh_text.empty())
@@ -4084,10 +4089,31 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " training_s=", training_seconds,
         " checkpoint_evaluations=", options.evaluation_iterations.size());
     const std::filesystem::path model_path = splat_file_path(cli);
-    if (!model_path.empty()) {
-        ensure_artifact_parent(model_path);
-        photara::splat::save_gaussians(gaussians, model_path);
+    std::unique_ptr<photara::splat::ModelHandoff> handoff;
+    if (cli.gui && !cli.final_model_handoff.empty()) {
+        const auto handoff_started = std::chrono::steady_clock::now();
+        try {
+            handoff = std::make_unique<photara::splat::ModelHandoff>(
+                gaussians, cli.final_model_handoff);
+            photara::core::Logger::instance().info(
+                "splat_final_handoff=ready seconds=",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - handoff_started).count());
+        } catch (const std::exception& error) {
+            photara::core::Logger::instance().warning("splat_final_handoff=fallback reason=", error.what());
+        }
     }
+    if (!model_path.empty()) {
+        const auto save_started = std::chrono::steady_clock::now();
+        ensure_artifact_parent(model_path);
+        photara::splat::save_gaussians(handoff ? handoff->model() : gaussians, model_path);
+        photara::core::Logger::instance().info("splat_final_save_seconds=",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - save_started).count());
+    }
+    if (handoff && !handoff->wait_for_reader(std::chrono::seconds(2)))
+        photara::core::Logger::instance().warning("splat_final_handoff=reader_timeout (saved model remains available)");
+    // The receiver owns an open view now. Do not retain the CPU snapshot or
+    // publisher mapping through optional, potentially lengthy mesh extraction.
+    handoff.reset();
     if (!cli.gui && !evaluation_views.empty()) {
     double final_psnr_sum = 0.0;
     double final_foreground_psnr_sum = 0.0;
@@ -4139,8 +4165,15 @@ std::optional<photara::mvs::Mesh> run_splat_training(
             "ascan_gaussians=", cli.output, " count=", gaussians.size());
     }
     }
-    if (!cli.gui && !cli.splat_mesh_only)
-        photara::splat::remove_training_checkpoint(options.checkpoint_path);
+    // Legacy checkpoint cleanup can rewrite archives; keep it off the UI thread.
+    if (!cli.splat_mesh_only) {
+        try {
+            photara::splat::remove_training_checkpoint(options.checkpoint_path);
+        } catch (const std::exception& error) {
+            photara::core::Logger::instance().warning(
+                "Final model saved; checkpoint cleanup failed: ", error.what());
+        }
+    }
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {
         photara::splat::PamMeshOptions pam_options;

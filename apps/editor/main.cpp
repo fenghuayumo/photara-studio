@@ -195,7 +195,9 @@ int main(const int argc, char** argv) {
         app.log.poll(app.fresh_lines);
         for (const std::string& line : app.fresh_lines)
             app.monitor.consume(line);
+        editor::poll_splat_model_load(app);
         if (app.job.consume_completion()) editor::on_job_finished(app);
+        editor::poll_splat_model_load(app);
         editor::poll_scene_load(app);
         editor::poll_mesh_load(app);
         editor::poll_alignment_preview(app);
@@ -217,6 +219,7 @@ int main(const int argc, char** argv) {
             } else if (
                 app.smoke_started && !app.job.running() &&
                 !retrain_pending &&
+                (stop_smoke || app.final_splat_ready) &&
                 (stop_smoke || editor::gpu::consumed_timeline_value() >= 3)) {
                 ++smoke_completed_runs;
                 if (retrain_smoke && smoke_completed_runs == 1 &&
@@ -431,7 +434,10 @@ int main(const int argc, char** argv) {
         // Now the frame is submitted and the stale preview descriptors are
         // safe to destroy.
         if (train_requested) editor::start_train(app, false, resume_training_requested);
-        if (retrain_requested) editor::start_train(app, true);
+        if (retrain_requested) {
+            retrain_requested = false;
+            editor::start_train(app, true);
+        }
         if (dense_requested) editor::start_dense(app);
 
         // Finish submitting the draw list and acknowledging its shared image
@@ -469,6 +475,7 @@ int main(const int argc, char** argv) {
     if (app.job.running()) app.job.stop();
     if (app.splat_export.cancel) app.splat_export.cancel->store(true);
     if (app.splat_export.job.valid()) app.splat_export.job.wait();
+    editor::wait_splat_model_loads(app);
     editor::cleanup_cache_session(app);
     editor::gpu::wait_idle();
     app.image_qa_session.clear();

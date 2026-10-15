@@ -826,6 +826,13 @@ float percentile_median_size(
 
 template <typename T>
 std::vector<T> download(const tinytensor::Tensor& tensor) {
+    if (tensor.device() == tinytensor::Device::CPU) {
+        const auto contiguous = tensor.contiguous();
+        std::vector<T> values(contiguous.numel());
+        if (!values.empty())
+            std::memcpy(values.data(), contiguous.data_ptr(), values.size() * sizeof(T));
+        return values;
+    }
     if (tensor.device() == tinytensor::Device::Vulkan) {
         static_assert(std::is_same_v<T, float>,
                       "Vulkan splat serialization currently downloads float tensors only");
@@ -2869,24 +2876,34 @@ void save_gaussians_ply(
     const GaussianModel& model, const std::filesystem::path& path) {
     const std::size_t count = model.size();
     const std::size_t bases = model.sh.shape()[1];
-    const auto means = download<float>(model.means);
-    const auto log_scales = download<float>(model.log_scales);
-    const auto rotations = download<float>(model.quaternions);
-    const auto opacities = download<float>(model.opacity_logits);
-    const auto sh = download<float>(model.sh);
+    // Keep CPU snapshots by reference, including the final shared-memory
+    // handoff snapshot, rather than copying every array again for persistence.
+    std::vector<tinytensor::Tensor> host_storage;
+    host_storage.reserve(7);
+    const auto host = [&](const tinytensor::Tensor& tensor) -> std::span<const float> {
+        auto cpu = (tensor.device() == tinytensor::Device::CPU
+            ? tensor : tensor.to(tinytensor::Device::CPU)).contiguous();
+        host_storage.push_back(cpu);
+        return {cpu.ptr<float>(), cpu.numel()};
+    };
+    const auto means = host(model.means);
+    const auto log_scales = host(model.log_scales);
+    const auto rotations = host(model.quaternions);
+    const auto opacities = host(model.opacity_logits);
+    const auto sh = host(model.sh);
     const bool has_normal_features = model.normal_features.is_valid() &&
         model.normal_features.shape().rank() == 2 &&
         model.normal_features.shape()[0] == count &&
         model.normal_features.shape()[1] == 4;
     const auto normal_features = has_normal_features
-        ? download<float>(model.normal_features)
-        : std::vector<float>{};
+        ? host(model.normal_features)
+        : std::span<const float>{};
     const bool has_filter = model.filter_3d.is_valid() &&
         model.filter_3d.numel() == count;
     const auto filter_3d = has_filter
-        ? download<float>(model.filter_3d)
-        : std::vector<float>{};
-    const auto require_finite = [](const std::vector<float>& values,
+        ? host(model.filter_3d)
+        : std::span<const float>{};
+    const auto require_finite = [](const std::span<const float> values,
                                    const char* name) {
         const auto invalid = std::find_if(
             values.begin(), values.end(),
@@ -2928,27 +2945,42 @@ void save_gaussians_ply(
                      "property float gaussian_features_3\n"
                    : "")
            << "end_header\n";
+    // Preserve the PLY layout while batching scalar serialization into 1 MiB
+    // writes. Millions of Gaussians otherwise make tens of millions of tiny
+    // ostream calls before the final model is available on disk.
+    std::vector<float> block;
+    block.reserve(256U * 1024U);
+    const auto flush = [&] {
+        if (block.empty()) return;
+        output.write(reinterpret_cast<const char*>(block.data()),
+                     static_cast<std::streamsize>(block.size() * sizeof(float)));
+        block.clear();
+    };
+    const auto append = [&](const float value) {
+        block.push_back(value);
+        if (block.size() == block.capacity()) flush();
+    };
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
-        for (int axis = 0; axis < 3; ++axis) write_float(output, means[3 * gaussian + axis]);
-        write_float(output, 0.F); write_float(output, 0.F); write_float(output, 0.F);
+        for (int axis = 0; axis < 3; ++axis) append(means[3 * gaussian + axis]);
+        append(0.F); append(0.F); append(0.F);
         for (int channel = 0; channel < 3; ++channel)
-            write_float(output, sh[(gaussian * bases) * 3 + channel]);
+            append(sh[(gaussian * bases) * 3 + channel]);
         // Standard 3DGS PLY stores all remaining bases for R, then G, then B.
         for (int channel = 0; channel < 3; ++channel)
             for (std::size_t basis = 1; basis < bases; ++basis)
-                write_float(output, sh[(gaussian * bases + basis) * 3 + channel]);
-        write_float(output, opacities[gaussian]);
+                append(sh[(gaussian * bases + basis) * 3 + channel]);
+        append(opacities[gaussian]);
         for (int axis = 0; axis < 3; ++axis)
-            write_float(output, log_scales[3 * gaussian + axis]);
+            append(log_scales[3 * gaussian + axis]);
         for (int component = 0; component < 4; ++component)
-            write_float(output, rotations[4 * gaussian + component]);
-        if (has_filter) write_float(output, filter_3d[gaussian]);
+            append(rotations[4 * gaussian + component]);
+        if (has_filter) append(filter_3d[gaussian]);
         if (has_normal_features)
             for (int component = 0; component < 4; ++component)
-                write_float(
-                    output,
-                    normal_features[4 * gaussian + component]);
+                append(normal_features[4 * gaussian + component]);
     }
+    flush();
+    output.close();
     if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
 }
 
