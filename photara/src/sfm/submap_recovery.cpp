@@ -661,6 +661,12 @@ std::vector<Index> recover_stable_resections(Scene& scene) {
 
 std::vector<Index> recover_stable_resections(
     Scene& scene, const std::vector<std::uint8_t>& stable) {
+    return recover_stable_resections(scene, stable, {});
+}
+
+std::vector<Index> recover_stable_resections(
+    Scene& scene, const std::vector<std::uint8_t>& stable,
+    const std::vector<RawPairMatches>& tentative_matches) {
     if (stable.size()!=scene.images.size())
         throw std::invalid_argument("stable mask must cover every scene image");
     AlignmentObservability audit;
@@ -669,13 +675,24 @@ std::vector<Index> recover_stable_resections(
         if (stable[i] && !scene.images[i].registered)
             throw std::invalid_argument("stable anchors must have registered poses");
         if (stable[i]) ++audit.reliable_views;
+        if (!tentative_matches.empty() && !stable[i] && scene.images[i].registered)
+            throw std::invalid_argument("frozen-map targets must be unregistered");
     }
     if (audit.reliable_views == scene.images.size() || audit.reliable_views < 2) return {};
     struct Match { Index feature; Index track; Vec3 point; unsigned independent_links; };
     std::vector<std::vector<Match>> matches(scene.images.size());
     std::vector<std::vector<Index>> depth_anchors(scene.tracks.size());
     std::unordered_map<std::uint64_t, std::vector<Observation>> boundary;
-    for (const auto& pair : scene.pairs) {
+    for (const auto& pair : tentative_matches) {
+        if (pair.id1 >= stable.size() || pair.id2 >= stable.size()) continue;
+        const bool forward = stable[pair.id1] && !stable[pair.id2];
+        const bool reverse = stable[pair.id2] && !stable[pair.id1];
+        if (!forward && !reverse) continue;
+        for (const auto& m : pair.matches)
+            boundary[key(forward ? pair.id1 : pair.id2, forward ? m.query : m.train)]
+                .push_back({forward ? pair.id2 : pair.id1, forward ? m.train : m.query});
+    }
+    if (tentative_matches.empty()) for (const auto& pair : scene.pairs) {
         if ((!pair.has_geometry() && !pair.H.has_value()) || pair.zero_baseline ||
             pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size()) continue;
         const bool forward = audit.reliable[pair.id1] && !audit.reliable[pair.id2];
@@ -687,8 +704,9 @@ std::vector<Index> recover_stable_resections(
     }
     TriangulationOptions tri;
     tri.reproj_threshold_px = 2;
-    tri.min_angle_deg = 1;
+    tri.min_angle_deg = tentative_matches.empty() ? 1.F : 2.F;
     tri.split_tracks = false;
+    const unsigned minimum_depth_views = tentative_matches.empty() ? 3U : 2U;
     for (Index t = 0; t < scene.tracks.size(); ++t) {
         const auto& source = scene.tracks[t];
         Track stable;
@@ -703,11 +721,12 @@ std::vector<Index> recover_stable_resections(
                 has_boundary = has_boundary || boundary.contains(key(obs.image_id, obs.feature_id));
             } else targets.emplace(obs.image_id, obs.feature_id);
         }
-        // Two-view triangulation can fit an accidental match exactly. A third
-        // stable view independently checks the depth before it anchors PnP.
-        if ((!has_boundary && targets.empty()) || stable_observations.size() < 3) continue;
+        // In the ordinary recovery path a third stable view checks each
+        // depth. The frozen local-map path instead requires wider parallax,
+        // three distinct fit/validation anchors, and 30 final pixel inliers.
+        if ((!has_boundary && targets.empty()) || stable_observations.size() < minimum_depth_views) continue;
         for (const auto& [image, feature] : stable_observations) stable.observations.push_back({image, feature});
-        if (triangulate_track(stable, scene, tri) < 3) continue;
+        if (triangulate_track(stable, scene, tri) < minimum_depth_views) continue;
         // Replacing a point must not discard valid observations in the frozen
         // map. A locally successful PnP is insufficient if its anchors damage
         // the geometry that made the main map reliable.
@@ -783,11 +802,12 @@ std::vector<Index> recover_stable_resections(
         const auto reject = [&](const char* reason) {
             core::Logger::instance().info("stable resection rejected: image=", image.path.filename(), " reason=", reason);
         };
-        // Keep enough observations for both the 30-inlier fit and the
-        // independent 12-inlier audit; a fixed 20% holdout cannot do so for
-        // small correspondence sets, even with perfect geometry.
-        if (unique.size() < 42) { reject("insufficient_independent_depths"); continue; }
-        const std::size_t validation_count = std::min(unique.size() - 30,
+        // Allocate a real 12-inlier holdout. Frozen local maps may use an
+        // 18-inlier fit, but still need 30 final inliers across three anchors;
+        // ordinary recovery retains its 30 + 12 observation budget.
+        const unsigned minimum_fit = tentative_matches.empty() ? 30U : 18U;
+        if (unique.size() < minimum_fit + 12) { reject("insufficient_independent_depths"); continue; }
+        const std::size_t validation_count = std::min(unique.size() - minimum_fit,
             std::max<std::size_t>(12, unique.size() / 3));
         // Feature order can correlate with scale, location, or repeated texture.
         // Shuffle once, independently of residuals, so validation stays held out.
@@ -799,6 +819,8 @@ std::vector<Index> recover_stable_resections(
         for (std::size_t j = 0; j < validation_count; ++j) is_validation[order[j]] = true;
         std::vector<Vec3> bearings, points;
         std::vector<Match> validation;
+        std::vector<Index> fit_tracks;
+        std::set<Index> fit_anchors;
         std::size_t n = 0;
         for (const auto& [feature, m] : unique) {
             const bool held_out = is_validation[n++];
@@ -806,15 +828,25 @@ std::vector<Index> recover_stable_resections(
             const auto& p = image.features.keypoints[feature];
             bearings.push_back(camera.unproject(Vec2(p.x, p.y)));
             points.push_back(m.point);
+            fit_tracks.push_back(m.track);
+            fit_anchors.insert(depth_anchors[m.track].begin(), depth_anchors[m.track].end());
         }
+        if (!tentative_matches.empty() && fit_anchors.size() < 3) { reject("insufficient_fit_anchors"); continue; }
         if (!noncollinear(points)) { reject("ill_conditioned_fit_points"); continue; }
         AbsolutePoseOptions options;
-        options.min_inliers = 30;
+        options.min_inliers = minimum_fit;
         options.max_reproj_error_px = 2;
         options.max_iterations = 10000;
         const auto pose = estimate_absolute_pose(bearings, points, camera, options);
         core::Logger::instance().info("stable resection fit: image=", image.path.filename(),
             " success=", pose.success, " inliers=", pose.num_inliers, '/', points.size());
+        if (!tentative_matches.empty() && pose.success) {
+            std::set<Index> inlier_anchors;
+            for (std::size_t j = 0; j < fit_tracks.size(); ++j)
+                if (j < pose.inlier_mask.size() && pose.inlier_mask[j])
+                    inlier_anchors.insert(depth_anchors[fit_tracks[j]].begin(), depth_anchors[fit_tracks[j]].end());
+            if (inlier_anchors.size() < 3) { reject("insufficient_inlier_anchors"); continue; }
+        }
         // Pixel-consistent aliases on repetitive structure can rotate a pose
         // away from the independently verified pair graph. Keep two distinct
         // frozen rotation witnesses as a non-regression check; this still
@@ -935,16 +967,19 @@ std::vector<Index> recover_stable_resections(
         std::set<std::pair<int, int>> cells;
         std::vector<Vec3> heldout_points;
         std::vector<Vec2> heldout_pixels;
+        std::set<Index> heldout_anchors;
         for (const auto& m : validation) {
             if (!supports(scene, {id, m.feature}, m.point, pose.pose, 2)) continue;
             ++heldout;
             heldout_points.push_back(m.point);
             const auto& p = image.features.keypoints[m.feature];
             heldout_pixels.emplace_back(p.x, p.y);
+            heldout_anchors.insert(depth_anchors[m.track].begin(), depth_anchors[m.track].end());
             cells.emplace(static_cast<int>(std::clamp(4*p.x/std::max(1u,camera.width), 0.F, 3.F)),
                           static_cast<int>(std::clamp(4*p.y/std::max(1u,camera.height), 0.F, 3.F)));
         }
         const double fit_ratio=static_cast<double>(pose.num_inliers)/points.size();
+        if (!tentative_matches.empty() && heldout_anchors.size() < 3) { reject("insufficient_validation_anchors"); continue; }
         // Candidate tracks contain outliers; demand held-out support consistent
         // with the robust fit, not 80% of every proposed correspondence.
         // The Wilson lower 95% bound accounts for the finite fit sample.
@@ -995,6 +1030,12 @@ std::vector<Index> recover_stable_resections(
             if (!patch_supported) { reject("insufficient_validation_cells"); continue; }
         }
         if (!noncollinear(heldout_points)) { reject("ill_conditioned_validation_points"); continue; }
+        if (!tentative_matches.empty()) {
+            unsigned final_support = 0;
+            for (const auto& [feature, m] : unique)
+                final_support += supports(scene, {id, feature}, m.point, pose.pose, 2);
+            if (final_support < 30) { reject("insufficient_final_support"); continue; }
+        }
         for (const auto& [feature, m] : unique)
             if (supports(scene, {id, feature}, m.point, pose.pose, 2)) accepted[id].push_back(m);
         scene.images[id].pose = pose.pose;

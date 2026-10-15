@@ -199,6 +199,60 @@ int main() {
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
         {
+            Scene missing = fixture();
+            for (Index id = 4; id < 8; ++id) missing.images[id].registered = false;
+            for (auto& track : missing.tracks)
+                std::erase_if(track.observations, [](const auto& obs) { return obs.image_id >= 4; });
+            std::erase_if(missing.pairs, [](const auto& pair) { return pair.id2 >= 4; });
+            const auto before = missing;
+            std::vector<RawPairMatches> tentative;
+            for (Index id = 4; id < 8; ++id) for (Index anchor = 0; anchor < 3; ++anchor) {
+                RawPairMatches pair;
+                pair.id1 = id; pair.id2 = anchor;
+                for (Index f = 0; f < 160; ++f) pair.matches.push_back({f, f});
+                tentative.push_back(std::move(pair));
+            }
+            expect(recover_stable_resections(missing, stable, tentative).size() == 4,
+                "tentative map links must recover views without inherited pair geometry");
+            for (Index id = 0; id < 4; ++id)
+                expect(missing.images[id].pose.C == before.images[id].pose.C &&
+                       missing.images[id].pose.R == before.images[id].pose.R,
+                       "map recovery must preserve every frozen camera exactly");
+            for (Index id = 4; id < 8; ++id)
+                expect((missing.images[id].pose.C - Vec3(0.25 * id, 0.12 * (id % 2), 0)).norm() < 0.01,
+                       "map recovery must solve missing poses from independent depths");
+            Scene false_matches = before;
+            for (auto& pair : tentative) for (auto& m : pair.matches)
+                m.train = (m.query * 71 + 13) % 160;
+            expect(recover_stable_resections(false_matches, stable, tentative).empty(),
+                "consistent descriptor aliases must still pass geometric validation");
+            for (unsigned count : {29U, 37U}) {
+                Scene sparse = before;
+                sparse.tracks.resize(count);
+                // Each depth has only two frozen views, but independent
+                // landmarks cover three cameras in both fit and validation.
+                for (Index t = 0; t < sparse.tracks.size(); ++t)
+                    std::erase_if(sparse.tracks[t].observations, [t](const auto& obs) {
+                        return obs.image_id == 3 || obs.image_id == t % 3;
+                    });
+                auto links = tentative;
+                for (auto& pair : links) {
+                    pair.matches.clear();
+                    for (Index f = 0; f < count; ++f) pair.matches.push_back({f, f});
+                }
+                const auto recovered = recover_stable_resections(sparse, stable, links);
+                expect(recovered.size() == (count == 37 ? 4 : 0),
+                    "sparse frozen-map recovery must retain the 30-observation final minimum");
+                Scene two_view_only = before;
+                for (auto& track : two_view_only.tracks)
+                    std::erase_if(track.observations, [](const auto& obs) { return obs.image_id >= 2; });
+                expect(recover_stable_resections(two_view_only, stable, links).empty(),
+                    "tentative recovery cannot certify itself from only two anchor cameras");
+            }
+            expect(recover_missing_views(missing) == 0,
+                "a complete reconstruction must bypass re-extraction entirely");
+        }
+        {
             const auto add_witnesses = [](Scene& source) {
                 const Pose3D target{Mat3::Identity(), Vec3(1.5, 0, 0)};
                 for (Index anchor : {0u, 1u}) {

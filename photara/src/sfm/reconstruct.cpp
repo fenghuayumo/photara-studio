@@ -1880,6 +1880,9 @@ ReconstructionSummary reconstruct_from_frontend(
                            config.global_positioning, config.resection);
     }
     finish_alignment_recovery(scene, config);
+    if (recover_missing_views(scene, config.frontend) > 0)
+        prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
+                                       config.maximum_final_reprojection_error_pixels);
     audit_position_support(scene);
     return summarize_scene(scene);
 }
@@ -1901,6 +1904,9 @@ ReconstructionSummary reconstruct(
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
         finish_alignment_recovery(scene_out, config);
+        if (recover_missing_views(scene_out, config.frontend) > 0)
+            prune_unsupported_registrations(scene_out, config.minimum_final_observations_per_image,
+                                           config.maximum_final_reprojection_error_pixels);
         audit_position_support(scene_out);
         if (config.resection.checkpoint_callback)
             config.resection.checkpoint_callback(scene_out);

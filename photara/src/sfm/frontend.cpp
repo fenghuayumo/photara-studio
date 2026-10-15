@@ -8,6 +8,7 @@
 #include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
+#include "sfm/triangulation.hpp"
 #include "sfm/camera_selection.hpp"
 #include <cctype>
 #include "sfm/align_live.hpp"
@@ -22,11 +23,14 @@
 #include <condition_variable>
 #include <future>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -2816,6 +2820,261 @@ FrontEndResult run_frontend(
         " observations=", observation_count, " avg_views/track=",
         average(observation_count, scene.tracks.size()));
     return result;
+}
+
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
+    std::vector<Index> missing;
+    for (Index id = 0; id < scene.images.size(); ++id)
+        if (!scene.images[id].registered) missing.push_back(id);
+    if (missing.empty() || scene.registered_count() < 3 ||
+        scene.registered_count() * 2 < scene.images.size()) return 0;
+    if ((!options.pipeline.empty() && options.pipeline != "none") ||
+        (options.extractor != "siftgpu" && options.extractor != "vulkan_sift" && options.extractor != "sift")) return 0;
+    for (Index id : missing)
+        if (!std::filesystem::is_regular_file(scene.images[id].path)) return 0;
+    core::StageScope stage("sfm.missing_view_recovery");
+    FrontEndOptions recovery = options;
+    recovery.max_features = std::max(options.max_features, options.progressive_rescue_max_features);
+    recovery.match_ratio = options.match_ratio;
+    if (recovery.matcher != "gpu_mutual_ratio" && recovery.matcher != "vulkan_mutual_ratio")
+        recovery.matcher = "mutual_ratio";
+    auto extractor = make_frontend_extractor(recovery);
+    auto matcher = make_frontend_matcher(recovery);
+    unsigned recovered_count = 0;
+    for (Index target : missing) {
+        // Rebuild only local depths. Neither the inherited missing pose nor
+        // the main map's triangulated points enter this independent solve.
+        std::vector<Index> neighbors;
+        for (Index id = 0; id < scene.images.size(); ++id)
+            if (scene.images[id].registered) neighbors.push_back(id);
+        std::stable_sort(neighbors.begin(), neighbors.end(), [target](Index a, Index b) {
+            const auto distance = [target](Index id) { return id > target ? id - target : target - id; };
+            return distance(a) < distance(b);
+        });
+        if (neighbors.size() > 16) neighbors.resize(16);
+        neighbors.push_back(target);
+        Scene local;
+        local.thread_count = scene.thread_count;
+        local.cameras = scene.cameras;
+        for (auto& camera : local.cameras) camera.trust_intrinsics = true;
+        for (Index global : neighbors) {
+            Image image = scene.images[global];
+            image.id = static_cast<Index>(local.images.size());
+            const auto gray = io::load_gray(image.path);
+            image.features = select_top_features_grid_3x3(
+                apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
+                    find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
+            image.features.compress_descriptors_u8();
+            local.images.push_back(std::move(image));
+        }
+        const Index candidate = static_cast<Index>(neighbors.size() - 1);
+        std::vector<RawPairMatches> tentative;
+        std::vector<ImagePair> boundary_geometry;
+        for (Index a = 0; a < candidate; ++a) {
+            for (Index b = a + 1; b < candidate; ++b) {
+                ImagePair pair(a, b);
+                pair.relative_pose = local.images[b].pose / local.images[a].pose;
+                const Vec3 baseline = local.images[b].pose.C - local.images[a].pose.C;
+                if (baseline.norm() < 1e-10) continue;
+                const auto& first = local.images[a]; const auto& second = local.images[b];
+                const double angular = std::max(local.camera_of(first).pixel_error_to_angular(4),
+                                                local.camera_of(second).pixel_error_to_angular(4));
+                const auto matched = matcher->match(first.features, second.features);
+                for (const auto& m : matched.matches) {
+                    const auto& x = first.features.keypoints[m.query];
+                    const auto& y = second.features.keypoints[m.train];
+                    const Vec3 u = first.pose.R.transpose() * local.camera_of(first).unproject_normalized(Vec2(x.x, x.y));
+                    const Vec3 v = second.pose.R.transpose() * local.camera_of(second).unproject_normalized(Vec2(y.x, y.y));
+                    const Vec3 normal = baseline.cross(u);
+                    if (normal.norm() > 1e-10 && std::abs(normal.normalized().dot(v)) <= std::sin(angular))
+                        pair.matches.push_back({m.query, m.train});
+                }
+                if (pair.matches.size() >= 8) local.pairs.push_back(std::move(pair));
+            }
+            RawPairMatches boundary;
+            boundary.id1 = candidate; boundary.id2 = a;
+            boundary.matches = matcher->match(local.images[candidate].features, local.images[a].features).matches;
+            std::vector<features::FeatureMatch> reversed;
+            for (auto m : boundary.matches) { std::swap(m.query, m.train); reversed.push_back(m); }
+            auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
+            if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+            tentative.push_back(std::move(boundary));
+        }
+        matcher->clear_prepared();
+        build_tracks(local);
+        // Boundary geometry audits the recovered pose, but cannot influence
+        // the anchor-only feature unions used to triangulate its depths.
+        for (auto& pair : boundary_geometry) local.pairs.push_back(std::move(pair));
+        std::vector<std::uint8_t> stable(neighbors.size(), 1);
+        stable[candidate] = 0;
+        auto recovered = recover_stable_resections(local, stable, tentative);
+        if (recovered.empty()) {
+            // A small PnP consensus is only a search seed, never a registered
+            // camera. Geometry-guided matching can resolve descriptor aliases;
+            // the resulting pose must still pass every final resection audit.
+            TriangulationOptions triangulation;
+            triangulation.min_angle_deg = 2;
+            triangulation.reproj_threshold_px = 2;
+            triangulation.split_tracks = false;
+            triangulate_tracks(local, false, triangulation);
+            std::vector<std::unordered_map<Index, Index>> feature_tracks(candidate);
+            for (Index t = 0; t < local.tracks.size(); ++t) {
+                const auto& track = local.tracks[t];
+                for (std::size_t o = 0; o < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++o) {
+                    const auto& obs = track.observations[o];
+                    if (obs.image_id < candidate) feature_tracks[obs.image_id].emplace(obs.feature_id, t);
+                }
+            }
+            std::map<Index, std::map<Index, unsigned>> votes;
+            for (const auto& pair : tentative) for (const auto& m : pair.matches)
+                if (const auto it = feature_tracks[pair.id2].find(m.train); it != feature_tracks[pair.id2].end())
+                    ++votes[m.query][it->second];
+            std::vector<Vec3> bearings, points;
+            const auto& query = local.images[candidate].features;
+            const auto& camera = local.camera_of(local.images[candidate]);
+            for (const auto& [f, tracks] : votes) {
+                auto best = tracks.begin();
+                bool tied = false;
+                for (auto it = std::next(tracks.begin()); it != tracks.end(); ++it) {
+                    if (it->second > best->second) { best = it; tied = false; }
+                    else if (it->second == best->second) tied = true;
+                }
+                if (tied) continue;
+                const auto& kp = query.keypoints[f];
+                bearings.push_back(camera.unproject(Vec2(kp.x, kp.y)));
+                points.push_back(local.tracks[best->first].position);
+            }
+            AbsolutePoseOptions seed_options;
+            seed_options.min_inliers = 8;
+            seed_options.max_reproj_error_px = 2;
+            seed_options.max_iterations = 50000;
+            const auto seed = estimate_absolute_pose(bearings, points, camera, seed_options);
+            core::Logger::instance().info("missing view search seed: image=", scene.images[target].path.filename(),
+                " success=", seed.success, " inliers=", seed.num_inliers);
+            if (seed.success) {
+                constexpr int cell_size = 16;
+                const int columns = (query.image_width + cell_size - 1) / cell_size;
+                const int rows = (query.image_height + cell_size - 1) / cell_size;
+                std::vector<std::vector<Index>> grid(columns * rows);
+                for (Index f = 0; f < query.keypoints.size(); ++f) {
+                    const auto& kp = query.keypoints[f];
+                    const int x = int(kp.x) / cell_size, y = int(kp.y) / cell_size;
+                    if (x >= 0 && y >= 0 && x < columns && y < rows) grid[y * columns + x].push_back(f);
+                }
+                std::vector<RawPairMatches> guided;
+                for (Index anchor = 0; anchor < candidate; ++anchor) {
+                    RawPairMatches pair; pair.id1 = candidate; pair.id2 = anchor;
+                    const auto& train = local.images[anchor].features;
+                    for (const auto& [f, t] : feature_tracks[anchor]) {
+                        Vec2 pixel;
+                        if (!camera.project_checked(seed.pose.transform_world_to_camera(local.tracks[t].position), pixel)) continue;
+                        if (pixel.x() < 0 || pixel.y() < 0 || pixel.x() >= query.image_width || pixel.y() >= query.image_height) continue;
+                        unsigned best = std::numeric_limits<unsigned>::max(), second = best;
+                        Index winner = k_invalid;
+                        const int gx = int(pixel.x()) / cell_size, gy = int(pixel.y()) / cell_size;
+                        for (int y = std::max(0, gy - 1); y <= std::min(rows - 1, gy + 1); ++y)
+                            for (int x = std::max(0, gx - 1); x <= std::min(columns - 1, gx + 1); ++x)
+                                for (Index q : grid[y * columns + x]) {
+                                    const auto& kp = query.keypoints[q];
+                                    if ((Vec2(kp.x, kp.y) - pixel).squaredNorm() > 64) continue;
+                                    unsigned distance = 0;
+                                    for (std::size_t d = 0; d < query.descriptor_dimension; ++d) {
+                                        const int delta = int(query.descriptors_u8[q * query.descriptor_dimension + d]) -
+                                            int(train.descriptors_u8[f * train.descriptor_dimension + d]);
+                                        distance += delta * delta;
+                                    }
+                                    if (distance < best) { second = best; best = distance; winner = q; }
+                                    else if (distance < second) second = distance;
+                                }
+                        if (winner != k_invalid && best <= 65536 &&
+                            (second == std::numeric_limits<unsigned>::max() || best < 0.75F * 0.75F * second))
+                            pair.matches.push_back({winner, f});
+                    }
+                    guided.push_back(std::move(pair));
+                }
+                std::map<std::pair<Index, Index>, std::set<Index>> independent_links;
+                for (const auto& pair : guided) for (const auto& m : pair.matches)
+                    independent_links[{m.query, feature_tracks[pair.id2].at(m.train)}].insert(pair.id2);
+                for (auto& pair : guided)
+                    std::erase_if(pair.matches, [&](const auto& m) {
+                        return independent_links.at({m.query, feature_tracks[pair.id2].at(m.train)}).size() < 2;
+                    });
+                recovered = recover_stable_resections(local, stable, guided);
+            }
+        }
+        if (recovered.empty()) continue;
+        // Commit only independently certified new observations and landmarks.
+        // Original camera poses, calibration, points and observations stay exact.
+        std::vector<std::unordered_map<KeypointIdentity, Index, KeypointIdentityHash>> existing(neighbors.size());
+        for (Index id = 0; id < neighbors.size(); ++id) {
+            const auto& keypoints = scene.images[neighbors[id]].features.keypoints;
+            for (Index f = 0; f < keypoints.size(); ++f) existing[id].emplace(keypoint_identity(keypoints[f]), f);
+        }
+        std::map<Index, std::vector<FeatureMatch>> certified_links;
+        for (const auto& source : local.tracks) {
+            bool seen = false;
+            for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o)
+                seen = seen || source.observations[o].image_id == candidate;
+            if (!seen) continue;
+            Track track;
+            track.position = source.position;
+            for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o) {
+                const auto& obs = source.observations[o];
+                const auto& kp = local.images[obs.image_id].features.keypoints[obs.feature_id];
+                auto& keypoints = scene.images[neighbors[obs.image_id]].features.keypoints;
+                auto [it, added] = existing[obs.image_id].emplace(keypoint_identity(kp), static_cast<Index>(keypoints.size()));
+                if (added) keypoints.push_back(kp);
+                track.observations.push_back({neighbors[obs.image_id], it->second});
+            }
+            track.num_inliers = static_cast<std::uint8_t>(track.observations.size());
+            const auto target_obs = std::find_if(track.observations.begin(), track.observations.end(),
+                [target](const auto& obs) { return obs.image_id == target; });
+            for (const auto& obs : track.observations)
+                if (obs.image_id != target)
+                    certified_links[obs.image_id].push_back({target_obs->feature_id, obs.feature_id});
+            scene.tracks.push_back(std::move(track));
+        }
+        scene.images[target].pose = local.images[candidate].pose;
+        scene.images[target].registered = true;
+        // Retain the newly certified 3D-to-image links in the graph. Otherwise
+        // a warm-cache audit would see an isolated camera and discard it again.
+        for (auto& [anchor, links] : certified_links) {
+            if (links.size() < 3) continue;
+            ImagePair pair(target, anchor);
+            pair.relative_pose = scene.images[pair.id2].pose / scene.images[pair.id1].pose;
+            if (pair.relative_pose->C.norm() < 1e-10) continue;
+            pair.relative_pose->C.normalize();
+            std::set<std::pair<int, int>> cells;
+            const auto& camera = scene.camera_of(scene.images[target]);
+            for (auto m : links) {
+                const auto& kp = scene.images[target].features.keypoints[m.query];
+                cells.emplace(int(4 * kp.x / std::max(1u, camera.width)), int(4 * kp.y / std::max(1u, camera.height)));
+                if (pair.id1 != target) std::swap(m.query, m.train);
+                pair.matches.push_back(m);
+            }
+            pair.weight_spatial = static_cast<float>(cells.size()) / 16.F;
+            const auto previous = std::find_if(scene.pairs.begin(), scene.pairs.end(), [&](const auto& value) {
+                return value.id1 == pair.id1 && value.id2 == pair.id2;
+            });
+            if (previous == scene.pairs.end()) scene.pairs.push_back(std::move(pair));
+            else *previous = std::move(pair);
+        }
+        ++recovered_count;
+    }
+    if (recovered_count) rebuild_track_index(scene);
+    // A blurred frame can have fewer strong corners than the final support
+    // minimum. Retry only the still-missing views with low-contrast SIFT;
+    // previously accepted geometry is not rebuilt or optimized.
+    if (options.sift_contrast_threshold > 0.001 &&
+        scene.registered_count() < scene.images.size()) {
+        FrontEndOptions finer = options;
+        finer.sift_contrast_threshold = 0.001;
+        finer.match_ratio = std::max(options.match_ratio, options.progressive_rescue_match_ratio);
+        recovered_count += recover_missing_views(scene, finer);
+    }
+    core::Logger::instance().info("missing view recovery: candidates=", missing.size(),
+        " recovered=", recovered_count, " frozen_registered_poses=1 frozen_intrinsics=1 frozen_landmarks=1");
+    return recovered_count;
 }
 
 }  // namespace photara::sfm

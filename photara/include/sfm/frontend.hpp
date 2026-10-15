@@ -107,4 +107,8 @@ FrontEndResult run_frontend(
     const std::vector<std::filesystem::path>& image_paths,
     const FrontEndOptions& options = {});
 
+// Late descriptor-to-map recovery. Existing cameras and intrinsics are frozen;
+// new poses must pass the stable resection's independent held-out checks.
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {});
+
 }  // namespace photara::sfm
