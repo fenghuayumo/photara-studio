@@ -78,6 +78,7 @@ int main() {
             image.position_audit=i==0?photara::sfm::PositionAudit::graph_supported:
                                      photara::sfm::PositionAudit::unverified;
         }
+        source.images[0].path = std::filesystem::path(u8"标准数据集-办公室") / u8"图像01.jpg";
         const auto decoded=photara::sfm::decode_asfm(photara::sfm::encode_asfm(source));
         const auto task_root = std::filesystem::temp_directory_path() /
             ("photara-transient-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -140,6 +141,8 @@ int main() {
             require(entry.path().extension() != ".ascan", "task cache contains no ascan files");
         std::filesystem::remove_all(task_root);
         const auto imported=editor::sparse_scene_from_sfm(decoded,false);
+        require(imported.scene.views[0].name == editor::path_to_utf8(source.images[0].path.filename()),
+                "Chinese camera image names reach the UI as UTF-8");
         const auto counts=imported.scene.position_audit_counts();
         require(counts.audited==2 && counts.unverified==1 && counts.unaudited==0,
                 "native project loading preserves risk and excludes unregistered cameras");

@@ -2,6 +2,7 @@
 
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "pipeline.hpp"
 #include "theme.hpp"
 
 #include "io/image.hpp"
@@ -319,7 +320,7 @@ QaItem item_at(
     if (!scene.views.empty()) {
         if (static_cast<std::size_t>(index) >= scene.views.size()) return item;
         const ViewPose& pose = scene.views[static_cast<std::size_t>(index)];
-        item.name = pose.name.empty() ? pose.image_path.filename().string()
+        item.name = pose.name.empty() ? path_to_utf8(pose.image_path.filename())
                                       : pose.name;
         item.path = pose.image_path;
         item.pose = &pose;
@@ -329,7 +330,7 @@ QaItem item_at(
     if (static_cast<std::size_t>(index) >= state.folder_images.size())
         return item;
     item.path = state.folder_images[static_cast<std::size_t>(index)];
-    item.name = item.path.filename().string();
+    item.name = path_to_utf8(item.path.filename());
     return item;
 }
 
@@ -1241,7 +1242,7 @@ void draw_image_qa(
         if (has_gt) {
             const std::string name_a = live->path_a.empty()
                 ? std::string{}
-                : live->path_a.filename().string();
+                : path_to_utf8(live->path_a.filename());
             draw_named_chip(
                 draw, {a_min.x + 8.F, a_min.y + 8.F}, "A", name_a.c_str(),
                 theme::accent);
@@ -1249,7 +1250,7 @@ void draw_image_qa(
         if (has_b) {
             const std::string name_b = live->path_b.empty()
                 ? std::string{}
-                : live->path_b.filename().string();
+                : path_to_utf8(live->path_b.filename());
             draw_named_chip(
                 draw, {b_min.x + 8.F, b_min.y + 8.F}, "B", name_b.c_str(),
                 theme::warning);
@@ -1360,7 +1361,7 @@ void draw_image_qa(
                 theme::u32(theme::warning, 0.85F));
             const std::string name_a = live->path_a.empty()
                 ? std::string{}
-                : live->path_a.filename().string();
+                : path_to_utf8(live->path_a.filename());
             if (!name_a.empty())
                 draw_named_chip(
                     draw, {img_min.x + 8.F, img_min.y + 8.F}, tr("Photo"),
