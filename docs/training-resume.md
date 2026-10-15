@@ -42,7 +42,8 @@ training. Inputs, cameras and numerical training settings are fingerprinted; a
 mismatch requires a new training run.
 
 Scale regularization now uses `scale_regularization_weight` (CLI:
-`--splat-scale-reg`) on the mean actual Gaussian scale, with a default of zero.
+`--splat-scale-reg`) on the mean actual Gaussian scale. Standard and High quality default to
+scale weight 0.01 and needle-suppression weight 0.001; Fast disables both.
 The old `log_scale_regularization_weight` Python name,
 `--splat-log-scale-reg` CLI flag and separate `shape_scale_reg` log-scale penalty
 have been removed. Projects
@@ -65,6 +66,19 @@ Image fitting, Geometry, Gaussians and Colour. Advanced constraints are collapse
 by default; colour-model-specific controls appear only when that model is enabled.
 Weights, bounds and descriptions share one definition in `splat/loss_settings.hpp`.
 The same definition drives CLI validation, project persistence and engine mapping.
+
+Selecting Standard or High quality resets objective settings to their defaults,
+including scale compactness 0.01 and needle suppression 0.001. Their weights remain
+editable, and explicit zero values stay disabled when a project is reopened.
+Fast uses only RGB image fitting (L1 + SSIM): mask-alpha, SH, scale, shape,
+geometry, normal-field and colour-correction penalties are disabled, as are
+optimizer opacity/scale decay and mean noise. Masked-out pixels may still be
+excluded from RGB fitting. Fast enforces this policy after CLI overrides and
+automatic mesh/strategy setup, so stale project settings cannot enable extra
+constraints. Studio shows only RGB controls in Fast; switch modes to edit others.
+Selecting a mode also turns off optional geometry, normal-field and colour
+correction toggles; Gaussian mesh extraction can still enable geometry supervision
+in Standard and High quality.
 
 Controls show suggested tuning ranges below their labels. Hover a label or
 value for the default, legal input bounds, starting value and adjustment advice.

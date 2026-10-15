@@ -1,6 +1,7 @@
 #pragma once
 
 #include "splat/options.hpp"
+#include "splat/training_preset.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -17,8 +18,8 @@ struct TrainingLossSettings {
     float ssim_weight{0.2F};
     float match_alpha_weight{0.25F};
     float opacity_regularization_weight{0.F};
-    float scale_regularization_weight{0.F};
-    float shape_erank_reg{0.F};
+    float scale_regularization_weight{0.01F};
+    float shape_erank_reg{0.001F};
     float shape_axis_ratio_reg{0.F};
     float shape_max_axis_ratio{100.F};
     float sh_regularization_weight{0.001F};
@@ -81,11 +82,11 @@ inline constexpr auto k_training_loss_fields = std::to_array<TrainingLossField>(
      LossGroup::gaussian, false, "splat-opacity-reg", "Opacity sparsity",
      "Reduces unnecessary opaque Gaussians. Zero disables this constraint.", .001F, .01F,
      "Start at 0.005 when enabling sparsity; reduce if fine structures disappear."},
-    {&TrainingLossSettings::scale_regularization_weight, &TrainingOptions::scale_regularization_weight, 0.F, 0.F, std::numeric_limits<float>::max(),
+    {&TrainingLossSettings::scale_regularization_weight, &TrainingOptions::scale_regularization_weight, 0.01F, 0.F, std::numeric_limits<float>::max(),
      LossGroup::gaussian, false, "splat-scale-reg", "Scale compactness",
      "Shrinks large Gaussians more strongly. Strength decreases during training.", .001F, .1F,
      "Start at 0.01; increase for oversized Gaussians and reduce if surfaces develop gaps. Adjust with scene scale."},
-    {&TrainingLossSettings::shape_erank_reg, &TrainingOptions::shape_erank_reg, 0.F, 0.F, std::numeric_limits<float>::max(),
+    {&TrainingLossSettings::shape_erank_reg, &TrainingOptions::shape_erank_reg, 0.001F, 0.F, std::numeric_limits<float>::max(),
      LossGroup::gaussian, false, "splat-shape-erank-reg", "Needle suppression",
      "Discourages needle-like Gaussians while allowing thin surfaces.", .001F, .01F,
      "Start at 0.001; increase for needle-like artifacts and check thin structures."},
@@ -178,6 +179,41 @@ inline constexpr auto k_training_loss_fields = std::to_array<TrainingLossField>(
      "Bounds per-view white-balance parameters. Zero removes the bound.", 1.F, 3.F,
      "Start at 2; increase for larger white-balance differences. Zero removes the bound."},
 });
+
+[[nodiscard]] constexpr bool is_rgb_loss(const TrainingLossField& field) {
+    return field.value == &TrainingLossSettings::photometric_weight ||
+        field.value == &TrainingLossSettings::ssim_weight;
+}
+
+inline void disable_training_constraints(TrainingLossSettings& settings) {
+    for (const auto& field : k_training_loss_fields)
+        if (!is_rgb_loss(field) && field.minimum == 0.F) settings.*field.value = 0.F;
+    settings.geometry_training = false;
+}
+
+inline void apply_training_loss_preset(TrainingLossSettings& settings, TrainingMode mode) {
+    settings = TrainingLossSettings{};
+    if (mode == TrainingMode::fast) disable_training_constraints(settings);
+}
+
+// Apply last, after user overrides and automatic mesh/strategy setup.
+inline void enforce_training_loss_mode(TrainingOptions& options, TrainingMode mode) {
+    if (mode != TrainingMode::fast) return;
+    for (const auto& field : k_training_loss_fields)
+        if (!is_rgb_loss(field) && field.minimum == 0.F) options.*field.training_value = 0.F;
+    options.use_depth_normal_loss = false;
+    options.use_normal_field = false;
+    options.use_mvs_depth = false;
+    options.use_mvs_normals = false;
+    options.use_ppisp = false;
+    options.use_bilateral_grid = false;
+    options.depth_weight = 0.F;
+    options.normal_weight = 0.F;
+    options.opacity_decay = 0.F;
+    options.scale_decay = 0.F;
+    options.mean_noise_weight = 0.F;
+    options.constrain_scale_range = false;
+}
 
 inline constexpr std::size_t k_training_loss_payload_bytes =
     k_training_loss_fields.size() * sizeof(float) + 2 * sizeof(std::int32_t) + sizeof(std::uint8_t);

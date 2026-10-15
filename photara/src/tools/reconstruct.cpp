@@ -231,7 +231,6 @@ struct ReconstructCli {
     unsigned splat_geometry_from_iter{7'000};
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
-    std::optional<float> splat_shape_erank_reg;
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
     float splat_growth_factor{0.F};
@@ -1593,8 +1592,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-min-scale-fraction"].as<float>();
     cli.splat_max_scale_fraction =
         result["splat-max-scale-fraction"].as<float>();
-    if (result.count("splat-shape-erank-reg"))
-        cli.splat_shape_erank_reg = result["splat-shape-erank-reg"].as<float>();
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
     cli.splat_bilateral_grid = result["splat-bilateral-grid"].as<bool>();
     cli.splat_bilateral_grid_shared =
@@ -1976,10 +1973,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!std::isfinite(cli.loss_settings.shape_axis_ratio_reg) || cli.loss_settings.shape_axis_ratio_reg < 0.F ||
         !std::isfinite(cli.loss_settings.shape_max_axis_ratio) || cli.loss_settings.shape_max_axis_ratio < 1.F)
         throw std::invalid_argument("Axis-ratio penalty requires non-negative finite weight and finite threshold >= 1");
-    if (cli.splat_shape_erank_reg &&
-        (!std::isfinite(*cli.splat_shape_erank_reg) || *cli.splat_shape_erank_reg < 0.F))
-        throw std::invalid_argument(
-            "--splat-shape-erank-reg must be finite and non-negative");
     if (cli.splat_strategy != "adc_plus" &&
         cli.splat_strategy != "adc_igs" &&
         cli.splat_strategy != "emc")
@@ -2160,6 +2153,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.extractor_min_score < -1.F || cli.extractor_min_score > 1.F)
         throw std::invalid_argument(
             "--extractor-min-score must be -1 or in [0, 1]");
+    if (cli.splat_mode == photara::splat::TrainingMode::fast) {
+        photara::splat::disable_training_constraints(cli.loss_settings);
+        cli.splat_normal_field = false;
+        cli.splat_ppisp = false;
+        cli.splat_bilateral_grid = false;
+        cli.splat_constrain_scales = false;
+    }
     return cli;
 }
 
@@ -3674,8 +3674,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     // forcing it for every dense input clips tangential splats and removes
     // legitimate surface coverage in sparsely sampled detail regions.
     options.constrain_scale_range = cli.splat_constrain_scales;
-    if (cli.splat_shape_erank_reg)
-        options.shape_erank_reg = *cli.splat_shape_erank_reg;
+    options.shape_erank_reg = cli.loss_settings.shape_erank_reg;
     options.shape_axis_ratio_reg = cli.loss_settings.shape_axis_ratio_reg;
     options.shape_max_axis_ratio = cli.loss_settings.shape_max_axis_ratio;
     for (std::size_t i = 0; i < photara::splat::k_training_loss_fields.size(); ++i) {
@@ -3733,6 +3732,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
          options.multi_view_geo_weight > 0.F ||
          options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
+    photara::splat::enforce_training_loss_mode(options, cli.splat_mode);
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
         : cli.splat_strategy.c_str();

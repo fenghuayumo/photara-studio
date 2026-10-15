@@ -316,6 +316,8 @@ Settings decode_settings(
         settings.shape_erank_reg = reader.value<float>();
         settings.shape_axis_ratio_reg = reader.value<float>();
         settings.shape_max_axis_ratio = reader.value<float>();
+    } else {
+        settings.shape_erank_reg = 0.F;
     }
     if (version >= 10) (void)reader.value<float>();  // Retired log-scale weight.
     settings.scale_regularization_weight = version >= 11 ? reader.value<float>() : 0.F;

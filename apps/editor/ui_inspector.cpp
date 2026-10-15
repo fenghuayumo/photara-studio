@@ -84,6 +84,7 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
     for (const auto& field : photara::splat::k_training_loss_fields) {
         if (field.group != group || field.advanced != advanced ||
             !objective_field_visible(settings, field)) continue;
+        if (settings.training_mode == 0 && !photara::splat::is_rgb_loss(field)) continue;
         ImGui::PushID(field.cli);
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -117,6 +118,17 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
 void draw_training_objective(App& app) {
     if (!ImGui::TreeNodeEx(tr("Loss & constraints"), ImGuiTreeNodeFlags_SpanAvailWidth)) return;
     auto& settings = app.settings;
+    if (settings.training_mode == 0) {
+        photara::splat::disable_training_constraints(settings);
+        settings.normal_field = false;
+        settings.ppisp_layout = 0;
+        settings.bilateral_grid = false;
+        objective_note("Fast mode uses RGB image fitting (L1 + SSIM) only. Switch to Standard or High quality to enable constraints.");
+        objective_fields(settings, LossGroup::image, false);
+        settings.sanitize();
+        ImGui::TreePop();
+        return;
+    }
     objective_note("Fit the photos, stabilize geometry and limit overfitting. Zero disables a penalty.");
     if (ImGui::BeginTabBar("##objective_tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
         const struct { const char* title; LossGroup group; } tabs[]{
@@ -617,6 +629,11 @@ Action draw_inspector(App& app) {
                 if (ImGui::Selectable(modes[index], !customized && mode == index)) {
                     const auto selected = photara::splat::training_preset(
                         static_cast<photara::splat::TrainingMode>(index));
+                    photara::splat::apply_training_loss_preset(app.settings,
+                        static_cast<photara::splat::TrainingMode>(index));
+                    app.settings.normal_field = false;
+                    app.settings.ppisp_layout = 0;
+                    app.settings.bilateral_grid = false;
                     app.settings.training_mode = index;
                     app.settings.iterations = static_cast<int>(selected.iterations);
                     app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
@@ -626,9 +643,10 @@ Action draw_inspector(App& app) {
             ImGui::EndCombo();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
+            ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
                 "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
-                "High quality: 50,000 steps, 5M Gaussians, no pruning."));
+                "High quality: 50,000 steps, 5M Gaussians, no pruning."),
+                tr("Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."));
         theme::caption("Capture type");
         ImGui::SetNextItemWidth(-1.F);
         const char* capture[] = {tr("Object"), tr("Scene")};
