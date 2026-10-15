@@ -2057,6 +2057,7 @@ GaussianModel Trainer::train(
         }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;
+        float weighted_multi_view_geometry = 0.F, weighted_multi_view_ncc = 0.F;
         DepthSampleGradients multi_view_sample_gradients;
         bool has_multi_view_sample_gradients = false;
         if (multi_view_active) {
@@ -2091,14 +2092,9 @@ GaussianModel Trainer::train(
                 CudaTrainingStage::multi_view_sample_backward);
             has_multi_view_sample_gradients = true;
             if (report_progress) {
-                loss.total += multi_view_options.multi_view_geo_weight *
-                                  multi_view_loss.geometry +
-                              multi_view_options.multi_view_ncc_weight *
-                                  multi_view_loss.ncc;
-                loss.depth_value += multi_view_options.multi_view_geo_weight *
-                                    multi_view_loss.geometry;
-                loss.normal_value += multi_view_options.multi_view_ncc_weight *
-                                     multi_view_loss.ncc;
+                weighted_multi_view_geometry = multi_view_options.multi_view_geo_weight * multi_view_loss.geometry;
+                weighted_multi_view_ncc = multi_view_options.multi_view_ncc_weight * multi_view_loss.ncc;
+                loss.total += weighted_multi_view_geometry + weighted_multi_view_ncc;
             }
         } else {
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
@@ -2667,7 +2663,7 @@ GaussianModel Trainer::train(
                 opacity_stats.gradient_mean,
                 opacity_stats.positive_gradient_fraction,
                 opacity_stats.opacity_mean,
-                milliseconds, multi_view_loss.geometry, multi_view_loss.ncc,
+                milliseconds, weighted_multi_view_geometry, weighted_multi_view_ncc,
                 multi_view_loss.geometry_pixels,
                 multi_view_loss.ncc_pixels, active_resolution_scale,
                 target.camera.width, target.camera.height,

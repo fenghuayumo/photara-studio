@@ -140,6 +140,11 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.shape_max_axis_ratio);
     writer.value(0.F);  // Retired v10 log-scale weight.
     writer.value(settings.scale_regularization_weight);
+    for (const auto& field : splat::k_training_loss_fields)
+        writer.value(settings.*field.value);
+    writer.value(static_cast<std::uint8_t>(settings.geometry_training));
+    writer.value(static_cast<std::int32_t>(settings.normal_field_from_iter));
+    writer.value(static_cast<std::int32_t>(settings.ppisp_model));
     return writer.take();
 }
 
@@ -322,6 +327,14 @@ Settings decode_settings(
         settings.shape_axis_ratio_reg = 0.F;
     if (!std::isfinite(settings.shape_max_axis_ratio) || settings.shape_max_axis_ratio < 1.F)
         settings.shape_max_axis_ratio = 100.F;
+    if (version >= 12) {
+        for (const auto& field : splat::k_training_loss_fields)
+            settings.*field.value = reader.value<float>();
+        settings.geometry_training = reader.value<std::uint8_t>() != 0;
+        settings.normal_field_from_iter = reader.value<std::int32_t>();
+        settings.ppisp_model = reader.value<std::int32_t>();
+    }
+    settings.sanitize();
     return settings;
 }
 

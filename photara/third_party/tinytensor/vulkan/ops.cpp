@@ -205,6 +205,25 @@ BufferView buffer_view(const Tensor& tensor) {
             static_cast<VkDeviceSize>(tensor.bytes())};
 }
 
+void apply_oversize_penalty(Tensor& log_scales, const Tensor& radii,
+    float inverse_resolution, float screen_limit, float penalty, float scales_lr) {
+    const std::size_t count = log_scales.numel() / 3;
+    if (!count) return;
+    if (!is_vulkan_tensor(log_scales) || !is_vulkan_tensor(radii) ||
+        log_scales.dtype() != DataType::Float32 || radii.dtype() != DataType::Int32 ||
+        radii.numel() != count || !log_scales.is_contiguous() || !radii.is_contiguous())
+        throw std::invalid_argument("Vulkan screen-size constraint requires matching scales and radii");
+    struct Push {
+        std::uint32_t count;
+        float inverse_resolution, screen_limit, penalty, scales_lr;
+        std::uint32_t scale_offset, radius_offset;
+    } push{u32(count), inverse_resolution, screen_limit, penalty, scales_lr,
+        u32(log_scales.storage_offset()), u32(radii.storage_offset())};
+    static_assert(sizeof(Push) == 28);
+    std::array<BufferBinding, 2> bindings{bind(log_scales), bind(radii)};
+    Context::get().dispatch(ShaderId::OversizePenalty, bindings, &push, sizeof(push), groups_for(count));
+}
+
 void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
     Tensor& scale_gradients, Tensor& quaternion_gradients,
     const float erank_weight,
@@ -214,7 +233,7 @@ void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternion
     if (count == 0) return;
     const auto valid = [](const Tensor& tensor, std::size_t size) {
         return is_vulkan_tensor(tensor) && tensor.dtype() == DataType::Float32 &&
-            tensor.is_contiguous() && tensor.storage_offset() == 0 && tensor.numel() == size;
+            tensor.is_contiguous() && tensor.numel() == size;
     };
     if (!valid(log_scales, count * 3) || !valid(quaternions, count * 4) ||
         !valid(scale_gradients, count * 3) || !valid(quaternion_gradients, count * 4))
@@ -223,8 +242,11 @@ void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternion
         std::uint32_t count;
         float erank_weight, erank_s3_weight, quat_weight;
         float axis_ratio_weight, max_axis_ratio;
-    } push{u32(count), erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio};
-    static_assert(sizeof(Push) == 24);
+        std::uint32_t scale_offset, quat_offset, scale_grad_offset, quat_grad_offset;
+    } push{u32(count), erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio,
+        u32(log_scales.storage_offset()), u32(quaternions.storage_offset()),
+        u32(scale_gradients.storage_offset()), u32(quaternion_gradients.storage_offset())};
+    static_assert(sizeof(Push) == 40);
     std::array<BufferBinding, 4> bindings{
         bind(log_scales), bind(quaternions), bind(scale_gradients), bind(quaternion_gradients)};
     Context::get().dispatch(ShaderId::ShapeRegularizers, bindings, &push, sizeof(push), groups_for(count));

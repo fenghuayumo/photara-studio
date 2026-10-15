@@ -92,6 +92,9 @@ public:
     static Tensor alias(const Tensor& source, TensorShape shape, std::size_t logical_dim0);
 };
 
+void apply_oversize_penalty(Tensor& log_scales, const Tensor& radii,
+    float inverse_resolution, float screen_limit, float penalty, float scales_lr);
+
 void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
     Tensor& scale_gradients, Tensor& quaternion_gradients,
     float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);

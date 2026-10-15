@@ -434,10 +434,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
-    settings.scale_regularization_weight = app.settings.scale_regularization_weight;
-    settings.shape_erank_reg = app.settings.shape_erank_reg;
-    settings.shape_axis_ratio_reg = app.settings.shape_axis_ratio_reg;
-    settings.shape_max_axis_ratio = app.settings.shape_max_axis_ratio;
+    static_cast<photara::splat::TrainingLossSettings&>(settings) = app.settings;
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
     settings.use_mask = app.settings.use_mask;
@@ -460,9 +457,6 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.mesh_remesh = app.settings.mesh_remesh;
     settings.mesh_remesh_target_faces = app.settings.mesh_remesh_target_faces;
     settings.mesh_remesh_smooth_iterations = app.settings.mesh_remesh_smooth_iterations;
-    settings.depth_normal_weight = app.settings.depth_normal_weight;
-    settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
-    settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
     settings.geometry_from_iter = app.settings.geometry_from_iter;
     settings.normal_field = app.settings.normal_field;
     settings.ppisp_layout = app.settings.ppisp_layout;
@@ -525,10 +519,7 @@ void apply_project_settings(
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
-    app.settings.scale_regularization_weight = settings.scale_regularization_weight;
-    app.settings.shape_erank_reg = settings.shape_erank_reg;
-    app.settings.shape_axis_ratio_reg = settings.shape_axis_ratio_reg;
-    app.settings.shape_max_axis_ratio = settings.shape_max_axis_ratio;
+    static_cast<photara::splat::TrainingLossSettings&>(app.settings) = settings;
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;
@@ -558,9 +549,6 @@ void apply_project_settings(
     app.settings.mesh_remesh = settings.mesh_remesh;
     app.settings.mesh_remesh_target_faces = std::max<std::uint64_t>(4, settings.mesh_remesh_target_faces);
     app.settings.mesh_remesh_smooth_iterations = std::clamp(settings.mesh_remesh_smooth_iterations, 0, 10);
-    app.settings.depth_normal_weight = settings.depth_normal_weight;
-    app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
-    app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
     app.settings.geometry_from_iter = settings.geometry_from_iter;
     app.settings.normal_field = settings.normal_field;
     app.settings.ppisp_layout = settings.ppisp_layout != 0 ? 1 : 0;

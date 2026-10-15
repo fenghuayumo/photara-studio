@@ -1,5 +1,7 @@
 #pragma once
 
+#include "splat/loss_settings.hpp"
+
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -67,6 +69,7 @@ struct TrainingStats {
     std::size_t gaussians{};
     float loss{};
     float rgb_loss{};
+    float alpha_loss{};
     float depth_loss{};
     float normal_loss{};
     float multi_view_geometry_loss{};
@@ -234,7 +237,7 @@ private:
 
 // ---------------------------------------------------------------------------
 
-struct ProjectSettings {
+struct ProjectSettings : photara::splat::TrainingLossSettings {
     // Pinned task-cache directory; never serialized as a user project setting.
     std::array<char, 1024> runtime_dir{};
     std::array<char, 1024> images_dir{};
@@ -299,13 +302,6 @@ struct ProjectSettings {
     int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive
-    // Scale shrinkage weight; zero disables it.
-    float scale_regularization_weight = 0.F;
-    // Soft penalty on effective rank below two; zero disables it.
-    float shape_erank_reg = 0.F;
-    // Soft penalty only above the axis-ratio threshold; zero weight disables it.
-    float shape_axis_ratio_reg{0.F};
-    float shape_max_axis_ratio{100.F};
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
@@ -333,9 +329,6 @@ struct ProjectSettings {
     bool mesh_remesh = false;
     std::uint64_t mesh_remesh_target_faces = 1'000'000;
     int mesh_remesh_smooth_iterations = 1;
-    float depth_normal_weight = 0.05F;
-    float multi_view_geo_weight = 0.02F;
-    float multi_view_ncc_weight = 0.6F;
     int geometry_from_iter = 7'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;

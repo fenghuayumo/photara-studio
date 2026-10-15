@@ -3361,7 +3361,7 @@ __global__ void apply_shape_regularizers_kernel(
         const float shares[3]{share_largest, share_middle, share_smallest};
         for (int k = 0; k < 3; ++k)
             dreg_dshare[k] =
-                rank * (logf(shares[k]) + 1.F) / (rank - 0.99999F);
+                erank_weight * rank * (logf(shares[k]) + 1.F) / (rank - 0.99999F);
     }
     const float dloss_dshare_smallest = dreg_dshare[2] + erank_s3_weight;
     float dloss_dx[3]{};
@@ -3393,10 +3393,10 @@ __global__ void apply_shape_regularizers_kernel(
             for (int other = 0; other < 3; ++other)
                 if (other != largest) pull += dloss_dx[other] * x[other];
             scale_gradients[3 * index + axis] +=
-                erank_weight * (-2.F * pull);
+                (-2.F * pull);
         } else {
             scale_gradients[3 * index + axis] +=
-                erank_weight * dloss_dx[axis] * 2.F * x[axis];
+                dloss_dx[axis] * 2.F * x[axis];
         }
     }
 }
@@ -3451,6 +3451,11 @@ void apply_oversize_penalty(
         radii.numel() != model.size() || !(screen_limit > 0.F) ||
         !(penalty > 0.F))
         return;
+    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
+        tinytensor::vulkan::apply_oversize_penalty(model.log_scales, radii,
+            inverse_resolution, screen_limit, penalty, scales_lr);
+        return;
+    }
     apply_oversize_penalty_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), radii.ptr<int>(), model.size(),

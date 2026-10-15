@@ -28,7 +28,7 @@ std::vector<std::uint8_t> encode_settings_v6(
     const Settings& settings, const std::filesystem::path& project) {
     auto bytes = encode_settings(settings, project);
     // Version 7 appends two ints, two booleans and two uint64 budgets.
-    bytes.resize(bytes.size() - 5 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
+    bytes.resize(bytes.size() - photara::splat::k_training_loss_payload_bytes - 5 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
     const std::uint32_t version = 6;
     std::memcpy(bytes.data(), &version, sizeof(version));
@@ -437,12 +437,14 @@ int main() {
     }
     {
         auto old = encode_settings(settings, ascan_path);
+        old.resize(old.size() - photara::splat::k_training_loss_payload_bytes);
         old.resize(old.size() - 5 * sizeof(float));
         const std::uint32_t version = 8;
         std::memcpy(old.data(), &version, sizeof(version));
         expect(decode_settings(old, ascan_path).shape_erank_reg == 0.F,
             "legacy project does not reinterpret retired axis ratio as rank weight");
         auto v9 = encode_settings(settings, ascan_path);
+        v9.resize(v9.size() - photara::splat::k_training_loss_payload_bytes);
         v9.resize(v9.size() - 2 * sizeof(float));
         const std::uint32_t v9_version = 9;
         std::memcpy(v9.data(), &v9_version, sizeof(v9_version));
@@ -453,6 +455,7 @@ int main() {
         expect(Settings{}.scale_regularization_weight == 0.F,
             "new projects leave the actual-scale prior disabled until tuned");
         auto v10 = encode_settings(settings, ascan_path);
+        v10.resize(v10.size() - photara::splat::k_training_loss_payload_bytes);
         v10.resize(v10.size() - sizeof(float));
         const std::uint32_t v10_version = 10;
         std::memcpy(v10.data(), &v10_version, sizeof(v10_version));
@@ -471,6 +474,26 @@ int main() {
         invalid.shape_erank_reg = -1.F;
         expect(decode_settings(encode_settings(invalid, ascan_path), ascan_path).shape_erank_reg == 0.F,
             "invalid rank weight is disabled");
+    }
+    {
+        auto objective = settings;
+        for (const auto& field : photara::splat::k_training_loss_fields)
+            objective.*field.value = std::min(field.maximum,
+                field.minimum + (field.default_value + 1.F) * 0.125F);
+        objective.geometry_training = true;
+        objective.normal_field_from_iter = 1234;
+        objective.ppisp_model = 2;
+        const auto restored = decode_settings(encode_settings(objective, ascan_path), ascan_path);
+        for (const auto& field : photara::splat::k_training_loss_fields)
+            expect(restored.*field.value == objective.*field.value, field.cli);
+        expect(restored.geometry_training && restored.normal_field_from_iter == 1234 &&
+            restored.ppisp_model == 2, "objective activation and modes round trip");
+        objective.ssim_weight = 2.F;
+        bool rejected = false;
+        try { objective.validate(); } catch (const std::invalid_argument&) { rejected = true; }
+        expect(rejected, "out-of-range image objective is rejected before training");
+        objective.sanitize();
+        expect(objective.ssim_weight == 1.F, "loaded image balance is clamped to its valid range");
     }
     auto old_training = encode_settings_v6(settings, ascan_path);
     old_training.resize(old_training.size() - 3 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));

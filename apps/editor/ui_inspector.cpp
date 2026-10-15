@@ -23,6 +23,156 @@
 namespace editor {
 using i18n::tr;
 
+namespace {
+using photara::splat::LossGroup;
+using photara::splat::TrainingLossSettings;
+
+void objective_note(const char* message) {
+    ImGui::PushTextWrapPos(0.F);
+    ImGui::TextDisabled("%s", tr(message));
+    ImGui::PopTextWrapPos();
+}
+
+bool objective_field_visible(const ProjectSettings& settings,
+    const photara::splat::TrainingLossField& field) {
+    const auto member = field.value;
+    if (member == &TrainingLossSettings::shape_max_axis_ratio)
+        return settings.shape_axis_ratio_reg > 0.F;
+    if (field.group != LossGroup::colour) return true;
+    if (member == &TrainingLossSettings::bilateral_grid_tv_weight ||
+        member == &TrainingLossSettings::bilateral_grid_deviation_limit)
+        return settings.bilateral_grid;
+    if (settings.ppisp_layout == 0) return false;
+    if (member == &TrainingLossSettings::ppisp_reg_vig_center ||
+        member == &TrainingLossSettings::ppisp_reg_vig_non_pos ||
+        member == &TrainingLossSettings::ppisp_reg_vig_channel_var)
+        return settings.ppisp_model >= 1;
+    if (member == &TrainingLossSettings::ppisp_reg_crf_channel_var)
+        return settings.ppisp_model == 2;
+    return true;
+}
+
+void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced) {
+    if (!ImGui::BeginTable("##objective_fields", 2,
+            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) return;
+    ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch, 0.62F);
+    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 0.38F);
+    for (const auto& field : photara::splat::k_training_loss_fields) {
+        if (field.group != group || field.advanced != advanced ||
+            !objective_field_visible(settings, field)) continue;
+        ImGui::PushID(field.cli);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(0.F);
+        ImGui::TextUnformatted(tr(field.label));
+        ImGui::PopTextWrapPos();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(field.help));
+        ImGui::TableNextColumn();
+        const bool alpha_disabled = field.value == &TrainingLossSettings::match_alpha_weight &&
+            (!(settings.use_mask || settings.sam_masks) || settings.mask_mode != 1 ||
+             (settings.training_backend == 1 && studio_vulkan_training()));
+        const bool normal_disabled = (field.value == &TrainingLossSettings::normal_field_weight ||
+            field.value == &TrainingLossSettings::normal_field_depth_ratio) && !settings.normal_field;
+        ImGui::BeginDisabled(alpha_disabled || normal_disabled);
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputFloat("##value", &(settings.*field.value), 0.F, 0.F, "%.5g");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr(field.help));
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
+void draw_training_objective(App& app) {
+    if (!ImGui::TreeNodeEx(tr("Loss & constraints"), ImGuiTreeNodeFlags_SpanAvailWidth)) return;
+    auto& settings = app.settings;
+    objective_note("Fit the photos, stabilize geometry and limit overfitting. Zero disables a penalty.");
+    if (ImGui::BeginTabBar("##objective_tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
+        const struct { const char* title; LossGroup group; } tabs[]{
+            {"Image fitting", LossGroup::image}, {"Geometry", LossGroup::geometry},
+            {"Gaussians", LossGroup::gaussian}, {"Colour", LossGroup::colour}};
+        for (const auto& tab : tabs) {
+            if (!ImGui::BeginTabItem(tr(tab.title))) continue;
+            ImGui::PushID(static_cast<int>(tab.group));
+            const bool geometry = settings.geometry_training || mesh_from_gaussians(settings);
+            if (tab.group == LossGroup::image)
+                objective_note("Image loss = image weight x [(1 - structure balance) x L1 + structure balance x SSIM loss].");
+            if (tab.group == LossGroup::image && settings.training_backend == 1 &&
+                studio_vulkan_training())
+                objective_note("Mask opacity fitting requires CUDA training and Transparent mask mode.");
+            if (tab.group == LossGroup::gaussian)
+                objective_note("Soft constraints on individual Gaussians. Start with the defaults and change one strength at a time.");
+            if (tab.group == LossGroup::geometry) {
+                bool enabled = geometry;
+                ImGui::BeginDisabled(mesh_from_gaussians(settings));
+                if (ImGui::Checkbox(tr("Surface consistency"), &enabled)) settings.geometry_training = enabled;
+                ImGui::EndDisabled();
+                if (mesh_from_gaussians(settings))
+                    objective_note("Enabled automatically for Gaussian mesh extraction.");
+                else if (!geometry)
+                    objective_note("Enable surface consistency to train geometry without extracting a mesh.");
+            }
+            if (tab.group == LossGroup::colour) {
+                bool ppisp = settings.ppisp_layout != 0;
+                if (ImGui::Checkbox(tr("Exposure & white balance"), &ppisp)) settings.ppisp_layout = ppisp ? 1 : 0;
+                if (ppisp) {
+                    const char* models[]{tr("Exposure & white balance"), tr("With vignetting"), tr("With camera response")};
+                    ImGui::SetNextItemWidth(-1.F);
+                    ImGui::Combo("##ppisp_model", &settings.ppisp_model, models, 3);
+                }
+                ImGui::Checkbox(tr("Spatial colour correction"), &settings.bilateral_grid);
+                objective_note("Colour correction is used during training only. Exported Gaussians keep their canonical colour.");
+            }
+            ImGui::BeginDisabled(tab.group == LossGroup::geometry && !geometry);
+            objective_fields(settings, tab.group, false);
+            if (tab.group == LossGroup::geometry) {
+                theme::caption("Geometry start step");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::InputInt("##geometry_start", &settings.geometry_from_iter, 500, 2000);
+                if (settings.geometry_from_iter >= settings.iterations)
+                    objective_note("Starts after this training run.");
+            }
+            ImGui::EndDisabled();
+            if (tab.group == LossGroup::geometry)
+                ImGui::Checkbox(tr("Normal field"), &settings.normal_field);
+            const bool has_advanced = std::any_of(
+                photara::splat::k_training_loss_fields.begin(),
+                photara::splat::k_training_loss_fields.end(), [&](const auto& field) {
+                    return field.group == tab.group && field.advanced &&
+                        objective_field_visible(settings, field);
+                });
+            if (has_advanced && ImGui::TreeNodeEx(
+                    tr("Advanced constraints"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                objective_fields(settings, tab.group, true);
+                if (tab.group == LossGroup::geometry) {
+                    ImGui::BeginDisabled(!settings.normal_field);
+                    theme::caption("Normal-field start step");
+                    ImGui::SetNextItemWidth(-1.F);
+                    ImGui::InputInt("##normal_field_start", &settings.normal_field_from_iter, 1000, 5000);
+                    if (settings.normal_field_from_iter >= settings.iterations)
+                        objective_note("Starts after this training run.");
+                    ImGui::EndDisabled();
+                }
+                ImGui::TreePop();
+            }
+            if (ImGui::SmallButton(tr("Reset weights"))) {
+                const TrainingLossSettings defaults;
+                for (const auto& field : photara::splat::k_training_loss_fields)
+                    if (field.group == tab.group) settings.*field.value = defaults.*field.value;
+            }
+            ImGui::PopID();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    settings.sanitize();
+    settings.geometry_from_iter = std::max(settings.geometry_from_iter, 0);
+    ImGui::TreePop();
+}
+}  // namespace
+
 Action draw_inspector(App& app) {
     Action action = Action::none;
     if (!app.show_inspector) return action;
@@ -495,45 +645,6 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
                 "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
                 "Requires full training resolution."));
-        theme::caption("Scale weight (scale_reg)");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputFloat("##scale_regularization_weight", &app.settings.scale_regularization_weight,
-            0.001F, 0.01F, "%.6f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Penalizes actual Gaussian scale; larger Gaussians shrink more.\n"
-                "0 disables the penalty (default)."));
-        app.settings.scale_regularization_weight = std::isfinite(app.settings.scale_regularization_weight)
-            ? std::max(app.settings.scale_regularization_weight, 0.F) : 0.F;
-        theme::caption("Effective-rank weight (erank_reg)");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputFloat("##shape_erank_reg", &app.settings.shape_erank_reg,
-            0.0001F, 0.001F, "%.6f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Softly penalizes needle-like Gaussians with effective rank below 2.\n"
-                "Allows thin surface Gaussians. 0 disables the penalty.\n"
-                "Suggested starting weight: 0.001."));
-        app.settings.shape_erank_reg = std::isfinite(app.settings.shape_erank_reg)
-            ? std::max(app.settings.shape_erank_reg, 0.F) : 0.F;
-        bool axis_ratio_penalty = app.settings.shape_axis_ratio_reg > 0.F;
-        if (ImGui::Checkbox(tr("Axis-ratio soft penalty"), &axis_ratio_penalty))
-            app.settings.shape_axis_ratio_reg = axis_ratio_penalty ? 0.001F : 0.F;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Penalizes extreme longest/shortest axis ratios above the threshold.\n"
-                "Soft gradient penalty; does not hard-clamp scales."));
-        if (axis_ratio_penalty) {
-            theme::caption("Axis-ratio threshold");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputFloat("##shape_max_axis_ratio", &app.settings.shape_max_axis_ratio, 10.F, 100.F, "%.1f");
-            theme::caption("Axis-ratio weight");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputFloat("##shape_axis_ratio_reg", &app.settings.shape_axis_ratio_reg, 0.0001F, 0.001F, "%.6f");
-        }
-        app.settings.shape_axis_ratio_reg = std::isfinite(app.settings.shape_axis_ratio_reg)
-            ? std::max(app.settings.shape_axis_ratio_reg, 0.F) : 0.F;
-        app.settings.shape_max_axis_ratio = std::isfinite(app.settings.shape_max_axis_ratio)
-            ? std::max(app.settings.shape_max_axis_ratio, 1.F) : 100.F;
         theme::caption("SH degree");
         ImGui::SetNextItemWidth(-1.F);
         const char* sh_degrees[] = {"0", "1", "2", "3"};
@@ -581,27 +692,7 @@ Action draw_inspector(App& app) {
                     "transparent: the mask is the target opacity.\n"
                     "Valid pixels stay opaque and masked pixels become transparent."));
         }
-        ImGui::Checkbox(tr("Normal field"), &app.settings.normal_field);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(
-                "3DGS's learned normal field.\n"
-                "Off (default) trains the GGGS path.\n"
-                "Auto mesh uses PAM when enabled, TSDF when disabled."));
-        bool ppisp_enabled = app.settings.ppisp_layout != 0;
-        if (ImGui::Checkbox(tr("PPISP colour correction"), &ppisp_enabled))
-            app.settings.ppisp_layout = ppisp_enabled ? 1 : 0;
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(
-                "Per-view exposure and white-balance correction for video\n"
-                "captures with auto exposure. Trained only; never baked into\n"
-                "the exported model."));
-        ImGui::Checkbox(
-            tr("Bilateral grid colour correction"),
-            &app.settings.bilateral_grid);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(
-                "Spatially varying affine colour correction (lens shading and\n"
-                "vignetting). Pairs with PPISP, which owns the global exposure."));
+        draw_training_objective(app);
         ImGui::EndDisabled();
         const bool simplify_open = app.splat_simplify.show;
         if (theme::toolbar_button(
@@ -738,31 +829,8 @@ Action draw_inspector(App& app) {
                     "Fast prioritizes speed and may lose small details.\n"
                     "Standard balances detail and time. High uses more samples and refinement.\n"
                     "Mesh quality does not change 3DGS training settings."));
-            if (mesh_from_gaussians(app.settings) &&
-                ImGui::TreeNodeEx(
-                    tr("Geometry training"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
-                theme::caption("Depth-normal weight");
-                ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat(
-                    "##depth_normal", &app.settings.depth_normal_weight,
-                    0.005F, 0.F, 1.F, "%.3f");
-                theme::caption("Multi-view geometry weight");
-                ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat(
-                    "##mv_geo", &app.settings.multi_view_geo_weight, 0.005F,
-                    0.F, 1.F, "%.3f");
-                theme::caption("Multi-view NCC weight");
-                ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat(
-                    "##mv_ncc", &app.settings.multi_view_ncc_weight, 0.01F,
-                    0.F, 2.F, "%.2f");
-                theme::caption("Geometry loss start iteration");
-                ImGui::SetNextItemWidth(-1.F);
-                ImGui::InputInt(
-                    "##geo_from", &app.settings.geometry_from_iter, 500,
-                    2000);
-                ImGui::TreePop();
-            }
+            if (mesh_from_gaussians(app.settings))
+                objective_note("Geometry weights are in Gaussian Splatting > Loss & constraints > Geometry.");
         } else {
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
@@ -1237,10 +1305,16 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
         theme::metric("Gaussians", format_count(stats.gaussians).c_str());
         std::snprintf(buffer, sizeof(buffer), "%.4f", stats.loss);
-        theme::metric("Total loss", buffer);
+        theme::metric("Image & geometry loss", buffer);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Weighted image and geometry losses. Optimizer regularization is applied separately and is not included in this value."));
         std::snprintf(buffer, sizeof(buffer), "%.4f", stats.rgb_loss);
         theme::metric("RGB", buffer);
-        if (mesh_from_gaussians(app.settings)) {
+        if ((app.settings.use_mask || app.settings.sam_masks) && app.settings.mask_mode == 1) {
+            std::snprintf(buffer, sizeof(buffer), "%.4f", stats.alpha_loss);
+            theme::metric("Mask opacity", buffer);
+        }
+        if (mesh_from_gaussians(app.settings) || app.settings.geometry_training || app.settings.normal_field) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.depth_loss);
             theme::metric("Depth", buffer);
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.normal_loss);
@@ -1248,10 +1322,10 @@ Action draw_inspector(App& app) {
             std::snprintf(
                 buffer, sizeof(buffer), "%.4f",
                 stats.multi_view_geometry_loss);
-            theme::metric("Multi-view geo", buffer);
+            theme::metric("Multi-view depth", buffer);
             std::snprintf(
                 buffer, sizeof(buffer), "%.4f", stats.multi_view_ncc_loss);
-            theme::metric("Multi-view NCC", buffer);
+            theme::metric("Multi-view appearance", buffer);
         }
         std::snprintf(buffer, sizeof(buffer), "%.1f ms", stats.step_milliseconds);
         theme::metric("Step time", buffer);
