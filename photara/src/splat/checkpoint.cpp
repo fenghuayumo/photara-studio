@@ -376,6 +376,10 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.ppisp_clamp_output);
     hash.append(options.ppisp_before_bilagrid);
     hash.append(options.depth_weight);
+    if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
+        hash.append(options.lambda_d);
+        hash.append(options.lambda_n);
+    }
     hash.append(options.normal_weight);
     hash.append(options.use_depth_normal_loss);
     hash.append(options.depth_normal_weight);
@@ -447,6 +451,14 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
         for (const auto& n : view.depth_map.normal) hash.append_bytes(n.data(), sizeof(float) * 3);
     }
     hash.append(sfm::fingerprint_images(paths));
+    if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
+        paths.clear();
+        for (std::size_t i = 0; i < scene.views.size(); ++i) {
+            if (options.evaluation_split_every != 0 && i % options.evaluation_split_every == 0) continue;
+            paths.push_back(options.prior_directory / ("view_" + std::to_string(scene.views[i].id) + ".prior"));
+        }
+        hash.append(sfm::fingerprint_images(paths));
+    }
     if (options.use_mask && !options.mask_dir.empty()) {
         paths.clear();
         for (const auto& item : std::filesystem::directory_iterator(options.mask_dir))

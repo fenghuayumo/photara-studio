@@ -35,7 +35,31 @@ float3 camera_to_world(float3 p) {
 void main(uint3 tid : SV_DispatchThreadID) {
     uint i = tid.x + tid.y * 65535u * 256u;
     if (i >= pc.count) return;
-    if (pc.mode == 10u) {
+    if (pc.mode == 11u || pc.mode == 12u) {
+        float mask = pc.euclidean != 0u ? camera_data[i] : 1.0f;
+        if (!(mask > 0.0f) || isnan(mask) || isinf(mask)) return;
+        float scale = pc.weight * mask / (float)pc.count;
+        if (pc.mode == 11u) {
+            float prediction = input0[i], target = input1[i];
+            if (!(prediction > 0.0f && target > 0.0f) || isinf(prediction) || isinf(target)) return;
+            float denominator = max(target, 1.0e-4f);
+            float difference = (prediction-target)/denominator;
+            float robust = sqrt(difference*difference+pc.focal*pc.focal);
+            add_float(output0, i, scale*difference/(robust*denominator));
+            if (pc.camera_count != 0u) terms.Store(4u*i, asuint(scale*robust));
+        } else {
+            float3 target = float3(input1[i],input1[pc.count+i],input1[2u*pc.count+i]);
+            float length2 = dot(target,target);
+            if (!(length2 > .25f) || isinf(length2)) return;
+            target *= rsqrt(length2);
+            float3 prediction = float3(input0[i],input0[pc.count+i],input0[2u*pc.count+i]);
+            if (any(isnan(prediction)) || any(isinf(prediction))) return;
+            add_float(output0,i,-scale*target.x);
+            add_float(output0,pc.count+i,-scale*target.y);
+            add_float(output0,2u*pc.count+i,-scale*target.z);
+            if (pc.camera_count != 0u) terms.Store(4u*i,asuint(scale*(1.0f-dot(prediction,target))));
+        }
+    } else if (pc.mode == 10u) {
         float3 scales = float3(input0[3u*i],input0[3u*i+1u],input0[3u*i+2u]);
         scales = exp(scales);
         float filter = pc.euclidean != 0u ? camera_data[i] : 0.0f;

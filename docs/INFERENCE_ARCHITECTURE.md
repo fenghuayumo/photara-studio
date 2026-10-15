@@ -312,6 +312,106 @@ ctest --test-dir build -C Release -R '^photara\.inference\.' --output-on-failure
 python python/models/moge/compare_prediction.py model.pt model-f32.gguf build/photara/Release/photara_moge_predict_test.exe --moge-source path/to/MoGe --images room.jpg portrait.jpg outdoor.jpg --output build/moge-prediction
 ```
 
+## Experimental 3DGS Prior Supervision
+
+`splat::TrainingOptions::lambda_d` and `lambda_n` independently weight external
+AI depth and normal supervision. Both default to zero. `prior_directory` selects
+an offline cache; CLI equivalents are `--splat-lambda-d`, `--splat-lambda-n`, and
+`--splat-prior-dir`. Python `TrainingOptions` exposes the same three fields.
+This initial experiment is available through the CLI/API, not the Studio panel.
+The weights do not enable DN, normal-field training, multi-view objectives, the
+geometry-training mode, or its automatic 3D filter. Fast mode remains RGB-only
+and clears these weights. Legacy MVS supervision and AI priors cannot share the
+same target slots in one training run.
+
+`photara_splat_prior_prepare` is a separate native Vulkan inference process:
+
+```powershell
+photara_splat_prior_prepare dataset/sparse/0 images model-f32.gguf prior-cache 640 1200 8
+photara --images images --splat-dataset dataset/sparse/0 --splat --mesh=false --splat-max-resolution 640 --splat-eval-split-every 8 --splat-prior-dir prior-cache --splat-lambda-d 0.01 --splat-lambda-n 0.01
+```
+
+The preparation arguments after the output directory are maximum training image
+dimension, token budget, and evaluation split interval. Use the accepted strict
+F32 Vulkan startup policy documented above. Preparation uses the exact training
+RGB decode, undistortion, pixel-center resizing and known camera intrinsics. It
+always requests pinhole views; fisheye training must likewise use
+`--splat-undistort=true`. Panorama priors are not supported. Preparation skips
+held-out views entirely. A median/MAD log-ratio fit aligns predicted camera-Z
+depth to **observed SfM sparse points**, requiring at least 16 inliers per view.
+There is no MVS depth estimation, dense fusion, or mesh reconstruction.
+
+Each local `.prior` file stores scene-unit camera-Z depth, CHW camera-space unit
+normals, camera intrinsics/pose, and source-image identity/size/mtime. Zero depth
+and zero normals independently mark invalid supervision. Cache loading checks
+camera, input identity, payload size and map values; changing the image, camera,
+or full training resolution requires regeneration. Progressive training
+resolution uses pixel-center nearest sampling, retaining depth units and avoiding
+interpolated surfaces at depth discontinuities. The training image's RGB mask is
+never replaced by prior validity. Evaluation explicitly disables prior loading,
+so held-out images need no prediction/cache. Positive weights and the cache file
+identities are included in checkpoint compatibility; a disabled prior directory
+does not affect the ordinary RGB-only fingerprint.
+
+The losses on CUDA and Vulkan are:
+
+```text
+L_depth  = lambda_d / (W*H) * sum_valid mask * sqrt(
+               ((D_render - D_prior) / max(D_prior, 1e-4))^2 + epsilon^2)
+L_normal = lambda_n / (W*H) * sum_valid mask * (1 - dot(N_render, unit(N_prior)))
+```
+
+Depth uses `rendered.median_depth`; the normal is the existing alpha-normalized
+rendered mixture, not a separately learned normal field. Both losses accumulate
+their derivatives into the main rasterization backward pass. There is no extra
+full render for the prior losses. If both weights are zero, no cache is read and
+AI priors do not request any geometry channels. If either is positive, the
+current renderer still allocates depth **and** normal geometry attachments and
+workspace together; setting only one weight does not split that workspace. The
+existing bounded host/device view caches include the enabled target maps.
+Offline MoGe GPU allocations are released with the preparation process before
+training starts.
+
+`photara.splat.ai_prior` checks cache validation, progressive resolution,
+RGB-mask independence, checkpoint fingerprints, held-out evaluation without a
+prior, and analytic/finite-difference gradients on CUDA for depth-only,
+normal-only, combined, disabled, invalid and fractionally masked pixels.
+Vulkan loss checks are a separate `photara.splat.ai_prior_vulkan` test; current
+training acceptance focuses on CUDA.
+`python/models/moge/test_splat_priors.py` reproduces the four-way held-out ablation
+with fixed seed, cameras and budgets, and DN/normal field/multi-view/filter off.
+It records exact commands, binary hash, selected views, PSNR/SSIM, training time,
+and sampled device memory. Its memory readings are **not** an allocator peak.
+These priors are optional regularizers; passing inference/gradient checks does
+not establish a rendering-quality improvement.
+
+### Initial CUDA ablation (2026-10-15)
+
+The indoor iPhone capture was subsampled to 96 registered views, with 84 training
+and 12 held-out views, maximum image dimension 640, seed 42 and 30,000 iterations.
+Initial Gaussian budget was 100,000 and the densification cap was 300,000. All
+four runs disabled DN, normal fields, multi-view geometry and filtering. Priors
+were prepared with Vulkan F32 MoGe and aligned using SfM sparse tracks; no dense
+MVS reconstruction was used.
+
+| lambda_d | lambda_n | Held-out PSNR | Held-out SSIM | Training seconds |
+|---|---|---|---|---|
+| 0 | 0 | 21.0023 | 0.880123 | 62.382 |
+| 0.01 | 0 | 21.4727 | 0.884348 | 175.681 |
+| 0 | 0.01 | 20.6427 | 0.883844 | 172.553 |
+| 0.01 | 0.01 | 21.1260 | 0.884268 | 117.730 |
+
+Depth-only improved PSNR by 0.4704 dB in this single-scene, single-seed experiment,
+with approximately 2.82 times the baseline training time. Normal-only reduced
+PSNR despite improving SSIM; enabling both did not outperform depth-only. Start
+experimentation with `lambda_d=0.01, lambda_n=0`, keeping both product defaults
+zero. These measurements do not establish a general quality or throughput gain.
+The four runs can produce different Gaussian geometry and render workloads;
+single-run timings under a desktop session are not a controlled performance
+benchmark. Preparation took another 13.14 seconds, outside the training times.
+Commands, binary hash and results are recorded locally in
+`build/ai-prior-ablation-indoor-30k-20261015/summary.json` and per-run logs.
+
 ## Geometry Conventions
 
 - Inputs are pinhole RGB images; callers handle fisheye and panorama resampling.
@@ -332,8 +432,9 @@ python python/models/moge/compare_prediction.py model.pt model-f32.gguf build/ph
   It does not replace multi-view consistency, depth/point-map consistency, or scale
   alignment checks.
 
-MVS owns prior alignment, initialization, and geometric filtering. Splat converts
-priors into training constraints. Model adapters must not depend on SfM/MVS/Splat
+Reconstruction consumers own prior alignment, initialization, and geometric
+filtering; the experimental Splat path aligns to SfM sparse observations without
+running MVS. Splat converts priors into training constraints. Model adapters must not depend on SfM/MVS/Splat
 or modify scene cameras or training parameters. CLI/Studio orchestration loads
 models and passes their results to consumers.
 
