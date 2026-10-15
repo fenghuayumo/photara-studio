@@ -1345,6 +1345,16 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_resume_process_test.py"
                     $<TARGET_FILE:photara>)
             set_tests_properties(photara.splat.process_resume PROPERTIES TIMEOUT 150)
+            add_test(NAME photara.splat.mode_objectives
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_mode_process_test.py"
+                    $<TARGET_FILE:photara>)
+            set_tests_properties(photara.splat.mode_objectives PROPERTIES TIMEOUT 150)
+            if(PHOTARA_ENABLE_VULKAN_COMPUTE)
+                add_test(NAME photara.splat.mode_objectives_vulkan
+                    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_mode_process_test.py"
+                        $<TARGET_FILE:photara> --backend vulkan)
+                set_tests_properties(photara.splat.mode_objectives_vulkan PROPERTIES TIMEOUT 150)
+            endif()
         endif()
         if(PHOTARA_ENABLE_VULKAN_COMPUTE)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)

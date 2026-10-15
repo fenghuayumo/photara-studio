@@ -29,6 +29,8 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings.", "快速模式仅保留 RGB 损失。标准和高质量模式默认启用尺度 0.01、针状抑制 0.001。选择模式会重置损失设置。", "Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings.", "Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."},
+    {"Fast mode uses RGB image fitting (L1 + SSIM) only. Switch to Standard or High quality to enable constraints.", "快速模式仅使用 RGB 图像损失（L1＋SSIM）。切换到标准或高质量模式可启用其他约束。", "Fast mode uses RGB image fitting (L1 + SSIM) only. Switch to Standard or High quality to enable constraints.", "Fast mode uses RGB image fitting (L1 + SSIM) only. Switch to Standard or High quality to enable constraints."},
     {"Default value", "默认值", "既定値", "기본값"},
     {"Off", "关闭", "オフ", "꺼짐"},
     {"Suggested range", "建议范围", "推奨範囲", "권장 범위"},
