@@ -3,6 +3,12 @@
 The Python API calls the same C++ libraries as the desktop application and CLI.
 It does not start `photara.exe` or translate Python options into CLI arguments.
 
+This page is a quick start. See the [Python API reference](../docs/api/python.md)
+for every bound function, method, result handle, callback and failure contract;
+the [type reference](../docs/api/types.md) lists all bound fields, defaults and
+enumerations. Native integrations are covered by the
+[corresponding C++ guide](../docs/api/cpp.md).
+
 Build the native nanobind module with Visual Studio:
 
 ```powershell
@@ -78,6 +84,11 @@ summary = aes.run_sfm_mapping(scene, options)
 MVS and training are independently callable stages. `TrainingOptions` exposes
 the public C++ training fields, including backend, optimization, loss,
 densification, cache, evaluation, and preview controls:
+
+`build_mvs_scene()` alone does not populate the training initialization cloud.
+The example below fills it through depth fusion. To avoid PatchMatch, import an
+existing dataset with `load_dataset()` or load a cloud with
+`MvsScene.load_dense_cloud()`; see the reference for the sparse-only workflow.
 
 ```python
 import photara as aes
