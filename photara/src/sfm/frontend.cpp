@@ -2840,6 +2840,10 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         recovery.matcher = "mutual_ratio";
     auto extractor = make_frontend_extractor(recovery);
     auto matcher = make_frontend_matcher(recovery);
+    // Reuse only the current neighborhood, keeping memory bounded regardless
+    // of the number of missing views. A low-contrast retry gets fresh caches.
+    std::map<Index, features::FeatureSet> feature_cache;
+    std::map<std::pair<Index, Index>, features::MatchSet> match_cache;
     unsigned recovered_count = 0;
     for (Index target : missing) {
         // Rebuild only local depths. Neither the inherited missing pose nor
@@ -2853,52 +2857,102 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         });
         if (neighbors.size() > 16) neighbors.resize(16);
         neighbors.push_back(target);
+        const auto retained = [&](Index id) {
+            return std::find(neighbors.begin(), neighbors.end(), id) != neighbors.end();
+        };
+        std::erase_if(feature_cache, [&](const auto& entry) { return !retained(entry.first); });
+        std::erase_if(match_cache, [&](const auto& entry) {
+            return !retained(entry.first.first) || !retained(entry.first.second);
+        });
         Scene local;
         local.thread_count = scene.thread_count;
         local.cameras = scene.cameras;
         for (auto& camera : local.cameras) camera.trust_intrinsics = true;
-        for (Index global : neighbors) {
-            Image image = scene.images[global];
-            image.id = static_cast<Index>(local.images.size());
-            const auto gray = io::load_gray(image.path);
-            image.features = select_top_features_grid_3x3(
-                apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
-                    find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
-            image.features.compress_descriptors_u8();
-            local.images.push_back(std::move(image));
+        {
+            core::StageScope extraction_stage("sfm.missing_view_extract");
+            for (Index global : neighbors) {
+                Image image = scene.images[global];
+                image.id = static_cast<Index>(local.images.size());
+                auto cached = feature_cache.find(global);
+                if (cached == feature_cache.end()) {
+                    const auto gray = io::load_gray(image.path);
+                    auto extracted = select_top_features_grid_3x3(
+                        apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
+                            find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
+                    extracted.compress_descriptors_u8();
+                    cached = feature_cache.emplace(global, std::move(extracted)).first;
+                }
+                image.features = cached->second;
+                local.images.push_back(std::move(image));
+            }
         }
         const Index candidate = static_cast<Index>(neighbors.size() - 1);
         std::vector<RawPairMatches> tentative;
         std::vector<ImagePair> boundary_geometry;
+        // Submit the same pairs in the same order, but let the backend batch
+        // uploads, kernels and readbacks instead of synchronizing every pair.
+        std::vector<features::FeatureMatcher::Pair> match_pairs;
+        std::vector<std::pair<Index, Index>> pair_keys, uncached_keys;
+        const auto add_pair = [&](Index query, Index train) {
+            // Direction matters: the query-side ratio test is not symmetric.
+            const auto key = std::make_pair(neighbors[query], neighbors[train]);
+            pair_keys.push_back(key);
+            if (!match_cache.contains(key)) {
+                uncached_keys.push_back(key);
+                match_pairs.emplace_back(&feature_cache.at(key.first), &feature_cache.at(key.second));
+            }
+        };
         for (Index a = 0; a < candidate; ++a) {
             for (Index b = a + 1; b < candidate; ++b) {
-                ImagePair pair(a, b);
-                pair.relative_pose = local.images[b].pose / local.images[a].pose;
-                const Vec3 baseline = local.images[b].pose.C - local.images[a].pose.C;
-                if (baseline.norm() < 1e-10) continue;
-                const auto& first = local.images[a]; const auto& second = local.images[b];
-                const double angular = std::max(local.camera_of(first).pixel_error_to_angular(4),
-                                                local.camera_of(second).pixel_error_to_angular(4));
-                const auto matched = matcher->match(first.features, second.features);
-                for (const auto& m : matched.matches) {
-                    const auto& x = first.features.keypoints[m.query];
-                    const auto& y = second.features.keypoints[m.train];
-                    const Vec3 u = first.pose.R.transpose() * local.camera_of(first).unproject_normalized(Vec2(x.x, x.y));
-                    const Vec3 v = second.pose.R.transpose() * local.camera_of(second).unproject_normalized(Vec2(y.x, y.y));
-                    const Vec3 normal = baseline.cross(u);
-                    if (normal.norm() > 1e-10 && std::abs(normal.normalized().dot(v)) <= std::sin(angular))
-                        pair.matches.push_back({m.query, m.train});
-                }
-                if (pair.matches.size() >= 8) local.pairs.push_back(std::move(pair));
+                if ((local.images[b].pose.C - local.images[a].pose.C).norm() < 1e-10) continue;
+                add_pair(a, b);
             }
-            RawPairMatches boundary;
-            boundary.id1 = candidate; boundary.id2 = a;
-            boundary.matches = matcher->match(local.images[candidate].features, local.images[a].features).matches;
-            std::vector<features::FeatureMatch> reversed;
-            for (auto m : boundary.matches) { std::swap(m.query, m.train); reversed.push_back(m); }
-            auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
-            if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
-            tentative.push_back(std::move(boundary));
+            add_pair(candidate, a);
+        }
+        std::vector<features::MatchSet> matched_pairs;
+        {
+            core::StageScope matching_stage("sfm.missing_view_match");
+            matched_pairs = matcher->match_batch(match_pairs);
+        }
+        for (std::size_t i = 0; i < uncached_keys.size(); ++i)
+            match_cache.emplace(uncached_keys[i], std::move(matched_pairs.at(i)));
+        core::Logger::instance().debug("missing view match reuse: pairs=", pair_keys.size(),
+            " reused=", pair_keys.size() - uncached_keys.size(), " submitted=", uncached_keys.size());
+        matched_pairs.clear();
+        for (const auto& key : pair_keys) matched_pairs.push_back(match_cache.at(key));
+        std::size_t matched_index = 0;
+        {
+            core::StageScope geometry_stage("sfm.missing_view_geometry");
+            for (Index a = 0; a < candidate; ++a) {
+                for (Index b = a + 1; b < candidate; ++b) {
+                    ImagePair pair(a, b);
+                    pair.relative_pose = local.images[b].pose / local.images[a].pose;
+                    const Vec3 baseline = local.images[b].pose.C - local.images[a].pose.C;
+                    if (baseline.norm() < 1e-10) continue;
+                    const auto& first = local.images[a]; const auto& second = local.images[b];
+                    const double angular = std::max(local.camera_of(first).pixel_error_to_angular(4),
+                                                    local.camera_of(second).pixel_error_to_angular(4));
+                    const auto& matched = matched_pairs.at(matched_index++);
+                    for (const auto& m : matched.matches) {
+                        const auto& x = first.features.keypoints[m.query];
+                        const auto& y = second.features.keypoints[m.train];
+                        const Vec3 u = first.pose.R.transpose() * local.camera_of(first).unproject_normalized(Vec2(x.x, x.y));
+                        const Vec3 v = second.pose.R.transpose() * local.camera_of(second).unproject_normalized(Vec2(y.x, y.y));
+                        const Vec3 normal = baseline.cross(u);
+                        if (normal.norm() > 1e-10 && std::abs(normal.normalized().dot(v)) <= std::sin(angular))
+                            pair.matches.push_back({m.query, m.train});
+                    }
+                    if (pair.matches.size() >= 8) local.pairs.push_back(std::move(pair));
+                }
+                RawPairMatches boundary;
+                boundary.id1 = candidate; boundary.id2 = a;
+                boundary.matches = std::move(matched_pairs.at(matched_index++).matches);
+                std::vector<features::FeatureMatch> reversed;
+                for (auto m : boundary.matches) { std::swap(m.query, m.train); reversed.push_back(m); }
+                auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
+                if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+                tentative.push_back(std::move(boundary));
+            }
         }
         matcher->clear_prepared();
         build_tracks(local);
