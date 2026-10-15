@@ -65,10 +65,10 @@ void draw_view_settings(App& app) {
             const auto& live = app.align_live;
             const std::string name_a = live.path_a.empty()
                 ? std::string{"—"}
-                : live.path_a.filename().string();
+                : path_to_utf8(live.path_a.filename());
             const std::string name_b = live.path_b.empty()
                 ? std::string{"—"}
-                : live.path_b.filename().string();
+                : path_to_utf8(live.path_b.filename());
             theme::metric("A", name_a.c_str());
             theme::metric("B", name_b.c_str());
             theme::metric(

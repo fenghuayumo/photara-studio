@@ -211,8 +211,8 @@ void draw_scene_panel(App& app) {
     const std::string project_label = app.layout.project_file.empty()
         ? (app.layout.root.filename().empty()
                ? std::string(tr("Untitled Project"))
-               : app.layout.root.filename().string())
-        : app.layout.project_file.filename().string();
+               : path_to_utf8(app.layout.root.filename()))
+        : path_to_utf8(app.layout.project_file.filename());
     const bool has_cloud = app.has_sparse || app.scene.has_points();
     const bool has_gaussians = app.has_model;
     const bool has_mesh = app.has_mesh;

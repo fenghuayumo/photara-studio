@@ -742,7 +742,10 @@ const PlyProperty* find_property(
 
 std::string load_ply(const std::filesystem::path& path, SparseScene& scene) {
     std::ifstream input(path, std::ios::binary);
-    if (!input) return "Cannot open " + path.filename().string();
+    if (!input) {
+        const auto name = path.filename().u8string();
+        return "Cannot open " + std::string(name.begin(), name.end());
+    }
 
     std::string line;
     if (!std::getline(input, line)) return "Empty PLY";
@@ -1533,7 +1536,8 @@ SceneLoad sparse_scene_from_sfm(const photara::sfm::Scene& scene, bool colour_fr
     loaded.scene.views.reserve(scene.images.size());
     for (const auto& image : scene.images) {
         ViewPose pose;
-        pose.name = image.path.filename().string();
+        const auto name = image.path.filename().u8string();
+        pose.name.assign(name.begin(), name.end());
         pose.centre = {
             static_cast<float>(image.pose.C.x()),
             static_cast<float>(image.pose.C.y()),
@@ -1661,7 +1665,8 @@ SceneLoad sparse_scene_from_dataset(
         loaded.scene.views.reserve(scene.views.size());
         for (const auto& view : scene.views) {
             ViewPose pose;
-            pose.name = view.path.filename().string();
+            const auto name = view.path.filename().u8string();
+            pose.name.assign(name.begin(), name.end());
             pose.image_path = view.path;
             pose.centre = {
                 static_cast<float>(view.pose.C.x()),

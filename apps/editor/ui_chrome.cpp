@@ -408,8 +408,8 @@ Action draw_menu_bar(App& app) {
     const std::string project = app.layout.project_file.empty()
         ? (app.layout.root.filename().empty()
                ? std::string(tr("Untitled Project"))
-               : app.layout.root.filename().string())
-        : app.layout.project_file.filename().string();
+               : path_to_utf8(app.layout.root.filename()))
+        : path_to_utf8(app.layout.project_file.filename());
     const float project_width = ImGui::CalcTextSize(project.c_str()).x;
     const float project_x =
         std::max(0.F, ImGui::GetWindowWidth() - project_width - 16.F);

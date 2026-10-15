@@ -2832,7 +2832,7 @@ void apply_opened_project(App& app) {
         request_ascan_scene_load(app);
     else if (app.has_asfm)
         request_asfm_scene_load(
-            app, app.layout.sparse_asfm, app.layout.sparse_asfm.filename().string());
+            app, app.layout.sparse_asfm, path_to_utf8(app.layout.sparse_asfm.filename()));
     else
         set_message(app, "Project opened; no SfM stage yet", theme::text_muted);
 }
@@ -2933,7 +2933,7 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
     }
     app.has_sparse = true;
     app.has_asfm = true;
-    request_asfm_scene_load(app, asfm, asfm.filename().string());
+    request_asfm_scene_load(app, asfm, path_to_utf8(asfm.filename()));
 }
 
 bool choose_project_save_path(App& app, const bool save_as = false) {

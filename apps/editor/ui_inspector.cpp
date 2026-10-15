@@ -645,14 +645,14 @@ Action draw_inspector(App& app) {
         if (app.has_asfm) {
             ImGui::Spacing();
             const std::string asfm_name =
-                app.layout.sparse_asfm.filename().string();
+                path_to_utf8(app.layout.sparse_asfm.filename());
             theme::metric_coloured(
                 "SfM scene", asfm_name.c_str(), theme::success);
         }
         if (app.has_mvs) {
             ImGui::Spacing();
             const std::string mvs_name =
-                app.layout.sparse_mvs.filename().string();
+                path_to_utf8(app.layout.sparse_mvs.filename());
             theme::metric_coloured(
                 "OpenMVS file", mvs_name.c_str(), theme::success);
         }
