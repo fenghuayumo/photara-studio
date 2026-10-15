@@ -65,6 +65,12 @@ int main() {
         require(command.find("--cache-dir -") != std::string::npos &&
                 command.find("--positioning-backend cpu") != std::string::npos,
                 "training-triggered alignment uses the same cache/backend policy");
+        settings.speedy_pruning = true;
+        command = editor::build_train_command("photara.exe", settings, layout, {});
+        require(command.find("--splat-speedy-pruning=true") != std::string::npos &&
+                command.find("--splat-speedy-start") == std::string::npos &&
+                command.find("--splat-speedy-every") == std::string::npos,
+                "Studio uses the automatic conservative pruning schedule");
 
         photara::sfm::Scene source;
         photara::sfm::PinholeCamera camera;

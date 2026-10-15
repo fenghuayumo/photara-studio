@@ -1508,10 +1508,7 @@ std::string build_train_command(
             << std::max(1, settings.densification_cap);
     command << " --splat-speedy-pruning="
             << (settings.speedy_pruning ? "true" : "false");
-    if (settings.speedy_pruning)
-        command << " --splat-speedy-start 9000 --splat-speedy-every 3000"
-                << " --splat-speedy-stop 30000 --splat-speedy-soft-ratio 0.3"
-                << " --splat-speedy-hard-ratio 0.2";
+    // Use the trainer's conservative two-soft/two-hard schedule when enabled.
     settings.validate();
     for (const auto& field : photara::splat::k_training_loss_fields)
         command << " --" << field.cli << ' ' << settings.*field.value;

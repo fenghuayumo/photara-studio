@@ -727,7 +727,7 @@ Action draw_inspector(App& app) {
                 ImGui::EndCombo();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
+                ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, no pruning.\n"
                     "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
                     "High quality: 50,000 steps, 5M Gaussians, no pruning."),
                     tr("Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."));
@@ -758,7 +758,9 @@ Action draw_inspector(App& app) {
             ImGui::Checkbox("##pruning", &app.settings.speedy_pruning);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
-                    "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
+                    "At most two soft and two hard prunes; off by default in all modes.\n"
+                    "30,000 steps: soft at 9,000/12,000; hard at 18,000/24,000.\n"
+                    "Other run lengths scale with the growth and fine-tuning phases.\n"
                     "Requires full training resolution."));
             ImGui::EndTable();
         }

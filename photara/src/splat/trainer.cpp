@@ -1113,8 +1113,8 @@ Trainer::Trainer(TrainingOptions options)
         !std::isfinite(options_.shape_max_axis_ratio) || options_.shape_max_axis_ratio < 1.F)
         throw std::invalid_argument("Shape regularizers require finite non-negative weights and axis-ratio threshold >= 1");
     if (options_.speedy_pruning) {
-        if (options_.speedy_every == 0 || options_.speedy_start == 0 ||
-            options_.speedy_stop < options_.speedy_start ||
+        if (options_.speedy_every == 0 ||
+            (options_.speedy_start != 0 && options_.speedy_stop < options_.speedy_start) ||
             !std::isfinite(options_.speedy_soft_ratio) ||
             !std::isfinite(options_.speedy_hard_ratio) ||
             options_.speedy_soft_ratio < 0.F || options_.speedy_soft_ratio >= 1.F ||
@@ -2490,14 +2490,11 @@ GaussianModel Trainer::train(
         }
         // Progressive training changes the pixels used by the sensitivity
         // score. Wait for the complete target resolution before sparsifying.
-        // With quarter/half stages of 3000 steps, the 6000 event is skipped
-        // and the default schedule first prunes at 9000.
-        if (options_.speedy_pruning && active_resolution_scale >= 1.F &&
-            iteration >= options_.speedy_start &&
-            iteration < options_.speedy_stop &&
-            (iteration - options_.speedy_start) % options_.speedy_every == 0) {
+        // Events before full resolution are skipped, not accumulated for later.
+        const auto pruning_phase = speedy_pruning_phase(options_, iteration, densification_enabled);
+        if (pruning_phase != SpeedyPruningPhase::none && active_resolution_scale >= 1.F) {
             const auto score_start = std::chrono::steady_clock::now();
-            const bool soft = densification_enabled && iteration < grow_stop_iteration(options_);
+            const bool soft = pruning_phase == SpeedyPruningPhase::soft;
             const float ratio = soft ? options_.speedy_soft_ratio : options_.speedy_hard_ratio;
             if (ratio > 0.F && model.size() > 1) {
                 auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());

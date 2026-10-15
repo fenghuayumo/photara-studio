@@ -8083,6 +8083,58 @@ void test_speedy_vulkan() {
 #endif
 }
 
+void test_speedy_conservative_schedule() {
+    using namespace photara::splat;
+    for (const auto mode : {TrainingMode::fast, TrainingMode::standard, TrainingMode::high_quality})
+        require(!training_preset(mode).speedy_pruning, "all presets must leave pruning opt-in");
+    TrainingOptions options;
+    const auto events = [&](bool growth) {
+        std::vector<std::pair<unsigned, SpeedyPruningPhase>> result;
+        for (unsigned i = 0; i <= options.iterations; ++i) {
+            const auto phase = speedy_pruning_phase(options, i, growth);
+            if (phase != SpeedyPruningPhase::none) result.emplace_back(i, phase);
+        }
+        return result;
+    };
+    require(events(true).empty(), "disabled pruning emitted an event");
+    options.speedy_pruning = true;
+    options.iterations = 30'000;
+    using Phase = SpeedyPruningPhase;
+    require(events(true) == std::vector<std::pair<unsigned, Phase>>{
+        {9000, Phase::soft}, {12000, Phase::soft}, {18000, Phase::hard}, {24000, Phase::hard}},
+        "30k pruning must have exactly two soft and two hard events");
+    options.iterations = 50'000;
+    require(events(true) == std::vector<std::pair<unsigned, Phase>>{
+        {15000, Phase::soft}, {20000, Phase::soft}, {30000, Phase::hard}, {40000, Phase::hard}},
+        "50k pruning must scale both phases and leave a recovery tail");
+    options.iterations = 30'000;
+    options.grow_stop_iter = 10'000;
+    require(events(true) == std::vector<std::pair<unsigned, Phase>>{
+        {6000, Phase::soft}, {8000, Phase::soft}, {14000, Phase::hard}, {22000, Phase::hard}},
+        "pruning must respect the actual growth cutoff");
+    require(events(false) == std::vector<std::pair<unsigned, Phase>>{
+        {14000, Phase::hard}, {22000, Phase::hard}},
+        "disabled growth must not turn soft events into extra hard prunes");
+    options.grow_stop_iter = 0;
+    for (unsigned total = 1; total <= 100; ++total) {
+        options.iterations = total;
+        unsigned soft = 0, hard = 0;
+        for (const auto& [iteration, phase] : events(true)) {
+            require(iteration > 0 && iteration < total, "short run prunes at a boundary");
+            if (phase == Phase::soft) ++soft; else ++hard;
+        }
+        require(soft <= 2 && hard <= 2, "short run exceeds conservative pruning budget");
+    }
+    options.iterations = 8;
+    options.speedy_start = 3;
+    options.speedy_every = 2;
+    options.speedy_stop = 8;
+    require(events(true) == std::vector<std::pair<unsigned, Phase>>{
+        {3, Phase::soft}, {5, Phase::hard}, {7, Phase::hard}},
+        "explicit periodic schedule compatibility changed");
+    std::cout << "Conservative Speedy-Splat schedule checks passed\n";
+}
+
 void benchmark_speedy_scores(const char* ply, const char* colmap, const char* images,
                             unsigned repeats) {
 #ifdef TINYTENSOR_HAS_VULKAN
@@ -8196,6 +8248,10 @@ int main(int argc, char** argv) {
         }
     }
     try {
+        if (argc > 1 && std::string(argv[1]) == "--speedy-schedule-only") {
+            test_speedy_conservative_schedule();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--adc-fused-only") {
             test_vulkan_adc_fused();
             test_densify_statistics_and_oversize_weights();
@@ -8494,6 +8550,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--speedy-only") {
+            test_speedy_conservative_schedule();
             test_forward_backward();
             test_speedy_reverse_compositing_oracle();
             test_speedy_vulkan();
@@ -8549,6 +8606,7 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_speedy_conservative_schedule();
         test_speedy_reverse_compositing_oracle();
         test_speedy_vulkan();
         test_compact_pixel_snapshots();

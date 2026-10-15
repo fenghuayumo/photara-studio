@@ -237,7 +237,7 @@ struct ReconstructCli {
     unsigned splat_seed{42};
     struct {
         bool speedy_pruning{false};
-        unsigned speedy_start{6000}, speedy_every{3000}, speedy_stop{30000}, speedy_score_views{0};
+        unsigned speedy_start{0}, speedy_every{3000}, speedy_stop{30000}, speedy_score_views{0};
         float speedy_soft_ratio{0.3F}, speedy_hard_ratio{0.2F};
     } speedy_options;
     bool splat_densification{true};
@@ -501,6 +501,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-ppisp-type TYPE  no_crf_no_vig (default), no_crf, or original\n"
               << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
+              << "  --splat-speedy-pruning=BOOL  opt-in sensitivity pruning (all modes default false)\n"
+              << "  --splat-speedy-start N  0 = two soft/two hard events; nonzero uses periodic schedule\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  override preset growth ceiling (standard 3000000)\n"
               << "  --splat-grow-stop N  stop adding Gaussians at N (default 0 = half of iterations)\n"
@@ -1014,7 +1016,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("42"))
         ("splat-speedy-pruning", "Enable CUDA/Vulkan Speedy-Splat sensitivity pruning",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat-speedy-start", "First pruning iteration", cxxopts::value<unsigned>()->default_value("6000"))
+        ("splat-speedy-start", "First periodic pruning iteration (0 = automatic two soft/two hard)", cxxopts::value<unsigned>()->default_value("0"))
         ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))
         ("splat-speedy-stop", "Exclusive pruning stop", cxxopts::value<unsigned>()->default_value("30000"))
         ("splat-speedy-views", "Scoring cameras (0 = all training views)", cxxopts::value<unsigned>()->default_value("0"))
@@ -1619,8 +1621,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.speedy_options.speedy_pruning = result.count("splat-speedy-pruning")
         ? result["splat-speedy-pruning"].as<bool>() : splat_preset.speedy_pruning;
     cli.speedy_options.speedy_start = result["splat-speedy-start"].as<unsigned>();
-    if (cli.splat_mode == photara::splat::TrainingMode::fast && !result.count("splat-speedy-start"))
-        cli.speedy_options.speedy_start = 9000;
+    // Preserve periodic scheduling for explicit legacy interval/stop overrides.
+    if (!result.count("splat-speedy-start") &&
+        (result.count("splat-speedy-every") || result.count("splat-speedy-stop")))
+        cli.speedy_options.speedy_start =
+            cli.splat_mode == photara::splat::TrainingMode::fast ? 9000 : 6000;
     cli.speedy_options.speedy_every = result["splat-speedy-every"].as<unsigned>();
     cli.speedy_options.speedy_stop = result["splat-speedy-stop"].as<unsigned>();
     cli.speedy_options.speedy_score_views = result["splat-speedy-views"].as<unsigned>();
@@ -3746,6 +3751,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " mode=", static_cast<int>(cli.splat_mode),
         " speedy_pruning=", options.speedy_pruning,
         " speedy_start=", options.speedy_start,
+        " speedy_schedule=", options.speedy_start == 0 ? "two_soft_two_hard" : "periodic",
         " log_interval=", options.log_interval,
         " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
