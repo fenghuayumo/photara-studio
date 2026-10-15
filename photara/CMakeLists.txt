@@ -537,6 +537,7 @@ if(PHOTARA_ENABLE_FEATURES)
         src/mvs/mesh_clean.cpp
         src/mvs/mesh_tsdf.cpp
         src/mvs/export.cpp
+        src/mvs/mesh_handoff.cpp
         src/io/mesh.cpp  # PLY/OBJ stay in mvs/export; GLB interchange lives in io/
         src/mvs/densify.cpp)
     if(PHOTARA_ENABLE_CUDA)
@@ -1528,6 +1529,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_mvs_test tests/mvs_test.cpp)
         target_link_libraries(photara_mvs_test PRIVATE Photara::MVS)
         add_test(NAME photara.mvs.pipeline COMMAND photara_mvs_test)
+        add_executable(photara_mesh_handoff_test tests/mesh_handoff_test.cpp)
+        target_link_libraries(photara_mesh_handoff_test PRIVATE Photara::MVS)
+        add_test(NAME photara.mesh.handoff COMMAND photara_mesh_handoff_test)
+        set_tests_properties(photara.mesh.handoff PROPERTIES TIMEOUT 60)
+        photara_exclude_from_default(photara_mesh_handoff_test)
+        add_dependencies(photara_tests photara_mesh_handoff_test)
         add_executable(photara_mesh_load_test tests/mesh_load_test.cpp)
         target_link_libraries(photara_mesh_load_test PRIVATE Photara::MVS)
         add_test(NAME photara.mesh.load COMMAND photara_mesh_load_test)

@@ -1,5 +1,7 @@
 #include "sparse_view.hpp"
 #include "vulkan_backend.hpp"
+#include "mvs/mesh_handoff.hpp"
+#include <future>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -120,6 +122,29 @@ int main(int argc, char** argv) {
         loaded = editor::prepare_mesh_preview(std::move(loaded), false);
         require(loaded.ok && !loaded.reconstruction_bounds_valid && loaded.gpu_data,
                 "reuse existing box should skip fitting");
+        // The viewport path must work even when no mesh PLY was ever written.
+        auto ready = path;
+        ready += ".ready";
+        {
+            photara::mvs::Mesh mesh;
+            mesh.vertices = {{0.F, 0.F, 0.F}, {1.F, 0.F, 0.F}, {0.F, 1.F, 0.F}};
+            mesh.faces = {{0, 1, 2}};
+            mesh.colors.assign(3, {1.F, 0.F, 0.F});
+            photara::mvs::MeshHandoff publisher(mesh, ready);
+            auto pending = std::async(std::launch::async, [ready] {
+                return editor::prepare_mesh_preview(editor::load_preview_mesh_handoff(ready), true);
+            });
+            loaded = pending.get();
+            require(publisher.wait_for_reader(std::chrono::milliseconds(1)), "viewport handoff acknowledgment");
+            require(loaded.ok && loaded.gpu_data && loaded.reconstruction_bounds_valid &&
+                loaded.mesh.vertices.size() == 3 && loaded.mesh.faces.size() == 1 &&
+                loaded.gpu_data->indices == std::vector<std::uint32_t>{0, 1, 2}, "shared mesh preview preparation");
+            require(loaded.gpu_data->vertices[0].r == 1.F && loaded.gpu_data->vertices[0].g == 0.F,
+                "shared mesh preview color packing");
+        }
+        std::filesystem::remove(ready);
+        ready += ".ack";
+        std::filesystem::remove(ready);
         if (argc > 1 && std::string(argv[1]) == "--vulkan") {
             const int result = test_gpu_upload(loaded.gpu_data, loaded.albedo);
             if (result != 0) {

@@ -6,6 +6,7 @@
 #include "core/camera_projection.hpp"
 #include "io/image.hpp"
 #include "mvs/export.hpp"
+#include "mvs/mesh_handoff.hpp"
 #include "mvs/internal.hpp"
 #include "mvs/types.hpp"
 #include "parallel/thread_pool.hpp"
@@ -1420,6 +1421,18 @@ MeshLoad load_preview_mesh(
         if (!loaded.ok) loaded.error = "Mesh has no faces";
     } catch (const std::exception& failure) {
         loaded.error = failure.what();
+    }
+    return loaded;
+}
+
+MeshLoad load_preview_mesh_handoff(const std::filesystem::path& ready) {
+    MeshLoad loaded;
+    try {
+        loaded.mesh = preview_mesh_from_mvs(photara::mvs::receive_mesh_handoff(ready));
+        loaded.ok = loaded.mesh.has();
+        if (!loaded.ok) loaded.error = "Shared mesh has no faces";
+    } catch (const std::exception& error) {
+        loaded.error = error.what();
     }
     return loaded;
 }

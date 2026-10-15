@@ -121,6 +121,11 @@ struct App {
     std::future<MeshLoad> pending_mesh_load;
     bool frame_mesh_on_load{};
     bool mesh_load_failed{};
+    std::uint64_t mesh_load_generation{};
+    std::uint64_t pending_mesh_load_generation{};
+    bool pending_mesh_handoff{};
+    bool final_mesh_handoff_seen{};
+    bool final_mesh_ready{};
     gpu::MeshPreviewRenderer mesh_renderer;
     std::unique_ptr<splat_render::Renderer> splat_renderer{
         std::make_unique<splat_render::Renderer>()};

@@ -387,6 +387,7 @@ struct ProjectLayout {
     // the working copies, which outlive the run.
     std::filesystem::path session_dir;
     std::filesystem::path final_model_handoff;
+    std::filesystem::path final_mesh_handoff;
     std::filesystem::path preview_view_file;
     std::filesystem::path preview_camera_file;
     std::filesystem::path preview_vis_file;

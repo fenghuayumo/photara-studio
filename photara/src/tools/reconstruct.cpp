@@ -12,6 +12,7 @@
 #include "mvs/mesh_postprocess.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
+#include "mvs/mesh_handoff.hpp"
 #include "mvs/internal.hpp"
 #include "core/logging.hpp"
 #include "core/version.hpp"
@@ -107,6 +108,7 @@ struct ReconstructCli {
     std::filesystem::path working_sfm;
     std::filesystem::path working_splat;
     std::filesystem::path final_model_handoff;
+    std::filesystem::path final_mesh_handoff;
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;
     std::filesystem::path working_texture;
@@ -677,6 +679,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("working-splat",
          "Gaussian file used by --gui training and --splat-view",
+         cxxopts::value<std::string>()->default_value(""))
+        ("final-mesh-handoff", "Shared-memory final-mesh manifest for the editor",
          cxxopts::value<std::string>()->default_value(""))
         ("final-model-handoff", "Shared-memory final-model manifest for the editor",
          cxxopts::value<std::string>()->default_value(""))
@@ -1398,6 +1402,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["working-splat"].as<std::string>();
     if (!working_splat_text.empty())
         cli.working_splat = utf8_to_path(working_splat_text);
+    cli.final_mesh_handoff = utf8_to_path(result["final-mesh-handoff"].as<std::string>());
     cli.final_model_handoff = utf8_to_path(result["final-model-handoff"].as<std::string>());
     const std::string working_mesh_text =
         result["working-mesh"].as<std::string>();
@@ -2679,8 +2684,29 @@ void write_mesh_artifact(
     const std::filesystem::path& sidecar, const bool write_obj = false) {
     const auto path = artifact_path(cli, cli.working_mesh, sidecar);
     if (path.empty() || mesh.faces.empty()) return;
-    ensure_artifact_parent(path);
-    photara::mvs::save_mesh_ply(mesh, path);
+    std::unique_ptr<photara::mvs::MeshHandoff> handoff;
+    if (cli.gui && !cli.final_mesh_handoff.empty()) {
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            handoff = std::make_unique<photara::mvs::MeshHandoff>(mesh, cli.final_mesh_handoff);
+            photara::core::Logger::instance().info("mesh_final_handoff=ready vertices=",
+                mesh.vertices.size(), " faces=", mesh.faces.size(), " seconds=",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        } catch (const std::exception& error) {
+            photara::core::Logger::instance().warning("mesh_final_handoff=fallback reason=", error.what());
+        }
+    }
+    // Publishing precedes persistence, so the editor can display the mesh while
+    // the working PLY is still being saved. Keep the mapping alive on save errors too.
+    try {
+        ensure_artifact_parent(path);
+        photara::mvs::save_mesh_ply(mesh, path);
+    } catch (...) {
+        if (handoff) handoff->wait_for_reader(std::chrono::seconds(2));
+        throw;
+    }
+    if (handoff && !handoff->wait_for_reader(std::chrono::seconds(2)))
+        photara::core::Logger::instance().warning("mesh_final_handoff=reader_timeout (saved mesh remains available)");
     if (!cli.gui && write_obj)
         photara::mvs::save_mesh_obj(
             mesh, path.parent_path() / (path.stem().string() + ".obj"));
