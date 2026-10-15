@@ -170,6 +170,9 @@ SceneLoad sparse_scene_from_dataset(
 MeshLoad load_preview_mesh(
     std::filesystem::path mesh_ply, std::filesystem::path ascan = {});
 
+// Receives a final reconstruction mesh without reading a PLY or project archive.
+MeshLoad load_preview_mesh_handoff(const std::filesystem::path& ready);
+
 // Loads a baked OBJ (with UVs) and records the sibling albedo PNG path.
 MeshLoad load_preview_textured_mesh(std::filesystem::path stem);
 // CPU packing, texture decode and optional box fitting belong on the loader

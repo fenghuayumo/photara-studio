@@ -291,7 +291,7 @@ void refresh_artifacts(App& app) {
         app.has_mvs = false;
         app.has_model = app.final_splat_ready || (gaussian_models_managed(app)
             ? visible_gaussian_model_count(app) > 0 : !existing_splat_model(app).empty());
-        app.has_mesh = !app.imported_mesh_source.empty();
+        app.has_mesh = app.final_mesh_ready || !app.imported_mesh_source.empty();
         app.has_texture = false;
         app.project_writer_version = 0;
         app.project_min_reader_version = 0;
@@ -311,7 +311,7 @@ void refresh_artifacts(App& app) {
     app.has_model = app.final_splat_ready || (gaussian_models_managed(app)
         ? visible_gaussian_model_count(app) > 0 : !existing_splat_model(app).empty());
     app.has_mesh =
-        !app.imported_mesh_source.empty() ||
+        app.final_mesh_ready || !app.imported_mesh_source.empty() ||
         std::filesystem::exists(app.layout.working_mesh, error) ||
         std::filesystem::exists(app.layout.mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
@@ -943,6 +943,10 @@ void clear_viewport_scene(App& app) {
     app.mesh.clear();
     app.imported_mesh_source.clear();
     app.mesh_load_failed = false;
+    ++app.mesh_load_generation;
+    app.pending_mesh_handoff = false;
+    app.final_mesh_handoff_seen = false;
+    app.final_mesh_ready = false;
     app.mesh_gpu_data.reset();
     app.mesh_gpu_uploaded = false;
     app.mesh_gpu_failed = false;
@@ -1819,8 +1823,10 @@ std::filesystem::path existing_mesh_path(const App& app) {
     return {};
 }
 
+namespace { void reset_mesh_handoff(App& app); }
+
 void request_mesh_load(App& app, const bool frame_when_ready) {
-    if (app.loading_scene) return;
+    if (app.loading_scene || app.pending_mesh_load.valid()) return;
     const auto ply = existing_mesh_path(app);
     const auto ascan = app.layout.project_file;
     const auto textured = app.layout.working_texture;
@@ -1834,7 +1840,8 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     app.loading_scene = true;
     app.mesh_load_failed = false;
     app.frame_mesh_on_load = frame_when_ready;
-    app.pending_scene_load_generation = app.scene_load_generation;
+    app.pending_mesh_load_generation = app.mesh_load_generation;
+    app.pending_mesh_handoff = false;
     const bool fit_box = !app.scene.has_points() && !app.reconstruction_box.user_set;
     app.pending_mesh_load = std::async(
         std::launch::async,
@@ -3201,13 +3208,45 @@ void poll_camera_photos(App& app) {
 }
 
 void poll_mesh_load(App& app) {
+    // Poll while the child is saving, before job completion can trigger a disk
+    // reload. The manifest belongs to this run and is never used for texture jobs.
+    if ((app.active_job == JobKind::train || app.active_job == JobKind::dense) &&
+        !app.final_mesh_handoff_seen && !app.loading_scene && !app.pending_mesh_load.valid() &&
+        !app.layout.final_mesh_handoff.empty()) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(app.layout.final_mesh_handoff, error)) {
+            app.final_mesh_handoff_seen = true;
+            app.pending_mesh_handoff = true;
+            app.loading_scene = true;
+            app.frame_mesh_on_load = true;
+            app.pending_mesh_load_generation = app.mesh_load_generation;
+            const auto ready = app.layout.final_mesh_handoff;
+            const bool fit_box = !app.scene.has_points() && !app.reconstruction_box.user_set;
+            app.pending_mesh_load = std::async(std::launch::async, [ready, fit_box] {
+                return prepare_mesh_preview(load_preview_mesh_handoff(ready), fit_box);
+            });
+        }
+    }
     if (!app.pending_mesh_load.valid()) return;
     if (app.pending_mesh_load.wait_for(std::chrono::seconds(0)) !=
         std::future_status::ready)
         return;
     MeshLoad loaded = app.pending_mesh_load.get();
+    const bool handoff = app.pending_mesh_handoff;
+    app.pending_mesh_handoff = false;
+    if (app.pending_mesh_load_generation != app.mesh_load_generation) {
+        // A project switch may already have started a different scene load.
+        if (!app.pending_load.valid()) app.loading_scene = false;
+        return;
+    }
     app.loading_scene = false;
-    if (app.pending_scene_load_generation != app.scene_load_generation) return;
+    if (!loaded.ok && handoff) {
+        photara::core::Logger::instance().warning("mesh_final_handoff=fallback reason=", loaded.error);
+        // If persistence is still running, on_job_finished will start the file
+        // fallback. Otherwise the completed working copy can be read now.
+        if (!app.job.running()) request_mesh_load(app, true);
+        return;
+    }
     if (!loaded.ok) {
         app.mesh_load_failed = true;
         set_message(app, "Mesh: " + loaded.error, theme::danger);
@@ -3235,6 +3274,12 @@ void poll_mesh_load(App& app) {
         app.mesh_gpu_failed = true;
         set_message(app, std::string("Mesh GPU upload: ") + failure.what(), theme::danger);
         return;
+    }
+    if (handoff) {
+        app.final_mesh_ready = true;
+        app.has_mesh = true;
+        photara::core::Logger::instance().info("mesh_final_handoff=received vertices=",
+            app.mesh.vertices.size(), " faces=", app.mesh.faces.size());
     }
     // Frame only when this load was requested with framing intent (fresh
     // mesh from extraction or first session entry). A load triggered by
@@ -3920,6 +3965,7 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
     // Keep unsaved edits on the CPU, but always release the preview model,
     // sorting workspaces and frame targets before starting the trainer.
     release_splat_preview(app);
+    reset_mesh_handoff(app);
     app.final_handoff_seen = false;
     for (const char* suffix : {"", ".ack", ".tmp", ".ack.tmp"}) {
         auto manifest = app.layout.final_model_handoff;
@@ -3999,6 +4045,11 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
             if (!handles.device_uuid.empty())
                 smoke_command << " --splat-preview-vk-device-uuid "
                               << handles.device_uuid;
+            if (app.settings.build_mesh) {
+                smoke_command << " --mesh=true --mesh-method tsdf --working-mesh \""
+                    << app.layout.working_mesh.string() << "\" --final-mesh-handoff \""
+                    << app.layout.final_mesh_handoff.string() << '\"';
+            }
             command = smoke_command.str();
         } else {
             command = build_train_command(
@@ -4043,6 +4094,24 @@ void poll_train_start(App& app) {
     app.training_inputs_ready = false;
 }
 
+namespace {
+void reset_mesh_handoff(App& app) {
+    ++app.mesh_load_generation;
+    app.final_mesh_handoff_seen = false;
+    app.final_mesh_ready = false;
+    app.pending_mesh_handoff = false;
+    // A previous background load may still finish; its generation prevents it
+    // from replacing this run's mesh. Do not replace its future on the UI thread.
+    if (app.layout.final_mesh_handoff.empty()) return;
+    for (const char* suffix : {"", ".ack", ".tmp", ".ack.tmp"}) {
+        auto path = app.layout.final_mesh_handoff;
+        path += suffix;
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+}
+}  // namespace
+
 void start_splat_mesh(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
@@ -4076,6 +4145,7 @@ void start_splat_mesh(App& app) {
     }
     app.view_mode = VisualizationMode::splat;
     try {
+        reset_mesh_handoff(app);
         app.monitor.begin(JobKind::dense, Stage::meshing);
         app.log.open(app.layout.dense_log);
         app.job.start(
@@ -4134,6 +4204,7 @@ void start_dense(App& app) {
     }
     app.view_mode = VisualizationMode::points;
     try {
+        reset_mesh_handoff(app);
         app.monitor.begin(JobKind::dense);
         app.log.open(app.layout.dense_log);
         app.job.start(
@@ -4301,7 +4372,10 @@ void on_job_finished(App& app) {
                           : "MVS finished but no dense cloud was written",
                 has_dense ? theme::success : theme::warning);
         }
-        if (app.has_mesh) {
+        if (app.final_mesh_ready || (app.pending_mesh_load.valid() &&
+            app.pending_mesh_load_generation == app.mesh_load_generation)) {
+            // The shared mesh is already displayed or is being prepared.
+        } else if (app.has_mesh) {
             app.mesh.clear();
             show_mesh_view(app, true);
         } else if (app.has_sparse || has_external_dataset(app)) {
@@ -4349,7 +4423,8 @@ void on_job_finished(App& app) {
             : "Training finished",
         mesh_from_gaussians(app.settings) && !app.has_mesh ? theme::warning
                                                            : theme::success);
-    if (app.has_mesh) {
+    if (app.has_mesh && !app.final_mesh_ready &&
+        !(app.pending_mesh_load.valid() && app.pending_mesh_load_generation == app.mesh_load_generation)) {
         app.mesh.clear();
         show_mesh_view(app, true);
     }

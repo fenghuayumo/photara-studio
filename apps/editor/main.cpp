@@ -37,13 +37,14 @@ std::string g_editor_ini;
 int main(const int argc, char** argv) {
     App app;
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
+    const bool mesh_smoke = smoke_arg == "--interop-mesh-smoke";
     const bool stop_smoke = smoke_arg == "--interop-stop-smoke" ||
                             smoke_arg == "--interop-stop-smoke-vulkan";
     const bool retrain_smoke = smoke_arg == "--interop-retrain-smoke" ||
                                smoke_arg == "--interop-retrain-smoke-vulkan";
     app.smoke_mode = smoke_arg == "--interop-smoke" ||
                      smoke_arg == "--interop-smoke-vulkan" || stop_smoke ||
-                     retrain_smoke;
+                     retrain_smoke || mesh_smoke;
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
@@ -77,6 +78,7 @@ int main(const int argc, char** argv) {
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
             "%s", reinterpret_cast<const char*>(project_u8.c_str()));
+        app.settings.build_mesh = mesh_smoke;
         app.settings.iterations = stop_smoke ? 30'000 : 100;
         if (smoke_arg == "--interop-smoke-vulkan" ||
             smoke_arg == "--interop-stop-smoke-vulkan" ||
@@ -196,6 +198,7 @@ int main(const int argc, char** argv) {
         for (const std::string& line : app.fresh_lines)
             app.monitor.consume(line);
         editor::poll_splat_model_load(app);
+        editor::poll_mesh_load(app);
         if (app.job.consume_completion()) editor::on_job_finished(app);
         editor::poll_splat_model_load(app);
         editor::poll_scene_load(app);
@@ -220,6 +223,7 @@ int main(const int argc, char** argv) {
                 app.smoke_started && !app.job.running() &&
                 !retrain_pending &&
                 (stop_smoke || app.final_splat_ready) &&
+                (!mesh_smoke || app.final_mesh_ready) &&
                 (stop_smoke || editor::gpu::consumed_timeline_value() >= 3)) {
                 ++smoke_completed_runs;
                 if (retrain_smoke && smoke_completed_runs == 1 &&
@@ -235,7 +239,7 @@ int main(const int argc, char** argv) {
                 }
             } else if (
                 std::chrono::steady_clock::now() - smoke_begin >
-                std::chrono::seconds(retrain_smoke ? 240 : 60)) {
+                std::chrono::seconds(retrain_smoke || mesh_smoke ? 240 : 60)) {
                 app.job.stop();
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }

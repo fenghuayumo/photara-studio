@@ -280,6 +280,8 @@ void append_gui_flags(
     std::ostringstream& command, const ProjectLayout& layout,
     const std::filesystem::path& splat_override = {}) {
     command << " --gui";
+    if (!layout.final_mesh_handoff.empty())
+        command << " --final-mesh-handoff " << quote(layout.final_mesh_handoff);
     if (!layout.final_model_handoff.empty())
         command << " --final-model-handoff " << quote(layout.final_model_handoff);
     if (!layout.working_sfm.empty())
@@ -1335,6 +1337,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         : session_temp / "Photara" / session_directory_name();
     layout.training_control = layout.session_dir / "training_control";
     layout.final_model_handoff = layout.session_dir / "final_model.ready";
+    layout.final_mesh_handoff = layout.session_dir / "final_mesh.ready";
     layout.preview_view_file = layout.session_dir / "preview_view";
     layout.preview_camera_file = layout.session_dir / "preview_camera";
     layout.preview_vis_file = layout.session_dir / "preview_vis";
