@@ -25,12 +25,11 @@ module, but the external `sam3` library still manages its computation graphs and
 backend lifecycle rather than using the new session wrapper. Both share the same
 ggml build.
 
-MoGe provides weight conversion, GGUF inspection, CPU/Vulkan loading, a ViT-B
-encoder, the neck and points/normal/mask/scale heads, and public output
-postprocessing and geometry-recovery interfaces. Raw head outputs can be converted
-into a `GeometryPrior` at the original image resolution. Full RGB image
-preprocessing and a `GeometryPredictor` implementation are not yet integrated.
-There are no callable model factories that merely throw a "not implemented" error.
+MoGe provides weight conversion, GGUF inspection, a ViT-B encoder, the neck and
+points/normal/mask/scale heads, RGB preprocessing, and a public Vulkan
+`GeometryPredictor` factory. Predictions produce a `GeometryPrior` at the original
+image resolution. MoGe prediction requires Vulkan and rejects CPU fallback;
+existing low-level CPU utilities remain available for reference diagnostics.
 Existing ONNX feature and delighting paths remain unchanged; their session
 wrappers are not being migrated at this stage.
 
@@ -51,7 +50,7 @@ recovery belong in the model directory. Extract common implementations only when
 multiple models actually share operators; do not create empty model directories
 or a generic operator framework in advance.
 
-Further MoGe-2 integration targets `Ruicheng/moge-2-vitb-normal` first. The model
+MoGe-2 integration targets `Ruicheng/moge-2-vitb-normal`. The model
 adapter owns the token grid, weight loading, computation graph, and geometry
 recovery. Callers provide optional pinhole intrinsics through `GeometryInput`.
 For production integration, pin the weight revision, compare reference outputs
@@ -240,8 +239,78 @@ dimensions specified through `--raw-width/--raw-height`. Outputs from real F32
 weights, synthetic input, and the strict Vulkan encoder/decoder also passed
 known/unknown-focal comparisons: depth relative L2 is approximately `1.50e-7` /
 `2.80e-6`, normal error approximately `5.86e-8`, and valid masks agree.
-End-to-end prediction on real images has not yet been accepted. There is no
-automatic integration into SfM/MVS/Splat or scene-camera updates.
+There is no automatic integration into SfM/MVS/Splat or scene-camera updates.
+
+## RGB Prediction and Real-Image Validation
+
+`create_moge_predictor()` loads a reusable MoGe-2 ViT-B normal session. The caller
+supplies tightly packed 8-bit RGB in `GeometryInput`; decoding and camera
+undistortion stay with the caller. Optional intrinsics describe those exact input
+pixels. The adapter never updates scene cameras. Example:
+
+```cpp
+#include "inference/models/moge.hpp"
+
+photara::inference::MogeOptions options;
+options.num_tokens = 1200;
+// Vulkan device 0; CPU fallback is disabled and is not supported by this adapter.
+auto predictor = photara::inference::create_moge_predictor("model-f32.gguf", options);
+photara::inference::GeometryInput input{rgb_image, pinhole_intrinsics};
+auto prior = predictor->predict(input);
+```
+
+Preprocessing selects `rows=round(sqrt(tokens/aspect))` and
+`columns=round(sqrt(tokens*aspect))` using Python's ties-to-even rounding. The
+rounded grid must contain 1..4096 patches. The default budget is 1200, the low end
+of the checkpoint's intended 1200..3600 range. The image is resized to
+`columns*14` by `rows*14` with separable bilinear antialias filtering,
+`align_corners=false`, then ImageNet-normalized in F32 CHW order. Antialias filter
+coordinates, edge normalization and float arithmetic follow ATen's F32 path.
+Original aspect ratio is passed separately to the decoder. Outputs are recovered
+at the original RGB resolution with camera-Z depth, predicted camera-space unit
+normals, projected points, a binary valid mask, model/revision/device metadata and
+`preprocessing_revision="moge2-rgb-aa-imagenet-geometry-v1"`. Confidence stays empty.
+
+Progress is reported at 0, 0.1, 0.5, 0.9 and 1. Stop requests are checked before
+and after each callback, between preprocessing, encoder, decoder and recovery.
+Cancellation and failed geometry recovery throw `std::runtime_error`; malformed
+inputs/options throw `std::invalid_argument`. Cancellation cannot interrupt an
+in-flight GPU dispatch. A cancelled session can be reused; concurrent calls are
+unsupported.
+
+`python/models/moge/compare_prediction.py` runs the complete native predictor
+against the **unmodified official v2 `infer()`** with F32 weights/arithmetic.
+Pillow decodes each real photograph once and shares identical RGB bytes with
+both implementations; codec differences are excluded from this test. The script
+also isolates resize math on downsample, upsample, singleton and mixed-axis
+fixtures. It exports depth/normal/mask previews and raw maps, and records input,
+checkpoint and GGUF hashes, source commit, grid, settings and errors in JSON.
+Known-focal cases supply a centered square-pixel test K (`fx=fy=0.75*width`);
+this is an API comparison, **not calibrated ground truth** for those photographs.
+
+The normal/general relative-L2 limit is `5e-4`, mask mismatch limit `1e-4`, and
+normal angular p99 limit 0.1 degrees. Known-focal depth/points additionally allow
+`1e-3` against official LM, whose stopping tolerance is `ftol=1e-3`. An independent
+float64 SciPy solve with `ftol/xtol/gtol=1e-13` must also agree with native depth
+within `5e-4`; the official source and inference results are never modified.
+This distinguishes graph errors from optimizer termination: on the mountain
+reference image the original LM shift is 0.2022033, native is 0.2112307 and tightly
+converged SciPy is 0.2112301. Native depth agrees with that control to relative L2
+`9.4e-7`; the original-infer depth difference is approximately 0.084%.
+
+**Precision scope:** acceptance uses F32 GGUF and Vulkan with
+`GGML_VK_DISABLE_F16/COOPMAT/COOPMAT2=1` set **only in the diagnostic child** before
+backend initialization. Library code never changes process environment or shared
+device precision. The ordinary fast Vulkan path still implicitly converts some
+F32 operands to F16 and did not pass these strict normal gates; it is not accepted
+by this validation. A production caller requiring this baseline must configure
+the same startup policy. F16-weight prediction remains unaccepted.
+
+```powershell
+cmake --build build --config Release --target photara_moge_predict_test
+ctest --test-dir build -C Release -R '^photara\.inference\.' --output-on-failure
+python python/models/moge/compare_prediction.py model.pt model-f32.gguf build/photara/Release/photara_moge_predict_test.exe --moge-source path/to/MoGe --images room.jpg portrait.jpg outdoor.jpg --output build/moge-prediction
+```
 
 ## Geometry Conventions
 

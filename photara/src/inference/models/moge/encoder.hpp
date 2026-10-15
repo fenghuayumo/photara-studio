@@ -20,7 +20,7 @@ struct EncoderResult {
 
 // Input is already resized/normalized CHW RGB: [3, rows*14, columns*14].
 // Image resizing/normalization and selection of a token grid belong to the
-// model's future preprocess stage. Batch size is one; no register/mask tokens.
+// model's preprocess stage. Batch size is one; no register/mask tokens.
 // Native DINOv2 positional interpolation (offset 0.1, no antialias) is included.
 // Verified with F32 weights and strict F32 backend kernels. GGML_PREC_F32 does
 // not disable Vulkan's implicit operand conversion; backend startup policy is
