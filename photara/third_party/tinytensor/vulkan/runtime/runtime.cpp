@@ -298,7 +298,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
         {ShaderId::ReduceAxis, as_bytes(span{reduce_axis_hlsl_spv}), 2, 44},
         {ShaderId::CumsumScan, as_bytes(span{cumsum_scan_hlsl_spv}), 3, 32},
-        {ShaderId::ShapeRegularizers, as_bytes(span{shape_regularizers_hlsl_spv}), 4, 28},
+        {ShaderId::ShapeRegularizers, as_bytes(span{shape_regularizers_hlsl_spv}), 4, 24},
         {ShaderId::ShAdamQuant, as_bytes(span{sh_adam_quant_hlsl_spv}), 5, 68},
         {ShaderId::QuantileBounds, as_bytes(span{quantile_bounds_hlsl_spv}), 4, 20},
         {ShaderId::CountMasks, as_bytes(span{count_masks_hlsl_spv}), 4, 16},

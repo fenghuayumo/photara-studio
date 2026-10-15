@@ -3004,9 +3004,28 @@ void add_sh_regularization(const tinytensor::Tensor& sh,
 
 void add_geometry_regularization(const GaussianModel& model,
     ModelGradients& gradients, const float opacity_weight,
-    const float log_scale_weight) {
+    const float scale_weight) {
     const std::size_t count = model.size();
-    if (count == 0 || (!(opacity_weight > 0.F) && !(log_scale_weight > 0.F))) return;
+    if (count == 0 || (!(opacity_weight > 0.F) && !(scale_weight > 0.F))) return;
+    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
+        if (opacity_weight > 0.F) {
+            const auto invalid = model.opacity_logits.isfinite().logical_not();
+            const auto logits = model.opacity_logits.masked_fill(invalid, 0.F);
+            const auto alpha = logits.neg().exp().add(1.F).reciprocal();
+            const auto prior = (alpha * alpha.neg().add(1.F) *
+                (opacity_weight / static_cast<float>(count))).masked_fill(invalid, 0.F);
+            gradients.opacity_logits.copy_from(gradients.opacity_logits.add(prior));
+        }
+        if (scale_weight > 0.F) {
+            const auto invalid = model.log_scales.isfinite().logical_not()
+                .logical_or(model.log_scales.le(-40.F));
+            const auto scales = model.log_scales.masked_fill(invalid, 0.F).exp();
+            const auto prior = (scales *
+                (scale_weight / (3.F * static_cast<float>(count)))).masked_fill(invalid, 0.F);
+            gradients.log_scales.copy_from(gradients.log_scales.add(prior));
+        }
+        return;
+    }
     // Both priors are means over the model (applies
     // `opacity_reg * mean(alpha)` and `scale_reg * mean(exp(log_scale))`), so
     // the weights do not depend on the Gaussian count.
@@ -3014,8 +3033,8 @@ void add_geometry_regularization(const GaussianModel& model,
         model.opacity_logits.ptr<float>(), model.log_scales.ptr<float>(),
         gradients.opacity_logits.ptr<float>(), gradients.log_scales.ptr<float>(),
         count, std::max(opacity_weight, 0.F) / static_cast<float>(count),
-        std::max(log_scale_weight, 0.F) / (3.F * static_cast<float>(count)));
-    check_cuda(cudaGetLastError(), "regularize Gaussian opacity and log scale");
+        std::max(scale_weight, 0.F) / (3.F * static_cast<float>(count)));
+    check_cuda(cudaGetLastError(), "regularize Gaussian opacity and actual scale");
 }
 
 void accumulate_densification_stats_cuda(
@@ -3263,18 +3282,11 @@ void inject_emc_noise(
 __global__ void apply_shape_regularizers_kernel(
     const float* log_scales, const float* quaternions,
     float* scale_gradients, float* quaternion_gradients,
-    const std::size_t count, const float scale_weight,
+    const std::size_t count,
     const float erank_weight, const float erank_s3_weight,
     const float quat_weight, const float axis_ratio_weight, const float max_axis_ratio) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
-    // Linear pressure on the floored log scale: an unused splat keeps
-    // moving toward the relocation threshold instead of vanishing.
-    if (scale_weight > 0.F)
-        for (int axis = 0; axis < 3; ++axis)
-            if (log_scales[3 * index + axis] > -40.F)
-                scale_gradients[3 * index + axis] += scale_weight / 3.F;
 
     // Quaternion norm pull: |q| - 1 - log|q| has its minimum on the unit
     // sphere and never saturates.
@@ -3391,21 +3403,21 @@ __global__ void apply_shape_regularizers_kernel(
 
 void apply_shape_regularizers(
     GaussianModel& model, ModelGradients& gradients,
-    const float scale_weight, const float erank_weight,
+    const float erank_weight,
     const float erank_s3_weight, const float quat_weight,
     const float axis_ratio_weight, const float max_axis_ratio) {
     if (model.size() == 0) return;
     if (model.log_scales.device() == tinytensor::Device::Vulkan) {
         tinytensor::vulkan::apply_shape_regularizers(model.log_scales, model.quaternions,
             gradients.log_scales, gradients.quaternions,
-            scale_weight, erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
+            erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
         return;
     }
     apply_shape_regularizers_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
         gradients.log_scales.ptr<float>(),
-        gradients.quaternions.ptr<float>(), model.size(), scale_weight,
+        gradients.quaternions.ptr<float>(), model.size(),
         erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
     check_cuda(cudaGetLastError(), "apply EMC regularizers");
 }

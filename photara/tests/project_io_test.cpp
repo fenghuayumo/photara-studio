@@ -28,7 +28,7 @@ std::vector<std::uint8_t> encode_settings_v6(
     const Settings& settings, const std::filesystem::path& project) {
     auto bytes = encode_settings(settings, project);
     // Version 7 appends two ints, two booleans and two uint64 budgets.
-    bytes.resize(bytes.size() - 3 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
+    bytes.resize(bytes.size() - 5 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
     const std::uint32_t version = 6;
     std::memcpy(bytes.data(), &version, sizeof(version));
@@ -273,6 +273,7 @@ int main() {
     settings.video_rotate = 90;
     settings.camera_model = 2;
     settings.strategy = 1;
+    settings.scale_regularization_weight = 0.01F;
     settings.shape_erank_reg = 0.00125F;
     settings.shape_axis_ratio_reg = 0.002F;
     settings.shape_max_axis_ratio = 160.F;
@@ -346,6 +347,8 @@ int main() {
     expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.training_mode == 0 && round_trip.speedy_pruning,
            "training mode and pruning survive project roundtrip");
+    expect(round_trip.scale_regularization_weight == settings.scale_regularization_weight,
+        "scale regularization weight survives project roundtrip");
     expect(round_trip.shape_erank_reg == settings.shape_erank_reg &&
         round_trip.shape_axis_ratio_reg == settings.shape_axis_ratio_reg &&
         round_trip.shape_max_axis_ratio == settings.shape_max_axis_ratio, "shape regularizer settings round trip");
@@ -434,12 +437,37 @@ int main() {
     }
     {
         auto old = encode_settings(settings, ascan_path);
-        old.resize(old.size() - 3 * sizeof(float));
+        old.resize(old.size() - 5 * sizeof(float));
         const std::uint32_t version = 8;
         std::memcpy(old.data(), &version, sizeof(version));
         expect(decode_settings(old, ascan_path).shape_erank_reg == 0.F,
             "legacy project does not reinterpret retired axis ratio as rank weight");
+        auto v9 = encode_settings(settings, ascan_path);
+        v9.resize(v9.size() - 2 * sizeof(float));
+        const std::uint32_t v9_version = 9;
+        std::memcpy(v9.data(), &v9_version, sizeof(v9_version));
+        const auto restored_v9 = decode_settings(v9, ascan_path);
+        expect(restored_v9.scale_regularization_weight == 0.F &&
+            restored_v9.shape_erank_reg == settings.shape_erank_reg,
+            "v9 project keeps rank weight and defaults scale weight to zero");
+        expect(Settings{}.scale_regularization_weight == 0.F,
+            "new projects leave the actual-scale prior disabled until tuned");
+        auto v10 = encode_settings(settings, ascan_path);
+        v10.resize(v10.size() - sizeof(float));
+        const std::uint32_t v10_version = 10;
+        std::memcpy(v10.data(), &v10_version, sizeof(v10_version));
+        const float retired_weight = 0.01F;
+        std::memcpy(v10.data() + v10.size() - sizeof(float), &retired_weight, sizeof(float));
+        expect(decode_settings(v10, ascan_path).scale_regularization_weight == 0.F,
+            "v10 log-scale weight is not reinterpreted as an actual-scale weight");
+        auto disabled = settings;
+        disabled.scale_regularization_weight = 0.F;
+        expect(decode_settings(encode_settings(disabled, ascan_path), ascan_path).scale_regularization_weight == 0.F,
+            "explicitly disabled scale regularization survives project roundtrip");
         auto invalid = settings;
+        invalid.scale_regularization_weight = -1.F;
+        expect(decode_settings(encode_settings(invalid, ascan_path), ascan_path).scale_regularization_weight == 0.F,
+            "invalid scale weight is disabled");
         invalid.shape_erank_reg = -1.F;
         expect(decode_settings(encode_settings(invalid, ascan_path), ascan_path).shape_erank_reg == 0.F,
             "invalid rank weight is disabled");

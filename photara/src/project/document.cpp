@@ -138,6 +138,8 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.shape_erank_reg);
     writer.value(settings.shape_axis_ratio_reg);
     writer.value(settings.shape_max_axis_ratio);
+    writer.value(0.F);  // Retired v10 log-scale weight.
+    writer.value(settings.scale_regularization_weight);
     return writer.take();
 }
 
@@ -310,6 +312,10 @@ Settings decode_settings(
         settings.shape_axis_ratio_reg = reader.value<float>();
         settings.shape_max_axis_ratio = reader.value<float>();
     }
+    if (version >= 10) (void)reader.value<float>();  // Retired log-scale weight.
+    settings.scale_regularization_weight = version >= 11 ? reader.value<float>() : 0.F;
+    if (!std::isfinite(settings.scale_regularization_weight) || settings.scale_regularization_weight < 0.F)
+        settings.scale_regularization_weight = 0.F;
     if (!std::isfinite(settings.shape_erank_reg) || settings.shape_erank_reg < 0.F)
         settings.shape_erank_reg = 0.F;
     if (!std::isfinite(settings.shape_axis_ratio_reg) || settings.shape_axis_ratio_reg < 0.F)

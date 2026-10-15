@@ -585,10 +585,6 @@ __device__ inline void adam_scalar(
 __device__ inline void add_shape_regularizer_grads(
     const float* log_scales, const float* quaternions, int i,
     float* grad_log, float* grad_quat, const StructureAdam& a) {
-    if (a.shape_scale_reg > 0.f)
-        for (int axis = 0; axis < 3; ++axis)
-            if (log_scales[3 * i + axis] > -40.f)
-                grad_log[axis] += a.shape_scale_reg / 3.f;
     if (a.shape_quat_norm_reg > 0.f) {
         const float ns =
             quaternions[4 * i] * quaternions[4 * i] +
@@ -718,11 +714,11 @@ __device__ inline void update_structure_adam_row(
     float grad_logit = d_opacity * activated_opacity * (1.f - opacity);
     if (isfinite(a.opacity_logits[i]) && a.opacity_reg > 0.f)
         grad_logit += a.opacity_reg * opacity * (1.f - opacity);
-    if (a.log_scale_reg > 0.f)
+    if (a.scale_reg > 0.f)
         for (int axis = 0; axis < 3; ++axis) {
             const float log_scale = a.log_scales[3 * i + axis];
             if (isfinite(log_scale) && log_scale > -40.f)
-                grad_log[axis] += a.log_scale_reg * expf(log_scale);
+                grad_log[axis] += a.scale_reg * expf(log_scale);
         }
     add_shape_regularizer_grads(
         a.log_scales, a.quaternions, i, grad_log, grad_quat, a);

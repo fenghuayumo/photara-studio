@@ -69,7 +69,7 @@ DeviceHandles device_handles();
 BufferView buffer_view(const Tensor& tensor);
 void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
     Tensor& scale_gradients, Tensor& quaternion_gradients,
-    float scale_weight, float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);
+    float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);
 
 void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
                const AdamStepOptions& options);

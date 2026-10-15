@@ -495,7 +495,17 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
                 "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
                 "Requires full training resolution."));
-        theme::caption("Effective-rank weight");
+        theme::caption("Scale weight (scale_reg)");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputFloat("##scale_regularization_weight", &app.settings.scale_regularization_weight,
+            0.001F, 0.01F, "%.6f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Penalizes actual Gaussian scale; larger Gaussians shrink more.\n"
+                "0 disables the penalty (default)."));
+        app.settings.scale_regularization_weight = std::isfinite(app.settings.scale_regularization_weight)
+            ? std::max(app.settings.scale_regularization_weight, 0.F) : 0.F;
+        theme::caption("Effective-rank weight (erank_reg)");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputFloat("##shape_erank_reg", &app.settings.shape_erank_reg,
             0.0001F, 0.001F, "%.6f");

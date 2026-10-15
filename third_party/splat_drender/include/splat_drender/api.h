@@ -136,8 +136,7 @@ struct StructureAdam {
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-15f;
     float minimum_log_scale = -1.e30f, maximum_log_scale = 1.e30f;
     float opacity_reg = 0.f;
-    float log_scale_reg = 0.f;
-    float shape_scale_reg = 0.f;
+    float scale_reg = 0.f;
     float shape_erank_reg = 0.f;
     float shape_erank_s3_reg = 0.f;
     float shape_quat_norm_reg = 0.f;

@@ -213,7 +213,7 @@ struct ReconstructCli {
     float splat_match_alpha_weight{0.25F};
     float splat_ssim_weight{0.2F};
     float splat_opacity_reg{0.F};
-    float splat_log_scale_reg{0.F};
+    float splat_scale_reg{0.F};
     float splat_depth_normal_weight{0.05F};
     std::string splat_filter_3d{"auto"};
     bool splat_normal_field{false};
@@ -481,7 +481,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --splat-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
-              << "  --splat-log-scale-reg W  per-Gaussian log-scale prior (default 0)\n"
+              << "  --splat-scale-reg W  per-Gaussian actual-scale prior (default 0)\n"
               << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
               << "  --splat-filter-3d MODE  independent 3D filter: auto, on, off (default auto)\n"
               << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
@@ -938,7 +938,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.2"))
         ("splat-opacity-reg", "Per-Gaussian opacity regularization weight",
          cxxopts::value<float>()->default_value("0"))
-        ("splat-log-scale-reg", "Per-Gaussian log-scale regularization weight",
+        ("splat-scale-reg", "Per-Gaussian actual-scale regularization weight",
          cxxopts::value<float>()->default_value("0"))
         ("splat-depth-normal-weight",
          "Splat median-depth/raster-normal consistency weight",
@@ -1584,7 +1584,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-match-alpha-weight"].as<float>();
     cli.splat_ssim_weight = result["splat-ssim-weight"].as<float>();
     cli.splat_opacity_reg = result["splat-opacity-reg"].as<float>();
-    cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
+    cli.splat_scale_reg = result["splat-scale-reg"].as<float>();
     cli.splat_depth_normal_weight =
         result["splat-depth-normal-weight"].as<float>();
     cli.splat_filter_3d = result["splat-filter-3d"].as<std::string>();
@@ -1967,7 +1967,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_ssim_weight < 0.F || cli.splat_ssim_weight > 1.F)
         throw std::invalid_argument("--splat-ssim-weight must be in [0,1]");
     if (!std::isfinite(cli.splat_opacity_reg) || cli.splat_opacity_reg < 0.F ||
-        !std::isfinite(cli.splat_log_scale_reg) || cli.splat_log_scale_reg < 0.F)
+        !std::isfinite(cli.splat_scale_reg) || cli.splat_scale_reg < 0.F)
         throw std::invalid_argument("Splat geometry regularization weights must be finite and non-negative");
     if (cli.splat_depth_normal_weight < 0.F)
         throw std::invalid_argument(
@@ -3700,7 +3700,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.match_alpha_weight = cli.splat_match_alpha_weight;
     options.ssim_weight = cli.splat_ssim_weight;
     options.opacity_regularization_weight = cli.splat_opacity_reg;
-    options.log_scale_regularization_weight = cli.splat_log_scale_reg;
+    options.scale_regularization_weight = cli.splat_scale_reg;
     options.use_normal_field = cli.splat_normal_field;
     options.normal_field_weight = cli.splat_normal_field_weight;
     options.normal_field_depth_ratio =
@@ -3787,7 +3787,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " grow_stop_iter=", options.grow_stop_iter,
         " opacity_decay=", options.opacity_decay,
         " opacity_reg=", options.opacity_regularization_weight,
-        " log_scale_reg=", options.log_scale_regularization_weight,
+        " scale_reg=", options.scale_regularization_weight,
         " scale_decay=", options.scale_decay,
         " bilateral_grid=", options.use_bilateral_grid,
         " bilateral_grid_shared=", options.bilateral_grid_shared,

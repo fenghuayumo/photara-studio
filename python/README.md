@@ -128,8 +128,9 @@ python python/examples/igs_shape_experiment.py --config python/examples/igs_shap
 ```
 
 The runner sets the existing Python `TrainingOptions` after applying the
-strategy preset. `shape_scale_reg` and `shape_erank_reg` correspond to the
-scale and effective-rank penalties. Changing their JSON values requires no
+strategy preset. `scale_regularization_weight` and `shape_erank_reg` correspond to the
+actual-scale and effective-rank penalties. The example leaves scale regularization
+disabled; weights from the retired log-scale penalty are not interchangeable. Changing their JSON values requires no
 C++ changes or recompilation. Each variant trains in a separate Python
 process, saves its resolved settings, progress, and model, and can run the
 existing projection evaluator. Cached SfM cameras and sparse points are reused;

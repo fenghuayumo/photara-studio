@@ -215,7 +215,7 @@ void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, float weight);
 
 void add_geometry_regularization(const GaussianModel& model,
-    ModelGradients& gradients, float opacity_weight, float log_scale_weight);
+    ModelGradients& gradients, float opacity_weight, float scale_weight);
 
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
@@ -333,13 +333,12 @@ void inject_emc_noise(
     GaussianModel& model, const tinytensor::Tensor& radii,
     float scaler, unsigned seed);
 
-// Per-splat shape regularizer gradients: linear pressure on the floored log
-// scale, the effective-rank (entropy) penalty on the relative squared scale
+// Per-splat shape regularizer gradients: effective-rank (entropy) penalty on the relative squared scale
 // shares, the soft log-axis-ratio hinge, and quaternion norm pull. Weights arrive
 // already decay-scheduled and divided by the splat count.
 void apply_shape_regularizers(
     GaussianModel& model, ModelGradients& gradients,
-    float scale_weight, float erank_weight, float erank_s3_weight,
+    float erank_weight, float erank_s3_weight,
     float quat_weight, float axis_ratio_weight = 0.F, float max_axis_ratio = 100.F);
 
 // EMC soft on-screen limit: over the limit, each step spends

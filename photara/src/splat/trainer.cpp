@@ -1107,7 +1107,8 @@ GaussianModel initialize_from_dense_cloud(
 
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
-    if (!std::isfinite(options_.shape_erank_reg) || options_.shape_erank_reg < 0.F ||
+    if (!std::isfinite(options_.scale_regularization_weight) || options_.scale_regularization_weight < 0.F ||
+        !std::isfinite(options_.shape_erank_reg) || options_.shape_erank_reg < 0.F ||
         !std::isfinite(options_.shape_axis_ratio_reg) || options_.shape_axis_ratio_reg < 0.F ||
         !std::isfinite(options_.shape_max_axis_ratio) || options_.shape_max_axis_ratio < 1.F)
         throw std::invalid_argument("Shape regularizers require finite non-negative weights and axis-ratio threshold >= 1");
@@ -2202,14 +2203,6 @@ GaussianModel Trainer::train(
             static_cast<float>(iteration) / std::max(1U, options_.iterations));
         const float inverse_count =
             1.F / static_cast<float>(std::max<std::size_t>(model.size(), 1));
-        const float shape_progress = std::min(
-            static_cast<float>(iteration - 1) /
-                std::max(1U, options_.iterations),
-            1.F);
-        const float shape_power =
-            std::max(options_.shape_scale_reg_decay_power, 0.F);
-        const float shape_decay =
-            (shape_power + 1.F) * std::pow(1.F - shape_progress, shape_power);
         // Auxiliary normal-field / multi-view merges retain the resident
         // gradient path. Empty renders also use the standalone optimizer
         // for zero-gradient decay.
@@ -2218,7 +2211,7 @@ GaussianModel Trainer::train(
         const bool fused_sh = !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
         const bool fused_structure = (!vulkan_backend ||
-            (fused_sh && options_.shape_scale_reg <= 0.F && options_.shape_erank_reg <= 0.F &&
+            (fused_sh && options_.shape_erank_reg <= 0.F &&
              options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F &&
              options_.shape_axis_ratio_reg <= 0.F)) && !normal_field_active &&
             !has_multi_view_sample_gradients && update_structure &&
@@ -2248,11 +2241,10 @@ GaussianModel Trainer::train(
             options_.adam_epsilon, minimum_log_scale, maximum_log_scale,
             std::max(options_.opacity_regularization_weight * remaining, 0.F) *
                 inverse_count,
-            std::max(options_.log_scale_regularization_weight *
+            std::max(options_.scale_regularization_weight *
                          std::pow(remaining, 0.4F),
                 0.F) *
                 inverse_count / 3.F,
-            options_.shape_scale_reg * shape_decay * inverse_count,
             options_.shape_erank_reg * inverse_count,
             options_.shape_erank_s3_reg * inverse_count,
             options_.shape_quat_norm_reg * inverse_count,
@@ -2348,15 +2340,13 @@ GaussianModel Trainer::train(
         if (update_structure && !fused_structure) {
             detail::add_geometry_regularization(model, gradients,
                 options_.opacity_regularization_weight * remaining,
-                options_.log_scale_regularization_weight *
+                options_.scale_regularization_weight *
                     std::pow(remaining, 0.4F));
-            if (options_.shape_scale_reg > 0.F ||
-                options_.shape_erank_reg > 0.F ||
+            if (options_.shape_erank_reg > 0.F ||
                 options_.shape_erank_s3_reg > 0.F ||
                 options_.shape_quat_norm_reg > 0.F || options_.shape_axis_ratio_reg > 0.F) {
                 detail::apply_shape_regularizers(
                     model, gradients,
-                    options_.shape_scale_reg * shape_decay * inverse_count,
                     options_.shape_erank_reg * inverse_count,
                     options_.shape_erank_s3_reg * inverse_count,
                     options_.shape_quat_norm_reg * inverse_count,

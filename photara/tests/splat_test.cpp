@@ -2260,7 +2260,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
     options.require_depth = false;
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
-    training.log_scale_regularization_weight = .03F;
+    training.scale_regularization_weight = .03F;
     training.adam_epsilon = 1e-15F;
     if (shape_penalties) {
         training.shape_erank_reg = 0.001F;
@@ -2284,8 +2284,8 @@ photara::splat::GaussianModel test_fused_structure_adam(
             1.F - std::pow(training.beta2, float(step)),
             training.adam_epsilon, -.8F, -.4F,
             training.opacity_regularization_weight * inverse,
-            training.log_scale_regularization_weight * inverse / 3.F,
-            0.F, 0.F, 0.F, 0.F, true};
+            training.scale_regularization_weight * inverse / 3.F,
+            0.F, 0.F, 0.F, true};
         update.shape_erank_reg = training.shape_erank_reg * inverse;
         update.shape_axis_ratio_reg = training.shape_axis_ratio_reg * inverse;
         update.shape_max_axis_ratio = training.shape_max_axis_ratio;
@@ -2318,7 +2318,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
                 const float alpha = 1.F / (1.F + std::exp(-raw_opacity[i]));
                 opacity_gradient[i] += update.opacity_reg * alpha * (1.F - alpha);
                 for (std::size_t axis = 0; axis < 3; ++axis)
-                    scale_gradient[3*i+axis] += update.log_scale_reg * std::exp(raw_scale[3*i+axis]);
+                    scale_gradient[3*i+axis] += update.scale_reg * std::exp(raw_scale[3*i+axis]);
             }
             // Detach packed views before replacing them: Tensor view assignment copies in place.
             g.opacity_logits = {}; g.log_scales = {};
@@ -2326,9 +2326,9 @@ photara::splat::GaussianModel test_fused_structure_adam(
             g.log_scales = Tensor::from_vector(scale_gradient, {n,3}, device);
         } else detail::add_geometry_regularization(
             model, g, training.opacity_regularization_weight,
-            training.log_scale_regularization_weight);
+            training.scale_regularization_weight);
         if (shape_penalties)
-            detail::apply_shape_regularizers(model, g, 0.F, update.shape_erank_reg,
+            detail::apply_shape_regularizers(model, g, update.shape_erank_reg,
                 0.F, 0.F, update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
         require(fg.opacity_logits.is_valid(),
             "Fused structure diagnostics dropped opacity gradients");
@@ -6784,9 +6784,8 @@ void test_revised_noise_scales_with_scene_units() {
     }
 }
 
-void test_geometry_regularization() {
+void test_geometry_regularization(tinytensor::Device gpu = tinytensor::Device::CUDA) {
     using namespace photara::splat;
-    constexpr auto gpu = tinytensor::Device::CUDA;
     const std::vector<float> logits{-3.F, 3.F};
     const std::vector<float> scales{-41.F, -2.F, 0.F, -1.F, 0.5F, 2.F};
     GaussianModel model;
@@ -6801,7 +6800,7 @@ void test_geometry_regularization() {
     const auto scale_grad = gradients.log_scales.to_vector();
     constexpr double eps = 1e-3;
     // Both priors are means over the model: `opacity_reg * mean(sigmoid(x))`
-    // and `log_scale_reg * mean(exp(log s))` per axis. The scale prior is
+    // and `scale_reg * mean(exp(log s))` per axis. The scale prior is
     // linear in the scale itself, so a millimetre splat keeps its data
     // gradient while a metre-wide sheet is pushed down hard, and the prior is
     // skipped entirely at or below the -40 log-scale floor.
@@ -6988,10 +6987,10 @@ void test_effective_rank_regularizer(tinytensor::Device device) {
     ModelGradients gradients;
     gradients.log_scales = Tensor::zeros_like(model.log_scales);
     gradients.quaternions = Tensor::zeros_like(model.quaternions);
-    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F);
     for (float g : gradients.log_scales.to_vector()) require(g == 0.F, "disabled rank penalty changed gradient");
     constexpr float weight = 0.001F;
-    detail::apply_shape_regularizers(model, gradients, 0.F, weight, 0.F, 0.F);
+    detail::apply_shape_regularizers(model, gradients, weight, 0.F, 0.F);
     const auto g = gradients.log_scales.to_vector();
     const auto loss = [](std::vector<float> v) {
         double sum = 0, entropy = 0;
@@ -7018,7 +7017,7 @@ void test_effective_rank_regularizer(tinytensor::Device device) {
     ratio_scales[4] = -2.2F;
     model.log_scales = Tensor::from_vector(ratio_scales, {3, 3}, device);
     gradients.log_scales = Tensor::zeros_like(model.log_scales);
-    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F, 0.002F, 100.F);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.002F, 100.F);
     const auto ratio_grad = gradients.log_scales.to_vector();
     const float excess = 7.F - std::log(100.F);
     require(std::abs(ratio_grad[3] - 0.002F * excess) < 1e-7F &&
@@ -7034,7 +7033,7 @@ void test_effective_rank_regularizer(tinytensor::Device device) {
     require(std::abs(ratio_grad[3] - fd) < 1e-6, "soft ratio gradient differs from finite differences");
     require(model.log_scales.to_vector() == ratio_scales, "soft ratio penalty hard-clamped scales");
     gradients.log_scales = Tensor::zeros_like(model.log_scales);
-    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.F, 0.002F, 10000.F);
+    detail::apply_shape_regularizers(model, gradients, 0.F, 0.F, 0.F, 0.002F, 10000.F);
     for (float value : gradients.log_scales.to_vector())
         require(value == 0.F, "axis-ratio threshold does not control penalty");
 
@@ -7060,7 +7059,6 @@ void test_emc_regularizers_match_finite_differences() {
         quats[component] *= 0.8F;  // non-unit norm row 0.
     model.quaternions = Tensor::from_vector(quats, {4, 4}, gpu);
 
-    constexpr float k_scale = 0.0137F;
     constexpr float k_erank = 0.0021F;
     constexpr float k_s3 = 0.0007F;
     constexpr float k_quat = 0.0173F;
@@ -7068,7 +7066,7 @@ void test_emc_regularizers_match_finite_differences() {
     gradients.log_scales = Tensor::zeros_like(model.log_scales);
     gradients.quaternions = Tensor::zeros_like(model.quaternions);
     photara::splat::detail::apply_shape_regularizers(
-        model, gradients, k_scale, k_erank, k_s3, k_quat);
+        model, gradients, k_erank, k_s3, k_quat);
     const auto scale_grad = gradients.log_scales.to_vector();
     const auto quat_grad = gradients.quaternions.to_vector();
     const auto host_scales = model.log_scales.to_vector();
@@ -7081,11 +7079,6 @@ void test_emc_regularizers_match_finite_differences() {
         // float host cannot resolve finite differences through that
         // subtraction (the perturbation is below one ulp of r).
         double loss = 0.0;
-        for (int axis = 0; axis < 3; ++axis)
-            loss += static_cast<double>(k_scale) / 3.0 *
-                    std::max(
-                        static_cast<double>(ls_override[3 * row + axis]),
-                        -40.0);
         double largest = ls_override[3 * row];
         for (int axis = 1; axis < 3; ++axis)
             largest = std::max<double>(
@@ -8402,6 +8395,12 @@ int main(int argc, char** argv) {
             test_gggs_depth_normal_parameter_gradients();
             test_densification_strategies_and_dense_bypass();
             std::cout << "Geometry tests passed\n";
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--scale-reg-only") {
+            test_geometry_regularization();
+            test_geometry_regularization(tinytensor::Device::Vulkan);
+            std::cout << "Actual-scale regularizer tests passed\n";
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--erank-only") {

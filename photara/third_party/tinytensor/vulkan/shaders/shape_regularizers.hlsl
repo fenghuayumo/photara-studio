@@ -5,7 +5,7 @@
 [[vk::binding(3, 0)]] RWStructuredBuffer<float> quaternion_gradients;
 struct Push {
     uint count;
-    float scale_weight, erank_weight, erank_s3_weight, quat_weight;
+    float erank_weight, erank_s3_weight, quat_weight;
     float axis_ratio_weight, max_axis_ratio;
 };
 [[vk::push_constant]] ConstantBuffer<Push> pc;
@@ -13,13 +13,6 @@ struct Push {
 void main(uint3 dtid : SV_DispatchThreadID) {
     const uint index = dtid.x;
     if (index >= pc.count) return;
-    // Linear pressure on the floored log scale: an unused splat keeps
-    // moving toward the relocation threshold instead of vanishing.
-    if (pc.scale_weight > 0.F)
-        for (int axis = 0; axis < 3; ++axis)
-            if (log_scales[3 * index + axis] > -40.F)
-                scale_gradients[3 * index + axis] += pc.scale_weight / 3.F;
-
     // Quaternion norm pull: |q| - 1 - log|q| has its minimum on the unit
     // sphere and never saturates.
     if (pc.quat_weight > 0.F) {
