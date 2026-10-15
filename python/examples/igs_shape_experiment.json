@@ -1,0 +1,50 @@
+{
+  "native_directory": "D:/ProgramCode/C++/photara-studio/build/photara/Release",
+  "output_directory": "D:/ProgramCode/C++/photara-studio/build/igs-shape-ab-v2-20261015",
+  "evaluator": "D:/ProgramCode/C++/photara-studio/build/photara/Release/photara_splat_quality_eval.exe",
+  "training": {
+    "iterations": 30000,
+    "seed": 42,
+    "log_interval": 1000,
+    "sh_degree": 3,
+    "densification_cap": 3000000,
+    "initial_point_budget": 0,
+    "input_is_dense": false,
+    "enable_densification": true,
+    "use_source_resolution": true,
+    "max_image_dimension": 1920,
+    "progressive_resolution": true,
+    "progressive_resolution_interval": 1000,
+    "progressive_initial_scale": 0.25,
+    "ssim_weight": 0.2,
+    "use_depth_normal_loss": false,
+    "use_normal_field": false,
+    "use_mvs_depth": false,
+    "use_mvs_normals": false,
+    "multi_view_geo_weight": 0.0,
+    "multi_view_ncc_weight": 0.0,
+    "shape_scale_reg_decay_power": 0.4,
+    "shape_axis_ratio_reg": 0.0,
+    "shape_erank_s3_reg": 0.0,
+    "shape_quat_norm_reg": 0.0,
+    "evaluation_iterations": []
+  },
+  "variants": [
+    {"name": "baseline", "training": {"shape_scale_reg": 0.0, "shape_erank_reg": 0.0}},
+    {"name": "scale_erank", "training": {"shape_scale_reg": 0.01, "shape_erank_reg": 0.001}}
+  ],
+  "datasets": [
+    {
+      "name": "panorama",
+      "images": "D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/images",
+      "sfm": "D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/images.cache/sfm.bin",
+      "training": {"use_mask": true, "evaluation_split_every": 47}
+    },
+    {
+      "name": "fisheye",
+      "images": "D:/ScanVideo/alameda/images",
+      "sfm": "D:/ScanVideo/alameda/images.cache/sfm.bin",
+      "training": {"use_mask": false, "evaluation_split_every": 225}
+    }
+  ]
+}
