@@ -481,12 +481,20 @@ $env:PYTHONPATH = "$PWD\python"
 ```
 
 See [`python/README.md`](python/README.md) for the API example and native-module
-lookup rules.
+lookup rules. The complete [Python API guide](docs/api/python.md) documents
+functions, result handles, callbacks and failures. Native consumers can use the
+[C++ API guide](docs/api/cpp.md) for CMake integration and corresponding calls.
+Both share a generated [type and enum reference](docs/api/types.md) with bound
+fields, defaults and declaration links.
 
 ## Documentation
 
 | Document | Scope |
 |---|---|
+| [`docs/api/README.md`](docs/api/README.md) | Library API documentation index and maintenance |
+| [`docs/api/python.md`](docs/api/python.md) | Python third-party integration and function reference |
+| [`docs/api/cpp.md`](docs/api/cpp.md) | C++ third-party integration and native API reference |
+| [`docs/api/types.md`](docs/api/types.md) | Shared bound configuration/result fields, defaults and enums |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Stage ordering, triggers, and artifacts |
 | [`docs/SFM_ARCHITECTURE.md`](docs/SFM_ARCHITECTURE.md) | Front end, mapping modes, BA, cameras, and diagnostics |
 | [`docs/MVS_ARCHITECTURE.md`](docs/MVS_ARCHITECTURE.md) | PatchMatch, fusion, meshing, cleanup, and quality presets |
