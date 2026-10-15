@@ -1530,6 +1530,8 @@ constexpr Entry k_entries[] = {
      "指標用マスクを読み込めません", "지표 마스크를 불러올 수 없습니다"},
     {"Mask has no valid pixels", "mask 中没有有效像素",
      "マスクに有効な画素がありません", "마스크에 유효 픽셀이 없습니다"},
+    {"Preparing model...", "正在准备模型…", "モデルを準備中…", "모델 준비 중…"},
+    {"Saving trained model...", "正在保存训练模型…", "学習済みモデルを保存中…", "학습된 모델 저장 중…"},
     {"Drag to wipe GT / 3DGS    ·    MMB pan    ·    wheel zoom",
      "拖动擦除对比 GT / 3DGS    ·    中键平移    ·    滚轮缩放",
      "ドラッグで GT / 3DGS ワイプ    ·    中パン    ·    ホイールズーム",

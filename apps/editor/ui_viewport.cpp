@@ -96,7 +96,7 @@ bool rail_icon_button(
 
 bool diagnostic_channels_available(const App& app) {
     return app.view_mode == VisualizationMode::splat &&
-           (app.has_model || (app.job.running() && app.active_job == JobKind::train));
+           (app.has_model || (live_preview_active(app)));
 }
 
 const char* display_channel_label(const DisplayChannel channel) {
@@ -115,7 +115,7 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
     ImGui::SetCursorScreenPos({origin.x + 140.F, origin.y + 5.F});
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.F);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8.F, 4.F});
-    const bool training = app.job.running() && app.active_job == JobKind::train;
+    const bool training = live_preview_active(app);
     struct Item { VisualizationMode mode; const char* label; bool enabled; const char* reason; };
     const Item items[] = {
         {VisualizationMode::points, tr("Point Cloud"), true, nullptr},
@@ -189,7 +189,7 @@ float draw_display_toolbar(App& app, const ImVec2 origin, const float width) {
             if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
                 const auto range = live_preview_active(app)
                     ? std::array{options.depth_near, options.depth_far}
-                    : app.splat_renderer.depth_range();
+                    : app.splat_renderer->depth_range();
                 options.depth_near = range[0]; options.depth_far = range[1];
             }
             if (!options.automatic_depth) {
@@ -236,7 +236,7 @@ void draw_display_legend(const App& app, const ImVec2 min, const ImVec2 max) {
     const bool depth = app.display_channel == DisplayChannel::depth;
     const bool live = live_preview_active(app);
     const auto range = live ? std::array{app.display_options.depth_near, app.display_options.depth_far}
-                            : app.splat_renderer.depth_range();
+                            : app.splat_renderer->depth_range();
     char left[48], right[48];
     std::snprintf(left, sizeof(left), "%.3g", range[0]);
     std::snprintf(right, sizeof(right), "%.3g", range[1]);
@@ -276,8 +276,7 @@ bool draw_edit_rail(App& app, const ImVec2 view_min) {
     constexpr float k_btn = 32.F;
     constexpr float k_inner = 6.F;
     const ImVec2 button_min{rail.Min.x + k_inner, rail.Min.y + k_inner};
-    const bool training =
-        app.job.running() && app.active_job == JobKind::train;
+    const bool training = live_preview_active(app);
     const bool can_edit = !training && app.has_model;
     const bool open = can_edit && app.splat_edit.tools_open();
     const char* tooltip = training
@@ -690,11 +689,11 @@ void capture_qa_render(App& app) {
     if (!app.image_qa.metrics_dirty) return;
     if (app.image_qa_session.metrics_busy()) return;
     const bool training =
-        app.job.running() && app.active_job == JobKind::train;
+        live_preview_active(app);
     if (training) {
         if (!app.preview.display.descriptor || !qa_capture_frame_ready(app))
             return;
-    } else if (app.splat_renderer.splat_count() == 0) {
+    } else if (app.splat_renderer->splat_count() == 0) {
         return;
     }
     if (!app.image_qa_session.has_gt() ||
@@ -704,7 +703,7 @@ void capture_qa_render(App& app) {
 
     const std::uint64_t revision = training
         ? gpu::consumed_timeline_value()
-        : app.splat_renderer.frames_epoch();
+        : app.splat_renderer->frames_epoch();
     if (app.image_qa_session.has_render_pixels() &&
         app.image_qa_session.render_view() == app.image_qa.selected &&
         app.image_qa_session.metrics().valid) {
@@ -719,7 +718,7 @@ void capture_qa_render(App& app) {
         std::vector<std::uint8_t> pixels;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
-        if (!app.splat_renderer.download_rgb(
+        if (!app.splat_renderer->download_rgb(
                 pixels, width, height, k_image_qa_metric_extent))
             return;
         render.width = width;
@@ -760,7 +759,7 @@ void ensure_qa_preview(App& app) {
     if (app.workspace != ViewportWorkspace::image_2d) return;
     // Training still publishes the capture pose to the CUDA child. After
     // training, the 2D compare draws that pose with the Vulkan rasterizer.
-    if (app.job.running() && app.active_job == JobKind::train)
+    if (live_preview_active(app))
         sync_qa_preview_camera(app);
     capture_qa_render(app);
 }
@@ -905,7 +904,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     write_working_subject_bounds(app);
     const bool ring_edit =
         app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
-        app.splat_edit.bound_to(app.splat_renderer.source_key());
+        app.splat_edit.bound_to(app.splat_renderer->source_key());
     app.splat_edit.note_view(ring_edit, app.view_options.ring_scale);
     splat_render::Camera ring_camera{};
     if (ring_edit) {
@@ -1093,7 +1092,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         ImGui::IsItemHovered() &&
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
-    const bool training = app.job.running() && app.active_job == JobKind::train;
+    const bool training = live_preview_active(app);
     const bool has_frame = app.preview.display.descriptor &&
                            gpu::consumed_timeline_value() > 0;
     const unsigned view_count = preview_camera_count(app);
@@ -1291,9 +1290,9 @@ void release_splat_preview_sets(App& app) {
 
 VkDescriptorSet splat_preview_texture(
     App& app, const splat_render::FrameTarget& frame) {
-    if (app.splat_frames_epoch != app.splat_renderer.frames_epoch()) {
+    if (app.splat_frames_epoch != app.splat_renderer->frames_epoch()) {
         release_splat_preview_sets(app);
-        app.splat_frames_epoch = app.splat_renderer.frames_epoch();
+        app.splat_frames_epoch = app.splat_renderer->frames_epoch();
     }
     if (frame.slot < 0 || frame.slot >= 3 || !frame.view || !frame.sampler)
         return VK_NULL_HANDLE;
@@ -1307,9 +1306,12 @@ VkDescriptorSet splat_preview_texture(
 }
 
 void release_splat_preview(App& app) {
+    cancel_splat_model_load(app);
+    app.final_splat_ready = false;
+    app.final_splat_source.clear();
     release_splat_preview_sets(app);
     app.splat_frames_epoch = 0;
-    app.splat_renderer.reset();
+    app.splat_renderer->reset();
 }
 
 splat_render::Camera preview_camera_for_orbit(
@@ -1339,10 +1341,10 @@ bool draw_splat_image(
     if (rings) camera.ring_sigma = app.view_options.ring_scale;
     const std::uint32_t width = std::max(1U, camera.width);
     const std::uint32_t height = std::max(1U, camera.height);
-    if (!app.splat_renderer.has_frame_size(width, height)) {
+    if (!app.splat_renderer->has_frame_size(width, height)) {
         gpu::wait_idle();
         release_splat_preview_sets(app);
-        app.splat_frames_epoch = app.splat_renderer.frames_epoch();
+        app.splat_frames_epoch = app.splat_renderer->frames_epoch();
     }
     splat_render::FrameTarget target;
     splat_render::Shading shading = rings ? splat_render::Shading::rings : splat_render::Shading::gaussian;
@@ -1351,7 +1353,7 @@ bool draw_splat_image(
         if (app.display_channel == DisplayChannel::depth) shading = splat_render::Shading::depth;
         if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
     }
-    if (!app.splat_renderer.draw(camera, target, shading, app.display_options))
+    if (!app.splat_renderer->draw(camera, target, shading, app.display_options))
         return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);
     if (!set) return false;
@@ -1413,10 +1415,11 @@ void draw_splat_render_tab(
         draw->AddImage(texture, min, max);
         draw_display_legend(app, min, max);
     } else {
-        const std::string& failure = app.splat_renderer.failure();
+        const std::string& failure = app.splat_renderer->failure();
         draw_empty_viewport(
             draw, min, max, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
-            failure.empty() ? tr("Train 3DGS to view the splat") : failure.c_str());
+            app.pending_splat_model.valid() ? tr("Preparing model...") :
+                (failure.empty() ? tr("Train 3DGS to view the splat") : failure.c_str()));
     }
 
     ViewOptions overlay = app.view_options;
@@ -1472,7 +1475,7 @@ void draw_splat_render_tab(
     } else {
         std::snprintf(
             readout, sizeof(readout), "%s gaussians  |  %s %s  |  %u x %u",
-            format_count(app.splat_renderer.splat_count()).c_str(),
+            format_count(app.splat_renderer->splat_count()).c_str(),
             format_count(app.splat_edit.selected_count()).c_str(), tr("selected"),
             preview.width, preview.height);
     }
@@ -1588,7 +1591,7 @@ void draw_viewport_panel(App& app) {
             app.image_qa, reconstruction_images_path(app));
         const int previous = app.image_qa.selected;
         const bool training_now =
-            app.job.running() && app.active_job == JobKind::train;
+            live_preview_active(app);
         ImTextureID splat_texture{};
         bool splat_ready = false;
         if (!training_now && image_qa_needs_render(app.image_qa.mode) &&

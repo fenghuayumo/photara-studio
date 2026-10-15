@@ -612,7 +612,7 @@ void SplatEdit::restore(App& app, const Snapshot& snapshot) {
 
 void SplatEdit::upload(App& app) {
     if (count_ == 0) return;
-    app.splat_renderer.update_centers(centers_.data(), count_);
+    app.splat_renderer->update_centers(centers_.data(), count_);
 }
 
 void SplatEdit::begin_stroke(const bool capture_positions) {
@@ -1133,9 +1133,9 @@ void SplatEdit::upload_model(App& app) {
     cloud.opacity_logits = count_ == 0 ? nullptr : opacity_.data();
     cloud.sh = sh_.empty() ? nullptr : sh_.data();
     cloud.filter_3d = filter_.size() == count_ ? filter_.data() : nullptr;
-    if (!app.splat_renderer.upload(cloud, key_)) {
-        if (!app.splat_renderer.failure().empty())
-            set_message(app, app.splat_renderer.failure(), theme::danger);
+    if (!app.splat_renderer->upload(cloud, key_)) {
+        if (!app.splat_renderer->failure().empty())
+            set_message(app, app.splat_renderer->failure(), theme::danger);
     }
 }
 
@@ -1318,8 +1318,8 @@ void SplatEdit::delete_selected(App& app) {
         set_message(app, failure.what(), theme::danger);
         return;
     }
-    if (!app.splat_renderer.failure().empty()) {
-        const std::string failure = app.splat_renderer.failure();
+    if (!app.splat_renderer->failure().empty()) {
+        const std::string failure = app.splat_renderer->failure();
         reinsert(step);
         try {
             upload_model(app);

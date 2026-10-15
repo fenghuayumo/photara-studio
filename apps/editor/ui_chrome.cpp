@@ -278,7 +278,7 @@ Action draw_menu_bar(App& app) {
     }
     if (ImGui::BeginMenu(tr("Selection"))) {
         const bool splats =
-            app.splat_edit.bound_to(app.splat_renderer.source_key()) &&
+            app.splat_edit.bound_to(app.splat_renderer->source_key()) &&
             app.splat_edit.gaussian_count() > 0;
         const bool any_selected = splats && app.splat_edit.selected_count() > 0;
         if (ImGui::MenuItem(tr("Select All"), "Ctrl+A", false, splats))

@@ -94,6 +94,14 @@ struct GaussianMergeJob {
     std::string error;
 };
 
+struct PreparedSplat {
+    std::unique_ptr<splat_render::Renderer> renderer;
+    SplatEdit edit;
+    std::string key;
+    std::filesystem::path source;
+    bool handoff{};
+};
+
 struct App {
     ProjectSettings settings;
     ProjectLayout layout;
@@ -114,7 +122,16 @@ struct App {
     bool frame_mesh_on_load{};
     bool mesh_load_failed{};
     gpu::MeshPreviewRenderer mesh_renderer;
-    splat_render::Renderer splat_renderer;
+    std::unique_ptr<splat_render::Renderer> splat_renderer{
+        std::make_unique<splat_render::Renderer>()};
+    std::future<PreparedSplat> pending_splat_model;
+    std::shared_ptr<std::atomic<bool>> splat_model_cancel;
+    std::vector<std::future<void>> retired_splat_models;
+    std::string pending_splat_key;
+    bool pending_splat_handoff{};
+    bool final_handoff_seen{};
+    bool final_splat_ready{};
+    std::filesystem::path final_splat_source;
     SplatEdit splat_edit;
     std::vector<GaussianModelEntry> gaussian_models;
     std::shared_ptr<const photara::splat::GaussianModel> composed_model;
@@ -399,6 +416,10 @@ void start_splat_simplify(App& app);
 
 bool ensure_splat_renderer(App& app);
 void release_splat_preview(App& app);
+void release_splat_preview_sets(App& app);
+void poll_splat_model_load(App& app);
+void cancel_splat_model_load(App& app);
+void wait_splat_model_loads(App& app);
 void start_align(App& app);
 void start_train(App& app, bool smoke, bool resume_training = false);
 void poll_train_start(App& app);
