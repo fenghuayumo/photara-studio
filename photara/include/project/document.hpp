@@ -1,5 +1,7 @@
 #pragma once
 
+#include "splat/loss_settings.hpp"
+
 #include "project/archive.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/scene.hpp"
@@ -12,7 +14,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 11;
+inline constexpr std::uint32_t k_settings_version = 12;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -23,7 +25,7 @@ struct GaussianSource {
     float scale{1.F};
 };
 
-struct Settings {
+struct Settings : photara::splat::TrainingLossSettings {
     std::string name;
     std::filesystem::path image_directory;
     // Optional external camera/dataset input used by direct splat training.
@@ -59,13 +61,6 @@ struct Settings {
     int preview_interval = 50;
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.
     int strategy = 0;
-    // Scale shrinkage weight; zero disables it.
-    float scale_regularization_weight = 0.F;
-    // Soft penalty on effective rank below two; zero disables it.
-    float shape_erank_reg = 0.F;
-    // Soft penalty only above the axis-ratio threshold; zero weight disables it.
-    float shape_axis_ratio_reg{0.F};
-    float shape_max_axis_ratio{100.F};
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
@@ -103,9 +98,6 @@ struct Settings {
     int texture_seam_steps = 60;
     // false = blend and export in sRGB (matches photographs). true = linear.
     bool texture_blend_linear = false;
-    float depth_normal_weight = 0.05F;
-    float multi_view_geo_weight = 0.02F;
-    float multi_view_ncc_weight = 0.6F;
     int geometry_from_iter = 7'000;
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance

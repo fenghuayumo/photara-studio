@@ -822,6 +822,9 @@ void RunMonitor::consume(const std::string& line) {
             number_after(line, " gaussians=", training_.gaussians);
             number_after(line, " loss=", training_.loss);
             number_after(line, " rgb=", training_.rgb_loss);
+            number_after(line, " alpha=", training_.alpha_loss);
+            training_.depth_loss = training_.normal_loss = 0.F;
+            training_.multi_view_geometry_loss = training_.multi_view_ncc_loss = 0.F;
             number_after(line, " depth=", training_.depth_loss);
             number_after(line, " normal=", training_.normal_loss);
             number_after(
@@ -1509,10 +1512,12 @@ std::string build_train_command(
         command << " --splat-speedy-start 9000 --splat-speedy-every 3000"
                 << " --splat-speedy-stop 30000 --splat-speedy-soft-ratio 0.3"
                 << " --splat-speedy-hard-ratio 0.2";
-    command << " --splat-scale-reg " << settings.scale_regularization_weight;
-    command << " --splat-shape-erank-reg " << settings.shape_erank_reg
-            << " --splat-shape-axis-ratio-reg " << settings.shape_axis_ratio_reg
-            << " --splat-shape-max-axis-ratio " << settings.shape_max_axis_ratio;
+    settings.validate();
+    for (const auto& field : photara::splat::k_training_loss_fields)
+        command << " --" << field.cli << ' ' << settings.*field.value;
+    command << " --splat-geometry-loss=" << (settings.geometry_training ? "true" : "false")
+            << " --splat-geometry-from-iter " << settings.geometry_from_iter
+            << " --splat-normal-field-from-iter " << settings.normal_field_from_iter;
     command << " --splat-sh-degree "
             << std::clamp(settings.sh_degree, 0, 3)
             << " --splat-preview-interval " << settings.preview_interval
@@ -1535,7 +1540,9 @@ std::string build_train_command(
             << " --splat-normal-field="
             << (settings.normal_field ? "true" : "false");
     if (settings.ppisp_layout != 0)
-        command << " --splat-ppisp=true";
+        command << " --splat-ppisp=true --splat-ppisp-type "
+                << (settings.ppisp_model == 2 ? "original" :
+                    settings.ppisp_model == 1 ? "no_crf" : "no_crf_no_vig");
     if (settings.bilateral_grid)
         command << " --splat-bilateral-grid=true";
     append_video_extract_flags(command, settings);
@@ -1547,13 +1554,7 @@ std::string build_train_command(
     const bool gaussian_mesh = mesh_from_gaussians(settings);
     command << " --mesh=" << (gaussian_mesh ? "true" : "false");
     if (gaussian_mesh) {
-        command << " --mesh-method " << mesh_method_flag(gaussian_mesh_method(settings))
-                << " --splat-depth-normal-weight "
-                << settings.depth_normal_weight << " --splat-mv-geo-weight "
-                << settings.multi_view_geo_weight << " --splat-mv-ncc-weight "
-                << settings.multi_view_ncc_weight
-                << " --splat-geometry-from-iter "
-                << settings.geometry_from_iter;
+        command << " --mesh-method " << mesh_method_flag(gaussian_mesh_method(settings));
         append_mesh_quality_flags(command, settings, gaussian_mesh_method(settings));
     }
 

@@ -646,7 +646,7 @@ __device__ inline void add_shape_regularizer_grads(
     if (a.shape_erank_reg > 0.f && rank - 0.99999f < 1.f) {
         const float shares[3]{share_largest, share_middle, share_smallest};
         for (int k = 0; k < 3; ++k)
-            dreg_dshare[k] = rank * (logf(shares[k]) + 1.f) / (rank - 0.99999f);
+            dreg_dshare[k] = a.shape_erank_reg * rank * (logf(shares[k]) + 1.f) / (rank - 0.99999f);
     }
     const float dloss_dshare_smallest = dreg_dshare[2] + a.shape_erank_s3_reg;
     float dloss_dx[3]{};
@@ -671,9 +671,9 @@ __device__ inline void add_shape_regularizer_grads(
             float pull = 0.f;
             for (int other = 0; other < 3; ++other)
                 if (other != largest) pull += dloss_dx[other] * x[other];
-            grad_log[axis] += a.shape_erank_reg * (-2.f * pull);
+            grad_log[axis] += (-2.f * pull);
         } else {
-            grad_log[axis] += a.shape_erank_reg * dloss_dx[axis] * 2.f * x[axis];
+            grad_log[axis] += dloss_dx[axis] * 2.f * x[axis];
         }
     }
 }

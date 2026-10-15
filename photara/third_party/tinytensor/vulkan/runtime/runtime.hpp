@@ -52,6 +52,7 @@ enum class ShaderId : std::uint32_t {
     CountMasks,
     RemapAppend,
     ShapeRegularizers,
+    OversizePenalty,
     Count
 };
 

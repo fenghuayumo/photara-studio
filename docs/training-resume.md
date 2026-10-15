@@ -58,7 +58,26 @@ Training completion publishes the final result and clears pending task recovery
 artifacts. Crash recovery returns to the last successful checkpoint. SfM stage
 caches, mesh extraction and texture baking retain their own existing behavior.
 
-## CLI
+## Training objective controls
+
+Studio groups training controls under **Gaussian Splatting > Loss & constraints**:
+Image fitting, Geometry, Gaussians and Colour. Advanced constraints are collapsed
+by default; colour-model-specific controls appear only when that model is enabled.
+Weights, bounds and descriptions share one definition in `splat/loss_settings.hpp`.
+The same definition drives CLI validation, project persistence and engine mapping.
+
+Surface consistency can be enabled independently of mesh extraction with
+`--splat-geometry-loss=true`; Gaussian mesh extraction also enables it automatically.
+Normal-field alignment has its own activation and start step. Inactive settings
+keep their values when saved. **Reset weights** restores only the current category.
+
+The telemetry value **Image & geometry loss** contains weighted image, mask,
+depth, normal and multi-view contributions. Multi-view terms are displayed with
+their active weights, including cadence compensation, and are not counted again
+under depth or normals. Parameter regularizers and colour-transform priors are
+applied separately by the optimizer and are not included in that displayed sum.
+
+## CLI recovery
 
 ```powershell
 photara --images IMAGES --splat-dataset DATASET --output result.ply --splat

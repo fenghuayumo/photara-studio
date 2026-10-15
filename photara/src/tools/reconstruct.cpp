@@ -27,6 +27,7 @@
 #include "splat/model_handoff.hpp"
 #include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
+#include "splat/loss_settings.hpp"
 #include "splat/checkpoint.hpp"
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
@@ -87,6 +88,8 @@ namespace {
 constexpr std::uint32_t kDefaultAtlasResolution{2048U};
 
 struct ReconstructCli {
+    photara::splat::TrainingLossSettings loss_settings;
+    std::array<bool, photara::splat::k_training_loss_fields.size()> loss_overrides{};
     std::filesystem::path images_dir;
     double focal_pixels{};
     photara::CameraModel camera_model{photara::CameraModel::automatic};
@@ -204,24 +207,14 @@ struct ReconstructCli {
     unsigned splat_bilateral_grid_height{16};
     unsigned splat_bilateral_grid_luma{8};
     float splat_bilateral_grid_lr{2e-3F};
-    float splat_bilateral_grid_tv{10.F};
     bool splat_ppisp{false};
     std::string splat_ppisp_type{"no_crf_no_vig"};
     float splat_ppisp_lr{2e-3F};
     bool splat_ppisp_before_bilagrid{true};
     std::string splat_alpha_mode{"masked"};
-    float splat_match_alpha_weight{0.25F};
-    float splat_ssim_weight{0.2F};
-    float splat_opacity_reg{0.F};
-    float splat_scale_reg{0.F};
-    float splat_depth_normal_weight{0.05F};
     std::string splat_filter_3d{"auto"};
     bool splat_normal_field{false};
-    float splat_normal_field_weight{0.05F};
-    float splat_normal_field_depth_ratio{0.6F};
     unsigned splat_normal_field_from_iter{20'001};
-    float splat_multi_view_geo_weight{0.02F};
-    float splat_multi_view_ncc_weight{0.6F};
     float splat_multi_view_depth_bracket{0.F};
     float splat_multi_view_depth_tolerance{0.F};
     unsigned splat_multi_view_num{8};
@@ -239,8 +232,6 @@ struct ReconstructCli {
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
     std::optional<float> splat_shape_erank_reg;
-    float splat_shape_axis_ratio_reg{0.F};
-    float splat_shape_max_axis_ratio{100.F};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
     float splat_growth_factor{0.F};
@@ -932,31 +923,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-alpha-mode",
          "Mask semantics: masked ignores invalid rays; transparent trains output alpha",
          cxxopts::value<std::string>()->default_value("masked"))
-        ("splat-match-alpha-weight", "Alpha BCE weight in transparent mode",
-         cxxopts::value<float>()->default_value("0.25"))
-        ("splat-ssim-weight", "SSIM blend in the photometric loss",
-         cxxopts::value<float>()->default_value("0.2"))
-        ("splat-opacity-reg", "Per-Gaussian opacity regularization weight",
-         cxxopts::value<float>()->default_value("0"))
-        ("splat-scale-reg", "Per-Gaussian actual-scale regularization weight",
-         cxxopts::value<float>()->default_value("0"))
-        ("splat-depth-normal-weight",
-         "Splat median-depth/raster-normal consistency weight",
-         cxxopts::value<float>()->default_value("0.05"))
         ("splat-filter-3d", "3D filter independently of geometry losses: auto/on/off",
          cxxopts::value<std::string>()->default_value("auto"))
         ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat-normal-field-weight", "Normal-field consistency loss weight",
-         cxxopts::value<float>()->default_value("0.05"))
-        ("splat-normal-field-depth-ratio",
-         "Median-depth fraction of normal-field alignment",
-         cxxopts::value<float>()->default_value("0.6"))
         ("splat-normal-field-from-iter", "Iteration to start normal-field loss",
          cxxopts::value<unsigned>()->default_value("20001"))
-        ("splat-mv-geo-weight", "Multi-view depth round-trip loss weight",
-         cxxopts::value<float>()->default_value("0.02"))
         ("splat-mv-depth-bracket",
          "Multi-view point-query median-depth seed window in world units "
          "(0 = derive from the scene extent, < 0 = reference +/-200)",
@@ -965,8 +938,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Multi-view point-query depth precision in world units "
          "(<= 0 = full 8 refinements; > 0 explicitly enables early stopping)",
          cxxopts::value<float>()->default_value("0"))
-        ("splat-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
-         cxxopts::value<float>()->default_value("0.6"))
         ("splat-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-mv-tail-interval",
@@ -1006,13 +977,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.0001"))
         ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
-        ("splat-shape-axis-ratio-reg", "Soft axis-ratio penalty weight (0 disables)",
-         cxxopts::value<float>()->default_value("0"))
-        ("splat-shape-max-axis-ratio", "Axis-ratio soft penalty threshold (at least 1)",
-         cxxopts::value<float>()->default_value("100"))
-        ("splat-shape-erank-reg",
-         "Effective-rank penalty weight (0 disables; default follows strategy)",
-         cxxopts::value<float>())
         ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-bilateral-grid",
@@ -1029,8 +993,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-bilateral-grid-lr", "Bilateral grid Adam learning rate",
          cxxopts::value<float>()->default_value("0.0002"))
-        ("splat-bilateral-grid-tv", "Bilateral grid total-variation weight",
-         cxxopts::value<float>()->default_value("10"))
         ("splat-ppisp",
          "PPISP per-view exposure/white-balance colour correction",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -1290,6 +1252,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("uv-max-stretch", "UV distortion budget (higher values allow fewer cuts)",
          cxxopts::value<float>()->default_value("0.333333333"));
 
+    for (const auto& field : photara::splat::k_training_loss_fields)
+        options.add_options()(field.cli, field.help,
+            cxxopts::value<float>()->default_value(std::to_string(field.default_value)));
+    options.add_options()("splat-geometry-loss", "Enable surface consistency without mesh extraction", cxxopts::value<bool>()->default_value("false")->implicit_value("true"));
+
     const auto result = options.parse(argc, argv);
     if (result.count("version")) {
         std::cout << PHOTARA_VERSION_STRING << '\n';
@@ -1312,6 +1279,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
 
     ReconstructCli cli;
+    for (std::size_t i = 0; i < photara::splat::k_training_loss_fields.size(); ++i) {
+        const auto& field = photara::splat::k_training_loss_fields[i];
+        cli.loss_settings.*field.value = result[field.cli].as<float>();
+        cli.loss_overrides[i] = result.count(field.cli) != 0;
+    }
+    cli.loss_settings.geometry_training = result["splat-geometry-loss"].as<bool>();
+    cli.loss_settings.validate();
     if (result.count("images"))
         cli.images_dir = utf8_to_path(result["images"].as<std::string>());
     cli.video_fps = result["video-fps"].as<float>();
@@ -1580,13 +1554,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-eval-split-every"].as<unsigned>();
     cli.splat_use_mask = result["splat-use-mask"].as<bool>();
     cli.splat_alpha_mode = result["splat-alpha-mode"].as<std::string>();
-    cli.splat_match_alpha_weight =
-        result["splat-match-alpha-weight"].as<float>();
-    cli.splat_ssim_weight = result["splat-ssim-weight"].as<float>();
-    cli.splat_opacity_reg = result["splat-opacity-reg"].as<float>();
-    cli.splat_scale_reg = result["splat-scale-reg"].as<float>();
-    cli.splat_depth_normal_weight =
-        result["splat-depth-normal-weight"].as<float>();
     cli.splat_filter_3d = result["splat-filter-3d"].as<std::string>();
     if (cli.splat_filter_3d != "auto" && cli.splat_filter_3d != "on" &&
         cli.splat_filter_3d != "off")
@@ -1596,16 +1563,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_multi_view_depth_tolerance =
         result["splat-mv-depth-tolerance"].as<float>();
     cli.splat_normal_field = result["splat-normal-field"].as<bool>();
-    cli.splat_normal_field_weight =
-        result["splat-normal-field-weight"].as<float>();
-    cli.splat_normal_field_depth_ratio =
-        result["splat-normal-field-depth-ratio"].as<float>();
     cli.splat_normal_field_from_iter =
         result["splat-normal-field-from-iter"].as<unsigned>();
-    cli.splat_multi_view_geo_weight =
-        result["splat-mv-geo-weight"].as<float>();
-    cli.splat_multi_view_ncc_weight =
-        result["splat-mv-ncc-weight"].as<float>();
     cli.splat_multi_view_num = result["splat-mv-neighbors"].as<unsigned>();
     cli.splat_multi_view_tail_interval = result.count("splat-mv-tail-interval")
         ? result["splat-mv-tail-interval"].as<unsigned>()
@@ -1634,8 +1593,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-min-scale-fraction"].as<float>();
     cli.splat_max_scale_fraction =
         result["splat-max-scale-fraction"].as<float>();
-    cli.splat_shape_axis_ratio_reg = result["splat-shape-axis-ratio-reg"].as<float>();
-    cli.splat_shape_max_axis_ratio = result["splat-shape-max-axis-ratio"].as<float>();
     if (result.count("splat-shape-erank-reg"))
         cli.splat_shape_erank_reg = result["splat-shape-erank-reg"].as<float>();
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
@@ -1650,8 +1607,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-bilateral-grid-luma"].as<unsigned>();
     cli.splat_bilateral_grid_lr =
         result["splat-bilateral-grid-lr"].as<float>();
-    cli.splat_bilateral_grid_tv =
-        result["splat-bilateral-grid-tv"].as<float>();
     cli.splat_ppisp = result["splat-ppisp"].as<bool>();
     cli.splat_ppisp_type = result["splat-ppisp-type"].as<std::string>();
     cli.splat_ppisp_lr = result["splat-ppisp-lr"].as<float>();
@@ -1954,35 +1909,35 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_bilateral_grid_lr < 0.F)
         throw std::invalid_argument(
             "--splat-bilateral-grid-lr must be finite and non-negative");
-    if (!std::isfinite(cli.splat_bilateral_grid_tv) ||
-        cli.splat_bilateral_grid_tv < 0.F)
+    if (!std::isfinite(cli.loss_settings.bilateral_grid_tv_weight) ||
+        cli.loss_settings.bilateral_grid_tv_weight < 0.F)
         throw std::invalid_argument(
             "--splat-bilateral-grid-tv must be finite and non-negative");
     if (!std::isfinite(cli.splat_ppisp_lr) || cli.splat_ppisp_lr < 0.F)
         throw std::invalid_argument(
             "--splat-ppisp-lr must be finite and non-negative");
-    if (cli.splat_match_alpha_weight < 0.F)
+    if (cli.loss_settings.match_alpha_weight < 0.F)
         throw std::invalid_argument(
             "--splat-match-alpha-weight must be non-negative");
-    if (cli.splat_ssim_weight < 0.F || cli.splat_ssim_weight > 1.F)
+    if (cli.loss_settings.ssim_weight < 0.F || cli.loss_settings.ssim_weight > 1.F)
         throw std::invalid_argument("--splat-ssim-weight must be in [0,1]");
-    if (!std::isfinite(cli.splat_opacity_reg) || cli.splat_opacity_reg < 0.F ||
-        !std::isfinite(cli.splat_scale_reg) || cli.splat_scale_reg < 0.F)
+    if (!std::isfinite(cli.loss_settings.opacity_regularization_weight) || cli.loss_settings.opacity_regularization_weight < 0.F ||
+        !std::isfinite(cli.loss_settings.scale_regularization_weight) || cli.loss_settings.scale_regularization_weight < 0.F)
         throw std::invalid_argument("Splat geometry regularization weights must be finite and non-negative");
-    if (cli.splat_depth_normal_weight < 0.F)
+    if (cli.loss_settings.depth_normal_weight < 0.F)
         throw std::invalid_argument(
             "--splat-depth-normal-weight must be non-negative");
-    if (!std::isfinite(cli.splat_normal_field_weight) ||
-        cli.splat_normal_field_weight < 0.F)
+    if (!std::isfinite(cli.loss_settings.normal_field_weight) ||
+        cli.loss_settings.normal_field_weight < 0.F)
         throw std::invalid_argument(
             "--splat-normal-field-weight must be finite and non-negative");
-    if (!std::isfinite(cli.splat_normal_field_depth_ratio) ||
-        cli.splat_normal_field_depth_ratio < 0.F ||
-        cli.splat_normal_field_depth_ratio > 1.F)
+    if (!std::isfinite(cli.loss_settings.normal_field_depth_ratio) ||
+        cli.loss_settings.normal_field_depth_ratio < 0.F ||
+        cli.loss_settings.normal_field_depth_ratio > 1.F)
         throw std::invalid_argument(
             "--splat-normal-field-depth-ratio must be in [0,1]");
-    if (cli.splat_multi_view_geo_weight < 0.F ||
-        cli.splat_multi_view_ncc_weight < 0.F)
+    if (cli.loss_settings.multi_view_geo_weight < 0.F ||
+        cli.loss_settings.multi_view_ncc_weight < 0.F)
         throw std::invalid_argument(
             "Splat multi-view loss weights must be non-negative");
     if (cli.splat_multi_view_num == 0)
@@ -2018,8 +1973,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_max_scale_fraction < cli.splat_min_scale_fraction)
         throw std::invalid_argument(
             "Splat scale fractions must satisfy 0 < min <= max");
-    if (!std::isfinite(cli.splat_shape_axis_ratio_reg) || cli.splat_shape_axis_ratio_reg < 0.F ||
-        !std::isfinite(cli.splat_shape_max_axis_ratio) || cli.splat_shape_max_axis_ratio < 1.F)
+    if (!std::isfinite(cli.loss_settings.shape_axis_ratio_reg) || cli.loss_settings.shape_axis_ratio_reg < 0.F ||
+        !std::isfinite(cli.loss_settings.shape_max_axis_ratio) || cli.loss_settings.shape_max_axis_ratio < 1.F)
         throw std::invalid_argument("Axis-ratio penalty requires non-negative finite weight and finite threshold >= 1");
     if (cli.splat_shape_erank_reg &&
         (!std::isfinite(*cli.splat_shape_erank_reg) || *cli.splat_shape_erank_reg < 0.F))
@@ -2549,6 +2504,10 @@ void ensure_video_frames(ReconstructCli& cli, const bool preserve_cameras) {
 
 photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     photara::project::Settings settings;
+    static_cast<photara::splat::TrainingLossSettings&>(settings) = cli.loss_settings;
+    settings.normal_field_from_iter = static_cast<int>(cli.splat_normal_field_from_iter);
+    settings.ppisp_model = cli.splat_ppisp_type == "original" ? 2 :
+        cli.splat_ppisp_type == "no_crf" ? 1 : 0;
     settings.name = cli.output.stem().string();
     settings.image_directory =
         cli.video_source.empty() ? cli.images_dir : cli.video_source;
@@ -2621,9 +2580,9 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
         settings.mesh_quality = cli.mesh_tsdf_voxel_scale >= 1.5F ? 0
             : cli.mesh_tsdf_voxel_scale > 0.F && cli.mesh_tsdf_voxel_scale <= 0.5F ? 2 : 1;
     }
-    settings.depth_normal_weight = cli.splat_depth_normal_weight;
-    settings.multi_view_geo_weight = cli.splat_multi_view_geo_weight;
-    settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
+    settings.depth_normal_weight = cli.loss_settings.depth_normal_weight;
+    settings.multi_view_geo_weight = cli.loss_settings.multi_view_geo_weight;
+    settings.multi_view_ncc_weight = cli.loss_settings.multi_view_ncc_weight;
     settings.geometry_from_iter = static_cast<int>(cli.splat_geometry_from_iter);
     settings.normal_field = cli.splat_normal_field;
     settings.ppisp_layout = cli.splat_ppisp ? 1 : 0;
@@ -3617,7 +3576,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.bilateral_grid_height = cli.splat_bilateral_grid_height;
     options.bilateral_grid_luma = cli.splat_bilateral_grid_luma;
     options.bilateral_grid_lr = cli.splat_bilateral_grid_lr;
-    options.bilateral_grid_tv_weight = cli.splat_bilateral_grid_tv;
+    options.bilateral_grid_tv_weight = cli.loss_settings.bilateral_grid_tv_weight;
     options.use_ppisp = cli.splat_ppisp;
     options.ppisp_type = cli.splat_ppisp_type == "original"
         ? photara::splat::PpispParamType::original
@@ -3697,14 +3656,14 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.alpha_mode = cli.splat_alpha_mode == "masked"
         ? photara::splat::AlphaMode::masked
         : photara::splat::AlphaMode::transparent;
-    options.match_alpha_weight = cli.splat_match_alpha_weight;
-    options.ssim_weight = cli.splat_ssim_weight;
-    options.opacity_regularization_weight = cli.splat_opacity_reg;
-    options.scale_regularization_weight = cli.splat_scale_reg;
+    options.match_alpha_weight = cli.loss_settings.match_alpha_weight;
+    options.ssim_weight = cli.loss_settings.ssim_weight;
+    options.opacity_regularization_weight = cli.loss_settings.opacity_regularization_weight;
+    options.scale_regularization_weight = cli.loss_settings.scale_regularization_weight;
     options.use_normal_field = cli.splat_normal_field;
-    options.normal_field_weight = cli.splat_normal_field_weight;
+    options.normal_field_weight = cli.loss_settings.normal_field_weight;
     options.normal_field_depth_ratio =
-        cli.splat_normal_field_depth_ratio;
+        cli.loss_settings.normal_field_depth_ratio;
     options.normal_field_from_iter = cli.splat_normal_field_from_iter;
     options.profile_cuda = cli.splat_profile_cuda;
     options.cuda_profile_interval = cli.splat_profile_interval;
@@ -3717,20 +3676,25 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.constrain_scale_range = cli.splat_constrain_scales;
     if (cli.splat_shape_erank_reg)
         options.shape_erank_reg = *cli.splat_shape_erank_reg;
-    options.shape_axis_ratio_reg = cli.splat_shape_axis_ratio_reg;
-    options.shape_max_axis_ratio = cli.splat_shape_max_axis_ratio;
+    options.shape_axis_ratio_reg = cli.loss_settings.shape_axis_ratio_reg;
+    options.shape_max_axis_ratio = cli.loss_settings.shape_max_axis_ratio;
+    for (std::size_t i = 0; i < photara::splat::k_training_loss_fields.size(); ++i) {
+        const auto& field = photara::splat::k_training_loss_fields[i];
+        if (cli.loss_overrides[i]) options.*field.training_value = cli.loss_settings.*field.value;
+    }
+    const bool geometry_objective = cli.mesh || cli.loss_settings.geometry_training;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
-    options.use_depth_normal_loss = cli.mesh &&
-        cli.splat_depth_normal_weight > 0.F;
-    options.depth_normal_weight = cli.splat_depth_normal_weight;
+    options.use_depth_normal_loss = geometry_objective &&
+        cli.loss_settings.depth_normal_weight > 0.F;
+    options.depth_normal_weight = cli.loss_settings.depth_normal_weight;
     if (cli.splat_filter_3d != "auto")
         options.use_3d_filter = cli.splat_filter_3d == "on";
-    options.multi_view_geo_weight = cli.mesh
-        ? cli.splat_multi_view_geo_weight
+    options.multi_view_geo_weight = geometry_objective
+        ? cli.loss_settings.multi_view_geo_weight
         : 0.F;
-    options.multi_view_ncc_weight = cli.mesh
-        ? cli.splat_multi_view_ncc_weight
+    options.multi_view_ncc_weight = geometry_objective
+        ? cli.loss_settings.multi_view_ncc_weight
         : 0.F;
     options.multi_view_depth_bracket = cli.splat_multi_view_depth_bracket;
     options.multi_view_depth_tolerance = cli.splat_multi_view_depth_tolerance;
@@ -3772,6 +3736,11 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
         : cli.splat_strategy.c_str();
+    std::ostringstream objective_summary;
+    objective_summary << "splat_objective";
+    for (const auto& field : photara::splat::k_training_loss_fields)
+        objective_summary << ' ' << field.cli << '=' << options.*field.training_value;
+    photara::core::Logger::instance().info(objective_summary.str());
     photara::core::Logger::instance().info(
         "splat training: iterations=", options.iterations,
         " mode=", static_cast<int>(cli.splat_mode),

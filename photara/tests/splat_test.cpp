@@ -2264,6 +2264,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
     training.adam_epsilon = 1e-15F;
     if (shape_penalties) {
         training.shape_erank_reg = 0.001F;
+        training.shape_erank_s3_reg = 0.0007F;
         training.shape_axis_ratio_reg = 0.003F;
         training.shape_max_axis_ratio = 1.1F;
     }
@@ -2287,6 +2288,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
             training.scale_regularization_weight * inverse / 3.F,
             0.F, 0.F, 0.F, true};
         update.shape_erank_reg = training.shape_erank_reg * inverse;
+        update.shape_erank_s3_reg = training.shape_erank_s3_reg * inverse;
         update.shape_axis_ratio_reg = training.shape_axis_ratio_reg * inverse;
         update.shape_max_axis_ratio = training.shape_max_axis_ratio;
         SHAdamUpdate sh_update;
@@ -2329,7 +2331,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
             training.scale_regularization_weight);
         if (shape_penalties)
             detail::apply_shape_regularizers(model, g, update.shape_erank_reg,
-                0.F, 0.F, update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
+                update.shape_erank_s3_reg, 0.F, update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
         require(fg.opacity_logits.is_valid(),
             "Fused structure diagnostics dropped opacity gradients");
         compare(g.opacity_logits, fg.opacity_logits,
@@ -7039,18 +7041,39 @@ void test_effective_rank_regularizer(tinytensor::Device device) {
 
 }
 
-void test_emc_regularizers_match_finite_differences() {
+void test_screen_size_constraint(tinytensor::Device device) {
     using namespace photara::splat;
     using tinytensor::Tensor;
-    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model;
+    model.means = Tensor::zeros({3, 3}, device);
+    const std::vector<float> before{-1.F,-2.F,-3.F, -1.F,-2.F,-3.F, -1.F,-2.F,-3.F};
+    model.log_scales = Tensor::from_vector(before, {3, 3}, device);
+    const auto radii = Tensor::from_vector(std::vector<int>{0,20,80}, {3}, device);
+    detail::apply_oversize_penalty(model, radii, .01F, .3F, .5F, .01F);
+    const auto actual = model.log_scales.to_vector();
+    for (int i = 0; i < 9; ++i) {
+        const float expected = before[i] - (i < 6 ? 0.F :
+            .01F * .5F * std::log2(.8F / .3F) * std::exp(2.F * (before[i] + 1.F)));
+        require(std::abs(actual[i] - expected) < 1e-6F, "Screen-size constraint differs from its axis-weighted update");
+    }
+    detail::apply_oversize_penalty(model, radii, .01F, 0.F, .5F, .01F);
+    require(model.log_scales.to_vector() == actual, "Disabled screen-size limit changed scales");
+}
+
+void test_emc_regularizers_match_finite_differences(
+    tinytensor::Device gpu = tinytensor::Device::CUDA, float k_erank = 0.0021F) {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
     auto model = make_default_refine_model(std::vector<float>(12, 0.F));
     auto scales = model.log_scales.to_vector();
-    // Row 0/1/3: anisotropic (active erank region), row 2 isotropic
-    // (erank inactive, r - c > 1).
+    // Distinct axes keep the minimum-eigenvalue term differentiable.
+    // Rows 1/2 have rank above two, so only the flatness term is active.
     scales[0] = std::log(0.01F);   scales[1] = std::log(0.001F);
     scales[2] = std::log(0.0001F);
     scales[3] = std::log(0.01F);   scales[4] = std::log(0.008F);
     scales[5] = std::log(0.006F);
+    scales[6] = std::log(0.01F);   scales[7] = std::log(0.009F);
+    scales[8] = std::log(0.008F);
     scales[9] = std::log(0.02F);   scales[10] = std::log(0.0002F);
     scales[11] = std::log(0.00002F);
     model.log_scales = Tensor::from_vector(scales, {4, 3}, gpu);
@@ -7059,12 +7082,13 @@ void test_emc_regularizers_match_finite_differences() {
         quats[component] *= 0.8F;  // non-unit norm row 0.
     model.quaternions = Tensor::from_vector(quats, {4, 4}, gpu);
 
-    constexpr float k_erank = 0.0021F;
     constexpr float k_s3 = 0.0007F;
     constexpr float k_quat = 0.0173F;
     ModelGradients gradients;
-    gradients.log_scales = Tensor::zeros_like(model.log_scales);
-    gradients.quaternions = Tensor::zeros_like(model.quaternions);
+    auto scale_storage = Tensor::zeros({6, 3}, gpu);
+    auto quat_storage = Tensor::zeros({6, 4}, gpu);
+    gradients.log_scales = scale_storage.slice(0, 1, 5);
+    gradients.quaternions = quat_storage.slice(0, 1, 5);
     photara::splat::detail::apply_shape_regularizers(
         model, gradients, k_erank, k_s3, k_quat);
     const auto scale_grad = gradients.log_scales.to_vector();
@@ -7123,6 +7147,10 @@ void test_emc_regularizers_match_finite_differences() {
                 (host_loss(row, up, host_quats) -
                  host_loss(row, down, host_quats)) / (2.F * eps);
             const float kernel = scale_grad[3 * row + axis];
+            if (!(std::fabs(fd - kernel) < 2e-4 + 0.05 * std::fabs(fd)))
+                std::cerr << "Shape gradient row=" << row << " axis=" << axis
+                          << " device=" << static_cast<int>(gpu) << " rank_weight=" << k_erank
+                          << " finite_difference=" << fd << " actual=" << kernel << '\n';
             require(std::fabs(fd - kernel) < 2e-4 + 0.05 * std::fabs(fd),
                     "EMC erank/scale gradient diverged from host math");
         }
@@ -7570,7 +7598,14 @@ void test_densification_strategies_and_dense_bypass() {
     options.multi_view_geo_weight = 0.02F;
     options.profile_cuda = true;
     options.cuda_profile_interval = 2;
-    const auto geometry_dense_model = splat::Trainer(options).train(scene);
+    const auto geometry_dense_model = splat::Trainer(options).train(scene,
+        [](const splat::TrainingProgress& progress) {
+            const float sum = progress.rgb_loss + progress.alpha_loss + progress.depth_loss +
+                progress.normal_loss + progress.multi_view_geometry_loss + progress.multi_view_ncc_loss;
+            require(std::abs(progress.loss - sum) < 1e-5F * std::max(1.F, std::abs(sum)),
+                "Displayed objective components must be disjoint weighted losses");
+            return true;
+        });
     require(
         geometry_dense_model.filter_3d.is_valid(),
         "depth-normal mesh training did not enable filter_3d");
@@ -8404,6 +8439,12 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--erank-only") {
+            test_screen_size_constraint(tinytensor::Device::CUDA);
+            test_screen_size_constraint(tinytensor::Device::Vulkan);
+            test_emc_regularizers_match_finite_differences();
+            test_emc_regularizers_match_finite_differences(tinytensor::Device::Vulkan);
+            test_emc_regularizers_match_finite_differences(tinytensor::Device::CUDA, 0.F);
+            test_emc_regularizers_match_finite_differences(tinytensor::Device::Vulkan, 0.F);
             test_effective_rank_regularizer(tinytensor::Device::CUDA);
             test_effective_rank_regularizer(tinytensor::Device::Vulkan);
             test_fused_structure_adam(tinytensor::Device::CUDA, 1, 0, true);
