@@ -94,7 +94,6 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     model_dir = output / "dataset" / "sparse" / "0"
     names = subset_colmap(args.dataset, model_dir, args.views)
-    prior_dir = output / "priors"
     environment = os.environ.copy()
     for key in ("GGML_VK_DISABLE_F16", "GGML_VK_DISABLE_COOPMAT", "GGML_VK_DISABLE_COOPMAT2"):
         environment[key] = "1"
@@ -103,14 +102,18 @@ def main():
                "images": names, "eval_split_every": 8, "initial_budget": 100000, "densification_cap": 300000,
                "trainer_sha256": hashlib.sha256(args.trainer.read_bytes()).hexdigest(), "runs": []}
     (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print("Preparing aligned priors for training views only", flush=True)
-    _, preparation_seconds = run([str(args.prepare.resolve()), str(model_dir), str(args.images.resolve()),
-        str(args.model.resolve()), str(prior_dir), str(args.resolution), str(args.tokens), "8"],
-        output / "preparation", environment)
-    summary["preparation_seconds"] = preparation_seconds
+    summary["preparation_seconds"] = 0.
     variants = [("baseline", 0., 0.), ("depth", .01, 0.), ("normal", 0., .01), ("depth_normal", .01, .01)]
     for name, depth, normal in variants:
         directory = output / name
+        prior_dir = directory / "priors"
+        preparation_seconds = 0.
+        if depth > 0 or normal > 0:
+            print("Preparing requested priors for " + name, flush=True)
+            _, preparation_seconds = run([str(args.prepare.resolve()), str(model_dir), str(args.images.resolve()),
+                str(args.model.resolve()), str(prior_dir), str(args.resolution), str(args.tokens), "8",
+                str(depth), str(normal)], directory / "preparation", environment)
+            summary["preparation_seconds"] += preparation_seconds
         command = [str(args.trainer.resolve()), "--images", str(args.images.resolve()), "--splat-dataset", str(model_dir),
             "--output", str(directory / "model.ply"), "--splat", "--mesh=false", "--backend", args.backend,
             "--splat-mode", "standard", "--splat-iterations", str(args.iterations), "--splat-log-interval", "500",
@@ -119,8 +122,10 @@ def main():
             "--splat-eval-split-every", "8", "--splat-densification=true", "--splat-init-point-budget", "100000",
             "--splat-densification-cap", "300000", "--splat-ppisp=false", "--splat-bilateral-grid=false",
             "--splat-checkpoint-seconds", "0", "--splat-seed", str(args.seed), "--splat-geometry-loss=false",
-            "--splat-normal-field=false", "--splat-filter-3d=off", "--splat-prior-dir", str(prior_dir),
+            "--splat-normal-field=false", "--splat-filter-3d=off",
             "--splat-lambda-d", str(depth), "--splat-lambda-n", str(normal)]
+        if depth > 0 or normal > 0:
+            command += ["--splat-prior-dir", str(prior_dir)]
         print("Training " + name, flush=True)
         text, wall_seconds = run(command, directory)
         match = re.search(r"splat_final_evaluation_views=(\d+) held_out=(\d+) average_psnr=([\d.eE+-]+) average_ssim=([\d.eE+-]+)", text)
@@ -136,7 +141,8 @@ def main():
         if not all(math.isfinite(float(value)) for value in losses):
             raise AssertionError("Nonfinite training loss")
         record = {"variant": name, "lambda_d": depth, "lambda_n": normal, "eval_views": int(match[1]),
-                  "psnr": psnr, "ssim": ssim, "training_seconds": float(training[2]), "wall_seconds": wall_seconds,
+                  "psnr": psnr, "ssim": ssim, "preparation_seconds": preparation_seconds,
+                  "training_seconds": float(training[2]), "wall_seconds": wall_seconds,
                   "sampled_device_used_bytes_max": max((int(value) for value in re.findall(r"\bvram=(\d+)/", text)), default=0)}
         summary["runs"].append(record)
         (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

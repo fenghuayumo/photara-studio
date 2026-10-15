@@ -46,14 +46,18 @@ std::string source_name(const std::filesystem::path& path) {
 void TrainingPrior::validate() const {
     const auto count = static_cast<std::uint64_t>(camera.width) * camera.height;
     if (camera.model != CameraModel::pinhole || !count || count > 100'000'000 ||
-        depth.size() != count || normals.size() != 3 * count ||
+        (depth.empty() && normals.empty()) ||
+        (!depth.empty() && depth.size() != count) ||
+        (!normals.empty() && normals.size() != 3 * count) ||
         !std::isfinite(camera.fx) || camera.fx <= 0 || !std::isfinite(camera.fy) || camera.fy <= 0 ||
         !std::isfinite(camera.cx) || !std::isfinite(camera.cy))
         throw std::invalid_argument("Invalid training prior camera or map dimensions");
     for (float value : camera.world_to_camera)
         if (!std::isfinite(value)) throw std::invalid_argument("Nonfinite training prior camera pose");
     for (std::size_t i = 0; i < count; ++i) {
-        if (!std::isfinite(depth[i]) || depth[i] < 0) throw std::invalid_argument("Invalid training prior depth");
+        if (!depth.empty() && (!std::isfinite(depth[i]) || depth[i] < 0))
+            throw std::invalid_argument("Invalid training prior depth");
+        if (normals.empty()) continue;
         const float x = normals[i], y = normals[count+i], z = normals[2*count+i];
         const float length = std::sqrt(x*x+y*y+z*z);
         if (!std::isfinite(length) || (length > 0 && std::abs(length-1.F) > 1e-3F))
@@ -68,22 +72,32 @@ void save_training_prior(const std::filesystem::path& path,
     prior.validate();
     const auto name = source_name(source_image);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    output.write("PHPRIOR1", 8);
+    output.write("PHPRIOR2", 8);
+    const std::uint32_t maps = (prior.depth.empty() ? 0U : 1U) | (prior.normals.empty() ? 0U : 2U);
+    write(output, maps);
     write_camera(output, prior.camera);
     write(output, static_cast<std::uint32_t>(name.size()));
     output.write(name.data(), name.size());
     write(output, static_cast<std::uint64_t>(std::filesystem::file_size(source_image)));
     write(output, static_cast<std::int64_t>(std::filesystem::last_write_time(source_image).time_since_epoch().count()));
-    output.write(reinterpret_cast<const char*>(prior.depth.data()), prior.depth.size()*sizeof(float));
-    output.write(reinterpret_cast<const char*>(prior.normals.data()), prior.normals.size()*sizeof(float));
+    if (!prior.depth.empty()) output.write(reinterpret_cast<const char*>(prior.depth.data()), prior.depth.size()*sizeof(float));
+    if (!prior.normals.empty()) output.write(reinterpret_cast<const char*>(prior.normals.data()), prior.normals.size()*sizeof(float));
     if (!output) throw std::runtime_error("Cannot write training prior: " + path.string());
 }
 TrainingPrior load_training_prior(const std::filesystem::path& path,
-    const std::filesystem::path& source_image, const Camera& full_camera) {
+    const std::filesystem::path& source_image, const Camera& full_camera,
+    bool require_depth, bool require_normals) {
+    if (!require_depth && !require_normals)
+        throw std::invalid_argument("No training prior maps requested");
     std::ifstream input(path, std::ios::binary);
     char magic[8]; input.read(magic, 8);
-    if (!input || std::string(magic, 8) != "PHPRIOR1")
+    if (!input || (std::string(magic, 8) != "PHPRIOR1" && std::string(magic, 8) != "PHPRIOR2"))
         throw std::runtime_error("Missing or invalid training prior: " + path.string());
+    std::uint32_t maps = 3;
+    if (std::string(magic, 8) == "PHPRIOR2") read(input, maps);
+    if (!maps || (maps & ~3U)) throw std::runtime_error("Invalid training prior map flags");
+    if ((require_depth && !(maps & 1U)) || (require_normals && !(maps & 2U)))
+        throw std::runtime_error("Requested training prior map is missing; regenerate the prior cache");
     TrainingPrior prior;
     prior.camera = read_camera(input);
     check_camera(prior.camera, full_camera);
@@ -96,12 +110,25 @@ TrainingPrior load_training_prior(const std::filesystem::path& path,
         stamp != std::filesystem::last_write_time(source_image).time_since_epoch().count())
         throw std::runtime_error("Training prior image changed; regenerate the prior cache");
     const auto count = static_cast<std::uint64_t>(prior.camera.width) * prior.camera.height;
-    if (!count || count > 100'000'000 ||
-        std::filesystem::file_size(path) - static_cast<std::uint64_t>(input.tellg()) != count*4*sizeof(float))
+    const auto channels = ((maps & 1U) ? 1U : 0U) + ((maps & 2U) ? 3U : 0U);
+    const auto offset = input.tellg();
+    const auto bytes = std::filesystem::file_size(path);
+    if (!count || count > 100'000'000 || offset < 0 ||
+        bytes < static_cast<std::uint64_t>(offset) ||
+        bytes - static_cast<std::uint64_t>(offset) != count*channels*sizeof(float))
         throw std::runtime_error("Invalid training prior data size");
-    prior.depth.resize(static_cast<std::size_t>(count)); prior.normals.resize(static_cast<std::size_t>(3*count));
-    input.read(reinterpret_cast<char*>(prior.depth.data()), prior.depth.size()*sizeof(float));
-    input.read(reinterpret_cast<char*>(prior.normals.data()), prior.normals.size()*sizeof(float));
+    if (maps & 1U) {
+        if (require_depth) {
+            prior.depth.resize(static_cast<std::size_t>(count));
+            input.read(reinterpret_cast<char*>(prior.depth.data()), prior.depth.size()*sizeof(float));
+        } else input.seekg(static_cast<std::streamoff>(count*sizeof(float)), std::ios::cur);
+    }
+    if (maps & 2U) {
+        if (require_normals) {
+            prior.normals.resize(static_cast<std::size_t>(3*count));
+            input.read(reinterpret_cast<char*>(prior.normals.data()), prior.normals.size()*sizeof(float));
+        } else input.seekg(static_cast<std::streamoff>(3*count*sizeof(float)), std::ios::cur);
+    }
     if (!input) throw std::runtime_error("Truncated training prior maps");
     prior.validate();
     return prior;
@@ -117,8 +144,9 @@ TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& ca
     check_camera(expected, camera);
     TrainingPrior result; result.camera = camera;
     const auto count = static_cast<std::size_t>(camera.width)*camera.height;
-    const auto original_count = prior.depth.size();
-    result.depth.resize(count); result.normals.resize(3*count);
+    const auto original_count = static_cast<std::size_t>(prior.camera.width)*prior.camera.height;
+    if (!prior.depth.empty()) result.depth.resize(count);
+    if (!prior.normals.empty()) result.normals.resize(3*count);
     // Nearest sampling preserves invalid regions and avoids inventing a surface
     // between foreground/background at discontinuities. No depth unit scaling.
     for (std::uint32_t y = 0; y < camera.height; ++y)
@@ -127,8 +155,9 @@ TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& ca
             const auto py = std::min(prior.camera.height-1, static_cast<std::uint32_t>((y+.5)*prior.camera.height/camera.height));
             const auto src = static_cast<std::size_t>(py)*prior.camera.width+px;
             const auto dst = static_cast<std::size_t>(y)*camera.width+x;
-            result.depth[dst] = prior.depth[src];
-            for (int c = 0; c < 3; ++c) result.normals[c*count+dst] = prior.normals[c*original_count+src];
+            if (!prior.depth.empty()) result.depth[dst] = prior.depth[src];
+            if (!prior.normals.empty())
+                for (int c = 0; c < 3; ++c) result.normals[c*count+dst] = prior.normals[c*original_count+src];
         }
     return result;
 }

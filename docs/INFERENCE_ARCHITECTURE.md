@@ -327,12 +327,19 @@ same target slots in one training run.
 `photara_splat_prior_prepare` is a separate native Vulkan inference process:
 
 ```powershell
-photara_splat_prior_prepare dataset/sparse/0 images model-f32.gguf prior-cache 640 1200 8
+photara_splat_prior_prepare dataset/sparse/0 images model-f32.gguf prior-cache 640 1200 8 0.01 0.01
 photara --images images --splat-dataset dataset/sparse/0 --splat --mesh=false --splat-max-resolution 640 --splat-eval-split-every 8 --splat-prior-dir prior-cache --splat-lambda-d 0.01 --splat-lambda-n 0.01
 ```
 
 The preparation arguments after the output directory are maximum training image
-dimension, token budget, and evaluation split interval. Use the accepted strict
+dimension, token budget, evaluation split interval, lambda_d and lambda_n. Both
+weights default to zero: preparation returns before opening the dataset/model or
+creating output directories when neither is positive. A depth-only request saves
+only depth; a normal-only request saves only normals and skips sparse depth-scale
+alignment. Pass the same weights to preparation and training. The current MoGe
+adapter still computes its joint depth/normal output internally; selective caches
+do not yet imply selective model heads or proportional inference-time savings.
+Use the accepted strict
 F32 Vulkan startup policy documented above. Preparation uses the exact training
 RGB decode, undistortion, pixel-center resizing and known camera intrinsics. It
 always requests pinhole views; fisheye training must likewise use
@@ -341,8 +348,12 @@ held-out views entirely. A median/MAD log-ratio fit aligns predicted camera-Z
 depth to **observed SfM sparse points**, requiring at least 16 inliers per view.
 There is no MVS depth estimation, dense fusion, or mesh reconstruction.
 
-Each local `.prior` file stores scene-unit camera-Z depth, CHW camera-space unit
-normals, camera intrinsics/pose, and source-image identity/size/mtime. Zero depth
+Each local `PHPRIOR2` `.prior` file stores the selected scene-unit camera-Z depth
+and/or CHW camera-space unit normals, plus camera intrinsics/pose and source-image
+identity/size/mtime. Map-presence flags distinguish absent channels; the loader
+rejects a cache missing an enabled channel. Existing `PHPRIOR1` caches remain
+readable. Training reads, resizes and uploads only requested channels, even when
+an older cache contains both. No cache is read when both weights are zero. Zero depth
 and zero normals independently mark invalid supervision. Cache loading checks
 camera, input identity, payload size and map values; changing the image, camera,
 or full training resolution requires regeneration. Progressive training

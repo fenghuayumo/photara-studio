@@ -11,6 +11,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 
@@ -112,6 +113,37 @@ void cache() {
     check(resized.depth.size()==16 && resized.depth[0]==4,"Progressive prior resize changed depth units");
     auto malformed=prior; malformed.normals[128]=2;
     fails([&]{malformed.validate();});
+    auto empty=prior; empty.depth.clear(); empty.normals.clear();
+    fails([&]{empty.validate();});
+    // Single-map caches are smaller and may only satisfy the requested loss.
+    const auto both_bytes=std::filesystem::file_size(training_prior_path(directory,4));
+    for (bool depth_only : {true,false}) {
+        auto single=prior;
+        if (depth_only) single.normals.clear(); else single.depth.clear();
+        save_training_prior(training_prior_path(directory,4),image,single);
+        check(std::filesystem::file_size(training_prior_path(directory,4)) < both_bytes,"Unused map stored");
+        auto one=load_training_prior(training_prior_path(directory,4),image,prior.camera,depth_only,!depth_only);
+        check(one.depth==single.depth && one.normals==single.normals,"Single-map roundtrip");
+        auto small=resize_training_prior(one,half);
+        check(small.depth.size()==(depth_only?16:0) && small.normals.size()==(depth_only?0:48),"Single-map resize");
+        fails([&]{(void)load_training_prior(training_prior_path(directory,4),image,prior.camera,!depth_only,depth_only);});
+        options.lambda_d=depth_only?.01F:0.F; options.lambda_n=depth_only?0.F:.01F;
+        training_data::TrainingDataLoader loader(scene.views,options);
+        auto target=loader.get(0);
+        check((depth_only?target.depth:target.normal).to_vector()==(depth_only?prior.depth:prior.normals),"Single-map loader");
+    }
+    save_training_prior(training_prior_path(directory,4),image,prior);
+    auto selected=load_training_prior(training_prior_path(directory,4),image,prior.camera,true,false);
+    check(selected.normals.empty() && selected.depth==prior.depth,"Unused map loaded");
+    // Legacy PHPRIOR1 caches always contained both maps, without the flags word.
+    { std::ifstream input(training_prior_path(directory,4),std::ios::binary);
+      std::vector<char> bytes((std::istreambuf_iterator<char>(input)),{});
+      bytes[7]='1'; bytes.erase(bytes.begin()+8,bytes.begin()+12);
+      const auto old=directory/"legacy.prior";
+      { std::ofstream output(old,std::ios::binary); output.write(bytes.data(),bytes.size()); }
+      auto legacy=load_training_prior(old,image,prior.camera,false,true);
+      check(legacy.depth.empty() && legacy.normals==prior.normals,"Legacy cache compatibility"); }
+    options.lambda_d=options.lambda_n=0;
     std::vector<photara::mvs::MvsView> views{view};
     options.prior_directory=directory/"missing";
     { training_data::TrainingDataLoader loader(views,options); auto target=loader.get(0);
