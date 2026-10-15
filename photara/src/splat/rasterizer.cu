@@ -570,8 +570,8 @@ ModelGradients Rasterizer::backward(
                 structure_adam->correction1, structure_adam->correction2,
                 structure_adam->epsilon, structure_adam->minimum_log_scale,
                 structure_adam->maximum_log_scale,
-                structure_adam->opacity_reg, structure_adam->log_scale_reg,
-                structure_adam->shape_scale_reg, structure_adam->shape_erank_reg,
+                structure_adam->opacity_reg, structure_adam->scale_reg,
+                structure_adam->shape_erank_reg,
                 structure_adam->shape_erank_s3_reg,
                 structure_adam->shape_quat_norm_reg,
                 gradients.opacity_logits.is_valid()

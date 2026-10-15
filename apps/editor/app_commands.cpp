@@ -434,6 +434,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
+    settings.scale_regularization_weight = app.settings.scale_regularization_weight;
     settings.shape_erank_reg = app.settings.shape_erank_reg;
     settings.shape_axis_ratio_reg = app.settings.shape_axis_ratio_reg;
     settings.shape_max_axis_ratio = app.settings.shape_max_axis_ratio;
@@ -524,6 +525,7 @@ void apply_project_settings(
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
+    app.settings.scale_regularization_weight = settings.scale_regularization_weight;
     app.settings.shape_erank_reg = settings.shape_erank_reg;
     app.settings.shape_axis_ratio_reg = settings.shape_axis_ratio_reg;
     app.settings.shape_max_axis_ratio = settings.shape_max_axis_ratio;

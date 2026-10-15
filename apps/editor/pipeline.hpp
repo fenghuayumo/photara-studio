@@ -299,6 +299,8 @@ struct ProjectSettings {
     int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive
+    // Scale shrinkage weight; zero disables it.
+    float scale_regularization_weight = 0.F;
     // Soft penalty on effective rank below two; zero disables it.
     float shape_erank_reg = 0.F;
     // Soft penalty only above the axis-ratio threshold; zero weight disables it.

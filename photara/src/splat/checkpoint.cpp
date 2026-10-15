@@ -311,8 +311,6 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.densify_score_power);
     hash.append(options.densify_loss_map_power);
     hash.append(options.densify_growth_factor);
-    hash.append(options.shape_scale_reg);
-    hash.append(options.shape_scale_reg_decay_power);
     hash.append(options.shape_erank_reg);
     hash.append(options.shape_axis_ratio_reg);
     hash.append(options.shape_max_axis_ratio);
@@ -348,7 +346,7 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.sh_rest_lr);
     hash.append(options.sh_regularization_weight);
     hash.append(options.opacity_regularization_weight);
-    hash.append(options.log_scale_regularization_weight);
+    hash.append(options.scale_regularization_weight);
     hash.append(options.beta1);
     hash.append(options.beta2);
     hash.append(options.adam_epsilon);

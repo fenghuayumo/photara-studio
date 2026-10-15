@@ -207,7 +207,7 @@ BufferView buffer_view(const Tensor& tensor) {
 
 void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
     Tensor& scale_gradients, Tensor& quaternion_gradients,
-    const float scale_weight, const float erank_weight,
+    const float erank_weight,
     const float erank_s3_weight, const float quat_weight,
     const float axis_ratio_weight, const float max_axis_ratio) {
     const std::size_t count = log_scales.numel() / 3;
@@ -221,10 +221,10 @@ void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternion
         throw std::invalid_argument("Vulkan shape regularizers require matching contiguous Float32 tensors");
     struct Push {
         std::uint32_t count;
-        float scale_weight, erank_weight, erank_s3_weight, quat_weight;
+        float erank_weight, erank_s3_weight, quat_weight;
         float axis_ratio_weight, max_axis_ratio;
-    } push{u32(count), scale_weight, erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio};
-    static_assert(sizeof(Push) == 28);
+    } push{u32(count), erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio};
+    static_assert(sizeof(Push) == 24);
     std::array<BufferBinding, 4> bindings{
         bind(log_scales), bind(quaternions), bind(scale_gradients), bind(quaternion_gradients)};
     Context::get().dispatch(ShaderId::ShapeRegularizers, bindings, &push, sizeof(push), groups_for(count));

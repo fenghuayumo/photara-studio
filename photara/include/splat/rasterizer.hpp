@@ -68,8 +68,7 @@ struct StructureAdamUpdate {
     float minimum_log_scale{-std::numeric_limits<float>::infinity()};
     float maximum_log_scale{std::numeric_limits<float>::infinity()};
     float opacity_reg{};
-    float log_scale_reg{};
-    float shape_scale_reg{};
+    float scale_reg{};
     float shape_erank_reg{};
     float shape_erank_s3_reg{};
     float shape_quat_norm_reg{};

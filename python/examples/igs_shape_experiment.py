@@ -54,7 +54,7 @@ def make_options(aes, config, dataset, variant):
         if isinstance(value, (int, float)) and not isinstance(value, bool) and not math.isfinite(value):
             raise ValueError(f"Non-finite option: {key}")
         setattr(options, key, value)
-    for key in ("shape_scale_reg", "shape_erank_reg"):
+    for key in ("scale_regularization_weight", "shape_erank_reg"):
         if getattr(options, key) < 0:
             raise ValueError(f"{key} must be non-negative")
     if options.input_is_dense:
@@ -206,7 +206,7 @@ if __name__ == "__main__":
             for variant in settings["variants"]:
                 options, _ = make_options(aes, settings, dataset, variant)
                 print(dataset["name"], variant["name"], options.densification_strategy,
-                      options.shape_scale_reg, options.shape_erank_reg)
+                      options.scale_regularization_weight, options.shape_erank_reg)
     else:
         try:
             run(args.config, settings)

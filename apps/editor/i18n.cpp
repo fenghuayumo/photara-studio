@@ -876,7 +876,13 @@ constexpr Entry k_entries[] = {
      "仅惩罚超过阈值的极端长短轴比。\n通过梯度施加软约束，不直接截断尺度。",
      "しきい値を超える極端な軸比にペナルティを適用。\n勾配によるソフト制約。",
      "임계값을 초과하는 극단적인 축비에 페널티 적용.\n기울기를 통한 소프트 제약."},
-    {"Effective-rank weight", "有效秩约束权重", "有効ランクの重み", "유효 랭크 가중치"},
+    {"Scale weight (scale_reg)", "尺度约束权重 (scale_reg)", "スケールの重み (scale_reg)", "스케일 가중치 (scale_reg)"},
+    {"Effective-rank weight (erank_reg)", "有效秩约束权重 (erank_reg)", "有効ランクの重み (erank_reg)", "유효 랭크 가중치 (erank_reg)"},
+    {"Penalizes actual Gaussian scale; larger Gaussians shrink more.\n"
+     "0 disables the penalty (default).",
+     "惩罚高斯实际尺度，较大的高斯收缩压力更强。\n0 表示关闭（默认）。",
+     "実際のスケールを制約し、大きいガウシアンほど強く縮小。\n0 で無効（既定）。",
+     "실제 가우시안 크기를 제약하며 큰 가우시안을 더 강하게 축소.\n0은 비활성화 (기본값)."},
     {"Softly penalizes needle-like Gaussians with effective rank below 2.\n"
      "Allows thin surface Gaussians. 0 disables the penalty.\n"
      "Suggested starting weight: 0.001.",

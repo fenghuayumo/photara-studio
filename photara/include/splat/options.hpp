@@ -127,12 +127,7 @@ struct TrainingOptions {
     // Extra Gaussians per refine as a multiplier of the live count. Values
     // <= 1 fall back to densify_select_fraction of above-threshold rows.
     float densify_growth_factor{0.F};
-    // Strategy-neutral per-splat shape regularizers, added to the
-    // scale/quaternion gradients when their weights are non-zero. The
-    // scale weight follows the front-loaded (p+1)(1-t)^p schedule so its
-    // integral over the run is fixed.
-    float shape_scale_reg{0.F};
-    float shape_scale_reg_decay_power{0.4F};
+    // Per-splat shape regularizers, added to scale/quaternion gradients.
     float shape_erank_reg{0.F};
     // Soft penalty only above the axis-ratio threshold; zero weight disables it.
     float shape_axis_ratio_reg{0.F};
@@ -194,7 +189,8 @@ struct TrainingOptions {
     float sh_regularization_weight{0.001F};
     // Optional per-Gaussian priors; independent of colour correction.
     float opacity_regularization_weight{0.F};
-    float log_scale_regularization_weight{0.F};
+    // Mean actual scale exp(log_scale), with remaining-progress^0.4 decay.
+    float scale_regularization_weight{0.F};
     float beta1{0.9F};
     float beta2{0.999F};
     // The raster gradients are averaged over every image pixel; a value as

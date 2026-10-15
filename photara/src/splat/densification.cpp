@@ -260,7 +260,6 @@ void apply_strategy_defaults(TrainingOptions& options) {
         // systematically under-sizes splats and cost 0.57 dB on the office
         // protocol (artifacts/office_emc_v3*_20260918). The erank and
         // quaternion pulls measured neutral-to-positive and stay on.
-        options.shape_scale_reg = 0.F;
         options.shape_erank_reg = 0.001F;
         options.shape_quat_norm_reg = 0.01F;
         options.oversize_screen_limit = 0.3F;

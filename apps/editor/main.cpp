@@ -267,6 +267,9 @@ int main(const int argc, char** argv) {
         app.settings.densification_cap = std::clamp(
             app.settings.densification_cap, 10'000, 50'000'000);
         app.settings.sh_degree = std::clamp(app.settings.sh_degree, 0, 3);
+        app.settings.scale_regularization_weight =
+            std::isfinite(app.settings.scale_regularization_weight)
+                ? std::max(app.settings.scale_regularization_weight, 0.F) : 0.F;
         app.settings.shape_erank_reg =
             std::isfinite(app.settings.shape_erank_reg)
                 ? std::max(app.settings.shape_erank_reg, 0.F) : 0.F;

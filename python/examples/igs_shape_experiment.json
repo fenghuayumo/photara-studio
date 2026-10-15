@@ -23,15 +23,14 @@
     "use_mvs_normals": false,
     "multi_view_geo_weight": 0.0,
     "multi_view_ncc_weight": 0.0,
-    "shape_scale_reg_decay_power": 0.4,
     "shape_axis_ratio_reg": 0.0,
     "shape_erank_s3_reg": 0.0,
     "shape_quat_norm_reg": 0.0,
     "evaluation_iterations": []
   },
   "variants": [
-    {"name": "baseline", "training": {"shape_scale_reg": 0.0, "shape_erank_reg": 0.0}},
-    {"name": "scale_erank", "training": {"shape_scale_reg": 0.01, "shape_erank_reg": 0.001}}
+    {"name": "baseline", "training": {"scale_regularization_weight": 0.0, "shape_erank_reg": 0.0}},
+    {"name": "erank", "training": {"scale_regularization_weight": 0.0, "shape_erank_reg": 0.001}}
   ],
   "datasets": [
     {

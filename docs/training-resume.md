@@ -41,6 +41,15 @@ again: this is model-based continuation, not numerically identical interrupted
 training. Inputs, cameras and numerical training settings are fingerprinted; a
 mismatch requires a new training run.
 
+Scale regularization now uses `scale_regularization_weight` (CLI:
+`--splat-scale-reg`) on the mean actual Gaussian scale, with a default of zero.
+The old `log_scale_regularization_weight` Python name,
+`--splat-log-scale-reg` CLI flag and separate `shape_scale_reg` log-scale penalty
+have been removed. Projects
+through settings v10 ignore its stored weight rather than converting it to an
+actual-scale weight. The training settings fingerprint has changed; old
+checkpoints require a new training run.
+
 Retired full-tensor checkpoints, embedded optimizer checkpoints and external
 legacy recovery files are not read, migrated, or used as a fallback. Start a new
 run for those formats; opening a project does not delete old recovery files.
