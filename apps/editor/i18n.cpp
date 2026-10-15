@@ -903,11 +903,11 @@ constexpr Entry k_entries[] = {
     {"Reuse cached alignment", "复用缓存对齐", "キャッシュしたアライメントを再利用", "캐시된 정렬 재사용"},
     {"Reuse compatible alignment stages from the project cache.\n"
      "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
-     "On by default for new projects. Off recomputes alignment;\n"
+     "Off by default for new projects. Off recomputes alignment;\n"
      "working cameras remain available for training and preview.",
-     "复用项目缓存中兼容的对齐阶段。\n图像、参数或算法版本变化会使相关缓存失效。\n新项目默认开启；关闭后重新计算对齐。\n工作相机仍可用于训练和预览。",
-     "互換性のあるアライメント段階をキャッシュから再利用します。\n画像、設定、アルゴリズムの変更で該当キャッシュは無効になります。\n新規プロジェクトではオン。オフでは再計算します。\n作業用カメラは学習とプレビューで引き続き利用できます。",
-     "호환되는 정렬 단계를 프로젝트 캐시에서 재사용합니다.\n이미지, 설정 또는 알고리즘 변경 시 관련 캐시는 무효화됩니다.\n새 프로젝트에서는 켜짐. 끄면 정렬을 다시 계산합니다.\n작업 카메라는 학습과 미리보기에 계속 사용할 수 있습니다."},
+     "复用项目缓存中兼容的对齐阶段。\n图像、参数或算法版本变化会使相关缓存失效。\n新项目默认关闭；关闭后重新计算对齐。\n工作相机仍可用于训练和预览。",
+     "互換性のあるアライメント段階をキャッシュから再利用します。\n画像、設定、アルゴリズムの変更で該当キャッシュは無効になります。\n新規プロジェクトではオフ。オフでは再計算します。\n作業用カメラは学習とプレビューで引き続き利用できます。",
+     "호환되는 정렬 단계를 프로젝트 캐시에서 재사용합니다.\n이미지, 설정 또는 알고리즘 변경 시 관련 캐시는 무효화됩니다.\n새 프로젝트에서는 꺼짐. 끄면 정렬을 다시 계산합니다.\n작업 카메라는 학습과 미리보기에 계속 사용할 수 있습니다."},
     {"Camera positioning and refinement. Automatic uses CUDA, then Vulkan, then CPU.",
      "相机定位与精修。自动模式依次选择 CUDA、Vulkan、CPU。",
      "カメラ位置推定と最適化。自動では CUDA、Vulkan、CPU の順に選択します。",

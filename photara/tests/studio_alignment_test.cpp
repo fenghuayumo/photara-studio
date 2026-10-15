@@ -44,15 +44,19 @@ int main() {
         layout.sparse_ply = layout.cache / "sparse.ply";
         layout.model_output = layout.cache / "splat.ply";
         settings.alignment_backend = 1;
-        require(settings.reuse_cache, "new Studio projects reuse compatible stages");
+        require(!settings.reuse_cache, "new Studio projects recompute alignment by default");
         auto command = editor::build_align_command("photara.exe", settings, layout);
         require(command.find("--ba-backend cpu") != std::string::npos &&
                 command.find("--positioning-backend cpu") != std::string::npos,
                 "Studio CPU selection controls both positioning and BA");
-        require(command.find("--cache-dir \"") != std::string::npos,
-                "first alignment receives a cache path even before it exists");
+        require(command.find("--cache-dir -") != std::string::npos,
+                "default alignment explicitly disables stage caching");
         require(command.find("--camera-warm-start") == std::string::npos,
                 "Studio leaves warm start policy internal instead of exposing tuning");
+        settings.reuse_cache = true;
+        command = editor::build_align_command("photara.exe", settings, layout);
+        require(command.find("--cache-dir \"") != std::string::npos,
+                "explicit cache reuse receives a cache path even before it exists");
         settings.reuse_cache = false;
         command = editor::build_align_command("photara.exe", settings, layout);
         require(command.find("--cache-dir -") != std::string::npos,

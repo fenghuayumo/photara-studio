@@ -629,7 +629,7 @@ Action draw_inspector(App& app) {
                 "%s",
                 tr("Reuse compatible alignment stages from the project cache.\n"
                    "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
-                   "On by default for new projects. Off recomputes alignment;\n"
+                   "Off by default for new projects. Off recomputes alignment;\n"
                    "working cameras remain available for training and preview."));
         ImGui::EndDisabled();
         draw_cache_folder_link(app);
@@ -744,6 +744,22 @@ Action draw_inspector(App& app) {
             inspector_field("Iterations");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
+            inspector_field("Densification cap");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt(
+                "##densification_cap",
+                &app.settings.densification_cap, 100'000, 1'000'000);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Maximum Gaussian count during densification.\n"
+                    "Initialization uses the full source cloud.\n"
+                    "Default 3,000,000."));
+            inspector_field("Pruning");
+            ImGui::Checkbox("##pruning", &app.settings.speedy_pruning);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
+                    "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
+                    "Requires full training resolution."));
             ImGui::EndTable();
         }
         if (ImGui::Checkbox(
@@ -765,21 +781,6 @@ Action draw_inspector(App& app) {
             int strategy_index = app.settings.strategy == 1 ? 1 : 0;
             ImGui::Combo("##strategy", &strategy_index, strategies, 2);
             app.settings.strategy = strategy_index;
-            theme::caption("Densification cap");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt(
-                "##densification_cap",
-                &app.settings.densification_cap, 100'000, 1'000'000);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tr(
-                    "Maximum Gaussian count during densification.\n"
-                    "Initialization uses the full source cloud.\n"
-                    "Default 3,000,000."));
-            ImGui::Checkbox(tr("Pruning"), &app.settings.speedy_pruning);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
-                    "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
-                    "Requires full training resolution."));
             theme::caption("SH degree");
             ImGui::SetNextItemWidth(-1.F);
             const char* sh_degrees[] = {"0", "1", "2", "3"};

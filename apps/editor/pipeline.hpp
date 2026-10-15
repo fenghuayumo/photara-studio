@@ -257,9 +257,9 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // persisted project setting stay in sync).
     int camera_model = 2;
     int sfm_mode = 0;  // 0 global, 2 hierarchical
-    // New projects reuse only compatible, fingerprinted alignment stages.
+    // Recompute alignment by default; cache reuse is an explicit opt-in.
     // Saved projects retain their explicit choice.
-    bool reuse_cache = true;
+    bool reuse_cache = false;
     // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
     // mesh/dense, preview sidecars). Empty keeps them next to the project
     // (<project folder>/<project name>.cache); a set folder collects every
