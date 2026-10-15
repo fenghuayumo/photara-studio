@@ -20,41 +20,49 @@
 namespace editor {
 using i18n::tr;
 
-void draw_step(
-    const char* index, const char* label, const StepState state,
-    const char* note) {
+namespace {
+void draw_workflow_step(App& app, const char* index, const char* label,
+    const InspectorSection section, const StepState state, const char* note) {
+    const bool selected = current_inspector_section(app) == section;
     ImVec4 colour = theme::inactive;
-    switch (state) {
-        case StepState::done: colour = theme::success; break;
-        case StepState::active: {
-            const float pulse =
-                0.55F + 0.45F * std::abs(std::sin(
-                                    static_cast<float>(ImGui::GetTime()) * 2.4F));
-            colour = theme::fade(theme::accent, pulse);
-            break;
-        }
-        case StepState::failed: colour = theme::danger; break;
-        case StepState::skipped: colour = theme::fade(theme::inactive, 0.4F); break;
-        case StepState::pending: break;
-    }
-
-    ImGui::SetCursorPosX(14.F);
-    theme::status_dot(colour);
-    ImGui::SameLine(0.F, 8.F);
-    theme::caption(index);
-    ImGui::SameLine(0.F, 8.F);
-    if (state == StepState::done || state == StepState::active) {
+    if (state == StepState::done) colour = theme::success;
+    else if (state == StepState::active) colour = theme::accent;
+    else if (state == StepState::failed) colour = theme::danger;
+    ImGui::PushID(index);
+    ImGui::SetCursorPosX(8.F);
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const float width = std::max(1.F, ImGui::GetContentRegionAvail().x - 8.F);
+    const float height = ImGui::GetTextLineHeight() + 22.F;
+    ImGui::PushStyleColor(ImGuiCol_Header, theme::fade(theme::accent, 0.14F));
+    if (ImGui::Selectable("##workflow_step", selected, 0, {width, height}))
+        select_inspector_section(app, section);
+    ImGui::PopStyleColor();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float text_y = min.y + (height - ImGui::GetTextLineHeight()) * 0.5F;
+    draw->AddCircleFilled({min.x + 12.F, min.y + height * 0.5F}, 3.5F,
+        theme::u32(colour));
+    draw->AddText({min.x + 26.F, text_y}, theme::u32(theme::text_muted), index);
+    const ImVec2 text_min{min.x + 51.F, text_y};
+    const ImVec2 text_max{min.x + width - 8.F, min.y + height};
+    ImGui::PushStyleColor(ImGuiCol_Text, selected ? theme::accent : theme::text_bright);
+    ImGui::RenderTextEllipsis(draw, text_min, text_max, text_max.x, text_max.x,
+        label, nullptr, nullptr);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
         ImGui::TextUnformatted(label);
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
-        ImGui::TextUnformatted(label);
-        ImGui::PopStyleColor();
+        if (note) ImGui::TextUnformatted(note);
+        ImGui::EndTooltip();
     }
     if (note) {
-        ImGui::SetCursorPosX(44.F);
+        ImGui::SetCursorPosX(34.F);
+        ImGui::PushTextWrapPos(ImGui::GetWindowContentRegionMax().x - 12.F);
         theme::caption(note);
+        ImGui::PopTextWrapPos();
     }
+    ImGui::PopID();
 }
+}  // namespace
 
 void draw_gaussian_models_panel(App& app) {
     if (app.gaussian_models.empty()) return;
@@ -273,96 +281,28 @@ void draw_scene_panel(App& app) {
     const Stage stage = app.monitor.stage();
     const bool aligning = busy && app.active_job == JobKind::align;
     const bool training = busy && app.active_job == JobKind::train;
-
-    draw_step(
-        "01", tr("Select images"),
-        app.settings.images_dir[0] != '\0' || external_dataset
-            ? StepState::done
-            : StepState::pending,
-        nullptr);
-    draw_step(
-        "02", tr("Align cameras"),
-        aligning ? StepState::active
-                 : (app.has_sparse || external_dataset
-                        ? StepState::done
-                        : StepState::pending),
-        aligning
-            ? stage_name(stage)
-            : (external_dataset ? tr("Imported cameras (SfM skipped)") : nullptr));
-    draw_step(
-        "03", tr("Review sparse cloud"),
-        app.scene.has_points()
-            ? StepState::done
-            : ((external_dataset || app.has_sparse)
-                   ? StepState::active
-                   : StepState::pending),
-        app.scene.has_points()
-            ? nullptr
-            : (aligning
-                   ? tr("Recomputing")
-                   : (app.loading_scene
-                          ? tr("Loading")
-                          : (external_dataset ? tr("Imported cameras")
-                                              : (app.has_sparse ? tr("On disk")
-                                                                : nullptr)))));
     const bool densing = busy && app.active_job == JobKind::dense;
     const bool texturing = busy && app.active_job == JobKind::texture;
-    const bool aligned = app.has_sparse || external_dataset;
-    const bool mvs_route =
-        !training && (mesh_from_mvs(app.settings) || densing ||
-                      (app.settings.mesh_source == 1 && app.settings.build_mesh));
-    const char* texture_note = nullptr;
-    if (texturing)
-        texture_note = stage_name(stage);
-    else if (app.has_texture)
-        texture_note = app.settings.texture_delight ? tr("Albedo atlas")
-                                                    : tr("Projected atlas");
-    else if (app.has_mesh)
-        texture_note = tr("Project photos onto the mesh");
-    const StepState texture_state = texturing
-        ? StepState::active
-        : (app.has_texture
-               ? StepState::done
-               : (app.has_mesh ? StepState::pending : StepState::pending));
-
-    if (mvs_route) {
-        const char* mesh_note = densing ? stage_name(stage)
-                                        : (app.has_mesh ? tr("Photogrammetry") : nullptr);
-        draw_step(
-            "04", tr("MVS Mesh"),
-            densing ? StepState::active
-                    : (app.has_mesh
-                           ? StepState::done
-                           : (aligned ? StepState::pending : StepState::pending)),
-            mesh_note);
-        draw_step("05", tr("Texture Baking"), texture_state, texture_note);
-    } else {
-        const char* gaussian_note = nullptr;
-        if (training)
-            gaussian_note = stage_name(stage);
-        else if (mesh_from_gaussians(app.settings) && app.has_model &&
-                 app.has_mesh)
-            gaussian_note = tr("Mesh extracted");
-        else if (mesh_from_gaussians(app.settings))
-            gaussian_note = tr("Then extract mesh");
-        draw_step(
-            "04", tr("Train 3DGS"),
-            training ? StepState::active
-                     : (app.has_model ? StepState::done : StepState::pending),
-            gaussian_note);
-        const bool extracting =
-            training && (stage == Stage::meshing || stage == Stage::texturing);
-        draw_step(
-            "05", tr("Extract Mesh"),
-            extracting ? StepState::active
-                       : (app.has_mesh
-                              ? StepState::done
-                              : (mesh_from_gaussians(app.settings)
-                                     ? StepState::pending
-                                     : StepState::skipped)),
-            app.has_mesh ? tr("From Gaussians") : nullptr);
-        draw_step("06", tr("Texture Baking"), texture_state, texture_note);
-    }
+    const bool extracting = training && stage == Stage::meshing;
+    draw_workflow_step(app, "01", tr("Camera Alignment"), InspectorSection::alignment,
+        aligning ? StepState::active : (alignment_ready(app) ? StepState::done : StepState::pending),
+        aligning ? stage_name(stage) : (external_dataset ? tr("Imported cameras (SfM skipped)") : nullptr));
+    draw_workflow_step(app, "02", tr("Train 3DGS"), InspectorSection::training,
+        training && !extracting ? StepState::active : (app.has_model ? StepState::done : StepState::pending),
+        training && !extracting ? stage_name(stage) : nullptr);
+    draw_workflow_step(app, "03", tr("Extract Mesh"), InspectorSection::mesh,
+        densing || extracting ? StepState::active : (app.has_mesh ? StepState::done : StepState::pending),
+        densing || extracting ? stage_name(stage) : nullptr);
+    draw_workflow_step(app, "04", tr("Texture Baking"), InspectorSection::texture,
+        texturing ? StepState::active : (app.has_texture ? StepState::done : StepState::pending),
+        texturing ? stage_name(stage) : nullptr);
+    ImGui::Dummy({0.F, 10.F});
+    ImGui::SetCursorPosX(10.F);
+    if (icons::labeled_button("##project_settings", icons::Icon::sliders,
+            tr("Project settings"), {std::max(1.F, ImGui::GetContentRegionAvail().x - 10.F), 32.F},
+            icons::ButtonStyle::normal, true,
+            current_inspector_section(app) == InspectorSection::project))
+        select_inspector_section(app, InspectorSection::project);
 
     ImGui::Dummy({0, 8.F});
     theme::section_header(tr("SOURCE"));

@@ -324,20 +324,25 @@ int main(const int argc, char** argv) {
         if (app.saving_training) action = Action::none;
         switch (action) {
             case Action::align:
+                editor::select_inspector_section(app, editor::InspectorSection::alignment);
                 if (!app.smoke_mode) editor::start_align(app);
                 break;
             case Action::train:
+                editor::select_inspector_section(app, editor::InspectorSection::training);
                 train_requested = !app.smoke_mode;
                 break;
             case Action::continue_training:
+                editor::select_inspector_section(app, editor::InspectorSection::training);
                 train_requested = !app.smoke_mode;
                 resume_training_requested = true;
                 break;
             case Action::dense:
+                editor::select_inspector_section(app, editor::InspectorSection::mesh);
                 // The Gaussians path falls through to start_train().
                 dense_requested = !app.smoke_mode;
                 break;
             case Action::texture:
+                editor::select_inspector_section(app, editor::InspectorSection::texture);
                 if (!app.smoke_mode) editor::start_texture(app);
                 break;
             case Action::export_sfm:

@@ -1,5 +1,5 @@
 #include "ui.hpp"
-#include "app.hpp"
+#include "ui.hpp"
 #include "file_dialogs.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
@@ -214,16 +214,98 @@ void draw_training_objective(App& app) {
 }
 }  // namespace
 
+InspectorSection current_inspector_section(const App& app) {
+    if (app.inspector_section != InspectorSection::automatic)
+        return app.inspector_section;
+    if (app.job.running()) {
+        switch (app.active_job) {
+            case JobKind::align: return InspectorSection::alignment;
+            case JobKind::train: return InspectorSection::training;
+            case JobKind::dense: return InspectorSection::mesh;
+            case JobKind::texture: return InspectorSection::texture;
+            default: break;
+        }
+    }
+    if (app.has_mesh) return InspectorSection::texture;
+    if (app.has_model) return InspectorSection::mesh;
+    if (alignment_ready(app)) return mesh_from_mvs(app.settings)
+        ? InspectorSection::mesh : InspectorSection::training;
+    return app.settings.images_dir[0] != '\0'
+        ? InspectorSection::alignment : InspectorSection::project;
+}
+
+void select_inspector_section(App& app, const InspectorSection section) {
+    app.inspector_section = section;
+    app.show_inspector = true;
+}
+
+namespace {
+void inspector_field(const char* label) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(0.F);
+    ImGui::TextUnformatted(tr(label));
+    ImGui::PopTextWrapPos();
+    ImGui::TableSetColumnIndex(1);
+}
+
+const char* inspector_title(const InspectorSection section) {
+    switch (section) {
+        case InspectorSection::project: return "Project settings";
+        case InspectorSection::alignment: return "Camera Alignment";
+        case InspectorSection::training: return "Train 3DGS";
+        case InspectorSection::mesh: return "Extract Mesh";
+        case InspectorSection::texture: return "Texture Baking";
+        default: return "Reconstruction settings";
+    }
+}
+
+const char* inspector_description(const InspectorSection section) {
+    switch (section) {
+        case InspectorSection::project: return "Choose capture sources and project files.";
+        case InspectorSection::alignment: return "Estimate capture cameras and the sparse cloud.";
+        case InspectorSection::training: return "Train a Gaussian model from the aligned photographs.";
+        case InspectorSection::mesh: return "Build a surface from Gaussians or MVS depth maps.";
+        case InspectorSection::texture: return "Unwrap the mesh and project calibrated photographs.";
+        default: return "Select a reconstruction step in the scene panel.";
+    }
+}
+}  // namespace
+
 Action draw_inspector(App& app) {
     Action action = Action::none;
     if (!app.show_inspector) return action;
-    if (!ImGui::Begin(i18n::id("Inspector", "###Inspector"), &app.show_inspector)) {
+    if (!ImGui::Begin(i18n::id("Reconstruction settings", "###Inspector"), &app.show_inspector)) {
         ImGui::End();
         return action;
     }
     const bool busy = app.job.running();
+    const InspectorSection section = current_inspector_section(app);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.F, 12.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.F, 10.F});
+    // Keep job controls reachable even when a step has many advanced fields.
+    const bool checkpoint = !busy && section == InspectorSection::training &&
+        app.training_checkpoint_info.has_value();
+    const float footer_height = busy ? 150.F : (checkpoint ? 230.F : 118.F);
+    char parameters_id[64];
+    std::snprintf(parameters_id, sizeof(parameters_id), "##inspector_parameters_%d",
+        static_cast<int>(section));
+    ImGui::BeginChild(parameters_id,
+        {0.F, -std::min(footer_height, ImGui::GetContentRegionAvail().y * 0.55F)},
+        ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PushID(static_cast<int>(section));
+    theme::caption(section == InspectorSection::project ? "PROJECT" : "PIPELINE");
+    ImGui::Spacing();
+    ImGui::TextUnformatted(tr(inspector_title(section)));
+    ImGui::PushTextWrapPos(0.F);
+    ImGui::TextDisabled("%s", tr(inspector_description(section)));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
 
-    if (ImGui::CollapsingHeader(tr("Project"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (section == InspectorSection::project) {
         ImGui::Spacing();
         if (busy) {
             ImGui::PushTextWrapPos(0.F);
@@ -234,7 +316,7 @@ Action draw_inspector(App& app) {
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
         }
-        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
         theme::caption("Image source");
         ImGui::SetNextItemWidth(-138.F);
         auto image_source = app.settings.images_dir;
@@ -405,7 +487,7 @@ Action draw_inspector(App& app) {
                     has_reconstruction_result(app)))
             app.show_clear_results = true;
 
-        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
         theme::caption("External SfM dataset (optional)");
         ImGui::SetNextItemWidth(-138.F);
         auto dataset_source = app.settings.dataset_source;
@@ -451,7 +533,7 @@ Action draw_inspector(App& app) {
             }
         }
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
         theme::caption("Trained splat model (optional)");
         ImGui::SetNextItemWidth(-138.F);
         if (ImGui::InputText(
@@ -476,10 +558,9 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
-    if (ImGui::CollapsingHeader(
-            tr("Camera Alignment"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (section == InspectorSection::alignment) {
         ImGui::Spacing();
-        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
         theme::caption("Solver");
         ImGui::SetNextItemWidth(-1.F);
         const char* modes[] = {tr("Global"), tr("Hierarchical")};
@@ -609,54 +690,62 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
-    if (ImGui::CollapsingHeader(
-            tr("Gaussian Splatting"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (section == InspectorSection::training) {
         ImGui::Spacing();
         draw_training_compute_link(app);
         ImGui::Spacing();
-        ImGui::BeginDisabled(busy);
-        theme::caption("Training mode");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* modes[] = {tr("Fast"), tr("Standard"), tr("High quality")};
-        const int mode = std::clamp(app.settings.training_mode, 0, 2);
-        const auto preset = photara::splat::training_preset(
-            static_cast<photara::splat::TrainingMode>(mode));
-        const bool customized = app.settings.iterations != static_cast<int>(preset.iterations) ||
-            app.settings.densification_cap != static_cast<int>(preset.gaussian_cap) ||
-            app.settings.speedy_pruning != preset.speedy_pruning;
-        if (ImGui::BeginCombo("##training_mode", customized ? tr("Custom") : modes[mode])) {
-            for (int index = 0; index < 3; ++index) {
-                if (ImGui::Selectable(modes[index], !customized && mode == index)) {
-                    const auto selected = photara::splat::training_preset(
-                        static_cast<photara::splat::TrainingMode>(index));
-                    photara::splat::apply_training_loss_preset(app.settings,
-                        static_cast<photara::splat::TrainingMode>(index));
-                    app.settings.normal_field = false;
-                    app.settings.ppisp_layout = 0;
-                    app.settings.bilateral_grid = false;
-                    app.settings.training_mode = index;
-                    app.settings.iterations = static_cast<int>(selected.iterations);
-                    app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
-                    app.settings.speedy_pruning = selected.speedy_pruning;
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
+        if (ImGui::BeginTable("##training_properties", 2,
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.42F);
+            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.58F);
+            inspector_field("Training mode");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* modes[] = {tr("Fast"), tr("Standard"), tr("High quality")};
+            const int mode = std::clamp(app.settings.training_mode, 0, 2);
+            const auto preset = photara::splat::training_preset(
+                static_cast<photara::splat::TrainingMode>(mode));
+            const bool customized = app.settings.iterations != static_cast<int>(preset.iterations) ||
+                app.settings.densification_cap != static_cast<int>(preset.gaussian_cap) ||
+                app.settings.speedy_pruning != preset.speedy_pruning;
+            if (ImGui::BeginCombo("##training_mode", customized ? tr("Custom") : modes[mode])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGui::Selectable(modes[index], !customized && mode == index)) {
+                        const auto selected = photara::splat::training_preset(
+                            static_cast<photara::splat::TrainingMode>(index));
+                        photara::splat::apply_training_loss_preset(app.settings,
+                            static_cast<photara::splat::TrainingMode>(index));
+                        app.settings.normal_field = false;
+                        app.settings.ppisp_layout = 0;
+                        app.settings.bilateral_grid = false;
+                        app.settings.training_mode = index;
+                        app.settings.iterations = static_cast<int>(selected.iterations);
+                        app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
+                        app.settings.speedy_pruning = selected.speedy_pruning;
+                    }
                 }
+                ImGui::EndCombo();
             }
-            ImGui::EndCombo();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
+                    "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
+                    "High quality: 50,000 steps, 5M Gaussians, no pruning."),
+                    tr("Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."));
+            inspector_field("Capture type");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* capture[] = {tr("Object"), tr("Scene")};
+            int capture_index = app.settings.scene_mode ? 1 : 0;
+            if (ImGui::Combo("##capture", &capture_index, capture, 2))
+                app.settings.scene_mode = capture_index == 1;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Object captures a bounded subject; Scene keeps distant\n"
+                    "background geometry."));
+            inspector_field("Iterations");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
+            ImGui::EndTable();
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
-                "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
-                "High quality: 50,000 steps, 5M Gaussians, no pruning."),
-                tr("Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."));
-        theme::caption("Capture type");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* capture[] = {tr("Object"), tr("Scene")};
-        int capture_index = app.settings.scene_mode ? 1 : 0;
-        if (ImGui::Combo("##capture", &capture_index, capture, 2))
-            app.settings.scene_mode = capture_index == 1;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Object captures a bounded subject; Scene keeps distant\n"
-                "background geometry."));
         if (ImGui::Checkbox(
                 tr("Focus Region"), &app.settings.focus_region) &&
             app.settings.focus_region)
@@ -667,79 +756,80 @@ Action draw_inspector(App& app) {
                 "Works with both Object and Scene capture. Turning it on\n"
                 "shows the editable box; hiding the box later only changes\n"
                 "the display and never disables the training constraint."));
-        theme::caption("Densification strategy");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* strategies[] = {
-            "ADC IGS", "ADC Plus"};
-        int strategy_index = app.settings.strategy == 1 ? 1 : 0;
-        ImGui::Combo("##strategy", &strategy_index, strategies, 2);
-        app.settings.strategy = strategy_index;
-        theme::caption("Iterations");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
-        theme::caption("Densification cap");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputInt(
-            "##densification_cap",
-            &app.settings.densification_cap, 100'000, 1'000'000);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Maximum Gaussian count during densification.\n"
-                "Initialization uses the full source cloud.\n"
-                "Default 3,000,000."));
-        ImGui::Checkbox(tr("Pruning"), &app.settings.speedy_pruning);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
-                "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
-                "Requires full training resolution."));
-        theme::caption("SH degree");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* sh_degrees[] = {"0", "1", "2", "3"};
-        ImGui::Combo(
-            "##sh_degree", &app.settings.sh_degree, sh_degrees, 4);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Spherical-harmonic colour bands.\n"
-                "0 is diffuse only. 3 is the training default."));
-        theme::caption("Max training resolution");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputInt(
-            "##resolution", &app.settings.max_resolution, 128, 512);
-        theme::caption("Live preview cadence");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputInt("##cadence", &app.settings.preview_interval, 10, 50);
-        ImGui::Checkbox(
-            tr("Coarse-to-fine resolution"), &app.settings.progressive_resolution);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(
-                "Starts training at a lower image resolution and increases it\n"
-                "in stages. This reduces early GPU memory and compute cost.\n"
-                "Turn it off to use the maximum resolution from the start."));
-        ImGui::Checkbox(tr("Foreground mask training"), &app.settings.use_mask);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(
-                "Uses each view's mask or source alpha during 3DGS training.\n"
-                "A mask is required for every training image.\n"
-                "Choose masked or transparent below."));
-        if (app.settings.use_mask || app.settings.sam_masks) {
-            theme::caption(tr("Mask mode"));
+        if (ImGui::TreeNodeEx(tr("Advanced training settings"),
+                ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            theme::caption("Densification strategy");
             ImGui::SetNextItemWidth(-1.F);
-            const char* mask_modes[] = {
-                tr("masked"),
-                tr("transparent"),
-            };
-            int mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
-            if (ImGui::Combo("##mask_mode", &mask_mode, mask_modes, 2))
-                app.settings.mask_mode = mask_mode;
+            const char* strategies[] = {
+                "ADC IGS", "ADC Plus"};
+            int strategy_index = app.settings.strategy == 1 ? 1 : 0;
+            ImGui::Combo("##strategy", &strategy_index, strategies, 2);
+            app.settings.strategy = strategy_index;
+            theme::caption("Densification cap");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt(
+                "##densification_cap",
+                &app.settings.densification_cap, 100'000, 1'000'000);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", tr(
-                    "masked: those rays are missing observations.\n"
-                    "Colour is trained only where the mask is valid, and alpha is left alone.\n"
-                    "Use this when a moving person hides static geometry.\n"
-                    "transparent: the mask is the target opacity.\n"
-                    "Valid pixels stay opaque and masked pixels become transparent."));
+                    "Maximum Gaussian count during densification.\n"
+                    "Initialization uses the full source cloud.\n"
+                    "Default 3,000,000."));
+            ImGui::Checkbox(tr("Pruning"), &app.settings.speedy_pruning);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
+                    "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
+                    "Requires full training resolution."));
+            theme::caption("SH degree");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* sh_degrees[] = {"0", "1", "2", "3"};
+            ImGui::Combo(
+                "##sh_degree", &app.settings.sh_degree, sh_degrees, 4);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Spherical-harmonic colour bands.\n"
+                    "0 is diffuse only. 3 is the training default."));
+            theme::caption("Max training resolution");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt(
+                "##resolution", &app.settings.max_resolution, 128, 512);
+            theme::caption("Live preview cadence");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt("##cadence", &app.settings.preview_interval, 10, 50);
+            ImGui::Checkbox(
+                tr("Coarse-to-fine resolution"), &app.settings.progressive_resolution);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr(
+                    "Starts training at a lower image resolution and increases it\n"
+                    "in stages. This reduces early GPU memory and compute cost.\n"
+                    "Turn it off to use the maximum resolution from the start."));
+            ImGui::Checkbox(tr("Foreground mask training"), &app.settings.use_mask);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr(
+                    "Uses each view's mask or source alpha during 3DGS training.\n"
+                    "A mask is required for every training image.\n"
+                    "Choose masked or transparent below."));
+            if (app.settings.use_mask || app.settings.sam_masks) {
+                theme::caption(tr("Mask mode"));
+                ImGui::SetNextItemWidth(-1.F);
+                const char* mask_modes[] = {
+                    tr("masked"),
+                    tr("transparent"),
+                };
+                int mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
+                if (ImGui::Combo("##mask_mode", &mask_mode, mask_modes, 2))
+                    app.settings.mask_mode = mask_mode;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", tr(
+                        "masked: those rays are missing observations.\n"
+                        "Colour is trained only where the mask is valid, and alpha is left alone.\n"
+                        "Use this when a moving person hides static geometry.\n"
+                        "transparent: the mask is the target opacity.\n"
+                        "Valid pixels stay opaque and masked pixels become transparent."));
+            }
+            draw_training_objective(app);
+            ImGui::TreePop();
         }
-        draw_training_objective(app);
         ImGui::EndDisabled();
         const bool simplify_open = app.splat_simplify.show;
         if (theme::toolbar_button(
@@ -809,10 +899,9 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
-    if (ImGui::CollapsingHeader(
-            tr("Mesh"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (section == InspectorSection::mesh) {
         ImGui::Spacing();
-        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
         ImGui::Checkbox(tr("Build mesh"), &app.settings.build_mesh);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
@@ -935,8 +1024,7 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
-    if (ImGui::CollapsingHeader(
-            tr("Texture"), ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (section == InspectorSection::texture) {
         ImGui::Spacing();
         ImGui::PushTextWrapPos(0.F);
         theme::caption(
@@ -948,45 +1036,51 @@ Action draw_inspector(App& app) {
         theme::caption(
             "This build was compiled without texture baking (Vulkan + photara_drender).");
 #else
-        ImGui::BeginDisabled(busy);
-        theme::caption("Quality");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* texture_qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
-        if (ImGui::Combo(
-                "##tex_quality", &app.settings.texture_quality,
-                texture_qualities, 3))
-            apply_texture_quality_preset(app.settings);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Fast: 1024 atlas, projection only.\n"
-                "Standard: 2048 atlas, 3000 photometric + 60 seam iterations.\n"
-                "High: 4096 atlas, 6000 photometric + 120 seam iterations.");
-        theme::caption("Atlas size");
-        ImGui::SetNextItemWidth(-1.F);
-        int atlas_index = app.settings.atlas_resolution >= 8192
-            ? 3
-            : (app.settings.atlas_resolution >= 4096
-                   ? 2
-                   : (app.settings.atlas_resolution >= 2048 ? 1 : 0));
-        const char* atlas_sizes[] = {"1024", "2048", "4096", "8192"};
-        if (ImGui::Combo("##atlas", &atlas_index, atlas_sizes, 4)) {
-            const int sizes[] = {1024, 2048, 4096, 8192};
-            app.settings.atlas_resolution = sizes[atlas_index];
+        ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
+        if (ImGui::BeginTable("##texture_properties", 2,
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.42F);
+            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.58F);
+            inspector_field("Quality");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* texture_qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
+            if (ImGui::Combo(
+                    "##tex_quality", &app.settings.texture_quality,
+                    texture_qualities, 3))
+                apply_texture_quality_preset(app.settings);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Fast: 1024 atlas, projection only.\n"
+                    "Standard: 2048 atlas, 3000 photometric + 60 seam iterations.\n"
+                    "High: 4096 atlas, 6000 photometric + 120 seam iterations.");
+            inspector_field("Atlas size");
+            ImGui::SetNextItemWidth(-1.F);
+            int atlas_index = app.settings.atlas_resolution >= 8192
+                ? 3
+                : (app.settings.atlas_resolution >= 4096
+                       ? 2
+                       : (app.settings.atlas_resolution >= 2048 ? 1 : 0));
+            const char* atlas_sizes[] = {"1024", "2048", "4096", "8192"};
+            if (ImGui::Combo("##atlas", &atlas_index, atlas_sizes, 4)) {
+                const int sizes[] = {1024, 2048, 4096, 8192};
+                app.settings.atlas_resolution = sizes[atlas_index];
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Square albedo atlas written with the textured OBJ.");
+            inspector_field("Blend space");
+            ImGui::SetNextItemWidth(-1.F);
+            int blend_space = app.settings.texture_blend_linear ? 1 : 0;
+            const char* blend_spaces[] = {tr("sRGB"), tr("Linear")};
+            if (ImGui::Combo("##tex_blend", &blend_space, blend_spaces, 2))
+                app.settings.texture_blend_linear = blend_space == 1;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "%s",
+                    tr("sRGB blends like the photographs, so the textured mesh matches them.\n"
+                       "Linear blends in scene-linear light, then encodes sRGB on export."));
+            ImGui::EndTable();
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Square albedo atlas written with the textured OBJ.");
-        theme::caption("Blend space");
-        ImGui::SetNextItemWidth(-1.F);
-        int blend_space = app.settings.texture_blend_linear ? 1 : 0;
-        const char* blend_spaces[] = {tr("sRGB"), tr("Linear")};
-        if (ImGui::Combo("##tex_blend", &blend_space, blend_spaces, 2))
-            app.settings.texture_blend_linear = blend_space == 1;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "%s",
-                tr("sRGB blends like the photographs, so the textured mesh matches them.\n"
-                   "Linear blends in scene-linear light, then encodes sRGB on export."));
         ImGui::Checkbox(tr("Remove lighting (albedo)"), &app.settings.texture_delight);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
@@ -1044,298 +1138,12 @@ Action draw_inspector(App& app) {
             ImGui::Spacing();
             theme::caption("Mesh is ready. Bake Texture to project the photos.");
         }
-        if (theme::toolbar_button(
-                app.has_texture ? "Re-bake Texture##texture_section"
-                                : "Bake Texture##texture_section",
-                {-1.F, 28.F}, !busy && app.has_mesh))
-            action = Action::texture;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "UV unwrap + multi-view projection onto the current mesh.\n"
-                "Use Export Mesh to save the atlas with the model.");
 #endif
         ImGui::Spacing();
     }
 
-    if (ImGui::CollapsingHeader(tr("Display"), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        if (ImGui::Checkbox(tr("Show cameras"), &app.view_options.show_views))
-            app.view_options.show_camera_photos = app.view_options.show_views;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Wire frustums and capture photos in the 3D / training view.");
-        ImGui::Checkbox(tr("Show trajectory"), &app.view_options.show_trajectory);
-        ImGui::Checkbox(tr("Show ground grid"), &app.view_options.show_grid);
-        ImGui::Checkbox(tr("Show origin axes"), &app.view_options.show_axes);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "RGB axes at the world origin (X red, Y green, Z blue).");
-        ImGui::Checkbox(
-            tr("Show reconstruction region"), &app.view_options.show_region);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr(
-                "Display-only overlay of the reconstruction region.\n"
-                "Drag the center arrows to move the box, or a face dot\n"
-                "to resize. Training follows it live only while the Focus\n"
-                "Region checkbox is on; hiding the box never disables it."));
-        if (app.reconstruction_box.valid) {
-            const Vec3 size = app.reconstruction_box.size();
-            ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
-            if (theme::toolbar_button(
-                    "Fit Region to Cloud", {-1.F, 28.F},
-                    app.reconstruction_box.user_set)) {
-                app.reconstruction_box.user_set = false;
-                app.gizmo.box = {};
-                invalidate_reconstruction_box(app.reconstruction_box);
-                ensure_reconstruction_box(app);
-                write_working_subject_bounds(app);
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tr(
-                    "Reset to the SfM-estimated SubjectBounds for the "
-                    "focus region."));
-        }
-        ImGui::Spacing();
-    }
-
-    if (app.workspace == ViewportWorkspace::image_2d &&
-        ImGui::CollapsingHeader(
-            tr("Image QA"), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        const bool live_pair =
-            alignment_job_running(app) &&
-            app.monitor.stage() == Stage::matching &&
-            photara::sfm::is_live_pair_kind(app.align_live.kind);
-        const int count = image_qa_count(app.image_qa, app.scene);
-        if (live_pair) {
-            const auto& live = app.align_live;
-            const std::string name_a = live.path_a.empty()
-                ? std::string{"—"}
-                : live.path_a.filename().string();
-            const std::string name_b = live.path_b.empty()
-                ? std::string{"—"}
-                : live.path_b.filename().string();
-            theme::metric("A", name_a.c_str());
-            theme::metric("B", name_b.c_str());
-            theme::metric(
-                live.kind == photara::sfm::AlignLiveKind::inliers
-                    ? tr("inliers")
-                    : tr("matches"),
-                std::to_string(live.total_matches).c_str());
-        } else if (app.image_qa.selected >= 0 && app.image_qa.selected < count &&
-            static_cast<std::size_t>(app.image_qa.selected) <
-                app.scene.views.size()) {
-            const ViewPose& pose =
-                app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
-            theme::metric("Capture", pose.name.c_str());
-            theme::metric("Camera", pose.camera_model.c_str());
-            char res[32];
-            std::snprintf(
-                res, sizeof(res), "%u × %u", pose.width, pose.height);
-            theme::metric("Resolution", res);
-            theme::metric(
-                "Registered", pose.registered ? tr("yes") : tr("no"));
-            theme::metric_coloured("Position support",
-                tr(pose.position_audit == photara::sfm::PositionAudit::unverified
-                    ? "Needs position review"
-                    : pose.position_audit == photara::sfm::PositionAudit::graph_supported
-                        ? "Graph supported" : "Not audited"),
-                pose.position_audit == photara::sfm::PositionAudit::unverified
-                    ? theme::warning : theme::text_muted);
-            theme::metric(
-                "Observations", std::to_string(pose.observations).c_str());
-            theme::metric(
-                "Features", std::to_string(pose.features.size()).c_str());
-            theme::metric(
-                "Triangulated",
-                std::to_string(pose.triangulated_features).c_str());
-        } else if (count > 0) {
-            theme::metric("Images", std::to_string(count).c_str());
-        } else {
-            theme::caption("Align photos to inspect cameras and features.");
-        }
-        ImGui::Spacing();
-        if (live_pair) {
-            ImGui::Checkbox(
-                tr("Show unmatched keypoints"),
-                &app.image_qa.show_live_keypoints);
-        } else {
-            ImGui::Checkbox(
-                tr("Show triangulated"), &app.image_qa.show_triangulated);
-            ImGui::Checkbox(
-                tr("Show untracked keypoints"), &app.image_qa.show_untracked);
-        }
-        if (app.image_qa_session.metrics().valid) {
-            ImGui::Spacing();
-            theme::section_header("COMPARE");
-            const ImageQaMetrics& metrics = app.image_qa_session.metrics();
-            ImGui::TextDisabled("%s", metrics.masked
-                ? tr("Metrics: foreground only") : tr("Metrics: full image"));
-            char buffer[32];
-            std::snprintf(buffer, sizeof(buffer), "%.2f dB", metrics.psnr);
-            theme::metric("PSNR", buffer);
-            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.ssim);
-            theme::metric("SSIM", buffer);
-            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.mae);
-            theme::metric("MAE", buffer);
-            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.rmse);
-            theme::metric("RMSE", buffer);
-        }
-        ImGui::Spacing();
-    }
-
-    if (app.workspace != ViewportWorkspace::image_2d &&
-        ImGui::CollapsingHeader(tr("Camera"), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        theme::caption("Projection");
-        ImGui::SetNextItemWidth(-1.F);
-        int projection = static_cast<int>(app.camera.projection);
-        const char* projections[] = {
-            tr("Perspective"), tr("Orthographic"), tr("Fisheye"), tr("Panorama")};
-        if (ImGui::Combo("##editor_projection", &projection, projections, 4)) {
-            set_editor_projection(
-                app.camera, static_cast<EditorProjection>(projection));
-            app.preview_follow_view = false;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Perspective — standard lens with field of view.\n"
-                "Orthographic — parallel view, no foreshortening.\n"
-                "Fisheye — OpenCV equidistant, same model as training.\n"
-                "Panorama — 360° × 180° spherical view.");
-
-        if (app.camera.projection == EditorProjection::perspective ||
-            app.camera.projection == EditorProjection::fisheye) {
-            theme::caption(
-                app.camera.projection == EditorProjection::fisheye
-                    ? "Fisheye field of view"
-                    : "Field of view");
-            ImGui::SetNextItemWidth(-1.F);
-            const float fov_min =
-                app.camera.projection == EditorProjection::fisheye ? 80.F : 10.F;
-            const float fov_max =
-                app.camera.projection == EditorProjection::fisheye ? 179.F
-                                                                   : 120.F;
-            ImGui::SliderFloat(
-                "##editor_fov", &app.camera.fov_degrees, fov_min, fov_max,
-                "%.0f°");
-        }
-        if (app.camera.projection == EditorProjection::fisheye) {
-            theme::caption("Lens distortion");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::SliderFloat(
-                "##fisheye_k1", &app.camera.fisheye_k1, -0.2F, 0.4F, "%.3f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "OpenCV fisheye k1. Zero is a pure equidistant lens.");
-        }
-        if (app.camera.projection == EditorProjection::orthographic) {
-            theme::caption("View height");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::DragFloat(
-                "##ortho_height", &app.camera.ortho_height, 0.05F, 0.01F,
-                1.0e5F, "%.3f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "World-space height visible in the viewport.\n"
-                    "Scroll the view to zoom.");
-        }
-        if (app.camera.projection == EditorProjection::panorama)
-            theme::caption("Full 360° × 180° spherical view around the camera.");
-        theme::caption("Fly speed");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::SliderFloat(
-            "##fly_speed", &app.camera.move_speed, 0.1F, 10.F, "%.1fx");
-        ImGui::Spacing();
-    }
-
-    if (app.view_mode != VisualizationMode::splat &&
-        ImGui::CollapsingHeader(tr("Viewport"), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        if (app.view_mode == VisualizationMode::mesh) {
-            ImGui::Spacing();
-            theme::metric(
-                "Vertices", format_count(app.mesh.vertices.size()).c_str());
-            theme::metric(
-                "Faces", format_count(app.mesh.faces.size()).c_str());
-            if (app.has_texture)
-                theme::metric(
-                    "Texture",
-                    app.settings.texture_delight ? "Albedo atlas" : "Projected atlas");
-            ImGui::BeginDisabled(!app.mesh.has_texture());
-            ImGui::Checkbox(tr("Albedo texture"), &app.view_options.mesh_texture);
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(
-                    app.mesh.has_texture()
-                        ? "Sample the baked atlas with mesh UVs."
-                        : "Bake Texture to preview the albedo on the mesh.");
-            ImGui::Checkbox(tr("Wireframe"), &app.view_options.mesh_wireframe);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Draw triangle edges on top of the shaded surface.");
-            ImGui::Checkbox(
-                tr("Vertex colour"), &app.view_options.mesh_vertex_colour);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Use PLY vertex colours instead of clay shading.");
-            theme::caption("Rendered face budget");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::SliderInt(
-                "##mesh_budget", &app.view_options.mesh_face_budget, 20'000,
-                600'000, "%d");
-        }
-        ImGui::Spacing();
-        if (app.view_mode != VisualizationMode::mesh) {
-        theme::caption("Point size");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::SliderFloat(
-                "##point_size", &app.view_options.point_size, 1.F, 6.F,
-                "%.1f px") &&
-            live_preview_active(app))
-            publish_preview_vis(app);
-        theme::caption("Rendered point budget");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::SliderInt(
-            "##budget", &app.view_options.point_budget, 20'000, 600'000,
-            "%d");
-        }
-        if (app.view_mode == VisualizationMode::rings) {
-            const bool gpu_rings =
-                app.has_model &&
-                !(app.job.running() && app.active_job == JobKind::train);
-            if (!gpu_rings) {
-                theme::caption("Ring budget");
-                ImGui::SetNextItemWidth(-1.F);
-                ImGui::SliderInt(
-                    "##ring_budget", &app.view_options.ring_budget, 1'000, 40'000,
-                    "%d");
-                theme::caption("Ring radius");
-                ImGui::SetNextItemWidth(-1.F);
-                if (ImGui::SliderFloat(
-                        "##ring_scale", &app.view_options.ring_scale, 1.F, 4.F,
-                        "%.2f σ") &&
-                    live_preview_active(app))
-                    publish_preview_vis(app);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "Ellipse size in projected sigmas. 2.83 matches SuperSplat's ring contour.");
-            }
-        }
-        theme::caption("Camera marker size");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::SliderFloat(
-            "##view_scale", &app.view_options.view_scale, 0.02F, 0.4F, "%.2f");
-        ImGui::Spacing();
-        ImGui::Checkbox(tr("Colour by depth"), &app.view_options.colour_by_depth);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Replace sampled point colours with a near-to-far ramp.");
-        ImGui::Spacing();
-    }
-
     const TrainingStats& stats = app.monitor.training();
-    if (stats.valid &&
+    if (section == InspectorSection::training && stats.valid &&
         ImGui::CollapsingHeader(
             tr("Training Telemetry"), ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
@@ -1386,6 +1194,11 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
+    ImGui::PopID();
+    ImGui::EndChild();
+    ImGui::Separator();
+    ImGui::BeginChild("##inspector_actions", {0.F, 0.F},
+        ImGuiChildFlags_AlwaysUseWindowPadding);
     // Context-appropriate primary action pinned to the bottom of the panel.
     const auto hover_tip = [](const char* english) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1407,15 +1220,15 @@ Action draw_inspector(App& app) {
     const char* const bake_tip = app.has_texture
         ? "Unwrap UVs again and reproject the calibrated photos onto the current mesh."
         : "Unwrap UVs and project the calibrated photos onto the current mesh.";
-    if (!busy && app.training_checkpoint_info) {
+    if (checkpoint) {
         const auto& info = *app.training_checkpoint_info;
         ImGui::Text("%s: %u / %u", tr("Saved Training Progress"), info.iteration, info.total_iterations);
         ImGui::TextWrapped("%s", tr("Continue from the saved PLY model. Optimizer state will be reinitialized."));
-        if (theme::primary_button("Resume Training##checkpoint", {-1.F, 40.F}, true)) {
+        if (theme::primary_button("Resume Training##checkpoint", {-1.F, 40.F},
+                !app.pending_train_prepare.valid())) {
             action = Action::continue_training;
         }
     }
-    ImGui::Dummy({0, 10.F});
     if (busy && app.saving_training) {
         ImGui::TextWrapped("%s", tr("Saving project and training progress. Please wait."));
         if (ImGui::Button(tr("Cancel"), {-1.F, 36.F})) cancel_project_save(app);
@@ -1440,77 +1253,59 @@ Action draw_inspector(App& app) {
                 stop_job_label(app.active_job), {-1.F, 36.F},
                 icons::ButtonStyle::danger, true, false, tr(k_stop_job_tooltip)))
             action = Action::stop;
-    } else if (app.has_mesh) {
-        if (theme::primary_button(
-                app.has_texture ? "Re-bake Texture##primary"
-                                : "Bake Texture##primary",
-                {-1.F, 40.F}, true))
-            action = Action::texture;
-        hover_tip(bake_tip);
-        ImGui::Dummy({0, 6.F});
-        if (mesh_from_mvs(app.settings)) {
-            if (theme::toolbar_button("Extract Mesh##primary_mvs", {-1.F, 32.F}))
-                action = Action::dense;
-            hover_tip(extract_tip);
-            ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Train 3DGS##primary_mvs", {-1.F, 32.F}))
-                action = Action::train;
-            hover_tip(train_tip);
-        } else {
-            if (theme::toolbar_button(
-                    mesh_from_gaussians(app.settings)
-                        ? "Train 3DGS + Mesh##primary_gaussian"
-                        : "Train 3DGS##primary_gaussian",
-                    {-1.F, 32.F}))
-                action = Action::train;
-            hover_tip(train_tip);
-            ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button(
-                    "Extract Mesh##primary_gaussian", {-1.F, 32.F}))
-                action = Action::dense;
-            hover_tip(extract_tip);
-        }
-    } else if (has_external_dataset(app)) {
-        if (mesh_from_mvs(app.settings)) {
-            if (theme::primary_button("Extract Mesh", {-1.F, 40.F}, true))
-                action = Action::dense;
-            ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
-                action = Action::train;
-        } else {
-            if (theme::primary_button(
-                    mesh_from_gaussians(app.settings)
-                        ? "Train External 3DGS + Mesh"
-                        : "Train External 3DGS",
-                    {-1.F, 40.F}, true))
-                action = Action::train;
-            ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
-                action = Action::dense;
-        }
-    } else if (!app.has_sparse) {
-        if (theme::primary_button(
-                "Align Photos", {-1.F, 40.F},
-                app.settings.images_dir[0] != '\0'))
-            action = Action::align;
-    } else if (mesh_from_mvs(app.settings)) {
-        if (theme::primary_button(
-                "Extract Mesh", {-1.F, 40.F},
-                app.settings.images_dir[0] != '\0'))
-            action = Action::dense;
-        ImGui::Dummy({0, 6.F});
-        if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
-            action = Action::train;
     } else {
-        if (theme::primary_button(
-                mesh_from_gaussians(app.settings) ? "Train 3DGS + Mesh"
-                                                  : "Train 3DGS",
-                {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
-            action = Action::train;
-        ImGui::Dummy({0, 6.F});
-        if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
-            action = Action::dense;
+        const bool aligned = alignment_ready(app);
+        const char* label = "Align Photos";
+        const char* tip = "Choose an image folder or video in Project settings.";
+        Action next = Action::align;
+        bool enabled = app.settings.images_dir[0] != '\0' && !has_external_dataset(app);
+        switch (section) {
+            case InspectorSection::training:
+                label = mesh_from_gaussians(app.settings)
+                    ? "Train 3DGS + Mesh" : "Train 3DGS";
+                tip = train_tip;
+                next = Action::train;
+                enabled = aligned;
+                break;
+            case InspectorSection::mesh:
+                label = "Extract Mesh";
+                tip = extract_tip;
+                next = Action::dense;
+                enabled = aligned && app.settings.build_mesh;
+                break;
+            case InspectorSection::texture:
+                label = app.has_texture ? "Re-bake Texture" : "Bake Texture";
+                tip = bake_tip;
+                next = Action::texture;
+                enabled = app.has_mesh;
+#if !defined(PHOTARA_HAS_TEXTURE)
+                enabled = false;
+#endif
+                break;
+            default: break;
+        }
+        // Preparation runs asynchronously before a ProcessJob exists.
+        enabled = enabled && !app.pending_train_prepare.valid();
+        ImGui::PushTextWrapPos(0.F);
+        theme::caption(app.pending_train_prepare.valid() ? "Preparing training..."
+            : (section == InspectorSection::texture && !app.has_mesh)
+                ? "Extract a mesh before baking textures."
+            : (section == InspectorSection::mesh && !app.settings.build_mesh)
+                ? "Enable Build mesh to configure surface extraction."
+            : ((section == InspectorSection::training || section == InspectorSection::mesh) && !aligned)
+                ? "Align photos or import a camera dataset first."
+            : (has_external_dataset(app) && (section == InspectorSection::project || section == InspectorSection::alignment))
+                ? "Imported cameras are ready. Select training or mesh extraction."
+            : enabled ? "Ready" : "Choose an image folder or video in Project settings.");
+        ImGui::PopTextWrapPos();
+        const bool pressed = checkpoint
+            ? theme::toolbar_button(label, {-1.F, 32.F}, enabled)
+            : theme::primary_button(label, {-1.F, 40.F}, enabled);
+        if (pressed) action = next;
+        hover_tip(tip);
     }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
 
     ImGui::End();
     return action;
