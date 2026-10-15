@@ -119,5 +119,22 @@ compiled into the current native module. Selecting an unavailable device raises
 an exception from the C++ backend rather than silently launching another
 process or changing the requested backend.
 
+For paired ADC-IGS experiments, edit
+`examples/igs_shape_experiment.json` and run from the repository root:
+
+```powershell
+python python/examples/igs_shape_experiment.py --config python/examples/igs_shape_experiment.json --validate
+python python/examples/igs_shape_experiment.py --config python/examples/igs_shape_experiment.json
+```
+
+The runner sets the existing Python `TrainingOptions` after applying the
+strategy preset. `shape_scale_reg` and `shape_erank_reg` correspond to the
+scale and effective-rank penalties. Changing their JSON values requires no
+C++ changes or recompilation. Each variant trains in a separate Python
+process, saves its resolved settings, progress, and model, and can run the
+existing projection evaluator. Cached SfM cameras and sparse points are reused;
+image alignment and depth estimation are not rerun. Use a new output directory
+for a different configuration.
+
 `examples/tsdf_experiment.py` loads an existing COLMAP model and trained splat
 PLY, so TSDF parameters can be tested without rerunning SfM or 3DGS training.
