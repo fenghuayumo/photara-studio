@@ -24,9 +24,19 @@ using namespace photara::sfm;
 using namespace photara::project;
 
 int failures = 0;
+std::vector<std::uint8_t> encode_settings_v12(
+    Settings settings, const std::filesystem::path& project) {
+    settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
+    auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::uint8_t) - 2 * sizeof(std::int32_t) -
+        2 * sizeof(std::uint64_t) - 2 * sizeof(float));
+    const std::uint32_t version = 12;
+    std::memcpy(bytes.data(), &version, sizeof(version));
+    return bytes;
+}
 std::vector<std::uint8_t> encode_settings_v6(
     const Settings& settings, const std::filesystem::path& project) {
-    auto bytes = encode_settings(settings, project);
+    auto bytes = encode_settings_v12(settings, project);
     // Version 7 appends two ints, two booleans and two uint64 budgets.
     bytes.resize(bytes.size() - photara::splat::k_training_loss_payload_bytes - 5 * sizeof(float) - sizeof(std::uint64_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint8_t) - 2 * sizeof(std::uint64_t));
@@ -257,6 +267,12 @@ int main() {
            settings.training_mode == 1 && !settings.speedy_pruning,
            "new projects default to standard 3DGS training");
     expect(!settings.sam_use_mask_for_sfm, "SAM alignment masks default off");
+    settings.ai_priors = true;
+    settings.ai_prior_source = 1;
+    settings.ai_prior_model = dir / "models" / "moge-normal.gguf";
+    settings.ai_prior_directory = dir / "aligned priors";
+    settings.ai_depth_weight = .025F; settings.ai_normal_weight = 0.F;
+    settings.ai_prior_tokens = 1600;
     settings.name = "demo";
     settings.image_directory = dir / "images";
     settings.dataset_source = dir / "colmap";
@@ -333,6 +349,20 @@ int main() {
     expect(
         round_trip.video_frames_dir == settings.video_frames_dir,
         "video frames dir");
+    expect(round_trip.ai_priors && round_trip.ai_prior_source == 1 &&
+        round_trip.ai_prior_model == settings.ai_prior_model &&
+        round_trip.ai_prior_directory == settings.ai_prior_directory &&
+        round_trip.ai_depth_weight == .025F && round_trip.ai_normal_weight == 0.F &&
+        round_trip.ai_prior_tokens == 1600, "AI prior sources and independent weights survive project roundtrip");
+    expect(!decode_settings(encode_settings_v12(settings, ascan_path), ascan_path).ai_priors,
+        "version 12 projects keep AI priors disabled");
+    {
+        auto invalid = settings; invalid.ai_depth_weight = -1.F;
+        bool rejected = false;
+        try { (void)decode_settings(encode_settings(invalid,ascan_path),ascan_path); }
+        catch (const std::exception&) { rejected=true; }
+        expect(rejected,"invalid AI prior weights are rejected");
+    }
     expect(round_trip.video_fps == 3.5F, "video fps");
     expect(round_trip.video_sharp_window == 5, "video sharp window");
     expect(round_trip.video_max_frames == 400, "video max frames");

@@ -115,6 +115,58 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
     ImGui::EndTable();
 }
 
+void draw_ai_priors(App& app) {
+    auto& settings=app.settings;
+    ImGui::Separator();
+    ImGui::Checkbox(tr("AI depth & normal priors"), &settings.ai_priors);
+    objective_note("AI priors are independent of surface consistency and multi-view losses. Zero disables each prior.");
+    if (!settings.ai_priors) return;
+    const char* sources[]{tr("Generate with MoGe"), tr("Existing aligned cache")};
+    theme::caption("Prior source");
+    ImGui::SetNextItemWidth(-1.F);
+    ImGui::Combo("##ai_prior_source", &settings.ai_prior_source, sources, 2);
+    if (settings.ai_prior_source == 0) {
+        objective_note("MoGe-2 ViT-B Normal, MIT license, 400 MiB. Downloaded automatically before first training and reused across projects.");
+#if defined(PHOTARA_HAS_INFERENCE)
+        if (moge_model_ready()) {
+            ImGui::TextColored(theme::success,"%s",tr("MoGe model is ready"));
+        } else if (app.moge_download.state()==ModelDownload::State::running) {
+            ImGui::ProgressBar(std::max(0.F,app.moge_download.progress()),{-1.F,0.F});
+            if (ImGui::SmallButton(tr("Show download"))) app.show_moge_download=true;
+        } else if (ImGui::Button(tr("Download model"))) {
+            request_moge_download(app);
+        }
+#else
+        objective_note("MoGe inference is unavailable in this build. Choose an existing aligned cache.");
+#endif
+        theme::caption("Prior token budget");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt("##ai_prior_tokens", &settings.ai_prior_tokens, 100, 400);
+        settings.ai_prior_tokens = std::clamp(settings.ai_prior_tokens, 1, 10000);
+    }
+    theme::caption(settings.ai_prior_source == 0 ? "Prior cache folder (optional)" : "Aligned prior cache folder");
+    ImGui::SetNextItemWidth(-68.F);
+    ImGui::InputText("##ai_prior_directory", settings.ai_prior_directory.data(), settings.ai_prior_directory.size());
+    ImGui::SameLine(0.F, 4.F);
+    if (ImGui::Button(i18n::id("Folder", "##ai_prior_folder_pick"), {64.F,0.F}))
+        pick_folder(L"Select aligned AI prior cache folder", settings.ai_prior_directory);
+    if (settings.ai_prior_source == 0)
+        objective_note("Training prepares priors automatically and reuses compatible maps. Leave the folder empty to use the task cache.");
+    else
+        objective_note("Select the folder containing aligned view_*.prior files for these cameras and images.");
+    const auto weight = [](const char* label, const char* id, float& value) {
+        theme::caption(label);
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputFloat(id, &value, 0.F, 0.F, "%.5g");
+        if (!std::isfinite(value) || value < 0.F) value = 0.F;
+    };
+    weight("AI depth weight", "##ai_depth_weight", settings.ai_depth_weight);
+    weight("AI normal weight", "##ai_normal_weight", settings.ai_normal_weight);
+    if (settings.ai_depth_weight == 0.F && settings.ai_normal_weight == 0.F)
+        objective_note("Both weights are zero. Prior preparation and loading are skipped.");
+    objective_note("Requires pinhole views. Fisheye images are rectified; panoramas are not supported.");
+}
+
 void draw_training_objective(App& app) {
     if (!ImGui::TreeNodeEx(tr("Loss & constraints"), ImGuiTreeNodeFlags_SpanAvailWidth)) return;
     auto& settings = app.settings;
@@ -178,6 +230,7 @@ void draw_training_objective(App& app) {
             ImGui::EndDisabled();
             if (tab.group == LossGroup::geometry)
                 ImGui::Checkbox(tr("Normal field"), &settings.normal_field);
+            if (tab.group == LossGroup::geometry) draw_ai_priors(app);
             const bool has_advanced = std::any_of(
                 photara::splat::k_training_loss_fields.begin(),
                 photara::splat::k_training_loss_fields.end(), [&](const auto& field) {
@@ -1172,7 +1225,8 @@ Action draw_inspector(App& app) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.alpha_loss);
             theme::metric("Mask opacity", buffer);
         }
-        if (mesh_from_gaussians(app.settings) || app.settings.geometry_training || app.settings.normal_field) {
+        if (mesh_from_gaussians(app.settings) || app.settings.geometry_training || app.settings.normal_field ||
+            (app.settings.ai_priors && app.settings.training_mode != 0)) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.depth_loss);
             theme::metric("Depth", buffer);
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.normal_loss);
@@ -1210,8 +1264,7 @@ Action draw_inspector(App& app) {
     const char* const train_tip = mesh_from_gaussians(app.settings)
         ? "Train 3DGS with depth and normal losses, then extract a "
           "surface from the Gaussians."
-        : "Train appearance-only 3DGS from the aligned cameras. "
-          "The mesh stays on the MVS path.";
+        : "Train 3DGS from the aligned cameras using the selected losses and priors.";
     const char* const extract_tip = mesh_from_gaussians(app.settings)
         ? (app.has_model
                ? "Extract a surface from the trained 3DGS model.\n"

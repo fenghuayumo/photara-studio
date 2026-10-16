@@ -4,6 +4,7 @@
 #include "image_qa_view.hpp"
 #include "pipeline.hpp"
 #include "sam_model.hpp"
+#include "moge_model.hpp"
 #include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
@@ -260,6 +261,11 @@ struct App {
     bool show_sam_license{};
     bool sam_license_tick{};
     SamModelDownload sam_download;
+    ModelDownload moge_download;
+    bool show_moge_download{};
+    bool moge_train_pending{};
+    bool moge_download_train_requested{};
+    bool moge_resume_pending{};
     gpu::PreviewTexture about_icon;
     bool about_icon_ready{};
     bool show_clear_results{};
