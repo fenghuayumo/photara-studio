@@ -1133,7 +1133,8 @@ void draw_project_lifecycle_modals(App& app) {
         if (!app.checkpoint_save_error.empty()) ImGui::TextWrapped("%s", app.checkpoint_save_error.c_str());
         if (ImGui::Button(tr("Save"), {120.F, 32.F})) {
             request_project_save(app, false);
-            if (!app.pending_project_action) ImGui::CloseCurrentPopup();
+            if (!app.pending_project_action || app.project_transition_ready)
+                ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button(tr("Don't Save"), {120.F, 32.F})) {
@@ -1143,6 +1144,7 @@ void draw_project_lifecycle_modals(App& app) {
         ImGui::SameLine();
         if (ImGui::Button(tr("Cancel"), {100.F, 32.F})) {
             app.pending_project_action = {};
+            app.project_transition_ready = false;
             app.checkpoint_save_error.clear();
             ImGui::CloseCurrentPopup();
         }

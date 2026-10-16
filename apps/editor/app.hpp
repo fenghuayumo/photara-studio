@@ -248,6 +248,7 @@ struct App {
     std::function<void()> pending_project_action;
     bool show_project_switch_confirmation{};
     bool project_transition_approved{};
+    bool project_transition_ready{};
     std::optional<photara::splat::TrainingCheckpointInfo> training_checkpoint_info;
     bool saving_training{};
     bool exit_after_save{};
@@ -400,8 +401,9 @@ void cancel_project_save(App& app);
 void save_project_as(App& app);
 bool has_unsaved_project_changes(const App& app);
 void mark_project_saved(App& app);
-bool defer_project_transition(App& app, std::function<void()> action);
+bool defer_project_transition(App& app, std::function<void()> action, bool confirm_unsaved = true);
 void complete_project_transition(App& app);
+void process_project_transition(App& app);
 void change_image_source(App& app, const std::filesystem::path& path);
 void change_external_dataset(App& app, const std::filesystem::path& path);
 void request_ascan_scene_load(App& app);

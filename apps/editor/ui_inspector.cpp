@@ -581,7 +581,7 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip(
                     "Optional dense PLY initializer. COLMAP/OpenMVS sparse points "
                     "are used automatically when available.");
-            if (ImGui::Button(tr("Clear external dataset"), {-1.F, 26.F})) {
+            if (ImGui::Button(tr("Remove external dataset"), {-1.F, 26.F})) {
                 change_external_dataset(app, {});
             }
         }

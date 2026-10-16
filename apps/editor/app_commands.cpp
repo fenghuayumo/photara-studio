@@ -673,8 +673,9 @@ void change_external_dataset(App& app, const std::filesystem::path& path) {
         !app.imported_mesh_source.empty() ||
         (!app.layout.dense_ply.empty() && std::filesystem::exists(app.layout.dense_ply, error)) ||
         (!app.layout.working_dense.empty() && std::filesystem::exists(app.layout.working_dense, error));
-    if (has_work_to_preserve &&
-        defer_project_transition(app, [&app, path] { change_external_dataset(app, path); })) return;
+    if (defer_project_transition(app,
+            [&app, path] { change_external_dataset(app, path); },
+            has_work_to_preserve)) return;
     store_utf8_path_field(app.settings.dataset_source, path);
     app.settings.dataset_initial_cloud.fill('\0');
     app.settings.project_dir.fill('\0');
@@ -775,15 +776,24 @@ void mark_project_saved(App& app) {
     }
 }
 
-bool defer_project_transition(App& app, std::function<void()> action) {
-    if (app.project_transition_approved || !has_unsaved_project_changes(app)) return false;
+bool defer_project_transition(App& app, std::function<void()> action, bool confirm_unsaved) {
+    if (app.project_transition_approved) return false;
     app.pending_project_action = std::move(action);
-    app.show_project_switch_confirmation = true;
+    app.show_project_switch_confirmation = confirm_unsaved && has_unsaved_project_changes(app);
+    app.project_transition_ready = !app.show_project_switch_confirmation;
     app.checkpoint_save_error.clear();
     return true;
 }
 
 void complete_project_transition(App& app) {
+    // The viewport's ImGui draw list may still reference textures that the
+    // action releases. Queue idle cannot protect a draw list not yet submitted.
+    app.project_transition_ready = static_cast<bool>(app.pending_project_action);
+}
+
+void process_project_transition(App& app) {
+    if (!app.project_transition_ready) return;
+    app.project_transition_ready = false;
     auto action = std::move(app.pending_project_action);
     app.pending_project_action = {};
     app.project_transition_approved = true;

@@ -890,7 +890,7 @@ constexpr Entry k_entries[] = {
      "可选的稠密 PLY 初始化。若有 COLMAP/OpenMVS 稀疏点会自动使用。",
      "任意の密な PLY 初期化。COLMAP/OpenMVS の疎点が使える場合は自動利用。",
      "선택적 밀집 PLY 초기화. COLMAP/OpenMVS 희소 점이 있으면 자동 사용됩니다."},
-    {"Clear external dataset", "清除外部数据集", "外部データセットをクリア", "외부 데이터셋 지우기"},
+    {"Remove external dataset", "移除外部数据集", "外部データセットを取り外す", "외부 데이터셋 연결 해제"},
     {"Trained splat model (optional)", "已训练溅射模型（可选）", "学習済みスプラット（任意）", "학습된 스플랫 모델(선택)"},
     {"Drop photos, a video, 3DGS, or a mesh", "拖入照片、视频、3DGS 或网格模型", "写真、動画、3DGS、メッシュをドロップ", "사진, 동영상, 3DGS 또는 메시를 드롭"},
     {"Drop photos, video, 3DGS (PLY/SOG/SPZ/GLB/USDC), mesh (PLY/OBJ), .asfm, or .ascan", "拖入照片、视频、3DGS（PLY/SOG/SPZ/GLB/USDC）、网格（PLY/OBJ）、.asfm 或 .ascan", "写真、動画、3DGS（PLY/SOG/SPZ/GLB/USDC）、メッシュ（PLY/OBJ）、.asfm、.ascan をドロップ", "사진, 동영상, 3DGS (PLY/SOG/SPZ/GLB/USDC), 메시 (PLY/OBJ), .asfm 또는 .ascan을 드롭"},
