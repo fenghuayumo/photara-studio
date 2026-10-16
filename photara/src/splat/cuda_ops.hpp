@@ -197,7 +197,9 @@ LossGradients compute_training_loss(
     // False when the render carried no depth/normal channels
     // (RasterizeOptions::require_depth off): the two full-image gradient
     // tensors are then neither allocated nor written.
-    bool need_geometry_gradients = true);
+    bool need_geometry_gradients = true,
+    // Trainer gates AI priors with the shared depth_normal_from_iter schedule.
+    bool ai_prior_active = true);
 
 LossGradients compute_normal_field_loss(
     const RenderResult& rendered, const Camera& camera, float weight,

@@ -220,14 +220,14 @@ void draw_training_objective(App& app) {
             }
             ImGui::BeginDisabled(tab.group == LossGroup::geometry && !geometry);
             objective_fields(settings, tab.group, false);
+            ImGui::EndDisabled();
             if (tab.group == LossGroup::geometry) {
                 theme::caption("Geometry start step");
                 ImGui::SetNextItemWidth(-1.F);
                 ImGui::InputInt("##geometry_start", &settings.geometry_from_iter, 500, 2000);
-                if (settings.geometry_from_iter >= settings.iterations)
+                if (settings.geometry_from_iter > settings.iterations)
                     objective_note("Starts after this training run.");
             }
-            ImGui::EndDisabled();
             if (tab.group == LossGroup::geometry)
                 ImGui::Checkbox(tr("Normal field"), &settings.normal_field);
             if (tab.group == LossGroup::geometry) draw_ai_priors(app);

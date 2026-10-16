@@ -2696,7 +2696,8 @@ void chain_parameter_gradients(
 LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, const bool collect_scalar_terms,
-    const bool depth_normal_active, const bool need_geometry_gradients) {
+    const bool depth_normal_active, const bool need_geometry_gradients,
+    const bool ai_prior_active) {
     if (rendered.median_depth.device() == tinytensor::Device::Vulkan ||
         rendered.color.device() == tinytensor::Device::Vulkan) {
         if (options.use_mvs_depth || options.use_mvs_normals || options.alpha_mode == AlphaMode::transparent)
@@ -2715,7 +2716,7 @@ LossGradients compute_training_loss(
             add_depth_normal_loss_vulkan(rendered, target.camera,
                 depth_normal_active ? options.depth_normal_weight : 0.F,
                 result, collect_scalar_terms);
-        if (options.lambda_d > 0.F || options.lambda_n > 0.F)
+        if (ai_prior_active && (options.lambda_d > 0.F || options.lambda_n > 0.F))
             add_prior_loss_vulkan(rendered, target, options, result, collect_scalar_terms);
         return result;
     }
@@ -2726,8 +2727,10 @@ LossGradients compute_training_loss(
     // full-image zeroing store per step for nothing.
     const std::size_t height = target.camera.height;
     const std::size_t width = target.camera.width;
-    if ((options.lambda_d > 0.F && target.depth.numel() != pixels) ||
-        (options.lambda_n > 0.F && target.normal.numel() != 3*pixels))
+    const float prior_depth_weight = ai_prior_active ? options.lambda_d : 0.F;
+    const float prior_normal_weight = ai_prior_active ? options.lambda_n : 0.F;
+    if ((prior_depth_weight > 0.F && target.depth.numel() != pixels) ||
+        (prior_normal_weight > 0.F && target.normal.numel() != 3*pixels))
         throw std::invalid_argument("Missing or mismatched CUDA AI prior maps");
     LossGradients result;
     result.color =
@@ -2750,10 +2753,10 @@ LossGradients compute_training_loss(
     const float ssim_weight = std::clamp(options.ssim_weight, 0.F, 1.F);
     // The weights are already zero whenever the geometry path is inactive, so
     // this only expresses the same state to the kernel.
-    const float depth_weight = options.lambda_d > 0.F ? options.lambda_d : options.use_mvs_depth
+    const float depth_weight = prior_depth_weight > 0.F ? prior_depth_weight : options.use_mvs_depth
         ? options.depth_weight
         : 0.F;
-    const float normal_weight = options.lambda_n > 0.F ? options.lambda_n : options.use_mvs_normals
+    const float normal_weight = prior_normal_weight > 0.F ? prior_normal_weight : options.use_mvs_normals
         ? options.normal_weight
         : 0.F;
     loss_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
@@ -2770,7 +2773,7 @@ LossGradients compute_training_loss(
         target.mask_is_validity ? -1 :
             options.alpha_mode == AlphaMode::masked ? 0 : 1,
         options.match_alpha_weight, 1.F,
-        options.geometry_epsilon, options.lambda_d > 0.F || options.lambda_n > 0.F);
+        options.geometry_epsilon, prior_depth_weight > 0.F || prior_normal_weight > 0.F);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
     if (use_fused_photometric)
         fused_l1_ssim_loss(
