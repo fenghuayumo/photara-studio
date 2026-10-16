@@ -964,6 +964,8 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/model_download.cpp
                 ${PHOTARA_STUDIO_DIR}/moge_model.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
+                ${PHOTARA_STUDIO_DIR}/prior_preview.cpp
+                ${PHOTARA_STUDIO_DIR}/prior_preview_data.cpp
                 ${PHOTARA_STUDIO_DIR}/sam_model.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/splat_edit.cpp
@@ -1573,6 +1575,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_hierarchical_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.hierarchical COMMAND photara_hierarchical_test)
         if(TARGET photara_studio)
+            add_executable(photara_prior_preview_test
+                tests/prior_preview_test.cpp
+                ${PHOTARA_STUDIO_DIR}/prior_preview_data.cpp)
+            target_include_directories(photara_prior_preview_test PRIVATE ${PHOTARA_STUDIO_DIR})
+            target_link_libraries(photara_prior_preview_test PRIVATE Photara::Splat)
+            add_test(NAME photara.studio.prior_preview COMMAND photara_prior_preview_test)
             add_executable(photara_studio_alignment_test
                 tests/studio_alignment_test.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp

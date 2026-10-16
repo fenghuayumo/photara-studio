@@ -4,6 +4,19 @@ In **Train 3DGS → Loss & constraints → Geometry**, enable **AI depth & norma
 priors**. The feature is available in Standard and High quality modes. Fast
 mode keeps RGB-only training and skips prior generation and loading.
 
+In the training panel, use **View AI depth and normals** to inspect generated caches in a separate
+window. Choose a view or use previous/next; the source photo, AI depth and AI
+normal maps are shown side by side. Hover for raw Z or normal values. Depth
+colors use each image's P02/P98 range in scene units, with warm colors near
+and cool colors far; invalid pixels are dark. Normal RGB is `(N+1)/2` in
+camera coordinates. Adjust **Depth display range** and **Apply range** to
+inspect near-surface details; **Auto range** restores the image's P02/P98.
+The source photo may retain lens distortion while priors use rectified
+training cameras. The maps are cached predictions, not the trained 3DGS render.
+Only maps actually generated are displayed, independently of current weights.
+Refresh the list after generation finishes. Missing, stale or incomplete
+caches show an error without blocking training or running inference again.
+
 Choose either source:
 
 - **Generate with MoGe**: the first training run downloads the fixed MoGe-2
