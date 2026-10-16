@@ -29,6 +29,7 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"No AI prior maps are available yet. This button becomes available after generation.", "尚无可查看的 AI 先验图，生成后此按钮会自动启用。", "AI事前マップがありません。生成後にこのボタンが有効になります。", "AI 사전 맵이 없습니다. 생성 후 이 버튼이 활성화됩니다."},
     {"View AI depth and normals", "查看 AI 深度和法线", "AI深度と法線を表示", "AI 깊이 및 법선 보기"},
     {"AI prior preview", "AI 先验预览", "AI事前情報プレビュー", "AI 사전 정보 미리보기"},
     {"Loading AI priors...", "正在加载 AI 先验…", "AI事前情報を読み込み中…", "AI 사전 정보 로딩 중…"},

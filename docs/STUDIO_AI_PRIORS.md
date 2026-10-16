@@ -6,7 +6,9 @@ mode keeps RGB-only training and skips prior generation and loading.
 
 In the training panel, use **View AI depth and normals** to inspect generated caches in a separate
 window. Choose a view or use previous/next; the source photo, AI depth and AI
-normal maps are shown side by side. Hover for raw Z or normal values. Depth
+normal maps are shown side by side. The button is disabled until a prior map
+exists in the selected cache; it updates automatically as maps are generated.
+Hover for raw Z or normal values. Depth
 colors use each image's P02/P98 range in scene units, with warm colors near
 and cool colors far; invalid pixels are dark. Normal RGB is `(N+1)/2` in
 camera coordinates. Adjust **Depth display range** and **Apply range** to
