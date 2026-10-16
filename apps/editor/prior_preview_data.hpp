@@ -15,5 +15,6 @@ std::vector<std::filesystem::path> list_prior_previews(const std::filesystem::pa
 PriorPreviewData load_prior_preview(const std::filesystem::path& file);
 std::filesystem::path find_prior_preview(
     const std::filesystem::path& directory, const std::filesystem::path& source);
-photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth);
+photara::splat::Camera prior_preview_camera(const photara::splat::Camera& camera);
+photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth,bool grayscale=false);
 } // namespace editor

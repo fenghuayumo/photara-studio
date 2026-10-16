@@ -23,8 +23,12 @@ struct ImageQaPriors {
     std::future<Result> pending;
     std::chrono::steady_clock::time_point next_check{};
     gpu::PreviewTexture depth, normal;
+    PriorPreviewData data;
+    float displayed_near{}, displayed_far{};
+    bool displayed_grayscale{};
     void update(const std::filesystem::path& folder, const std::filesystem::path& image);
     void reset_textures();
+    void set_depth_display(bool automatic, bool grayscale, float near_depth, float far_depth);
 };
 struct PriorPreview {
     bool open{};

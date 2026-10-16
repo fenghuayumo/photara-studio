@@ -1,5 +1,7 @@
 #include "prior_preview_data.hpp"
+#include "splat_render/include/splat_render/display_color.hpp"
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -51,11 +53,30 @@ int main(int argc,char** argv) {
         std::filesystem::remove(other_directory);
         auto data=editor::load_prior_preview(both);
         check(data.source==image && data.photo.width==2 && data.depth.width==2 && data.normal.width==2,"Preview dimensions/source mismatch");
-        check(data.depth.pixels[0]==24 && data.normal.pixels[0]==24,"Invalid pixels were not dark");
+        check(data.depth.pixels[0]==0 && data.normal.pixels[0]==0,"Invalid pixels were not black");
         check(data.normal.pixels[3]==255 && data.normal.pixels[4]==128 && data.normal.pixels[5]==128,"Camera normal color mapping mismatch");
         check(data.normal.pixels[11]==0,"Negative Z normal must retain its sign");
         check(data.depth_near==1 && data.depth_far>data.depth_near,"Invalid depth display range");
         const auto manual=editor::colorize_prior_depth(data.prior,1.F,3.F);
+        for (std::size_t p=1;p<4;++p) {
+            const auto expected=splat_render::depth_color((data.prior.depth[p]-1.F)/2.F,false);
+            for(int c=0;c<3;++c)
+                check(manual.pixels[3*p+c]==static_cast<unsigned char>(std::lround(expected[c]*255.F)),
+                    "Prior and rasterized depth palettes differ");
+        }
+        const auto gray=editor::colorize_prior_depth(data.prior,1.F,3.F,true);
+        check(gray.pixels[3]==255 && gray.pixels[6]==128 && gray.pixels[9]==0,
+            "Prior grayscale range differs from rasterized depth");
+        auto full_camera=prior.camera;
+        full_camera.width=2048; full_camera.height=1024;
+        full_camera.fx=1000;full_camera.fy=800;full_camera.cx=900;full_camera.cy=400;
+        full_camera.world_to_camera={1,0,0,0, 0,1,0,0, 0,0,1,0, -2,-3,-4,1};
+        const auto preview_camera=editor::prior_preview_camera(full_camera);
+        check(preview_camera.width==1024 && preview_camera.height==512 && preview_camera.fx==500 &&
+            preview_camera.fy==400 && preview_camera.cx==450 && preview_camera.cy==200,
+            "Comparison camera did not preserve prior intrinsics at preview resolution");
+        check(preview_camera.world_to_camera==full_camera.world_to_camera &&
+            preview_camera.position==std::array<float,3>{2,3,4},"Comparison camera changed the SfM pose");
         check(manual.pixels[3]>manual.pixels[5] && manual.pixels[11]>manual.pixels[9],"Depth near/far colors reversed");
         fails([&]{editor::colorize_prior_depth(data.prior,1.F,1.F);});
         {
@@ -75,7 +96,7 @@ int main(int argc,char** argv) {
         check(data.normal.pixels.empty() && data.depth_far>data.depth_near,"Depth-only constant-map preview failed");
         prior.depth={0,0,0,0};photara::splat::save_training_prior(depth,image,prior);
         data=editor::load_prior_preview(depth);
-        check(data.depth.pixels[0]==24,"All-invalid depth preview failed");
+        check(data.depth.pixels[0]==0,"All-invalid depth preview failed");
         std::ofstream(root/"view_invalid.prior")<<"incomplete";
         std::ofstream(root/"manifest.txt")<<"metadata";
         const auto files=editor::list_prior_previews(root);

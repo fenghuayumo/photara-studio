@@ -164,7 +164,6 @@ struct ImageQaDrawInput {
     ImageQaMode render_mode{ImageQaMode::photo};
     int render_view{-1};
     ImageQaPriors* priors{};
-    std::filesystem::path prior_directory;
     bool render_live{};
     bool has_model{};
     bool external_alignment{};

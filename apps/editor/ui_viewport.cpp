@@ -133,9 +133,13 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
         ImGui::Separator();
         auto& options = app.display_options;
         if ((app.workspace == ViewportWorkspace::scene_3d && app.display_channel == DisplayChannel::depth) ||
-            (app.workspace == ViewportWorkspace::image_2d && app.image_qa.mode == ImageQaMode::depth)) {
+            (app.workspace == ViewportWorkspace::image_2d &&
+             (app.image_qa.mode == ImageQaMode::depth || app.image_qa.mode == ImageQaMode::ai_depth))) {
             if (ImGui::Checkbox(tr("Automatic range"), &options.automatic_depth) && !options.automatic_depth) {
-                const auto range = live_preview_active(app)
+                const auto range = app.workspace == ViewportWorkspace::image_2d &&
+                    !app.image_qa_priors.data.prior.depth.empty()
+                    ? std::array{app.image_qa_priors.data.depth_near, app.image_qa_priors.data.depth_far}
+                    : live_preview_active(app)
                     ? std::array{options.depth_near, options.depth_far}
                     : app.splat_renderer->depth_range();
                 options.depth_near = range[0]; options.depth_far = range[1];
@@ -153,14 +157,20 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
             ImGui::Checkbox(tr("Grayscale"), &options.grayscale_depth);
             ImGui::TextDisabled("%s", tr("Depth uses scene units"));
         } else if ((app.workspace == ViewportWorkspace::scene_3d && app.display_channel == DisplayChannel::normal) ||
-                   (app.workspace == ViewportWorkspace::image_2d && app.image_qa.mode == ImageQaMode::normal)) {
-            ImGui::SetNextItemWidth(140.F);
-            if (ImGui::BeginCombo("##normal_space", options.world_normals ? tr("World space") : tr("Camera space"))) {
-                if (ImGui::Selectable(tr("World space"), options.world_normals)) options.world_normals = true;
-                if (ImGui::Selectable(tr("Camera space"), !options.world_normals)) options.world_normals = false;
-                ImGui::EndCombo();
+                   (app.workspace == ViewportWorkspace::image_2d &&
+                    (app.image_qa.mode == ImageQaMode::normal || app.image_qa.mode == ImageQaMode::ai_normal))) {
+            if (app.workspace == ViewportWorkspace::image_2d) {
+                ImGui::TextDisabled("%s", tr("Camera space"));
+            } else {
+                ImGui::SetNextItemWidth(140.F);
+                if (ImGui::BeginCombo("##normal_space", options.world_normals ? tr("World space") : tr("Camera space"))) {
+                    if (ImGui::Selectable(tr("World space"), options.world_normals)) options.world_normals = true;
+                    if (ImGui::Selectable(tr("Camera space"), !options.world_normals)) options.world_normals = false;
+                    ImGui::EndCombo();
+                }
             }
-            ImGui::TextWrapped("%s", tr("Rasterized Gaussian footprint normals"));
+            if (app.image_qa.mode != ImageQaMode::ai_normal || app.workspace == ViewportWorkspace::scene_3d)
+                ImGui::TextWrapped("%s", tr("Rasterized Gaussian footprint normals"));
         }
         if (app.workspace == ViewportWorkspace::scene_3d &&
             app.display_channel != DisplayChannel::color)
@@ -647,29 +657,16 @@ bool handle_viewport_double_click(
     return consumed > 0 && consumed > app.qa_camera_timeline;
 }
 
+bool qa_preview_camera(const App& app, SplatPreviewCamera& camera);
+
 void sync_qa_preview_camera(App& app) {
     if (app.layout.preview_camera_file.empty()) return;
     if (app.image_qa.selected < 0 ||
         static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
         return;
-    const ViewPose& pose = app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
-    std::uint32_t width = k_preview_extent;
-    std::uint32_t height = k_preview_extent;
-    if (pose.width > 0 && pose.height > 0) {
-        if (pose.width >= pose.height) {
-            width = k_preview_extent;
-            height = std::max<std::uint32_t>(
-                1, static_cast<std::uint32_t>(std::lround(
-                       static_cast<double>(k_preview_extent) * pose.height /
-                       pose.width)));
-        } else {
-            height = k_preview_extent;
-            width = std::max<std::uint32_t>(
-                1, static_cast<std::uint32_t>(std::lround(
-                       static_cast<double>(k_preview_extent) * pose.width /
-                       pose.height)));
-        }
-    }
+    SplatPreviewCamera preview;
+    if (!qa_preview_camera(app, preview)) return;
+    const auto width = preview.width, height = preview.height;
     const unsigned view = static_cast<unsigned>(app.image_qa.selected);
     if (app.qa_camera_valid && app.qa_preview_view == view &&
         app.qa_camera_mode == app.image_qa.mode &&
@@ -684,8 +681,6 @@ void sync_qa_preview_camera(App& app) {
     app.preview_raster_height = height;
     app.preview_view = view;
     app.preview_follow_view = true;
-    const SplatPreviewCamera preview =
-        make_preview_camera_from_view(pose, width, height);
     if (!write_preview_camera_file(
             app.layout.preview_camera_file, preview, app.preview_camera_revision,
             "splat", app.view_options.point_size, app.view_options.ring_scale)) {
@@ -706,11 +701,12 @@ void sync_qa_preview_camera(App& app) {
         : app.image_qa.mode == ImageQaMode::normal
             ? photara::splat::VisualizationChannel::normal
             : photara::splat::VisualizationChannel::color;
-    vis.automatic_depth = app.display_options.automatic_depth;
-    vis.grayscale_depth = app.display_options.grayscale_depth;
-    vis.world_normals = app.display_options.world_normals;
-    vis.depth_near = app.display_options.depth_near;
-    vis.depth_far = app.display_options.depth_far;
+    const auto display = image_qa_display_options(app);
+    vis.automatic_depth = display.automatic_depth;
+    vis.grayscale_depth = display.grayscale_depth;
+    vis.world_normals = display.world_normals;
+    vis.depth_near = display.depth_near;
+    vis.depth_far = display.depth_far;
     photara::splat::write_visualization_sidecar(
         app.layout.preview_vis_file, vis, app.preview_camera_revision);
     app.qa_metrics_after =
@@ -1394,7 +1390,8 @@ bool draw_splat_image(
         if (app.display_channel == DisplayChannel::depth) shading = splat_render::Shading::depth;
         if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
     }
-    if (!app.splat_renderer->draw(camera, target, shading, app.display_options))
+    const auto display = orbit ? app.display_options : image_qa_display_options(app);
+    if (!app.splat_renderer->draw(camera, target, shading, display))
         return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);
     if (!set) return false;
@@ -1403,6 +1400,11 @@ bool draw_splat_image(
 }
 
 bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
+    const bool geometry = app.image_qa.mode == ImageQaMode::depth || app.image_qa.mode == ImageQaMode::normal;
+    if (geometry && image_qa_prior_matches(app)) {
+        camera = prior_preview_camera(app.image_qa_priors.data.prior.camera);
+        return true;
+    }
     if (app.image_qa.selected < 0 ||
         static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
         return false;
@@ -1633,6 +1635,24 @@ void draw_viewport_panel(App& app) {
         refresh_image_qa_folder(
             app.image_qa, reconstruction_images_path(app));
         const int previous = app.image_qa.selected;
+        const int count = image_qa_count(app.image_qa, app.scene);
+        if (app.image_qa.selected < 0 && count > 0) app.image_qa.selected = 0;
+        if (app.image_qa.selected >= count) app.image_qa.selected = count > 0 ? count - 1 : -1;
+        const auto prior_directory = app.settings.ai_prior_directory[0]
+            ? path_from_utf8_field(app.settings.ai_prior_directory.data())
+            : app.layout.cache.empty() ? std::filesystem::path{} : app.layout.cache / "ai_priors";
+        std::filesystem::path photo;
+        if (app.image_qa.selected >= 0) {
+            const auto index = static_cast<std::size_t>(app.image_qa.selected);
+            photo = app.scene.views.empty() ? app.image_qa.folder_images[index] : app.scene.views[index].image_path;
+        }
+        const auto old_file = app.image_qa_priors.file;
+        const auto old_stamp = app.image_qa_priors.stamp;
+        app.image_qa_priors.update(prior_directory, photo);
+        if (old_file != app.image_qa_priors.file || old_stamp != app.image_qa_priors.stamp)
+            app.qa_camera_valid = false;
+        app.image_qa_priors.set_depth_display(app.display_options.automatic_depth,
+            app.display_options.grayscale_depth, app.display_options.depth_near, app.display_options.depth_far);
         const bool training_now =
             live_preview_active(app);
         ImTextureID splat_texture{};
@@ -1652,9 +1672,6 @@ void draw_viewport_panel(App& app) {
         input.render_mode = training_now ? app.qa_camera_mode : app.image_qa.mode;
         input.render_view = training_now ? static_cast<int>(app.qa_preview_view) : app.image_qa.selected;
         input.priors = &app.image_qa_priors;
-        input.prior_directory = app.settings.ai_prior_directory[0]
-            ? path_from_utf8_field(app.settings.ai_prior_directory.data())
-            : app.layout.cache.empty() ? std::filesystem::path{} : app.layout.cache / "ai_priors";
         input.scene = &app.scene;
         input.photos = &app.photos;
         input.render = splat_ready

@@ -1,4 +1,5 @@
 #include "prior_preview_data.hpp"
+#include "splat_render/include/splat_render/display_color.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -65,7 +66,22 @@ std::filesystem::path find_prior_preview(
     }
     return {};
 }
-photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth) {
+photara::splat::Camera prior_preview_camera(const photara::splat::Camera& source) {
+    if (!source.width || !source.height) throw std::invalid_argument("Invalid prior camera dimensions");
+    auto camera = source;
+    const float factor = std::min(1.F, 1024.F / std::max(source.width, source.height));
+    camera.width = std::max(1U, static_cast<unsigned>(source.width * factor));
+    camera.height = std::max(1U, static_cast<unsigned>(source.height * factor));
+    const float sx = static_cast<float>(camera.width) / source.width;
+    const float sy = static_cast<float>(camera.height) / source.height;
+    camera.fx *= sx; camera.fy *= sy; camera.cx *= sx; camera.cy *= sy;
+    const auto& m = camera.world_to_camera;
+    camera.position = {-(m[0]*m[12]+m[1]*m[13]+m[2]*m[14]),
+                       -(m[4]*m[12]+m[5]*m[13]+m[6]*m[14]),
+                       -(m[8]*m[12]+m[9]*m[13]+m[10]*m[14])};
+    return camera;
+}
+photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth,bool grayscale) {
     if(prior.depth.empty()) return {};
     if(!std::isfinite(near_depth) || !std::isfinite(far_depth) || near_depth<0 || far_depth<=near_depth)
         throw std::invalid_argument("Invalid depth display range");
@@ -79,10 +95,10 @@ photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& 
         const auto sy=std::min(camera.height-1,static_cast<unsigned>((y+.5)*camera.height/height));
         const float depth=prior.depth[static_cast<std::size_t>(sy)*camera.width+sx];
         auto* rgb=image.pixels.data()+3ull*(y*width+x);
-        rgb[0]=24;rgb[1]=28;rgb[2]=34;
+        rgb[0]=rgb[1]=rgb[2]=0;
         if(depth>0) {
-            const float t=1.F-std::clamp((depth-near_depth)/(far_depth-near_depth),0.F,1.F);
-            rgb[0]=byte(1.5F-std::abs(4*t-3));rgb[1]=byte(1.5F-std::abs(4*t-2));rgb[2]=byte(1.5F-std::abs(4*t-1));
+            const auto color=splat_render::depth_color((depth-near_depth)/(far_depth-near_depth),grayscale);
+            for(int c=0;c<3;++c) rgb[c]=byte(color[c]);
         }
     }
     return image;
@@ -138,7 +154,7 @@ PriorPreviewData load_prior_preview(const std::filesystem::path& file) {
             const float nx=prior.normals[src],ny=prior.normals[count+src],nz=prior.normals[2*count+src];
             if(nx*nx+ny*ny+nz*nz>.25F) {
                 rgb[0]=byte(.5F*(nx+1)); rgb[1]=byte(.5F*(ny+1)); rgb[2]=byte(.5F*(nz+1));
-            } else {rgb[0]=24;rgb[1]=28;rgb[2]=34;}
+            } else {rgb[0]=rgb[1]=rgb[2]=0;}
         }
     }
     auto photo=photara::io::load_rgb_with_minimum_size(result.source,width,height);

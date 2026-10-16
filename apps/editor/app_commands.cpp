@@ -2732,6 +2732,27 @@ void show_mesh_view(App& app, const bool frame_when_ready) {
     request_mesh_load(app, frame_when_ready);
 }
 
+bool image_qa_prior_matches(const App& app) {
+    const auto index = app.image_qa.selected;
+    return index >= 0 && static_cast<std::size_t>(index) < app.scene.views.size() &&
+        !app.image_qa_priors.data.source.empty() &&
+        app.image_qa_priors.source == app.scene.views[index].image_path;
+}
+
+splat_render::DisplayOptions image_qa_display_options(const App& app) {
+    auto options = app.display_options;
+    options.world_normals = false;
+    // Automatic comparison uses the prior's bounds for BOTH depth maps.
+    // Independently stretching each map would conceal absolute depth errors.
+    if (options.automatic_depth && image_qa_prior_matches(app) &&
+        !app.image_qa_priors.data.prior.depth.empty()) {
+        options.automatic_depth = false;
+        options.depth_near = app.image_qa_priors.data.depth_near;
+        options.depth_far = app.image_qa_priors.data.depth_far;
+    }
+    return options;
+}
+
 photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
     photara::splat::VisualizeOptions options;
     const bool vulkan_training = live_preview_active(app) &&
@@ -2760,11 +2781,13 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
                 ? photara::splat::VisualizationChannel::normal
                 : photara::splat::VisualizationChannel::color;
     }
-    options.automatic_depth = app.display_options.automatic_depth;
-    options.grayscale_depth = app.display_options.grayscale_depth;
-    options.world_normals = app.display_options.world_normals;
-    options.depth_near = app.display_options.depth_near;
-    options.depth_far = app.display_options.depth_far;
+    const auto display = app.workspace == ViewportWorkspace::image_2d
+        ? image_qa_display_options(app) : app.display_options;
+    options.automatic_depth = display.automatic_depth;
+    options.grayscale_depth = display.grayscale_depth;
+    options.world_normals = display.world_normals;
+    options.depth_near = display.depth_near;
+    options.depth_far = display.depth_far;
     return options;
 }
 

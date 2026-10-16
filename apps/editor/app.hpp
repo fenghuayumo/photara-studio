@@ -458,6 +458,8 @@ void publish_preview_vis(App& app);
 void write_preview_vis(App& app);
 void publish_preview_ack(App& app);
 photara::splat::VisualizeOptions editor_visualize_options(const App& app);
+bool image_qa_prior_matches(const App& app);
+splat_render::DisplayOptions image_qa_display_options(const App& app);
 void sync_live_preview_camera(
     App& app, bool force, std::uint32_t width, std::uint32_t height);
 bool update_gpu_mesh_preview(App& app, ImVec2 min, ImVec2 max);
