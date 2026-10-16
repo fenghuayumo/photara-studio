@@ -1331,7 +1331,32 @@ void draw_image_qa(
             texture = reinterpret_cast<ImTextureID>(input.priors->normal.descriptor);
         else if (input.has_render && input.render_mode == state.mode && input.render_view == state.selected)
             texture = input.render;
-        if (texture) draw->AddImage(texture, img_min, img_max);
+        if (texture) {
+            draw->AddImage(texture, img_min, img_max);
+            if (prior_texture && canvas_hovered && over_image && input.priors->source == item.path) {
+                const auto pixel = sample_prior_preview(input.priors->data,
+                    (io.MousePos.x-img_min.x)/(img_max.x-img_min.x),
+                    (io.MousePos.y-img_min.y)/(img_max.y-img_min.y));
+                if (pixel) {
+                    ImGui::BeginTooltip();
+                    ImGui::PushTextWrapPos(380.F);
+                    ImGui::Text("(%u, %u)",pixel->x,pixel->y);
+                    if (state.mode == ImageQaMode::ai_depth && pixel->depth) {
+                        ImGui::Text("%s: Z = %.6g",tr("AI depth"),*pixel->depth);
+                        if (!pixel->depth_valid) ImGui::TextDisabled("%s",tr("Invalid pixel"));
+                        else ImGui::TextWrapped("%s",tr("Camera Z, scene units. Rainbow colors: near red, far blue."));
+                    }
+                    if (state.mode == ImageQaMode::ai_normal && pixel->normal) {
+                        const auto& n = *pixel->normal;
+                        ImGui::Text("%s: N = (%.4f, %.4f, %.4f)",tr("AI normals"),n[0],n[1],n[2]);
+                        if (!pixel->normal_valid) ImGui::TextDisabled("%s",tr("Invalid pixel"));
+                        else ImGui::TextWrapped("%s",tr("Camera normals: X right, Y down, Z forward. RGB = (N + 1) / 2."));
+                    }
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTooltip();
+                }
+            }
+        }
         else draw_empty(draw, canvas_min, canvas_max, tr("Waiting for a rendered frame…"),
                         tr("The renderer is snapping to this training camera"));
     } else if (!live_align && state.mode == ImageQaMode::error) {

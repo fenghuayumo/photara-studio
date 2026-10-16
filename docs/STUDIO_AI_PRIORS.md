@@ -4,20 +4,17 @@ In **Train 3DGS → Loss & constraints → Geometry**, enable **AI depth & norma
 priors**. The feature is available in Standard and High quality modes. Fast
 mode keeps RGB-only training and skips prior generation and loading.
 
-In the training panel, use **View AI depth and normals** to inspect generated caches in a separate
-window. Choose a view or use previous/next; the source photo, AI depth and AI
-normal maps are shown side by side. The button is disabled until a prior map
-exists in the selected cache; it updates automatically as maps are generated.
-Hover for raw Z or normal values. Depth
-colors use each image's P02/P98 range in scene units, with warm colors near
-and cool colors far; invalid pixels are dark. Normal RGB is `(N+1)/2` in
-camera coordinates. Adjust **Depth display range** and **Apply range** to
-inspect near-surface details; **Auto range** restores the image's P02/P98.
-The source photo may retain lens distortion while priors use rectified
-training cameras. The maps are cached predictions, not the trained 3DGS render.
-Only maps actually generated are displayed, independently of current weights.
-Refresh the list after generation finishes. Missing, stale or incomplete
-caches show an error without blocking training or running inference again.
+Inspect generated maps using the **AI depth** and **AI normals** buttons in the
+**2D viewport**. Each button appears only when the selected photo has that map,
+independently of current training weights. Use the filmstrip or previous/next
+buttons to change photos. Hover over a map for raw depth and normal values.
+
+**View settings** provides the shared depth range and grayscale controls, plus
+an **AI prior cache** section with cache/source information and a Refresh button.
+Automatic depth display uses the image's P02/P98 bounds in scene units. Invalid
+pixels are black; normal RGB is `(N+1)/2` in camera coordinates. Maps are cached
+predictions, not the trained 3DGS render. Inspecting or refreshing them does not
+run inference or block training.
 
 Choose either source:
 
@@ -98,11 +95,19 @@ an unavailable AI mode returns to Photo. Inspecting maps does not start inferenc
 Cached priors use rectified training cameras, so their framing can differ from
 the source photo. Rasterized geometry uses the matching cached camera and preview
 dimensions when available, preserving the SfM pose and scaling its intrinsics.
-Both depth views share the warm-to-cool palette, grayscale setting, and black
+Both depth views share the original AI-prior rainbow palette (near red, middle
+green, far blue), grayscale setting, and black
 invalid pixels. Automatic comparison uses the AI depth's 2nd/98th percentile
 bounds for both maps; manual bounds apply to both as well. They are not stretched
 independently, so color differences retain actual depth differences.
-The independent AI prior preview window remains available.
+AI prior inspection is integrated into the 2D viewport; there is no separate
+preview window or inspector button. View settings includes the AI prior cache
+directory, matching cache file and source photo, map dimensions, independent
+depth/normal availability, load errors, and a Refresh button. Hovering an AI map
+shows the original cache pixel coordinates, raw camera-Z depth in scene units,
+camera-space normal components, and invalid-pixel status. Sampling follows the
+displayed texel even after preview downsampling, zooming, and panning. Display
+clipping never changes these raw values.
 
 ## Distributed model identity
 

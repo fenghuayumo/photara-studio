@@ -81,6 +81,30 @@ photara::splat::Camera prior_preview_camera(const photara::splat::Camera& source
                        -(m[8]*m[12]+m[9]*m[13]+m[10]*m[14])};
     return camera;
 }
+std::optional<PriorPreviewPixel> sample_prior_preview(const PriorPreviewData& data, float u, float v) {
+    const auto& prior = data.prior;
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.F || u >= 1.F || v < 0.F || v >= 1.F ||
+        !prior.camera.width || !prior.camera.height) return {};
+    const auto preview = prior_preview_camera(prior.camera);
+    const auto px = std::min(preview.width-1, static_cast<unsigned>(u*preview.width));
+    const auto py = std::min(preview.height-1, static_cast<unsigned>(v*preview.height));
+    PriorPreviewPixel pixel;
+    // Match the source texel used by the downsampled preview, including zoom/pan.
+    pixel.x = std::min(prior.camera.width-1, static_cast<unsigned>((px+.5)*prior.camera.width/preview.width));
+    pixel.y = std::min(prior.camera.height-1, static_cast<unsigned>((py+.5)*prior.camera.height/preview.height));
+    const auto count = static_cast<std::size_t>(prior.camera.width)*prior.camera.height;
+    const auto index = static_cast<std::size_t>(pixel.y)*prior.camera.width+pixel.x;
+    if (prior.depth.size() == count) {
+        pixel.depth = prior.depth[index];
+        pixel.depth_valid = std::isfinite(*pixel.depth) && *pixel.depth > 0.F;
+    }
+    if (prior.normals.size() == count*3) {
+        const std::array<float,3> n{prior.normals[index],prior.normals[count+index],prior.normals[2*count+index]};
+        pixel.normal = n;
+        pixel.normal_valid = std::isfinite(n[0]+n[1]+n[2]) && n[0]*n[0]+n[1]*n[1]+n[2]*n[2] > .25F;
+    }
+    return pixel;
+}
 photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth,bool grayscale) {
     if(prior.depth.empty()) return {};
     if(!std::isfinite(near_depth) || !std::isfinite(far_depth) || near_depth<0 || far_depth<=near_depth)
@@ -153,7 +177,8 @@ PriorPreviewData load_prior_preview(const std::filesystem::path& file) {
             auto* rgb=result.normal.pixels.data()+dst;
             const float nx=prior.normals[src],ny=prior.normals[count+src],nz=prior.normals[2*count+src];
             if(nx*nx+ny*ny+nz*nz>.25F) {
-                rgb[0]=byte(.5F*(nx+1)); rgb[1]=byte(.5F*(ny+1)); rgb[2]=byte(.5F*(nz+1));
+                const auto color=splat_render::normal_color(nx,ny,nz);
+                for(int c=0;c<3;++c) rgb[c]=byte(color[c]);
             } else {rgb[0]=rgb[1]=rgb[2]=0;}
         }
     }

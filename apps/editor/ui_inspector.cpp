@@ -888,16 +888,6 @@ Action draw_inspector(App& app) {
         }
         ImGui::EndDisabled();
         const bool simplify_open = app.splat_simplify.show;
-        const auto prior_directory=app.settings.ai_prior_directory[0]
-            ? path_from_utf8_field(app.settings.ai_prior_directory.data())
-            : app.layout.cache.empty() ? std::filesystem::path{} : app.layout.cache / "ai_priors";
-        const bool priors_available=app.prior_preview.available(prior_directory);
-        ImGui::BeginDisabled(!priors_available);
-        if(ImGui::Button(tr("View AI depth and normals"),{-1.F,0.F}))
-            app.prior_preview.show(prior_directory);
-        ImGui::EndDisabled();
-        if(!priors_available && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s",tr("No AI prior maps are available yet. This button becomes available after generation."));
         if (theme::toolbar_button(
                 tr("Simplify"), {-1.F, 28.F},
                 !busy && can_export_model(app), simplify_open))

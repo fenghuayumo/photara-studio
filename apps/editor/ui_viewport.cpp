@@ -145,17 +145,26 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
                 options.depth_near = range[0]; options.depth_far = range[1];
             }
             if (!options.automatic_depth) {
+                const float gap = std::max(1e-8F,std::abs(options.depth_near)*1e-6F);
+                const float speed = std::max(1e-8F,std::abs(options.depth_far-options.depth_near)*.01F);
                 ImGui::SetNextItemWidth(115.F);
-                ImGui::DragFloat(tr("Near"), &options.depth_near, 0.01F, 0.F,
-                                 std::max(0.F, options.depth_far - 0.001F), "%.3f");
+                ImGui::DragFloat(tr("Near"), &options.depth_near, speed, 0.F,
+                                 std::max(0.F, options.depth_far - gap), "%.6g");
                 ImGui::SetNextItemWidth(115.F);
-                ImGui::DragFloat(tr("Far"), &options.depth_far, 0.05F,
-                                 options.depth_near + 0.001F, 1e8F, "%.3f");
+                ImGui::DragFloat(tr("Far"), &options.depth_far, speed,
+                                 options.depth_near + gap, 1e8F, "%.6g");
                 options.depth_near = std::max(0.F, options.depth_near);
-                options.depth_far = std::max(options.depth_near + 0.001F, options.depth_far);
+                options.depth_far = std::max(options.depth_near + gap, options.depth_far);
             }
             ImGui::Checkbox(tr("Grayscale"), &options.grayscale_depth);
             ImGui::TextDisabled("%s", tr("Depth uses scene units"));
+            if (app.workspace == ViewportWorkspace::image_2d) {
+                const auto display = image_qa_display_options(app);
+                const auto range = display.automatic_depth ? app.splat_renderer->depth_range()
+                    : std::array{display.depth_near,display.depth_far};
+                ImGui::Text("%s: %.6g - %.6g",tr("Depth display range"),range[0],range[1]);
+                ImGui::TextWrapped("%s",tr("Display colors may clip values outside the range. Hover to inspect raw depth."));
+            }
         } else if ((app.workspace == ViewportWorkspace::scene_3d && app.display_channel == DisplayChannel::normal) ||
                    (app.workspace == ViewportWorkspace::image_2d &&
                     (app.image_qa.mode == ImageQaMode::normal || app.image_qa.mode == ImageQaMode::ai_normal))) {
@@ -175,6 +184,29 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
         if (app.workspace == ViewportWorkspace::scene_3d &&
             app.display_channel != DisplayChannel::color)
             ImGui::Checkbox(tr("Show legend"), &app.show_display_legend);
+        if (app.workspace == ViewportWorkspace::image_2d && ImGui::CollapsingHeader(tr("AI prior cache"))) {
+            auto& priors = app.image_qa_priors;
+            const auto directory = app.settings.ai_prior_directory[0]
+                ? path_from_utf8_field(app.settings.ai_prior_directory.data())
+                : app.layout.cache.empty() ? std::filesystem::path{} : app.layout.cache / "ai_priors";
+            ImGui::TextWrapped("%s: %s",tr("Cache directory"),path_to_utf8(directory).c_str());
+            if (ImGui::Button(tr("Refresh"))) priors.request_refresh();
+            if (image_qa_prior_matches(app)) {
+                ImGui::TextWrapped("%s: %s",tr("Cache file"),path_to_utf8(priors.file).c_str());
+                ImGui::TextWrapped("%s: %s",tr("Source image"),path_to_utf8(priors.data.source).c_str());
+                ImGui::Text("%s: %u x %u",tr("Map resolution"),
+                    priors.data.prior.camera.width,priors.data.prior.camera.height);
+                ImGui::Text("%s: %s",tr("AI depth"),tr(priors.data.prior.depth.empty() ? "Not generated" : "Available"));
+                ImGui::Text("%s: %s",tr("AI normals"),tr(priors.data.prior.normals.empty() ? "Not generated" : "Available"));
+                ImGui::TextWrapped("%s",tr("Source photos may retain lens distortion; prior maps use rectified training cameras."));
+            } else if (!priors.error.empty()) {
+                ImGui::TextWrapped("%s",tr("Unable to preview this cache. It may be incomplete or its source image may have changed. Refresh after preparation finishes."));
+                ImGui::TextWrapped("%s",priors.error.c_str());
+            } else {
+                ImGui::TextWrapped("%s",tr(priors.pending.valid()
+                    ? "Loading AI priors..." : "No AI prior maps for this image"));
+            }
+        }
         draw_view_settings(app);
         ImGui::EndPopup();
     }

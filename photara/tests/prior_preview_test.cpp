@@ -31,6 +31,13 @@ int main(int argc,char** argv) {
     const auto root=std::filesystem::temp_directory_path()/
         ("photara-prior-preview-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
+        check(splat_render::depth_color(0.F,false)==std::array<float,3>{.5F,0,0} &&
+            splat_render::depth_color(.5F,false)==std::array<float,3>{.5F,1,.5F} &&
+            splat_render::depth_color(1.F,false)==std::array<float,3>{0,0,.5F},
+            "Depth palette must retain the original AI-prior rainbow");
+        check(splat_render::normal_color(0,0,-2)==std::array<float,3>{.5F,.5F,0} &&
+            splat_render::normal_color(0,0,2)==std::array<float,3>{.5F,.5F,1},
+            "Normal colors must preserve camera-space direction and normalize magnitude");
         std::filesystem::create_directories(root);
         const auto image=root/"source.png";
         photara::io::save_rgb_png({2,2,{255,0,0, 0,255,0, 0,0,255, 255,255,255}},image);
@@ -57,6 +64,22 @@ int main(int argc,char** argv) {
         check(data.normal.pixels[3]==255 && data.normal.pixels[4]==128 && data.normal.pixels[5]==128,"Camera normal color mapping mismatch");
         check(data.normal.pixels[11]==0,"Negative Z normal must retain its sign");
         check(data.depth_near==1 && data.depth_far>data.depth_near,"Invalid depth display range");
+        const auto pixel=editor::sample_prior_preview(data,.75F,.25F);
+        check(pixel && pixel->x==1 && pixel->y==0 && pixel->depth==1.F && pixel->depth_valid &&
+            pixel->normal && *pixel->normal==std::array<float,3>{1,0,0} && pixel->normal_valid,
+            "Hover did not read the displayed source pixel");
+        const auto invalid_pixel=editor::sample_prior_preview(data,.1F,.1F);
+        check(invalid_pixel && invalid_pixel->depth==0.F && !invalid_pixel->depth_valid &&
+            invalid_pixel->normal && !invalid_pixel->normal_valid,"Invalid pixels were reported as valid");
+        check(!editor::sample_prior_preview(data,-.1F,.5F) && !editor::sample_prior_preview(data,1.F,.5F) &&
+            !editor::sample_prior_preview({},.5F,.5F),"Hover outside the image sampled a pixel");
+        editor::PriorPreviewData reduced;
+        reduced.prior.camera.width=2048; reduced.prior.camera.height=2;
+        reduced.prior.depth.resize(4096);
+        for(unsigned y=0;y<2;++y) for(unsigned x=0;x<2048;++x) reduced.prior.depth[y*2048+x]=x+10*y;
+        const auto reduced_pixel=editor::sample_prior_preview(reduced,0.F,0.F);
+        check(reduced_pixel && reduced_pixel->x==1 && reduced_pixel->y==1 && reduced_pixel->depth==11.F,
+            "Hover did not match the downsampled preview texel center");
         const auto manual=editor::colorize_prior_depth(data.prior,1.F,3.F);
         for (std::size_t p=1;p<4;++p) {
             const auto expected=splat_render::depth_color((data.prior.depth[p]-1.F)/2.F,false);
@@ -91,9 +114,13 @@ int main(int argc,char** argv) {
         check(editor::find_prior_preview(root,image)==normal,"Source lookup must not assume the photo index matches the cache view ID");
         data=editor::load_prior_preview(normal);
         check(data.depth.pixels.empty() && !data.normal.pixels.empty(),"Normal-only preview failed");
+        const auto normal_pixel=editor::sample_prior_preview(data,.75F,.25F);
+        check(normal_pixel && !normal_pixel->depth && normal_pixel->normal_valid,"Normal-only hover failed");
         prior.depth={2,2,2,2};prior.normals.clear();photara::splat::save_training_prior(depth,image,prior);
         data=editor::load_prior_preview(depth);
         check(data.normal.pixels.empty() && data.depth_far>data.depth_near,"Depth-only constant-map preview failed");
+        const auto depth_pixel=editor::sample_prior_preview(data,.75F,.25F);
+        check(depth_pixel && depth_pixel->depth_valid && !depth_pixel->normal,"Depth-only hover failed");
         prior.depth={0,0,0,0};photara::splat::save_training_prior(depth,image,prior);
         data=editor::load_prior_preview(depth);
         check(data.depth.pixels[0]==0,"All-invalid depth preview failed");

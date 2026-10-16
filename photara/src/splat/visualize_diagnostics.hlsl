@@ -52,9 +52,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (valid) {
         if (pc.channel == 1) {
             float t=saturate((d-asfloat(stats[2]))/max(asfloat(stats[3])-asfloat(stats[2]),1e-8));
-            rgb=pc.grayscale ? (1-t).xxx : (t<.5
-                ? lerp(float3(.90,.80,.53),float3(.51,.73,.65),t*2)
-                : lerp(float3(.51,.73,.65),float3(.16,.24,.40),(t-.5)*2));
+            rgb=pc.grayscale ? (1-t).xxx : saturate(1.5-abs(4*(1-t)-float3(3,2,1)));
         } else {
             float3 n=float3(normal[p],normal[pc.pixels+p],normal[2*pc.pixels+p]);
             if (pc.world) n=float3(dot(float3(pc.r0,pc.r1,pc.r2),n),

@@ -198,7 +198,6 @@ struct App {
     std::filesystem::path imported_mesh_source;
     bool has_texture{};
     gpu::PreviewTexture atlas_preview;
-    PriorPreview prior_preview;
     ImageQaPriors image_qa_priors;
     std::filesystem::path atlas_preview_path;
     std::uint32_t project_writer_version{};
