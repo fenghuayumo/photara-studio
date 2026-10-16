@@ -37,6 +37,7 @@ std::string g_editor_ini;
 int main(const int argc, char** argv) {
     App app;
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
+    const bool transition_smoke = smoke_arg == "--project-transition-smoke";
     const bool mesh_smoke = smoke_arg == "--interop-mesh-smoke";
     const bool stop_smoke = smoke_arg == "--interop-stop-smoke" ||
                             smoke_arg == "--interop-stop-smoke-vulkan";
@@ -44,14 +45,14 @@ int main(const int argc, char** argv) {
                                smoke_arg == "--interop-retrain-smoke-vulkan";
     app.smoke_mode = smoke_arg == "--interop-smoke" ||
                      smoke_arg == "--interop-smoke-vulkan" || stop_smoke ||
-                     retrain_smoke || mesh_smoke;
+                     retrain_smoke || mesh_smoke || transition_smoke;
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
     if (!app.smoke_mode) editor::load_editor_cache_dir(app);
     if (!app.smoke_mode) editor::load_editor_preferences(app);
 
-    if (app.smoke_mode) {
+    if (app.smoke_mode && !transition_smoke) {
         // The interop smoke harness needs a fixed dataset so runs stay
         // comparable, but developer-machine paths do not belong in the
         // source. Point PHOTARA_SMOKE_IMAGES at the COLMAP images directory;
@@ -91,6 +92,7 @@ int main(const int argc, char** argv) {
     });
     if (!glfwInit() || !glfwVulkanSupported()) return 1;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    if (transition_smoke) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow* window = glfwCreateWindow(
         1600, 940, tr("Photara Studio"), nullptr, nullptr);
     editor::apply_studio_window_icon(window);
@@ -188,6 +190,7 @@ int main(const int argc, char** argv) {
     int smoke_completed_runs = 0;
     bool retrain_pending = false;
     bool retrain_requested = false;
+    int transition_smoke_step = 0;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -210,7 +213,7 @@ int main(const int argc, char** argv) {
         editor::poll_gaussian_merge(app);
         editor::poll_splat_export(app);
 
-        if (app.smoke_mode) {
+        if (app.smoke_mode && !transition_smoke) {
             if (!app.smoke_started && !app.job.running()) {
                 app.smoke_started = true;
                 editor::start_train(app, true);
@@ -428,12 +431,58 @@ int main(const int argc, char** argv) {
             ImGui::EndPopup();
         }
         editor::draw_project_lifecycle_modals(app);
+        if (transition_smoke) {
+            // Keep an actual Vulkan texture in this frame's draw list while
+            // exercising discard, cancellation, and the prompt-free path.
+            app.atlas_preview.upload({1, 1, {255, 128, 64}});
+            ImGui::Begin("Project transition regression");
+            ImGui::Image(reinterpret_cast<ImTextureID>(app.atlas_preview.descriptor), {32.F, 32.F});
+            ImGui::End();
+            std::snprintf(app.settings.dataset_source.data(),
+                app.settings.dataset_source.size(), "%s", "smoke-external-dataset");
+            app.has_sparse = transition_smoke_step < 2;
+            editor::change_external_dataset(app, {});
+            const bool prompted = app.show_project_switch_confirmation;
+            const bool queued = static_cast<bool>(app.pending_project_action);
+            if (transition_smoke_step == 1) {
+                app.pending_project_action = {};
+                app.project_transition_ready = false;
+            } else if (prompted) {
+                editor::complete_project_transition(app); // Don't Save
+            }
+            app.show_project_switch_confirmation = false;
+            // The cancelled synthetic path is deliberately not a real dataset.
+            app.suppress_scene_auto_load = true;
+            if (!queued || prompted != (transition_smoke_step < 2) ||
+                !app.atlas_preview.descriptor || !app.settings.dataset_source[0]) {
+                std::fprintf(stderr, "Project transition ran before frame submission (step %d)\n",
+                    transition_smoke_step);
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+        }
         if (app.close_approved) glfwSetWindowShouldClose(window, GLFW_TRUE);
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             editor::gpu::present(draw_data, editor::theme::surface_0);
         editor::publish_preview_ack(app);
+
+        // Project switches release photo/QA/splat textures referenced by this
+        // frame. Execute only once its draw list has been submitted.
+        editor::process_project_transition(app);
+        if (transition_smoke && !glfwWindowShouldClose(window)) {
+            const bool cancelled = transition_smoke_step == 1;
+            const bool retained = app.atlas_preview.descriptor && app.settings.dataset_source[0];
+            const bool cleared = !app.atlas_preview.descriptor && !app.settings.dataset_source[0];
+            if ((cancelled && !retained) || (!cancelled && !cleared)) {
+                std::fprintf(stderr, "Project transition did not preserve/clear the expected scene\n");
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } else if (++transition_smoke_step == 3) {
+                app.smoke_success = true;
+                std::fprintf(stdout, "Project transition smoke passed: discard, cancel, no prompt\n");
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+        }
 
         // Preparation runs off the UI thread; launch only after the submitted
         // frame no longer references preview resources that start_train drops.
