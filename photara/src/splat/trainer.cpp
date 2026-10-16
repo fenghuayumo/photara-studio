@@ -1763,6 +1763,8 @@ GaussianModel Trainer::train(
             options_, scene_extent);
         raster_options.point_depth_bracket = point_query.bracket;
         raster_options.point_depth_tolerance = point_query.tolerance;
+        const bool ai_prior_active = use_ai_prior &&
+            iteration >= options_.depth_normal_from_iter;
         const bool depth_normal_active = !native_non_pinhole &&
             options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
@@ -1798,7 +1800,7 @@ GaussianModel Trainer::train(
         // One flag drives the render channels and the matching loss-gradient
         // tensors: when it is false the depth/normal images, their gradients
         // and the rasterizer's per-Gaussian geometry scratch are all skipped.
-        const bool need_geometry_channels = use_ai_prior || options_.use_mvs_depth ||
+        const bool need_geometry_channels = ai_prior_active || options_.use_mvs_depth ||
                                             options_.use_mvs_normals ||
                                             depth_normal_active ||
                                             normal_field_active ||
@@ -2050,12 +2052,12 @@ GaussianModel Trainer::train(
                 detail::add_depth_normal_loss_vulkan(rendered, target.camera,
                     depth_normal_active ? options_.depth_normal_weight : 0.F,
                     loss, report_progress);
-            if (use_ai_prior)
+            if (ai_prior_active)
                 detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
         } else {
             loss = detail::compute_training_loss(
                 loss_render, target, options_, report_progress,
-                depth_normal_active, allocate_geometry_gradients);
+                depth_normal_active, allocate_geometry_gradients, ai_prior_active);
         }
         if (options_.use_normal_field &&
             iteration == std::max(options_.normal_field_from_iter, 1U)) {

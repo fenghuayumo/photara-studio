@@ -264,6 +264,7 @@ struct TrainingOptions {
     // Explicit on/off separates filtering from losses for controlled runs.
     std::optional<bool> use_3d_filter;
     float depth_normal_weight{0.05F};
+    // Shared start iteration for DN, AI depth/normal priors and multi-view losses.
     unsigned depth_normal_from_iter{7'000};
     // GaussianWrapping normal field. Four features per Gaussian encode
     // normalize(xyz) * tanh(w), and are aligned to normals differentiated

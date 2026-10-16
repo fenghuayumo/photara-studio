@@ -74,6 +74,16 @@ void losses(tinytensor::Device device) {
         const auto objective=[&](double value) { const double r=(value-4)/4; return weights.first/n*std::sqrt(r*r+1e-6); };
         close(gd[4],static_cast<float>((objective(4.5001)-objective(4.4999))/.0002));
     }
+    // Warmup must skip prior maps and geometry attachments entirely, even
+    // with nonzero configured weights and DN disabled.
+    TrainingOptions warmup; warmup.photometric_weight=0;
+    warmup.lambda_d=.05F; warmup.lambda_n=.02F;
+    rendered.median_depth={}; rendered.normal={};
+    view.depth={}; view.normal={};
+    const auto inactive=detail::compute_training_loss(rendered,view,warmup,true,false,false,false);
+    close(inactive.depth_value,0); close(inactive.normal_value,0); close(inactive.total,0);
+    check(!inactive.depth.is_valid() && !inactive.normal.is_valid(),
+        "Inactive priors allocated geometry gradients during warmup");
     std::cout << "Prior loss/gradient checks passed on " << (device==tinytensor::Device::CUDA?"CUDA":"Vulkan") << '\n';
 }
 void cache() {

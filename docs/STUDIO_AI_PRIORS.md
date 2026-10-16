@@ -34,7 +34,11 @@ depth alignment. Depth preparation requires at least 16 robust observed sparse
 points per training view. Unsupported or insufficient inputs fail explicitly.
 
 AI priors do not enable DN, normal-field or multi-view losses. Their existing
-controls remain independent. Gaussian mesh extraction retains its existing
+controls remain independent. AI priors share **Geometry start step** with DN
+and multi-view losses (`--splat-geometry-from-iter`, default 7000), including
+when DN is disabled. Before that step they contribute no loss or gradients;
+at that step the configured weights take effect without a ramp. Gaussian mesh
+extraction retains its existing
 geometry policy. Priors use pinhole training views: fisheye images are rectified
 when AI priors are active; equirectangular panoramas are unsupported.
 
