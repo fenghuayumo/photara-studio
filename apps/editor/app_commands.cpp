@@ -2734,8 +2734,11 @@ void show_mesh_view(App& app, const bool frame_when_ready) {
 
 bool image_qa_prior_matches(const App& app) {
     const auto index = app.image_qa.selected;
-    return index >= 0 && static_cast<std::size_t>(index) < app.scene.views.size() &&
-        !app.image_qa_priors.data.source.empty() &&
+    if (index < 0 || app.image_qa_priors.data.source.empty()) return false;
+    if (app.scene.views.empty())
+        return static_cast<std::size_t>(index) < app.image_qa.folder_images.size() &&
+            app.image_qa_priors.source == app.image_qa.folder_images[index];
+    return static_cast<std::size_t>(index) < app.scene.views.size() &&
         app.image_qa_priors.source == app.scene.views[index].image_path;
 }
 

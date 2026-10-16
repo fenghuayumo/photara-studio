@@ -7,8 +7,7 @@
 #include <optional>
 
 namespace editor {
-// Independent of the floating preview: selecting a photo in either viewer
-// must not change the other viewer's textures or selected cache.
+// Cached AI maps for the selected photo in the 2D viewport.
 struct ImageQaPriors {
     struct Result {
         std::filesystem::path directory, source, file;
@@ -16,6 +15,7 @@ struct ImageQaPriors {
         std::filesystem::file_time_type source_stamp{};
         std::optional<PriorPreviewData> data;
         bool unchanged{};
+        std::string error;
     };
     std::filesystem::path directory, source, file;
     std::filesystem::file_time_type stamp{};
@@ -26,31 +26,11 @@ struct ImageQaPriors {
     PriorPreviewData data;
     float displayed_near{}, displayed_far{};
     bool displayed_grayscale{};
+    std::string error;
+    bool refresh_requested{};
     void update(const std::filesystem::path& folder, const std::filesystem::path& image);
     void reset_textures();
     void set_depth_display(bool automatic, bool grayscale, float near_depth, float far_depth);
-};
-struct PriorPreview {
-    bool open{};
-    int selected{-1};
-    std::filesystem::path directory;
-    std::filesystem::path requested_directory;
-    std::vector<std::filesystem::path> files;
-    std::future<std::vector<std::filesystem::path>> pending_files;
-    std::future<PriorPreviewData> pending;
-    PriorPreviewData data;
-    gpu::PreviewTexture photo,depth,normal;
-    std::string error;
-    float depth_range[2]{};
-    float displayed_range[2]{};
-    bool manual_range{};
-    std::filesystem::path availability_directory,checked_directory;
-    std::future<bool> pending_availability;
-    std::chrono::steady_clock::time_point next_availability_check{};
-    bool cache_available{};
-    bool available(const std::filesystem::path& folder);
-    void show(const std::filesystem::path& folder);
-    void draw();
-    void reset_textures();
+    void request_refresh() { refresh_requested = true; }
 };
 } // namespace editor

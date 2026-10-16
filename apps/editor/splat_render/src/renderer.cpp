@@ -1052,10 +1052,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
                             const float wz = m[8] * x + m[9] * y + m[10] * z;
                             x = wx; y = wy; z = wz;
                         }
-                        const float length = std::sqrt(x * x + y * y + z * z);
-                        if (!std::isfinite(length) || length < 1e-6F) continue;
-                        rgb = {0.5F + 0.5F * x / length, 0.5F + 0.5F * y / length,
-                               0.5F + 0.5F * z / length};
+                        rgb = normal_color(x,y,z);
                     }
                     for (std::size_t c = 0; c < 3; ++c)
                         rgba[p * 4U + c] = static_cast<std::uint8_t>(

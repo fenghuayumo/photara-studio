@@ -79,6 +79,24 @@ int main() {
         require(std::abs(world_normal[0] - 128) < 10 &&
                 std::abs(camera_normal[0] - world_normal[0]) > 50,
                 "rotated camera normals must transform back to the world Z axis");
+        // A camera pitched downward sees a horizontal plane with negative
+        // camera Y and Z. Checking signs catches axis/transpose mistakes that
+        // a frontal plane or a color-encoding test cannot reveal.
+        camera.world_to_camera = {1,0,0,0, 0,c,-c,0, 0,c,c,0, 0,-3*c,3-3*c,1};
+        camera.position = {0,3*c,3-3*c};
+        options.world_normals = false;
+        draw(splat_render::Shading::normal);
+        const auto pitched_normal = center();
+        std::cout << "Pitched camera normal RGB=" << pitched_normal[0] << ','
+                  << pitched_normal[1] << ',' << pitched_normal[2] << '\n';
+        require(std::abs(pitched_normal[0]-128)<10 &&
+                std::abs(pitched_normal[1]-37)<15 && std::abs(pitched_normal[2]-37)<15,
+                "pitched camera normal must have negative Y and Z");
+        options.world_normals = true;
+        draw(splat_render::Shading::normal);
+        const auto pitched_world = center();
+        require(std::abs(pitched_world[0]-128)<10 && std::abs(pitched_world[1]-128)<10 &&
+                pitched_world[2]<10,"pitched camera failed to recover world-space plane normal");
         camera = original_camera;
         draw(splat_render::Shading::rings);
         draw(splat_render::Shading::gaussian);

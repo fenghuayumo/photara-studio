@@ -490,12 +490,9 @@ __global__ void diagnostic_kernel(const float *depth, const float *alpha, const 
                 1.F, fmaxf(0.F, (d - __uint_as_float(stats[2])) /
                                     fmaxf(__uint_as_float(stats[3]) - __uint_as_float(stats[2]),
                                           1e-8F)));
-            const float near_depth[3] = {.90F, .80F, .53F}, middle[3] = {.51F, .73F, .65F},
-                        far_depth[3] = {.16F, .24F, .40F};
             for (int c = 0; c < 3; ++c)
                 rgb[c] = pc.grayscale ? 1 - t
-                         : t < .5F    ? near_depth[c] + (middle[c] - near_depth[c]) * t * 2
-                                      : middle[c] + (far_depth[c] - middle[c]) * (t - .5F) * 2;
+                         : fminf(1.F,fmaxf(0.F,1.5F-fabsf(4.F*(1.F-t)-(3.F-c))));
         } else {
             float n[3] = {normal[p], normal[pc.pixels + p], normal[2 * pc.pixels + p]};
             if (pc.world) {
