@@ -661,7 +661,20 @@ void apply_external_dataset_selection(App& app) {
 
 void change_external_dataset(App& app, const std::filesystem::path& path) {
     if (app.job.running() || app.loading_scene) return;
-    if (defer_project_transition(app, [&app, path] { change_external_dataset(app, path); })) return;
+    // Selecting images and then their external cameras configures one new
+    // session. Input paths, the imported camera preview and an empty task
+    // cache do not constitute reconstruction work that needs saving first.
+    // Preserve the transition prompt for existing projects and actual results.
+    std::error_code error;
+    const bool has_work_to_preserve = !app.saved_project_settings.empty() ||
+        !app.layout.project_file.empty() || app.training_checkpoint_info ||
+        app.has_sparse || app.has_asfm || app.has_mvs || app.has_model ||
+        app.has_mesh || app.has_texture || !app.gaussian_models.empty() ||
+        !app.imported_mesh_source.empty() ||
+        (!app.layout.dense_ply.empty() && std::filesystem::exists(app.layout.dense_ply, error)) ||
+        (!app.layout.working_dense.empty() && std::filesystem::exists(app.layout.working_dense, error));
+    if (has_work_to_preserve &&
+        defer_project_transition(app, [&app, path] { change_external_dataset(app, path); })) return;
     store_utf8_path_field(app.settings.dataset_source, path);
     app.settings.dataset_initial_cloud.fill('\0');
     app.settings.project_dir.fill('\0');
