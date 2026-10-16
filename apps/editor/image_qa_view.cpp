@@ -966,7 +966,6 @@ void draw_image_qa(
     if (state.selected < 0 && count > 0) state.selected = 0;
     if (state.selected >= count) state.selected = count > 0 ? count - 1 : -1;
     const QaItem item = item_at(state, scene, state.selected);
-    if (input.priors) input.priors->update(input.prior_directory, item.path);
     const bool ai_depth = input.priors && input.priors->depth.descriptor;
     const bool ai_normal = input.priors && input.priors->normal.descriptor;
     if ((state.mode == ImageQaMode::ai_depth && !ai_depth) ||
@@ -1129,9 +1128,15 @@ void draw_image_qa(
     const auto* prior_texture = state.mode == ImageQaMode::ai_depth && ai_depth
         ? &input.priors->depth : state.mode == ImageQaMode::ai_normal && ai_normal
             ? &input.priors->normal : nullptr;
-    const float img_w = prior_texture ? static_cast<float>(prior_texture->width)
+    const bool raster_prior_camera = input.priors && !input.priors->data.source.empty() &&
+        (state.mode == ImageQaMode::depth || state.mode == ImageQaMode::normal);
+    const auto prior_camera = raster_prior_camera
+        ? prior_preview_camera(input.priors->data.prior.camera) : photara::splat::Camera{};
+    const float img_w = raster_prior_camera ? static_cast<float>(prior_camera.width)
+        : prior_texture ? static_cast<float>(prior_texture->width)
         : has_gt ? static_cast<float>(session.gt_width()) : 4.F;
-    const float img_h = prior_texture ? static_cast<float>(prior_texture->height)
+    const float img_h = raster_prior_camera ? static_cast<float>(prior_camera.height)
+        : prior_texture ? static_cast<float>(prior_texture->height)
         : has_gt ? static_cast<float>(session.gt_height()) : 3.F;
     ImVec2 img_min{};
     ImVec2 img_max{};

@@ -15,6 +15,7 @@ std::string utf8(const std::filesystem::path& path) {
 void PriorPreview::reset_textures() {photo.reset();depth.reset();normal.reset();}
 void ImageQaPriors::reset_textures() {
     depth.reset(); normal.reset(); file.clear(); stamp = {}; source_stamp = {};
+    data = {}; displayed_near = displayed_far = 0.F;
 }
 void ImageQaPriors::update(const std::filesystem::path& folder, const std::filesystem::path& image) {
     const auto now = std::chrono::steady_clock::now();
@@ -28,7 +29,10 @@ void ImageQaPriors::update(const std::filesystem::path& folder, const std::files
             if (!result.unchanged) {
                 reset_textures();
                 if (result.data) {
-                    depth.upload(result.data->depth); normal.upload(result.data->normal);
+                    data = std::move(*result.data);
+                    depth.upload(data.depth); normal.upload(data.normal);
+                    displayed_near = data.depth_near; displayed_far = data.depth_far;
+                    displayed_grayscale = false;
                     file = result.file; stamp = result.stamp; source_stamp = result.source_stamp;
                 }
             }
@@ -51,6 +55,13 @@ void ImageQaPriors::update(const std::filesystem::path& folder, const std::files
         } catch (const std::exception&) { result.data.reset(); result.unchanged = false; }
         return result;
     });
+}
+void ImageQaPriors::set_depth_display(bool automatic, bool grayscale, float near_depth, float far_depth) {
+    if (data.prior.depth.empty()) return;
+    if (automatic) { near_depth = data.depth_near; far_depth = data.depth_far; }
+    if (near_depth == displayed_near && far_depth == displayed_far && grayscale == displayed_grayscale) return;
+    depth.upload(colorize_prior_depth(data.prior, near_depth, far_depth, grayscale));
+    displayed_near = near_depth; displayed_far = far_depth; displayed_grayscale = grayscale;
 }
 bool PriorPreview::available(const std::filesystem::path& folder) {
     const auto now=std::chrono::steady_clock::now();

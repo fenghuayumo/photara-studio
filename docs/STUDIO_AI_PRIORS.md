@@ -86,7 +86,8 @@ Omit `--splat-prior-model` to consume an existing cache without inference.
 The 2D viewport mode buttons include Depth and Normal for rasterized outputs
 when a trained 3DGS model or a live training preview is available. Both use the
 selected photo's camera. View settings controls the depth range, grayscale
-display, and world/camera normal space. Compare and Error continue to use RGB;
+display. In 2D, rasterized and AI normals both use camera space; the 3D viewer
+retains its world/camera space selector. Compare and Error continue to use RGB;
 diagnostic maps do not contribute to the photometric metrics.
 
 AI depth and AI normals appear separately only when a valid prior cache matches
@@ -95,7 +96,13 @@ directory, or the current task's `ai_priors` cache, in the background and notice
 new maps during preparation. Changing photos clears the previous photo's maps;
 an unavailable AI mode returns to Photo. Inspecting maps does not start inference.
 Cached priors use rectified training cameras, so their framing can differ from
-the source photo. The independent AI prior preview window remains available.
+the source photo. Rasterized geometry uses the matching cached camera and preview
+dimensions when available, preserving the SfM pose and scaling its intrinsics.
+Both depth views share the warm-to-cool palette, grayscale setting, and black
+invalid pixels. Automatic comparison uses the AI depth's 2nd/98th percentile
+bounds for both maps; manual bounds apply to both as well. They are not stretched
+independently, so color differences retain actual depth differences.
+The independent AI prior preview window remains available.
 
 ## Distributed model identity
 
