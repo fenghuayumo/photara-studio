@@ -8,6 +8,7 @@
 #endif
 #include "io/image.hpp"
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -85,6 +86,96 @@ void losses(tinytensor::Device device) {
     check(!inactive.depth.is_valid() && !inactive.normal.is_valid(),
         "Inactive priors allocated geometry gradients during warmup");
     std::cout << "Prior loss/gradient checks passed on " << (device==tinytensor::Device::CUDA?"CUDA":"Vulkan") << '\n';
+}
+void parameter_gradients(tinytensor::Device device) {
+    // Audit the complete AI loss -> rasterizer -> Gaussian parameter chain.
+    // A rotated camera and overlapping anisotropic splats exercise camera
+    // coordinates, normal blending, median depth and opacity derivatives.
+    Camera camera;
+    camera.width=48; camera.height=32;
+    camera.fx=38; camera.fy=36; camera.cx=23.2F; camera.cy=15.1F;
+    const float c=std::cos(.23F), s=std::sin(.23F);
+    camera.world_to_camera={c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1};
+    const std::size_t pixels=camera.width*camera.height, pixel=16*camera.width+30;
+    const std::vector<float> parameters={
+        -.10F,.04F,2.F, .05F,-.02F,2.12F,
+        std::log(.22F),std::log(.16F),std::log(.09F),
+        std::log(.20F),std::log(.14F),std::log(.08F),
+        .94F,.13F,-.18F,.21F, .97F,-.1F,.17F,.05F,
+        1.7F,1.2F, .4F,.2F,.3F, .1F,.5F,.2F};
+    const auto make_model=[&](const std::vector<float>& p) {
+        const auto upload=[&](int first,int count,std::initializer_list<std::size_t> shape) {
+            return Tensor::from_vector(std::vector<float>(p.begin()+first,p.begin()+first+count),shape,device);
+        };
+        GaussianModel m;
+        m.means=upload(0,6,{2,3}); m.log_scales=upload(6,6,{2,3});
+        m.quaternions=upload(12,8,{2,4}); m.opacity_logits=upload(20,2,{2,1});
+        m.sh=upload(22,6,{2,1,3}); m.sh_degree=0;
+        return m;
+    };
+    Rasterizer rasterizer;
+    RasterizeOptions raster_options; raster_options.require_depth=true; raster_options.kernel_size=0;
+    auto model=make_model(parameters);
+    const auto rendered=rasterizer.forward(model,camera,raster_options);
+    const float target_depth=rendered.median_depth.to_vector()[pixel]*1.08F;
+    check(target_depth>0,"Parameter audit requires valid median depth");
+    const float target_z=-std::sqrt(.87F);
+    std::vector<float> td(pixels),tn(3*pixels),mask(pixels);
+    td[pixel]=target_depth; tn[pixel]=-.3F; tn[pixels+pixel]=.2F; tn[2*pixels+pixel]=target_z;
+    mask[pixel]=1;
+    TrainingView view; view.camera=camera; view.has_mask=true;
+    view.rgb=Tensor::zeros({3,camera.height,camera.width},device);
+    view.mask=Tensor::from_vector(mask,{camera.height,camera.width},device);
+    view.depth=Tensor::from_vector(td,{camera.height,camera.width},device);
+    view.normal=Tensor::from_vector(tn,{3,camera.height,camera.width},device);
+    for (int mode=0;mode<3;++mode) {
+        TrainingOptions options; options.photometric_weight=0; options.use_mask=true;
+        options.lambda_d=mode==1?0.F:1.F; options.lambda_n=mode==0?0.F:1.F;
+        const auto loss=detail::compute_training_loss(rendered,view,options,true,false,true);
+        const auto gradient=rasterizer.backward(model,rendered,loss.color,loss.alpha,loss.depth,loss.normal);
+        std::vector<float> analytic;
+        for (const auto* tensor : {&gradient.means,&gradient.log_scales,&gradient.quaternions,&gradient.opacity_logits,&gradient.sh}) {
+            const auto values=tensor->to_vector();
+            for (float value:values) analytic.push_back(value*pixels);
+        }
+        const auto objective=[&](const std::vector<float>& p) {
+            const auto out=rasterizer.forward(make_model(p),camera,raster_options);
+            double value=0;
+            if(options.lambda_d>0) {
+                const double depth=out.median_depth.to_vector()[pixel];
+                check(depth>0,"Parameter perturbation changed depth validity");
+                const double r=(depth-target_depth)/target_depth;
+                value+=std::sqrt(r*r+double(options.geometry_epsilon)*options.geometry_epsilon);
+            }
+            if(options.lambda_n>0) {
+                const auto n=out.normal.to_vector();
+                value+=1.-(-.3*n[pixel]+.2*n[pixels+pixel]+double(target_z)*n[2*pixels+pixel]);
+            }
+            return value;
+        };
+        double error2=0,numeric2=0,dot=0;
+        for(std::size_t i=0;i<parameters.size();++i) {
+            auto plus=parameters,minus=parameters;
+            const float h=5e-4F;
+            plus[i]+=h;minus[i]-=h;
+            const double numeric=(objective(plus)-objective(minus))/(double(plus[i])-minus[i]);
+            const double error=analytic[i]-numeric;
+            error2+=error*error; numeric2+=numeric*numeric; dot+=analytic[i]*numeric;
+            if(!std::isfinite(analytic[i]) || std::abs(error)>.006+.04*std::abs(numeric)) {
+                std::cerr<<"Prior parameter FD mode="<<mode<<" parameter="<<i
+                    <<" analytic="<<analytic[i]<<" numeric="<<numeric<<'\n';
+                throw std::runtime_error("AI prior parameter gradient mismatch");
+            }
+        }
+        const double relative_error=std::sqrt(error2/std::max(numeric2,1e-20));
+        std::cout<<"Prior parameter FD backend="<<(device==tinytensor::Device::CUDA?"CUDA":"Vulkan")
+            <<" mode="<<mode<<" relative_l2="<<relative_error<<'\n';
+        check(relative_error<.02,"Prior parameter gradient relative error exceeded two percent");
+        check(dot>0,"Prior gradient is not a descent direction");
+        auto next=parameters;
+        for(std::size_t i=0;i<next.size();++i) next[i]-=1e-3F*analytic[i];
+        check(objective(next)<objective(parameters),"Prior-only parameter step failed to reduce loss");
+    }
 }
 void cache() {
     const auto directory=std::filesystem::temp_directory_path()/("photara-prior-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -183,10 +274,10 @@ void cache() {
 int main(int argc, char** argv) {
     try {
         if (argc == 1) {
-            cache(); losses(tinytensor::Device::CUDA);
+            cache(); losses(tinytensor::Device::CUDA); parameter_gradients(tinytensor::Device::CUDA);
         } else if (argc == 2 && std::string_view(argv[1]) == "--vulkan") {
 #if defined(TINYTENSOR_HAS_VULKAN)
-            losses(tinytensor::Device::Vulkan);
+            losses(tinytensor::Device::Vulkan); parameter_gradients(tinytensor::Device::Vulkan);
 #else
             throw std::runtime_error("Vulkan is unavailable in this build");
 #endif
