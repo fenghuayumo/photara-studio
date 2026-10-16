@@ -13,6 +13,28 @@ std::string utf8(const std::filesystem::path& path) {
 }
 }
 void PriorPreview::reset_textures() {photo.reset();depth.reset();normal.reset();}
+bool PriorPreview::available(const std::filesystem::path& folder) {
+    const auto now=std::chrono::steady_clock::now();
+    if(folder!=availability_directory) {
+        availability_directory=folder;cache_available=false;next_availability_check={};
+    }
+    if(pending_availability.valid() && pending_availability.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool found=pending_availability.get();
+        if(checked_directory==folder) {
+            cache_available=found;
+            next_availability_check=now+std::chrono::seconds(1);
+        }
+    }
+    if(folder.empty()) return false;
+    if(!pending_availability.valid() && now>=next_availability_check) {
+        checked_directory=folder;
+        pending_availability=std::async(std::launch::async,[folder] {
+            try {return !list_prior_previews(folder).empty();}
+            catch(const std::exception&) {return false;}
+        });
+    }
+    return cache_available;
+}
 void PriorPreview::show(const std::filesystem::path& folder) {
     open=true;
     requested_directory=folder;

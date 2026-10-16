@@ -2,6 +2,7 @@
 #include "prior_preview_data.hpp"
 #include "vulkan_backend.hpp"
 #include <future>
+#include <chrono>
 #include <string>
 
 namespace editor {
@@ -19,6 +20,11 @@ struct PriorPreview {
     float depth_range[2]{};
     float displayed_range[2]{};
     bool manual_range{};
+    std::filesystem::path availability_directory,checked_directory;
+    std::future<bool> pending_availability;
+    std::chrono::steady_clock::time_point next_availability_check{};
+    bool cache_available{};
+    bool available(const std::filesystem::path& folder);
     void show(const std::filesystem::path& folder);
     void draw();
     void reset_textures();
