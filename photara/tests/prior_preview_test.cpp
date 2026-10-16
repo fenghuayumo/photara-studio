@@ -39,6 +39,16 @@ int main(int argc,char** argv) {
         prior.normals={0,1,0,0, 0,0,1,0, 0,0,0,-1};
         const auto both=root/"view_10.prior", normal=root/"view_2.prior", depth=root/"view_25.prior";
         photara::splat::save_training_prior(both,image,prior);
+        check(editor::find_prior_preview(root,image)==both,"Prior did not match its source photo");
+        check(editor::find_prior_preview(root/"missing",image).empty(),"Missing cache matched a photo");
+        check(editor::find_prior_preview(root,{}).empty(),"Empty source matched a prior");
+        const auto other_directory=root/"other";
+        std::filesystem::create_directory(other_directory);
+        const auto other_image=other_directory/image.filename();
+        photara::io::save_rgb_png({1,1,{0,0,0}},other_image);
+        check(editor::find_prior_preview(root,other_image).empty(),"Prior matched a different photo with the same basename");
+        std::filesystem::remove(other_image);
+        std::filesystem::remove(other_directory);
         auto data=editor::load_prior_preview(both);
         check(data.source==image && data.photo.width==2 && data.depth.width==2 && data.normal.width==2,"Preview dimensions/source mismatch");
         check(data.depth.pixels[0]==24 && data.normal.pixels[0]==24,"Invalid pixels were not dark");
@@ -57,6 +67,7 @@ int main(int argc,char** argv) {
             check(legacy.depth.pixels==data.depth.pixels && legacy.normal.pixels==data.normal.pixels,"Legacy prior preview mismatch");
         }
         prior.depth.clear(); photara::splat::save_training_prior(normal,image,prior);
+        check(editor::find_prior_preview(root,image)==normal,"Source lookup must not assume the photo index matches the cache view ID");
         data=editor::load_prior_preview(normal);
         check(data.depth.pixels.empty() && !data.normal.pixels.empty(),"Normal-only preview failed");
         prior.depth={2,2,2,2};prior.normals.clear();photara::splat::save_training_prior(depth,image,prior);
@@ -73,6 +84,10 @@ int main(int argc,char** argv) {
         fails([&]{editor::load_prior_preview(root/"view_invalid.prior");});
         std::filesystem::resize_file(both,20);
         fails([&]{editor::load_prior_preview(both);});
+        std::filesystem::remove(normal);
+        std::filesystem::remove(depth);
+        check(editor::find_prior_preview(root,image).empty(),"Truncated cache matched a source photo");
+        photara::splat::save_training_prior(normal,image,prior);
         std::ofstream(image,std::ios::app|std::ios::binary)<<'x';
         fails([&]{editor::load_prior_preview(normal);});
         std::cout<<"Prior preview tests passed\n";

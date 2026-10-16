@@ -35,6 +35,36 @@ std::vector<std::filesystem::path> list_prior_previews(const std::filesystem::pa
     std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return view_id(a)<view_id(b);});
     return files;
 }
+std::filesystem::path find_prior_preview(
+    const std::filesystem::path& directory, const std::filesystem::path& source) {
+    if (directory.empty() || source.empty()) return {};
+    for (const auto& file : list_prior_previews(directory)) {
+        try {
+            std::ifstream input(file, std::ios::binary);
+            char magic[8]{}; input.read(magic, 8);
+            const std::string version(magic, 8);
+            if (version != "PHPRIOR1" && version != "PHPRIOR2") continue;
+            if (version == "PHPRIOR2") {
+                std::uint32_t maps{}; read(input, maps);
+                if (!maps || (maps & ~3U)) continue;
+            }
+            photara::splat::Camera camera;
+            read(input, camera.width); read(input, camera.height);
+            read(input, camera.fx); read(input, camera.fy); read(input, camera.cx); read(input, camera.cy);
+            for (float& value : camera.world_to_camera) read(input, value);
+            std::uint32_t length{}; read(input, length);
+            if (!length || length > 32768) continue;
+            std::string name(length, '\0'); input.read(name.data(), length);
+            if (!input || name.find('\0') != std::string::npos) continue;
+            std::error_code error;
+            if (std::filesystem::equivalent(std::filesystem::u8path(name), source, error) && !error)
+                return file;
+        } catch (const std::exception&) {
+            // Preparation may still be replacing a cache file.
+        }
+    }
+    return {};
+}
 photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth) {
     if(prior.depth.empty()) return {};
     if(!std::isfinite(near_depth) || !std::isfinite(far_depth) || near_depth<0 || far_depth<=near_depth)

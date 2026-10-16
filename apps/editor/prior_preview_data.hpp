@@ -13,5 +13,7 @@ struct PriorPreviewData {
 };
 std::vector<std::filesystem::path> list_prior_previews(const std::filesystem::path& directory);
 PriorPreviewData load_prior_preview(const std::filesystem::path& file);
+std::filesystem::path find_prior_preview(
+    const std::filesystem::path& directory, const std::filesystem::path& source);
 photara::io::RgbImage colorize_prior_depth(const photara::splat::TrainingPrior& prior,float near_depth,float far_depth);
 } // namespace editor

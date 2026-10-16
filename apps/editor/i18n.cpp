@@ -45,6 +45,8 @@ constexpr Entry k_entries[] = {
     {"Source image", "原始图片", "元画像", "원본 이미지"},
     {"AI depth", "AI 深度", "AI深度", "AI 깊이"},
     {"AI normals", "AI 法线", "AI法線", "AI 법선"},
+    {"Rasterized depth", "光栅化深度", "ラスタライズ深度", "래스터화 깊이"},
+    {"Rasterized normals", "光栅化法线", "ラスタライズ法線", "래스터화 법선"},
     {"This map was not generated (its weight may have been zero).", "此图未生成（对应权重可能为零）。", "このマップは生成されていません（重みが0の可能性）。", "이 맵은 생성되지 않았습니다 (가중치가 0일 수 있음)."},
     {"Camera Z, scene units. Near: warm; far: cool.", "相机 Z 深度，场景单位。近处暖色，远处冷色。", "カメラZ深度、シーン単位。近：暖色、遠：寒色。", "카메라 Z 깊이, 장면 단위. 가까움: 난색, 멂: 한색."},
     {"Display range is automatic per image; values outside it are color-clipped.", "每张图自动设置显示范围，范围外的数值仅作颜色饱和显示。", "表示範囲は画像ごとに自動設定されます。範囲外の値は色が飽和します。", "이미지별 자동 표시 범위이며 범위 밖 값은 색상만 포화됩니다."},

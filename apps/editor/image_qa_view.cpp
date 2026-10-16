@@ -876,6 +876,10 @@ void ImageQaSession::queue_metrics() {
 }
 
 bool image_qa_needs_render(const ImageQaMode mode) {
+    return mode == ImageQaMode::compare || mode == ImageQaMode::error ||
+           mode == ImageQaMode::depth || mode == ImageQaMode::normal;
+}
+bool image_qa_needs_metrics(const ImageQaMode mode) {
     return mode == ImageQaMode::compare || mode == ImageQaMode::error;
 }
 
@@ -962,6 +966,12 @@ void draw_image_qa(
     if (state.selected < 0 && count > 0) state.selected = 0;
     if (state.selected >= count) state.selected = count > 0 ? count - 1 : -1;
     const QaItem item = item_at(state, scene, state.selected);
+    if (input.priors) input.priors->update(input.prior_directory, item.path);
+    const bool ai_depth = input.priors && input.priors->depth.descriptor;
+    const bool ai_normal = input.priors && input.priors->normal.descriptor;
+    if ((state.mode == ImageQaMode::ai_depth && !ai_depth) ||
+        (state.mode == ImageQaMode::ai_normal && !ai_normal))
+        state.mode = ImageQaMode::photo;
     const std::filesystem::path live_a =
         live_features || live_matching ? live->path_a : std::filesystem::path{};
     if (!live_a.empty())
@@ -1030,16 +1040,23 @@ void draw_image_qa(
              true, tr("Slide to compare 3DGS against the training view")},
             {"##qa_err", icons::Icon::heatmap, tr("Error"), ImageQaMode::error,
              true, tr("Per-pixel photometric error map")},
+            {"##qa_depth", icons::Icon::heatmap, tr("Depth"), ImageQaMode::depth,
+             compare_ok, tr("Rasterized depth")},
+            {"##qa_normal", icons::Icon::heatmap, tr("Normal"), ImageQaMode::normal,
+             compare_ok, tr("Rasterized Gaussian footprint normals")},
+            {"##qa_ai_depth", icons::Icon::heatmap, tr("AI depth"), ImageQaMode::ai_depth,
+             ai_depth, tr("AI depth")},
+            {"##qa_ai_normal", icons::Icon::heatmap, tr("AI normals"), ImageQaMode::ai_normal,
+             ai_normal, tr("AI normals")},
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.F, 0.F});
-        for (const ModeItem& mode : modes) {
-            if (mode_chip(
-                    mode.id, mode.icon, mode.label, state.mode == mode.mode,
-                    mode.enabled)) {
+        for (const auto& mode : modes) {
+            if ((mode.mode == ImageQaMode::ai_depth && !ai_depth) ||
+                (mode.mode == ImageQaMode::ai_normal && !ai_normal)) continue;
+            if (mode_chip(mode.id, mode.icon, mode.label, state.mode == mode.mode, mode.enabled)) {
                 if (state.mode != mode.mode) {
                     state.mode = mode.mode;
-                    if (image_qa_needs_render(state.mode))
-                        state.metrics_dirty = true;
+                    state.metrics_dirty = true;
                 }
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
@@ -1109,8 +1126,13 @@ void draw_image_qa(
     const ImGuiIO& io = ImGui::GetIO();
 
     const bool has_gt = session.has_gt();
-    const float img_w = has_gt ? static_cast<float>(session.gt_width()) : 4.F;
-    const float img_h = has_gt ? static_cast<float>(session.gt_height()) : 3.F;
+    const auto* prior_texture = state.mode == ImageQaMode::ai_depth && ai_depth
+        ? &input.priors->depth : state.mode == ImageQaMode::ai_normal && ai_normal
+            ? &input.priors->normal : nullptr;
+    const float img_w = prior_texture ? static_cast<float>(prior_texture->width)
+        : has_gt ? static_cast<float>(session.gt_width()) : 4.F;
+    const float img_h = prior_texture ? static_cast<float>(prior_texture->height)
+        : has_gt ? static_cast<float>(session.gt_height()) : 3.F;
     ImVec2 img_min{};
     ImVec2 img_max{};
     fit_image_rect(
@@ -1135,7 +1157,8 @@ void draw_image_qa(
     }
 
     const bool compare = !live_align && state.mode == ImageQaMode::compare;
-    const bool show_render = compare && input.has_render && has_gt;
+    const bool show_render = compare && input.has_render && has_gt &&
+        image_qa_needs_metrics(input.render_mode) && input.render_view == state.selected;
     const float image_span = img_max.x - img_min.x;
     const float wipe_x =
         img_min.x + image_span * std::clamp(state.wipe, 0.F, 1.F);
@@ -1294,6 +1317,18 @@ void draw_image_qa(
             draw, canvas_min, canvas_max, tr("Capture unavailable"),
             item.path.empty() ? tr("This view has no image path")
                               : tr("Could not decode the selected file"));
+    } else if (!live_align && (state.mode == ImageQaMode::depth || state.mode == ImageQaMode::normal ||
+                               state.mode == ImageQaMode::ai_depth || state.mode == ImageQaMode::ai_normal)) {
+        ImTextureID texture{};
+        if (state.mode == ImageQaMode::ai_depth && ai_depth)
+            texture = reinterpret_cast<ImTextureID>(input.priors->depth.descriptor);
+        else if (state.mode == ImageQaMode::ai_normal && ai_normal)
+            texture = reinterpret_cast<ImTextureID>(input.priors->normal.descriptor);
+        else if (input.has_render && input.render_mode == state.mode && input.render_view == state.selected)
+            texture = input.render;
+        if (texture) draw->AddImage(texture, img_min, img_max);
+        else draw_empty(draw, canvas_min, canvas_max, tr("Waiting for a rendered frame…"),
+                        tr("The renderer is snapping to this training camera"));
     } else if (!live_align && state.mode == ImageQaMode::error) {
         const bool error_current =
             session.has_error() && session.loaded_view() == state.selected &&
@@ -1413,13 +1448,13 @@ void draw_image_qa(
             tr("Loading imported cameras for the feature overlay…"));
     }
 
-    if (!live_align && image_qa_needs_render(state.mode) &&
+    if (!live_align && image_qa_needs_metrics(state.mode) &&
         session.metrics_busy() && !session.metrics().valid) {
         ImVec2 card{canvas_min.x + 14.F, canvas_max.y - 58.F};
         draw_metric_card(draw, card, "PSNR", "…", theme::text_muted);
         draw_metric_card(draw, card, "SSIM", "…", theme::text_muted);
         draw_metric_card(draw, card, "MAE", "…", theme::text_muted);
-    } else if (!live_align && image_qa_needs_render(state.mode) &&
+    } else if (!live_align && image_qa_needs_metrics(state.mode) &&
                session.metrics().valid) {
         const ImageQaMetrics& m = session.metrics();
         ImVec2 card{canvas_min.x + 14.F, canvas_max.y - 58.F};
@@ -1440,12 +1475,12 @@ void draw_image_qa(
             m.masked ? tr("Metrics: foreground only") :
                 (input.use_metric_mask ? tr("Metrics: full image (no mask found)")
                                        : tr("Metrics: full image")));
-    } else if (!live_align && image_qa_needs_render(state.mode) &&
+    } else if (!live_align && image_qa_needs_metrics(state.mode) &&
                session.mask_failed()) {
         draw->AddText(
             {canvas_min.x + 14.F, canvas_max.y - 58.F},
             theme::u32(theme::warning), tr("Cannot load metric mask"));
-    } else if (!live_align && image_qa_needs_render(state.mode) &&
+    } else if (!live_align && image_qa_needs_metrics(state.mode) &&
                !session.loading() && !session.metrics_busy() &&
                session.metrics().masked) {
         draw->AddText(
