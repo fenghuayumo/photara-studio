@@ -390,6 +390,7 @@ int main(const int argc, char** argv) {
         editor::draw_splat_export_modal(app);
         editor::draw_sam_license_modal(app);
         editor::draw_moge_download_modal(app);
+        app.prior_preview.draw();
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
         ImGui::EndDisabled();
@@ -490,6 +491,7 @@ int main(const int argc, char** argv) {
     app.image_qa_session.clear();
     app.photos.clear();
     app.atlas_preview.reset();
+    app.prior_preview.reset_textures();
     app.about_icon.reset();
     editor::release_splat_preview(app);
     app.mesh_renderer.reset();

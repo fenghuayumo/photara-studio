@@ -5,6 +5,7 @@
 #include "pipeline.hpp"
 #include "sam_model.hpp"
 #include "moge_model.hpp"
+#include "prior_preview.hpp"
 #include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
@@ -197,6 +198,7 @@ struct App {
     std::filesystem::path imported_mesh_source;
     bool has_texture{};
     gpu::PreviewTexture atlas_preview;
+    PriorPreview prior_preview;
     std::filesystem::path atlas_preview_path;
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
