@@ -81,6 +81,22 @@ Equivalent CLI parameters:
 
 Omit `--splat-prior-model` to consume an existing cache without inference.
 
+## Inspecting depth and normals
+
+The 2D viewport mode buttons include Depth and Normal for rasterized outputs
+when a trained 3DGS model or a live training preview is available. Both use the
+selected photo's camera. View settings controls the depth range, grayscale
+display, and world/camera normal space. Compare and Error continue to use RGB;
+diagnostic maps do not contribute to the photometric metrics.
+
+AI depth and AI normals appear separately only when a valid prior cache matches
+the selected photo's full source path. The viewer checks the configured prior
+directory, or the current task's `ai_priors` cache, in the background and notices
+new maps during preparation. Changing photos clears the previous photo's maps;
+an unavailable AI mode returns to Photo. Inspecting maps does not start inference.
+Cached priors use rectified training cameras, so their framing can differ from
+the source photo. The independent AI prior preview window remains available.
+
 ## Distributed model identity
 
 - Download: https://github.com/fenghuayumo/photara-studio/releases/download/v0.5.0/moge-2-vitb-normal-f32.gguf

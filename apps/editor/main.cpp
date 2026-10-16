@@ -541,6 +541,7 @@ int main(const int argc, char** argv) {
     app.photos.clear();
     app.atlas_preview.reset();
     app.prior_preview.reset_textures();
+    app.image_qa_priors.reset_textures();
     app.about_icon.reset();
     editor::release_splat_preview(app);
     app.mesh_renderer.reset();

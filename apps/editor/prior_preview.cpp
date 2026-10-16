@@ -13,6 +13,45 @@ std::string utf8(const std::filesystem::path& path) {
 }
 }
 void PriorPreview::reset_textures() {photo.reset();depth.reset();normal.reset();}
+void ImageQaPriors::reset_textures() {
+    depth.reset(); normal.reset(); file.clear(); stamp = {}; source_stamp = {};
+}
+void ImageQaPriors::update(const std::filesystem::path& folder, const std::filesystem::path& image) {
+    const auto now = std::chrono::steady_clock::now();
+    if (directory != folder || source != image) {
+        directory = folder; source = image; next_check = {};
+        reset_textures();
+    }
+    if (pending.valid() && pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = pending.get();
+        if (result.directory == directory && result.source == source) {
+            if (!result.unchanged) {
+                reset_textures();
+                if (result.data) {
+                    depth.upload(result.data->depth); normal.upload(result.data->normal);
+                    file = result.file; stamp = result.stamp; source_stamp = result.source_stamp;
+                }
+            }
+            next_check = now + std::chrono::seconds(1);
+        }
+    }
+    if (folder.empty() || image.empty() || pending.valid() || now < next_check) return;
+    pending = std::async(std::launch::async, [folder, image, previous = file, previous_stamp = stamp,
+                                           previous_source_stamp = source_stamp] {
+        Result result; result.directory = folder; result.source = image;
+        try {
+            result.file = find_prior_preview(folder, image);
+            if (!result.file.empty()) {
+                result.stamp = std::filesystem::last_write_time(result.file);
+                result.source_stamp = std::filesystem::last_write_time(image);
+                result.unchanged = result.file == previous && result.stamp == previous_stamp &&
+                    result.source_stamp == previous_source_stamp;
+                if (!result.unchanged) result.data = load_prior_preview(result.file);
+            }
+        } catch (const std::exception&) { result.data.reset(); result.unchanged = false; }
+        return result;
+    });
+}
 bool PriorPreview::available(const std::filesystem::path& folder) {
     const auto now=std::chrono::steady_clock::now();
     if(folder!=availability_directory) {

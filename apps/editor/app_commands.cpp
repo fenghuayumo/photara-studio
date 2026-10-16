@@ -2752,6 +2752,14 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
                 ? photara::splat::VisualizationChannel::normal
                 : photara::splat::VisualizationChannel::color;
     }
+    if (app.workspace == ViewportWorkspace::image_2d) {
+        options.mode = photara::splat::VisualizationMode::splat;
+        options.channel = app.image_qa.mode == ImageQaMode::depth
+            ? photara::splat::VisualizationChannel::depth
+            : app.image_qa.mode == ImageQaMode::normal
+                ? photara::splat::VisualizationChannel::normal
+                : photara::splat::VisualizationChannel::color;
+    }
     options.automatic_depth = app.display_options.automatic_depth;
     options.grayscale_depth = app.display_options.grayscale_depth;
     options.world_normals = app.display_options.world_normals;

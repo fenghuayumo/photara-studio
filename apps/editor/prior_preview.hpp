@@ -4,8 +4,28 @@
 #include <future>
 #include <chrono>
 #include <string>
+#include <optional>
 
 namespace editor {
+// Independent of the floating preview: selecting a photo in either viewer
+// must not change the other viewer's textures or selected cache.
+struct ImageQaPriors {
+    struct Result {
+        std::filesystem::path directory, source, file;
+        std::filesystem::file_time_type stamp{};
+        std::filesystem::file_time_type source_stamp{};
+        std::optional<PriorPreviewData> data;
+        bool unchanged{};
+    };
+    std::filesystem::path directory, source, file;
+    std::filesystem::file_time_type stamp{};
+    std::filesystem::file_time_type source_stamp{};
+    std::future<Result> pending;
+    std::chrono::steady_clock::time_point next_check{};
+    gpu::PreviewTexture depth, normal;
+    void update(const std::filesystem::path& folder, const std::filesystem::path& image);
+    void reset_textures();
+};
 struct PriorPreview {
     bool open{};
     int selected{-1};

@@ -2,6 +2,7 @@
 
 #include "sparse_view.hpp"
 #include "vulkan_backend.hpp"
+#include "prior_preview.hpp"
 
 #include "sfm/align_live.hpp"
 #include "io/image.hpp"
@@ -22,7 +23,7 @@ namespace editor {
 // readback is downscaled to it instead of transferring the whole render.
 inline constexpr std::uint32_t k_image_qa_metric_extent = 640;
 
-enum class ImageQaMode { photo, features, compare, error };
+enum class ImageQaMode { photo, features, compare, error, depth, normal, ai_depth, ai_normal };
 
 struct ImageQaMetrics {
     bool valid{};
@@ -141,6 +142,7 @@ private:
 };
 
 [[nodiscard]] bool image_qa_needs_render(ImageQaMode mode);
+[[nodiscard]] bool image_qa_needs_metrics(ImageQaMode mode);
 
 void refresh_image_qa_folder(
     ImageQaState& state, const std::filesystem::path& directory);
@@ -159,6 +161,10 @@ struct ImageQaDrawInput {
     gpu::CameraPhotoCache* photos{};
     ImTextureID render{};
     bool has_render{};
+    ImageQaMode render_mode{ImageQaMode::photo};
+    int render_view{-1};
+    ImageQaPriors* priors{};
+    std::filesystem::path prior_directory;
     bool render_live{};
     bool has_model{};
     bool external_alignment{};

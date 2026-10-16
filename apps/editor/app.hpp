@@ -199,6 +199,7 @@ struct App {
     bool has_texture{};
     gpu::PreviewTexture atlas_preview;
     PriorPreview prior_preview;
+    ImageQaPriors image_qa_priors;
     std::filesystem::path atlas_preview_path;
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
@@ -219,6 +220,9 @@ struct App {
     std::chrono::steady_clock::time_point qa_metrics_after{};
     std::uint64_t qa_camera_timeline{};
     bool qa_camera_valid{};
+    ImageQaMode qa_camera_mode{ImageQaMode::photo};
+    ImageQaMode qa_raster_mode{ImageQaMode::photo};
+    int qa_raster_view{-1};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
     // Last preview frame count published to the trainer's acknowledgement
