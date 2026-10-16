@@ -128,3 +128,22 @@ Full texts for some nested components live next to those trees:
 - [third_party/sam3/LICENSE](third_party/sam3/LICENSE)
 - [third_party/sam3/ggml/LICENSE](third_party/sam3/ggml/LICENSE)
 - [docs/LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md)
+
+## MoGe-2 geometry-prior model
+
+Studio optionally downloads `moge-2-vitb-normal-f32.gguf` from the project's
+[GitHub release](https://github.com/fenghuayumo/photara-studio/releases/download/v0.5.0/moge-2-vitb-normal-f32.gguf).
+The [official model card](https://huggingface.co/Ruicheng/moge-2-vitb-normal)
+labels its weights MIT. The original checkpoint revision is
+`ca5f0e07ff01d3e5a364c1d954ed12ee1814b368`. Photara converts the checkpoint to
+GGUF with `python/models/moge/convert_weights.py`, preserving F32 tensor values;
+it does not retrain or fine-tune the model. SHA-256 of this converted asset:
+`b515fd1ac1a187f46871aabd346870eaad22d2f20d2848637758c5c6e674b1c2`.
+
+[MoGe](https://github.com/microsoft/MoGe) code is copyright Microsoft Corporation,
+MIT licensed. Its included DINOv2 code is copyright Meta Platforms, Inc. and
+affiliates, Apache-2.0 licensed. The upstream combined license text is reproduced
+in [licenses/MoGe-LICENSE.txt](licenses/MoGe-LICENSE.txt). Distribute these notices
+and the license text with Photara distributions that include this integration
+or redistribute the converted model. The model is downloaded on demand and
+is not embedded in the installer.

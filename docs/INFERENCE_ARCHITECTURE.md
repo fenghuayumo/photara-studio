@@ -324,7 +324,7 @@ geometry-training mode, or its automatic 3D filter. Fast mode remains RGB-only
 and clears these weights. Legacy MVS supervision and AI priors cannot share the
 same target slots in one training run.
 
-`photara_splat_prior_prepare` is a separate native Vulkan inference process:
+`photara_splat_prior_prepare` supports a separate native Vulkan preparation process:
 
 ```powershell
 photara_splat_prior_prepare dataset/sparse/0 images model-f32.gguf prior-cache 640 1200 8 0.01 0.01
@@ -382,6 +382,15 @@ workspace together; setting only one weight does not split that workspace. The
 existing bounded host/device view caches include the enabled target maps.
 Offline MoGe GPU allocations are released with the preparation process before
 training starts.
+
+Studio also supports automatic preparation inside the training child process:
+`--splat-prior-model model.gguf --splat-prior-tokens 1200` uses the finalized
+training scene and options, then destroys the MoGe session before allocating
+the Gaussian model. `splat::prepare_training_priors` is shared with the
+standalone utility. It validates and reuses compatible maps before loading
+MoGe, and emits per-view preparation progress. The Studio geometry inspector
+offers automatic generation or an existing aligned cache, independent depth
+and normal weights, and project persistence. See [Studio AI priors](STUDIO_AI_PRIORS.md).
 
 `photara.splat.ai_prior` checks cache validation, progressive resolution,
 RGB-mask independence, checkpoint fingerprints, held-out evaluation without a
@@ -463,8 +472,10 @@ Legacy `PHOTARA_ENABLE_SAM_VULKAN/CUDA` options only initialize the defaults of
 their corresponding new options. Once the new options are in the CMake cache,
 use the new names for subsequent changes. Disabling SAM does not disable
 Inference. Disabling Inference makes the SAM model unavailable, but retains
-license/cache APIs and the CLI's segmentation-unavailable message. Models are not
-downloaded automatically, and license-acceptance state is not changed automatically.
+license/cache APIs and the CLI's segmentation-unavailable message. Inference sessions do not download weights themselves. Studio downloads the
+optional MoGe GGUF before first AI-prior training and verifies its pinned size
+and SHA-256; see [Studio AI priors](STUDIO_AI_PRIORS.md). SAM retains its separate
+license-acceptance flow. License-acceptance state is not changed automatically.
 
 New sessions request Vulkan by default. CPU fallback on initialization failure
 is configurable, and the actual device is exposed. Unsupported operators fail

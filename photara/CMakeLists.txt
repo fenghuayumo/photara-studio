@@ -681,6 +681,8 @@ if(PHOTARA_ENABLE_FEATURES)
             zstd::libzstd)
         target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_SPLAT=1)
         if(TARGET Photara::Inference)
+            target_sources(photara_splat PRIVATE src/splat/prior_prepare.cpp)
+            target_link_libraries(photara_splat PUBLIC Photara::Inference)
             add_executable(photara_splat_prior_prepare src/tools/splat_prior_prepare.cpp)
             target_include_directories(photara_splat_prior_prepare PRIVATE src/splat)
             target_link_libraries(photara_splat_prior_prepare PRIVATE Photara::Splat Photara::Inference)
@@ -959,6 +961,8 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/icons.cpp
                 ${PHOTARA_STUDIO_DIR}/image_qa_view.cpp
                 ${PHOTARA_STUDIO_DIR}/main.cpp
+                ${PHOTARA_STUDIO_DIR}/model_download.cpp
+                ${PHOTARA_STUDIO_DIR}/moge_model.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
                 ${PHOTARA_STUDIO_DIR}/sam_model.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
@@ -1036,6 +1040,15 @@ if(TARGET photara_features)
             target_compile_definitions(photara_studio PRIVATE
                 PHOTARA_CLI_FILENAME="$<TARGET_FILE_NAME:photara>")
             add_dependencies(photara_studio photara)
+            add_custom_command(TARGET photara_studio POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:photara_studio>/licenses"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_SOURCE_DIR}/licenses/MoGe-LICENSE.txt"
+                    "$<TARGET_FILE_DIR:photara_studio>/licenses/MoGe-LICENSE.txt"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+                    "$<TARGET_FILE_DIR:photara_studio>/THIRD_PARTY_NOTICES.md"
+                VERBATIM)
             add_custom_command(TARGET photara_studio POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${CMAKE_CURRENT_SOURCE_DIR}/../apps/icons/icon.png"
@@ -1576,6 +1589,13 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                 target_compile_options(photara_studio_alignment_test PRIVATE /utf-8)
             endif()
             add_test(NAME photara.studio.alignment COMMAND photara_studio_alignment_test)
+            add_executable(photara_model_download_test
+                tests/model_download_test.cpp ${PHOTARA_STUDIO_DIR}/model_download.cpp)
+            target_include_directories(photara_model_download_test PRIVATE ${PHOTARA_STUDIO_DIR})
+            target_link_libraries(photara_model_download_test PRIVATE Photara::Splat)
+            target_compile_features(photara_model_download_test PRIVATE cxx_std_20)
+            add_test(NAME photara.studio.model_download COMMAND photara_model_download_test)
+            photara_exclude_from_default(photara_model_download_test)
         endif()
         add_executable(photara_export_mvs_test tests/export_mvs_test.cpp)
         target_link_libraries(photara_export_mvs_test PRIVATE Photara::SfM)

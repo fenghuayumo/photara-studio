@@ -93,6 +93,42 @@ int main() {
             const auto text = editor::path_to_utf8(path);
             std::snprintf(field.data(), field.size(), "%s", text.c_str());
         };
+        std::filesystem::create_directories(task_root / "aligned priors");
+        auto prior_settings = settings;
+        prior_settings.ai_priors = true; prior_settings.ai_prior_source = 1;
+        prior_settings.geometry_training = false;
+        prior_settings.ai_depth_weight = 0.F; prior_settings.ai_normal_weight = .02F;
+        put_path(prior_settings.ai_prior_directory, task_root / "aligned priors");
+        command = editor::build_train_command("photara.exe",prior_settings,layout,{});
+        require(command.find("--splat-lambda-d 0") != std::string::npos &&
+            command.find("--splat-lambda-n 0.02") != std::string::npos &&
+            command.find("--splat-geometry-loss=false") != std::string::npos &&
+            command.find("--splat-prior-model") == std::string::npos,
+            "cached normal-only priors remain independent of DN/MV and inference");
+        prior_settings.ai_depth_weight = prior_settings.ai_normal_weight = 0.F;
+        prior_settings.ai_prior_directory.fill('\0');
+        command = editor::build_train_command("photara.exe",prior_settings,layout,{});
+        require(command.find("--splat-prior-") == std::string::npos,
+            "zero weights skip prior paths and generation");
+        prior_settings.ai_prior_source = 0; prior_settings.ai_depth_weight = .01F;
+        const auto model_file = task_root / "moge normal.gguf";
+        std::ofstream(model_file).put('x'); put_path(prior_settings.ai_prior_model,model_file);
+        command = editor::build_train_command("photara.exe",prior_settings,layout,{});
+        require(command.find("--splat-prior-model \"") != std::string::npos &&
+            command.find("--splat-prior-tokens 1200") != std::string::npos &&
+            command.find("--splat-undistort=true") != std::string::npos &&
+            command.find("ai_priors") != std::string::npos,
+            "automatic preparation receives the model, token budget and task cache");
+        prior_settings.training_mode = 0; prior_settings.ai_prior_model.fill('\0');
+        command = editor::build_train_command("photara.exe",prior_settings,layout,{});
+        require(command.find("--splat-prior-") == std::string::npos,
+            "fast mode skips AI priors without requiring model files");
+        monitor.begin(editor::JobKind::train);
+        monitor.consume("stage started: splat.prepare_ai_priors");
+        monitor.consume("progress: Prepare AI priors completed=2/4 percent=50.0 items/s=1 elapsed_s=2 eta_s=2");
+        require(monitor.headline().find("Prepare AI priors") != std::string::npos &&
+            monitor.training_elapsed_seconds() < 0,
+            "prior generation has progress before the training timer starts");
         put_path(transient.images_dir, task_root / "dataset_a" / "images");
         put_path(transient.cache_dir, task_root / "cache");
         const auto first_task = editor::resolve_layout(transient);

@@ -14,7 +14,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 12;
+inline constexpr std::uint32_t k_settings_version = 13;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -100,6 +100,13 @@ struct Settings : photara::splat::TrainingLossSettings {
     bool texture_blend_linear = false;
     int geometry_from_iter = 7'000;
     bool normal_field = false;
+    bool ai_priors = false;
+    int ai_prior_source = 0;
+    std::filesystem::path ai_prior_model;
+    std::filesystem::path ai_prior_directory;
+    float ai_depth_weight = 0.01F;
+    float ai_normal_weight = 0.01F;
+    int ai_prior_tokens = 1200;
     // Training-time colour correction for auto-exposure / auto-white-balance
     // drift: ppisp_layout 0 = off, nonzero = PPISP on. Legacy value 2
     // (exposure + white balance) is treated as on. The bilateral grid adds

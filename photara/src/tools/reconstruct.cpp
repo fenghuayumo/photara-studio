@@ -29,6 +29,9 @@
 #include "splat/trainer.hpp"
 #include "splat/loss_settings.hpp"
 #include "splat/checkpoint.hpp"
+#if defined(PHOTARA_HAS_INFERENCE)
+#include "splat/prior_prepare.hpp"
+#endif
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
 #include "splat_drender/vulkan_api.h"
@@ -159,6 +162,8 @@ struct ReconstructCli {
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path splat_prior_directory;
+    std::filesystem::path splat_prior_model;
+    unsigned splat_prior_tokens{1200};
     float splat_lambda_d{0.F};
     float splat_lambda_n{0.F};
     std::filesystem::path dense_ply;
@@ -444,6 +449,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-prior-dir PATH  aligned AI prior cache; no MVS required\n"
+              << "  --splat-prior-model PATH  prepare/reuse priors with a local MoGe-2 normal GGUF\n"
+              << "  --splat-prior-tokens N  prior inference token budget (default 1200)\n"
               << "  --splat-lambda-d W  AI depth constraint weight (default 0)\n"
               << "  --splat-lambda-n W  AI normal constraint weight (default 0)\n"
               << "  --splat-mode NAME  fast, standard (default), high-quality\n"
@@ -821,6 +828,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-prior-dir", "Aligned AI depth/normal cache (independent of MVS and DN)",
          cxxopts::value<std::string>()->default_value(""))
+        ("splat-prior-model", "Generate/reuse AI priors with a local MoGe-2 normal GGUF before training",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-prior-tokens", "MoGe token budget for AI prior generation (default: 1200)",
+         cxxopts::value<unsigned>()->default_value("1200"))
         ("splat-lambda-d", "AI depth prior weight; zero disables (default: 0)",
          cxxopts::value<float>()->default_value("0"))
         ("splat-lambda-n", "AI normal prior weight; zero disables (default: 0)",
@@ -1476,6 +1487,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());
     cli.splat_prior_directory = utf8_to_path(result["splat-prior-dir"].as<std::string>());
+    cli.splat_prior_model = utf8_to_path(result["splat-prior-model"].as<std::string>());
+    cli.splat_prior_tokens = result["splat-prior-tokens"].as<unsigned>();
     cli.splat_lambda_d = result["splat-lambda-d"].as<float>();
     cli.splat_lambda_n = result["splat-lambda-n"].as<float>();
     if (!std::isfinite(cli.splat_lambda_d) || cli.splat_lambda_d < 0.F ||
@@ -3761,6 +3774,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
          options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
     photara::splat::enforce_training_loss_mode(options, cli.splat_mode);
+    if ((options.lambda_d > 0.F || options.lambda_n > 0.F) && !cli.splat_prior_model.empty()) {
+#if defined(PHOTARA_HAS_INFERENCE)
+        photara::splat::prepare_training_priors(scene, options, cli.splat_prior_model, cli.splat_prior_tokens);
+#else
+        throw std::invalid_argument("This build does not support MoGe inference. Choose an existing aligned AI prior cache.");
+#endif
+    }
     photara::core::Logger::instance().info("splat_ai_priors lambda_d=", options.lambda_d,
         " lambda_n=", options.lambda_n, " enabled=", options.lambda_d > 0.F || options.lambda_n > 0.F);
     const char* effective_strategy = !options.enable_densification

@@ -1,6 +1,7 @@
 #include "pipeline.hpp"
 
 #include "i18n.hpp"
+#include "moge_model.hpp"
 #include "io/video_frames.hpp"
 #include "sam/model_cache.hpp"
 #include "splat/checkpoint.hpp"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -115,6 +117,7 @@ constexpr Band k_train_bands[] = {
     {"build tracks", Stage::tracks, 0.08F, 0.09F},
     {"register images", Stage::mapping, 0.09F, 0.11F},
     {"refine sam masks", Stage::masking, 0.11F, 0.12F},
+    {"Prepare AI priors", Stage::preparing, 0.09F, 0.12F},
     {"mvs.load_images", Stage::meshing, 0.88F, 0.90F},
     {"mvs.estimate_depth", Stage::dense, 0.12F, 0.40F},
     {"mvs.geometric_consistency", Stage::dense, 0.40F, 0.50F},
@@ -853,7 +856,9 @@ void RunMonitor::consume(const std::string& line) {
     if (line.find("stage started: ") != std::string::npos) {
         std::string name;
         if (token_after(line, "stage started: ", name)) {
-            if (name == "sfm.frontend")
+            if (name == "splat.prepare_ai_priors")
+                enter_stage(Stage::preparing, 0.09F);
+            else if (name == "sfm.frontend")
                 enter_stage(Stage::features, 0.02F);
             else if (name.rfind("sfm.", 0) == 0 &&
                      name.find("mapping") != std::string::npos)
@@ -1510,6 +1515,36 @@ std::string build_train_command(
             << (settings.speedy_pruning ? "true" : "false");
     // Use the trainer's conservative two-soft/two-hard schedule when enabled.
     settings.validate();
+    if (settings.ai_priors && settings.training_mode != 0) {
+        if (!std::isfinite(settings.ai_depth_weight) || settings.ai_depth_weight < 0.F ||
+            !std::isfinite(settings.ai_normal_weight) || settings.ai_normal_weight < 0.F)
+            throw std::invalid_argument("AI prior weights must be finite and nonnegative.");
+        if (settings.ai_depth_weight > 0.F || settings.ai_normal_weight > 0.F) {
+            const bool generate = settings.ai_prior_source == 0;
+            if (settings.ai_prior_source != 0 && settings.ai_prior_source != 1)
+                throw std::invalid_argument("Invalid AI prior source.");
+            const auto directory = settings.ai_prior_directory[0]
+                ? path_from_utf8_field(settings.ai_prior_directory.data()) : layout.cache / "ai_priors";
+            if (!generate && !settings.ai_prior_directory[0])
+                throw std::invalid_argument("Choose the aligned AI prior cache folder.");
+            if (generate) {
+                const auto model = settings.ai_prior_model[0]
+                    ? path_from_utf8_field(settings.ai_prior_model.data()) : moge_model_path();
+                if (!std::filesystem::is_regular_file(model))
+                    throw std::invalid_argument("MoGe model is not downloaded yet.");
+                if (settings.ai_prior_tokens < 1 || settings.ai_prior_tokens > 10000)
+                    throw std::invalid_argument("AI prior tokens must be between 1 and 10000.");
+                command << " --splat-prior-model " << quote(model)
+                        << " --splat-prior-tokens " << settings.ai_prior_tokens;
+            } else if (!std::filesystem::is_directory(directory)) {
+                throw std::invalid_argument("The aligned AI prior cache folder does not exist.");
+            }
+            command << " --splat-prior-dir " << quote(directory)
+                    << " --splat-lambda-d " << settings.ai_depth_weight
+                    << " --splat-lambda-n " << settings.ai_normal_weight
+                    << " --splat-undistort=true";
+        }
+    }
     for (const auto& field : photara::splat::k_training_loss_fields)
         command << " --" << field.cli << ' ' << settings.*field.value;
     command << " --splat-geometry-loss=" << (settings.geometry_training ? "true" : "false")

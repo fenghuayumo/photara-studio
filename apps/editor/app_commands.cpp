@@ -459,6 +459,13 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.mesh_remesh_smooth_iterations = app.settings.mesh_remesh_smooth_iterations;
     settings.geometry_from_iter = app.settings.geometry_from_iter;
     settings.normal_field = app.settings.normal_field;
+    settings.ai_priors = app.settings.ai_priors;
+    settings.ai_prior_source = app.settings.ai_prior_source;
+    settings.ai_prior_model = path_from_utf8_field(app.settings.ai_prior_model.data());
+    settings.ai_prior_directory = path_from_utf8_field(app.settings.ai_prior_directory.data());
+    settings.ai_depth_weight = app.settings.ai_depth_weight;
+    settings.ai_normal_weight = app.settings.ai_normal_weight;
+    settings.ai_prior_tokens = app.settings.ai_prior_tokens;
     settings.ppisp_layout = app.settings.ppisp_layout;
     settings.bilateral_grid = app.settings.bilateral_grid;
     settings.texture_quality = app.settings.texture_quality;
@@ -551,6 +558,13 @@ void apply_project_settings(
     app.settings.mesh_remesh_smooth_iterations = std::clamp(settings.mesh_remesh_smooth_iterations, 0, 10);
     app.settings.geometry_from_iter = settings.geometry_from_iter;
     app.settings.normal_field = settings.normal_field;
+    app.settings.ai_priors = settings.ai_priors;
+    app.settings.ai_prior_source = settings.ai_prior_source;
+    store_path_field(app.settings.ai_prior_model, settings.ai_prior_model);
+    store_path_field(app.settings.ai_prior_directory, settings.ai_prior_directory);
+    app.settings.ai_depth_weight = settings.ai_depth_weight;
+    app.settings.ai_normal_weight = settings.ai_normal_weight;
+    app.settings.ai_prior_tokens = settings.ai_prior_tokens;
     app.settings.ppisp_layout = settings.ppisp_layout != 0 ? 1 : 0;
     app.settings.bilateral_grid = settings.bilateral_grid;
     app.settings.texture_quality = std::clamp(settings.texture_quality, 0, 2);
@@ -3906,6 +3920,7 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         set_message(app, "This project's training checkpoint is in use by another process.", theme::warning);
         return;
     }
+    if (!smoke && !ensure_moge_ready(app,resume_training)) return;
     if (!smoke && !app.training_inputs_ready) {
         const auto layout = app.layout;
         const auto images = reconstruction_images_path(app);

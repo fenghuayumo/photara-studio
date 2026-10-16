@@ -389,6 +389,7 @@ int main(const int argc, char** argv) {
         editor::draw_alignment_export_modal(app);
         editor::draw_splat_export_modal(app);
         editor::draw_sam_license_modal(app);
+        editor::draw_moge_download_modal(app);
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
         ImGui::EndDisabled();
@@ -437,6 +438,7 @@ int main(const int argc, char** argv) {
         // frame no longer references preview resources that start_train drops.
         if (app.close_requested && app.train_preparation) app.train_preparation->cancelled = true;
         editor::poll_train_start(app);
+        editor::poll_moge_download(app);
 
         // Now the frame is submitted and the stale preview descriptors are
         // safe to destroy.

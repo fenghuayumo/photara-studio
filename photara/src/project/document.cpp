@@ -145,6 +145,13 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::uint8_t>(settings.geometry_training));
     writer.value(static_cast<std::int32_t>(settings.normal_field_from_iter));
     writer.value(static_cast<std::int32_t>(settings.ppisp_model));
+    writer.value(static_cast<std::uint8_t>(settings.ai_priors));
+    writer.value(static_cast<std::int32_t>(settings.ai_prior_source));
+    writer.string(store_path(settings.ai_prior_model, base));
+    writer.string(store_path(settings.ai_prior_directory, base));
+    writer.value(settings.ai_depth_weight);
+    writer.value(settings.ai_normal_weight);
+    writer.value(static_cast<std::int32_t>(settings.ai_prior_tokens));
     return writer.take();
 }
 
@@ -335,6 +342,20 @@ Settings decode_settings(
         settings.geometry_training = reader.value<std::uint8_t>() != 0;
         settings.normal_field_from_iter = reader.value<std::int32_t>();
         settings.ppisp_model = reader.value<std::int32_t>();
+    }
+    if (version >= 13) {
+        settings.ai_priors = reader.value<std::uint8_t>() != 0;
+        settings.ai_prior_source = reader.value<std::int32_t>();
+        settings.ai_prior_model = load_path(reader.string(), base);
+        settings.ai_prior_directory = load_path(reader.string(), base);
+        settings.ai_depth_weight = reader.value<float>();
+        settings.ai_normal_weight = reader.value<float>();
+        settings.ai_prior_tokens = reader.value<std::int32_t>();
+        if ((settings.ai_prior_source != 0 && settings.ai_prior_source != 1) ||
+            !std::isfinite(settings.ai_depth_weight) || settings.ai_depth_weight < 0.F ||
+            !std::isfinite(settings.ai_normal_weight) || settings.ai_normal_weight < 0.F ||
+            settings.ai_prior_tokens < 1 || settings.ai_prior_tokens > 10000)
+            throw std::invalid_argument("Invalid AI prior project settings");
     }
     settings.sanitize();
     return settings;

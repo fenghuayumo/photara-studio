@@ -332,6 +332,13 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int geometry_from_iter = 7'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
+    bool ai_priors = false;
+    int ai_prior_source = 0; // 0 generate with MoGe, 1 existing aligned cache
+    std::array<char, 1024> ai_prior_model{};
+    std::array<char, 1024> ai_prior_directory{};
+    float ai_depth_weight = 0.01F;
+    float ai_normal_weight = 0.01F;
+    int ai_prior_tokens = 1200;
     // Training-time colour correction for auto-exposure / auto-white-balance
     // drift. `ppisp_layout`: 0 off, nonzero on (PPISP exposure + white
     // balance). The bilateral grid adds spatially varying affine correction.
