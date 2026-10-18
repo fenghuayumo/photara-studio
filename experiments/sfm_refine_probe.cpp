@@ -13,11 +13,15 @@
 #include <cmath>
 #include <string>
 #include "sfm_focal_probe.hpp"
+#include "sfm_ba_quality_probe.hpp"
 
 int main(int argc, char** argv) {
     using namespace photara::sfm;
-    if (argc != 3 && !(argc == 4 && (std::string(argv[3]) == "reattach" || std::string(argv[3]) == "focal"))) {
-        std::cerr << "checkpoint.bin output_prefix [reattach|focal]\n"; return 1;
+    const std::string mode = argc == 4 ? argv[3] : "";
+    const bool polish = mode == "polish" || mode == "polish-weak-prior" ||
+        mode == "polish-square" || mode == "polish-pinhole" || mode == "polish-per-view";
+    if (argc != 3 && !(argc == 4 && (mode == "reattach" || mode == "focal" || polish))) {
+        std::cerr << "checkpoint.bin output_prefix [reattach|focal|polish|polish-weak-prior|polish-square|polish-pinhole|polish-per-view]\n"; return 1;
     }
     const std::filesystem::path input(argv[1]), output(argv[2]);
     photara::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
@@ -27,6 +31,10 @@ int main(int argc, char** argv) {
     CheckpointOptions options; options.directory=input.parent_path(); options.write=false;
     Scene scene;
     if (!CheckpointStore(options).load_scene(CheckpointStage::reconstruction,key,scene)) return 3;
+    if (polish) {
+        probe_ba_quality(scene, output, mode);
+        return 0;
+    }
     // A rejected final checkpoint retains candidate poses but clears their
     // registration flags. Offline component experiments need the original
     // candidate set back to exercise recovery from the mapping state.

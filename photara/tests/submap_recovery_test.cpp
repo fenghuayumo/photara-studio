@@ -6,6 +6,7 @@
 #include "sfm/asfm.hpp"
 #include "sfm/rotation_recovery.hpp"
 #include "core/logging.hpp"
+#include "../src/sfm/resection_seeding.hpp"
 #include <iostream>
 #include <chrono>
 #include <random>
@@ -199,6 +200,35 @@ int main() {
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
         {
+            Scene search = fixture();
+            search.pairs.clear();
+            search.images[4].registered = false;
+            Pose3D truth;
+            truth.C = Vec3(1, 0, 0);
+            for (Index anchor : {0U, 3U}) {
+                ImagePair pair(anchor, 4);
+                pair.relative_pose = truth/search.images[anchor].pose;
+                pair.matches.resize(20);
+                search.pairs.push_back(pair);
+            }
+            std::vector<Vec3> points, bearings;
+            std::mt19937 rng(81);
+            std::uniform_real_distribution<double> xy(-1.5, 1.5), z(4.0, 6.0);
+            for (Index f = 0; f < 160; ++f) {
+                points.emplace_back(xy(rng), xy(rng), z(rng));
+                bearings.push_back(truth.transform_world_to_camera(points.back()).normalized());
+            }
+            const auto seed = detail::relative_resection_search_seed(search, 4, bearings, points);
+            expect(seed.success && seed.num_inliers == 160 && (seed.pose.C-truth.C).norm() < 1e-8,
+                "independent boundary rays can seed search without the inherited target pose");
+            search.pairs.back().relative_pose->C *= -1;
+            expect(!detail::relative_resection_search_seed(search, 4, bearings, points).success,
+                "negative relative ray depths cannot seed recovery");
+            search.pairs.pop_back();
+            expect(!detail::relative_resection_search_seed(search, 4, bearings, points).success,
+                "one boundary ray cannot determine a search center");
+        }
+        {
             Scene missing = fixture();
             for (Index id = 4; id < 8; ++id) missing.images[id].registered = false;
             for (auto& track : missing.tracks)
@@ -214,6 +244,36 @@ int main() {
             }
             expect(recover_stable_resections(missing, stable, tentative).size() == 4,
                 "tentative map links must recover views without inherited pair geometry");
+            {
+                Scene distant = before;
+                for (Index anchor = 0; anchor < 4; ++anchor)
+                    distant.images[anchor].pose.C *= 0.16;
+                std::mt19937 depth_rng(81);
+                std::uniform_real_distribution<double> xy(-1.5, 1.5), z(4.0, 6.0);
+                for (Index f = 0; f < 160; ++f) {
+                    const Vec3 point(xy(depth_rng), xy(depth_rng), z(depth_rng));
+                    for (Index anchor = 0; anchor < 4; ++anchor) {
+                        const auto pixel = distant.cameras[0].project(
+                            distant.images[anchor].pose.transform_world_to_camera(point));
+                        distant.images[anchor].features.keypoints[f].x = static_cast<float>(pixel.x());
+                        distant.images[anchor].features.keypoints[f].y = static_cast<float>(pixel.y());
+                    }
+                }
+                const auto frozen = distant;
+                expect(recover_stable_resections(distant, stable, tentative).size() == 4,
+                    "independent multi-view depths below two degrees retain ordinary resection support");
+                for (Index id = 4; id < 8; ++id)
+                    expect((distant.images[id].pose.C - Vec3(0.25*id, 0.12*(id%2), 0)).norm() < 1e-3,
+                        "low-parallax multi-view recovery must recover the actual camera centers");
+                for (Index id = 0; id < 4; ++id)
+                    expect(distant.images[id].pose.C == frozen.images[id].pose.C,
+                        "low-parallax recovery keeps anchor poses frozen");
+                Scene two_depths = frozen;
+                for (auto& track : two_depths.tracks)
+                    std::erase_if(track.observations, [](const auto& obs) { return obs.image_id >= 2; });
+                expect(recover_stable_resections(two_depths, stable, tentative).empty(),
+                    "two-view local depths still require the wider parallax gate");
+            }
             for (Index id = 0; id < 4; ++id)
                 expect(missing.images[id].pose.C == before.images[id].pose.C &&
                        missing.images[id].pose.R == before.images[id].pose.R,

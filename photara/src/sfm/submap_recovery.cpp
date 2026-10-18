@@ -4,6 +4,7 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 #include "core/logging.hpp"
+#include "resection_validation.hpp"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -704,7 +705,7 @@ std::vector<Index> recover_stable_resections(
     }
     TriangulationOptions tri;
     tri.reproj_threshold_px = 2;
-    tri.min_angle_deg = tentative_matches.empty() ? 1.F : 2.F;
+    tri.min_angle_deg = 1.F;
     tri.split_tracks = false;
     const unsigned minimum_depth_views = tentative_matches.empty() ? 3U : 2U;
     for (Index t = 0; t < scene.tracks.size(); ++t) {
@@ -727,6 +728,15 @@ std::vector<Index> recover_stable_resections(
         if ((!has_boundary && targets.empty()) || stable_observations.size() < minimum_depth_views) continue;
         for (const auto& [image, feature] : stable_observations) stable.observations.push_back({image, feature});
         if (triangulate_track(stable, scene, tri) < minimum_depth_views) continue;
+        // Three or more frozen views provide the same independent depth
+        // check as ordinary resection. Only two-view local depths need the
+        // wider parallax gate; applying it to every track discards valid
+        // multi-view support in distant/low-baseline scene regions.
+        if (!tentative_matches.empty() && stable.num_inliers == 2) {
+            auto pair_tri = tri;
+            pair_tri.min_angle_deg = 2.F;
+            if (triangulate_track(stable, scene, pair_tri) < 2) continue;
+        }
         // Replacing a point must not discard valid observations in the frozen
         // map. A locally successful PnP is insufficient if its anchors damage
         // the geometry that made the main map reliable.
@@ -809,14 +819,22 @@ std::vector<Index> recover_stable_resections(
         if (unique.size() < minimum_fit + 12) { reject("insufficient_independent_depths"); continue; }
         const std::size_t validation_count = std::min(unique.size() - minimum_fit,
             std::max<std::size_t>(12, unique.size() / 3));
-        // Feature order can correlate with scale, location, or repeated texture.
-        // Shuffle once, independently of residuals, so validation stays held out.
-        std::vector<std::size_t> order(unique.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::mt19937 split_rng(0x53464d);
-        std::shuffle(order.begin(), order.end(), split_rng);
-        std::vector<bool> is_validation(unique.size(), false);
-        for (std::size_t j = 0; j < validation_count; ++j) is_validation[order[j]] = true;
+        std::vector<bool> is_validation;
+        if (!tentative_matches.empty()) {
+            std::vector<std::vector<Index>> ancestry;
+            for (const auto& [feature, match] : unique)
+                ancestry.emplace_back(depth_anchors[match.track].begin(), depth_anchors[match.track].end());
+            is_validation = detail::stratified_resection_holdout(ancestry, validation_count);
+        } else {
+            // Ordinary recovery already requires >=3 cameras per depth.
+            // Preserve its existing independent shuffle.
+            std::vector<std::size_t> order(unique.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::mt19937 split_rng(0x53464d);
+            std::shuffle(order.begin(), order.end(), split_rng);
+            is_validation.assign(unique.size(), false);
+            for (std::size_t j = 0; j < validation_count; ++j) is_validation[order[j]] = true;
+        }
         std::vector<Vec3> bearings, points;
         std::vector<Match> validation;
         std::vector<Index> fit_tracks;

@@ -1,10 +1,13 @@
 #include "core/logging.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/checkpoint.hpp"
+#include "sfm/export_colmap.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/submap_recovery.hpp"
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
+#include "../../../experiments/sfm_missing_group_probe.hpp"
 
 // Development-only bounded ancestry experiment. Each pass freezes its anchor
 // mask; newly accepted views are promoted only for the NEXT pass. Original
@@ -12,8 +15,9 @@
 int main(int argc, char** argv) {
     try {
         using namespace photara::sfm;
-        if (argc != 3 && !(argc == 4 && std::string_view(argv[3]) == "--descriptor-map"))
-            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map]");
+        if (argc != 3 && !(argc == 4 && (std::string_view(argv[3]) == "--descriptor-map" || std::string_view(argv[3]) == "--groups")))
+            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map|--groups]");
+        const bool groups = argc == 4 && std::string_view(argv[3]) == "--groups";
         const bool descriptor_map = argc == 4;
         const std::filesystem::path input(argv[1]), output(argv[2]);
         const auto reports = std::filesystem::path(output.string() + ".rounds.csv");
@@ -31,6 +35,15 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Cannot load final graph checkpoint");
         if (scene.pairs.empty()) throw std::runtime_error("Resection requires pair geometry");
         photara::core::Logger::instance().configure({}, "photara", photara::core::LogLevel::debug);
+        if (groups) {
+            std::ofstream csv(reports);
+            const auto recovered = probe_missing_groups(scene, csv);
+            save_asfm(scene, output);
+            if (const auto* export_path = std::getenv("PHOTARA_PROBE_EXPORT_COLMAP"))
+                save_colmap_text(scene, export_path);
+            std::cout << "recovered_views=" << recovered << " registered_views=" << scene.registered_count() << '\n';
+            return 0;
+        }
         const auto audit = analyze_position_observability(scene);
         if (audit.reliable_views < 3) throw std::runtime_error("No frozen stable map available");
         auto stable = audit.reliable;
@@ -59,7 +72,13 @@ int main(int argc, char** argv) {
         for (unsigned round = 0; round < 3; ++round) {
             std::vector<Index> recovered;
             if (descriptor_map) {
-                recover_missing_views(scene);
+                FrontEndOptions recovery;
+                if (const auto* relaxed = std::getenv("PHOTARA_PROBE_DENSE_RECOVERY");
+                    relaxed && std::string_view(relaxed) == "1") {
+                    recovery.mutual_check = false;
+                    recovery.match_ratio = 0.9F;
+                }
+                recover_missing_views(scene, recovery);
                 if (map_fingerprint() != original_map)
                     throw std::runtime_error("Original landmarks or observations changed during missing-view recovery");
                 for (Index id = 0; id < scene.images.size(); ++id)
@@ -94,6 +113,8 @@ int main(int argc, char** argv) {
         if (!csv) throw std::runtime_error("Failed writing resection reports");
         std::cout << "recovered_views=" << total << " original_anchors_unchanged=1 intrinsics_unchanged=1\n";
         if (descriptor_map) std::cout << "original_landmarks_unchanged=1\n";
+        if (const auto* export_path = std::getenv("PHOTARA_PROBE_EXPORT_COLMAP"))
+            save_colmap_text(scene, export_path);
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

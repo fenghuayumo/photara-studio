@@ -109,6 +109,13 @@ FrontEndResult run_frontend(
 
 // Late descriptor-to-map recovery. Existing cameras and intrinsics are frozen;
 // new poses must pass the stable resection's independent held-out checks.
+// Mix verified visual neighbors with temporal neighbors at a fixed total budget.
+std::vector<Index> select_missing_view_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors = 16);
 unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {});
+// Bounded, independently validated re-localization of weak scale-breaking leaves
+// together with missing views. Other registered poses and intrinsics stay fixed.
+std::vector<Index> select_weak_position_repairs(const Scene& scene);
+unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options = {});
 
 }  // namespace photara::sfm

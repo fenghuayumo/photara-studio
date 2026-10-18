@@ -13,6 +13,7 @@
 #include <cctype>
 #include "sfm/align_live.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "resection_seeding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2822,12 +2823,102 @@ FrontEndResult run_frontend(
     return result;
 }
 
+std::vector<Index> select_missing_view_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors) {
+    if (target >= scene.images.size() || maximum_neighbors == 0) return {};
+    const auto distance = [target](Index id) { return id > target ? id-target : target-id; };
+    std::vector<Index> temporal;
+    for (Index id = 0; id < scene.images.size(); ++id)
+        if (id != target && scene.images[id].registered) temporal.push_back(id);
+    std::stable_sort(temporal.begin(), temporal.end(), [&](Index a, Index b) {
+        return distance(a) < distance(b);
+    });
+    std::map<Index, double> scores;
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.matches.empty()) continue;
+        const Index other = pair.id1 == target ? pair.id2 : pair.id2 == target ? pair.id1 : k_invalid;
+        if (other >= scene.images.size() || other == target || !scene.images[other].registered) continue;
+        // Inactive edges remain search proposals only. Replacement poses still
+        // require independent depths and withheld-observation validation.
+        const double score = pair.matches.size() * std::max(0.25F, pair.weight_spatial);
+        if (std::isfinite(score)) scores[other] = std::max(scores[other], score);
+    }
+    std::vector<Index> visual;
+    for (const auto& [id, score] : scores) visual.push_back(id);
+    std::stable_sort(visual.begin(), visual.end(), [&](Index a, Index b) {
+        if (scores[a] != scores[b]) return scores[a] > scores[b];
+        return distance(a) < distance(b);
+    });
+    if (visual.size() > maximum_neighbors/2) visual.resize(maximum_neighbors/2);
+    for (Index id : temporal) {
+        if (visual.size() >= maximum_neighbors) break;
+        if (std::find(visual.begin(), visual.end(), id) == visual.end()) visual.push_back(id);
+    }
+    return visual;
+}
+
+std::vector<Index> select_weak_position_repairs(const Scene& scene) {
+    std::vector<unsigned> degree(scene.images.size());
+    std::vector<double> longest(scene.images.size());
+    std::vector<double> steps;
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.zero_baseline || pair.degenerate_planar ||
+            pair.matches.size() < 30 || pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size() ||
+            !scene.images[pair.id1].registered || !scene.images[pair.id2].registered) continue;
+        const double length = (scene.images[pair.id1].pose.C-scene.images[pair.id2].pose.C).norm();
+        if (!std::isfinite(length) || length <= 1e-10) continue;
+        // A genuine long-baseline revisit is not a temporal scale break.
+        if (pair.id2-pair.id1 <= 4) {
+            longest[pair.id1] = std::max(longest[pair.id1], length);
+            longest[pair.id2] = std::max(longest[pair.id2], length);
+        }
+        if (pair.active) {
+            ++degree[pair.id1]; ++degree[pair.id2];
+            if (pair.id2-pair.id1 <= 2) steps.push_back(length);
+        }
+    }
+    if (steps.size() < 8) return {};
+    auto mid = steps.begin()+steps.size()/2;
+    std::nth_element(steps.begin(), mid, steps.end());
+    std::vector<Index> targets;
+    for (Index i = 0; i < scene.images.size(); ++i)
+        if (scene.images[i].registered && degree[i] > 0 && degree[i] <= 3 && longest[i] > 8*(*mid))
+            targets.push_back(i);
+    std::stable_sort(targets.begin(), targets.end(), [&](Index a, Index b) { return longest[a] > longest[b]; });
+    if (targets.size() > 32) targets.resize(32);
+    return targets;
+}
+
 unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
     std::vector<Index> missing;
     for (Index id = 0; id < scene.images.size(); ++id)
         if (!scene.images[id].registered) missing.push_back(id);
     if (missing.empty() || scene.registered_count() < 3 ||
         scene.registered_count() * 2 < scene.images.size()) return 0;
+    // Work inward from both sides of a missing run, rather than failing the
+    // whole run before reaching the usable anchor at its far end.
+    std::vector<Index> stable_ids;
+    for (Index id = 0; id < scene.images.size(); ++id)
+        if (scene.images[id].registered) stable_ids.push_back(id);
+    const auto boundary_distance = [&](Index id) {
+        const auto right = std::lower_bound(stable_ids.begin(), stable_ids.end(), id);
+        Index distance = static_cast<Index>(scene.images.size());
+        if (right != stable_ids.end()) distance = *right-id;
+        if (right != stable_ids.begin()) distance = std::min(distance, id-*std::prev(right));
+        return distance;
+    };
+    // Keep separate missing runs together so their bounded feature/match
+    // cache is reused instead of repeatedly extracting distant neighborhoods.
+    std::vector<Index> run_start(scene.images.size(), k_invalid);
+    Index start = missing.front(), previous = k_invalid;
+    for (Index id : missing) {
+        if (previous == k_invalid || id != previous+1) start = id;
+        run_start[id] = start; previous = id;
+    }
+    std::stable_sort(missing.begin(), missing.end(), [&](Index a, Index b) {
+        if (run_start[a] != run_start[b]) return run_start[a] < run_start[b];
+        return boundary_distance(a) < boundary_distance(b);
+    });
     if ((!options.pipeline.empty() && options.pipeline != "none") ||
         (options.extractor != "siftgpu" && options.extractor != "vulkan_sift" && options.extractor != "sift")) return 0;
     for (Index id : missing)
@@ -2848,14 +2939,7 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
     for (Index target : missing) {
         // Rebuild only local depths. Neither the inherited missing pose nor
         // the main map's triangulated points enter this independent solve.
-        std::vector<Index> neighbors;
-        for (Index id = 0; id < scene.images.size(); ++id)
-            if (scene.images[id].registered) neighbors.push_back(id);
-        std::stable_sort(neighbors.begin(), neighbors.end(), [target](Index a, Index b) {
-            const auto distance = [target](Index id) { return id > target ? id - target : target - id; };
-            return distance(a) < distance(b);
-        });
-        if (neighbors.size() > 16) neighbors.resize(16);
+        std::vector<Index> neighbors = select_missing_view_anchors(scene, target);
         neighbors.push_back(target);
         const auto retained = [&](Index id) {
             return std::find(neighbors.begin(), neighbors.end(), id) != neighbors.end();
@@ -2961,7 +3045,25 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         for (auto& pair : boundary_geometry) local.pairs.push_back(std::move(pair));
         std::vector<std::uint8_t> stable(neighbors.size(), 1);
         stable[candidate] = 0;
-        auto recovered = recover_stable_resections(local, stable, tentative);
+        // Two-view consensus can remove descriptor aliases before they enter
+        // the feature-to-landmark ambiguity resolver. It is only a proposal:
+        // depths still come exclusively from frozen anchors and the absolute
+        // pose must pass the same fit/holdout and spatial support checks.
+        std::vector<RawPairMatches> verified_boundary;
+        for (const auto& pair : local.pairs) {
+            if (pair.id2 != candidate || !pair.relative_pose) continue;
+            RawPairMatches boundary;
+            boundary.id1 = candidate;
+            boundary.id2 = pair.id1;
+            for (const auto& match : pair.matches)
+                boundary.matches.push_back({match.train, match.query});
+            verified_boundary.push_back(std::move(boundary));
+        }
+        std::vector<Index> recovered;
+        if (!verified_boundary.empty())
+            recovered = recover_stable_resections(local, stable, verified_boundary);
+        if (recovered.empty())
+            recovered = recover_stable_resections(local, stable, tentative);
         if (recovered.empty()) {
             // A small PnP consensus is only a search seed, never a registered
             // camera. Geometry-guided matching can resolve descriptor aliases;
@@ -3002,7 +3104,9 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             seed_options.min_inliers = 8;
             seed_options.max_reproj_error_px = 2;
             seed_options.max_iterations = 50000;
-            const auto seed = estimate_absolute_pose(bearings, points, camera, seed_options);
+            auto seed = estimate_absolute_pose(bearings, points, camera, seed_options);
+            if (!seed.success)
+                seed = detail::relative_resection_search_seed(local, candidate, bearings, points);
             core::Logger::instance().info("missing view search seed: image=", scene.images[target].path.filename(),
                 " success=", seed.success, " inliers=", seed.num_inliers);
             if (seed.success) {
@@ -3129,6 +3233,37 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
     core::Logger::instance().info("missing view recovery: candidates=", missing.size(),
         " recovered=", recovered_count, " frozen_registered_poses=1 frozen_intrinsics=1 frozen_landmarks=1");
     return recovered_count;
+}
+
+unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
+    const auto targets = select_weak_position_repairs(scene);
+    std::vector<Pose3D> original;
+    for (Index id : targets) {
+        original.push_back(scene.images[id].pose);
+        scene.images[id].registered = false;
+    }
+    unsigned recovered = 0;
+    try {
+        recovered = recover_missing_views(scene, options);
+    } catch (...) {
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            scene.images[targets[i]].pose = original[i];
+            scene.images[targets[i]].registered = true;
+        }
+        throw;
+    }
+    unsigned repaired = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        auto& image = scene.images[targets[i]];
+        if (!image.registered) { image.pose = original[i]; image.registered = true; }
+        else {
+            ++repaired;
+            core::Logger::instance().info("independent position repair accepted: image=", image.path.filename());
+        }
+    }
+    if (repaired) filter_tracks(scene, 2.F, 1.F, 0.F, 0.F);
+    core::Logger::instance().info("independent position repair: nominated=", targets.size(), " repaired=", repaired);
+    return recovered;
 }
 
 }  // namespace photara::sfm
