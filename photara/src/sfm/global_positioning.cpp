@@ -1,4 +1,5 @@
 #include "sfm/global_positioning.hpp"
+#include "sfm/reconstruct.hpp"
 #include "positioning_validation.hpp"
 #include "sfm/positioning_control.hpp"
 #include "core/logging.hpp"
@@ -515,6 +516,48 @@ std::vector<Index> select_tracks_for_positioning(
                 ++image_counts[image_id];
             });
     };
+
+    if (options.cross_branch_tracks_per_image && target >= 4) {
+        // Match the late weak-branch graph screen, without inherited points.
+        Scene graph; graph.images.resize(scene.images.size());
+        std::vector<float> strongest(scene.images.size(),0.F);
+        for (Index id=0;id<scene.images.size();++id) {
+            graph.images[id].id=id; graph.images[id].registered=scene.images[id].registered;
+        }
+        const auto eligible_pair=[&](const ImagePair& p) {
+            return p.active && p.relative_pose && !p.zero_baseline && p.id1<scene.images.size() &&
+                p.id2<scene.images.size() && scene.images[p.id1].registered && scene.images[p.id2].registered &&
+                std::isfinite(p.composite_weight());
+        };
+        for (const auto& p:scene.pairs) if (eligible_pair(p)) {
+            strongest[p.id1]=std::max(strongest[p.id1],p.composite_weight());
+            strongest[p.id2]=std::max(strongest[p.id2],p.composite_weight());
+        }
+        for (const auto& p:scene.pairs) if (eligible_pair(p) &&
+            p.composite_weight()>=std::max(3.F,0.01F*std::min(strongest[p.id1],strongest[p.id2]))) {
+            ImagePair edge(p.id1,p.id2); edge.relative_pose=p.relative_pose;
+            graph.pairs.push_back(std::move(edge));
+        }
+        const auto audit=analyze_alignment_observability(graph);
+        std::vector<unsigned> boundary_counts(scene.images.size());
+        unsigned candidates=0;
+        if (audit.reliable_views>=3) for (const auto& entry:ranked) {
+            if (selected.size()>=target/4) break;
+            const auto& track=scene.tracks[entry.track_id]; unsigned core=0; bool helps=false;
+            for (const auto& obs:track.observations) {
+                if (obs.image_id>=scene.images.size() || !scene.images[obs.image_id].registered) continue;
+                if (audit.reliable[obs.image_id]) ++core;
+                else helps=helps || boundary_counts[obs.image_id]<options.cross_branch_tracks_per_image;
+            }
+            if (core<2 || !helps) continue;
+            ++candidates; select(entry.track_id);
+            for (const auto& obs:track.observations)
+                if (obs.image_id<scene.images.size() && scene.images[obs.image_id].registered && !audit.reliable[obs.image_id])
+                    ++boundary_counts[obs.image_id];
+        }
+        core::Logger::instance().info("positioning boundary quota: core=",audit.reliable_views,
+            " selected=",selected.size()," candidates=",candidates," quota=",options.cross_branch_tracks_per_image);
+    }
 
     // Pass 1: cover as many image-grid cells as possible.
     for (const RankedTrack& entry : ranked) {
@@ -2001,6 +2044,7 @@ GlobalPositioningSummary solve_global_positions(
 
     const std::vector<Index> selected_tracks =
         select_tracks_for_positioning(scene, options);
+    if (options.selection_callback) options.selection_callback(scene, selected_tracks);
     core::Logger::instance().info(
         "global positioning setup: images=", scene.registered_count(),
         " pairs=", scene.pairs.size(),

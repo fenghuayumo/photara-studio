@@ -2834,14 +2834,30 @@ std::vector<Index> select_missing_view_anchors(
         return distance(a) < distance(b);
     });
     std::map<Index, double> scores;
+    std::map<Index, double> bridges;
     for (const auto& pair : scene.pairs) {
         if (!pair.relative_pose || pair.matches.empty()) continue;
         const Index other = pair.id1 == target ? pair.id2 : pair.id2 == target ? pair.id1 : k_invalid;
-        if (other >= scene.images.size() || other == target || !scene.images[other].registered) continue;
+        if (other >= scene.images.size() || other == target) continue;
         // Inactive edges remain search proposals only. Replacement poses still
         // require independent depths and withheld-observation validation.
         const double score = pair.matches.size() * std::max(0.25F, pair.weight_spatial);
-        if (std::isfinite(score)) scores[other] = std::max(scores[other], score);
+        if (!std::isfinite(score)) continue;
+        if (scene.images[other].registered) scores[other] = std::max(scores[other], score);
+        else bridges[other] = std::max(bridges[other], score);
+    }
+    // Missing runs can hide a useful revisit from the target's direct graph.
+    // A two-hop path only nominates an anchor for fresh descriptor matching;
+    // it contributes no pose/depth evidence to the resection itself.
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.matches.empty()) continue;
+        for (const auto [bridge, anchor] : {std::pair{pair.id1, pair.id2}, std::pair{pair.id2, pair.id1}}) {
+            const auto found = bridges.find(bridge);
+            if (found == bridges.end() || anchor >= scene.images.size() || !scene.images[anchor].registered) continue;
+            const double weight = pair.matches.size()*std::max(0.25F, pair.weight_spatial);
+            const double score = 0.5*std::min(found->second, weight);
+            if (std::isfinite(score)) scores[anchor] = std::max(scores[anchor], score);
+        }
     }
     std::vector<Index> visual;
     for (const auto& [id, score] : scores) visual.push_back(id);

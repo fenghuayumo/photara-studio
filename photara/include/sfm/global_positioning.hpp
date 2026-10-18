@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sfm/scene.hpp"
+#include <functional>
 
 namespace photara::sfm {
 
@@ -36,6 +37,9 @@ struct GlobalPositioningOptions {
     unsigned tracks_per_registered_image{20};
     unsigned max_tracks_for_positioning{20000};
     unsigned coverage_grid_size{4};
+    // Offline opt-in: reserve <=25% of the existing budget for eligible tracks
+    // with >=2 cameras in the strong core and cameras outside it.
+    unsigned cross_branch_tracks_per_image{0};
     unsigned max_irls_iterations{8};
     unsigned irls_inner_iterations{8};
     double irls_tuning_constant{4.685};
@@ -72,6 +76,8 @@ struct GlobalPositioningOptions {
     // uniform motion: keep measured geometry free by default, including for
     // handheld or nonuniform turntable sequences.
     bool regularize_complete_orbits{false};
+    // Read-only diagnostics; excluded from reconstruction cache keys.
+    std::function<void(const Scene&, const std::vector<Index>&)> selection_callback;
 };
 
 enum class GlobalPositioningTermination {

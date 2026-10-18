@@ -353,6 +353,8 @@ void append_resection(
     key.append(options.mult_depth_near);
     key.append(options.mult_depth_far);
     key.append(options.use_pair_match_correspondences);
+    key.append(options.preserve_conflict_alternatives);
+    key.append(options.retry_lower_support_candidates);
     key.append(options.ransac.max_reproj_error_px);
     key.append(options.ransac.confidence);
     key.append(options.ransac.max_iterations);
@@ -421,6 +423,7 @@ std::uint64_t reconstruction_key(
     key.append(config.global_positioning.tracks_per_registered_image);
     key.append(config.global_positioning.max_tracks_for_positioning);
     key.append(config.global_positioning.coverage_grid_size);
+    key.append(config.global_positioning.cross_branch_tracks_per_image);
     key.append(config.global_positioning.max_irls_iterations);
     key.append(config.global_positioning.irls_inner_iterations);
     key.append(config.global_positioning.irls_tuning_constant);
@@ -1538,6 +1541,10 @@ ReconstructionSummary run_global_mapping(
     core::StageScope stage("sfm.global_mapping");
     ReconstructionSummary summary;
 
+    const auto trace = [&](const char* name) {
+        if (fallback_resection.diagnostic_callback) fallback_resection.diagnostic_callback(name, scene);
+    };
+    trace("mapping_input");
     GlobalRotationSummary rotation_summary =
         estimate_global_rotations(scene, rotation);
     if (!rotation_summary.success) {
@@ -1555,10 +1562,13 @@ ReconstructionSummary run_global_mapping(
     rotation_summary.filtered_pairs = total_filtered_pairs;
     // Rotation filtering changes triangle support. Refresh graph-local weights
     // before rebuilding tracks so rejected edges cannot dominate unions.
+    trace("rotation_filtered");
     compute_pair_weights(scene);
+    trace("weights_refreshed");
     // openMVS rebuilds tracks after relative-rotation filtering with
     // ReconstructionConfig::minPairWeight (default 3).
     build_tracks(scene, 3.F);
+    trace("tracks_rebuilt");
     core::Logger::instance().info(
         "global: rotation_images=", rotation_summary.estimated_images,
         " used_pairs=", rotation_summary.used_pairs,
@@ -1574,6 +1584,7 @@ ReconstructionSummary run_global_mapping(
         return summary;
     }
 
+    trace("positioned");
     std::vector<Index> reseeded_images;
     const unsigned repaired_positions =
         repair_position_outliers(scene, reseeded_images);
@@ -1595,6 +1606,7 @@ ReconstructionSummary run_global_mapping(
     }
 
     filter_tracks(scene, 6.F, 1.F, 0.F, 0.F);
+    trace("initial_triangulation_filtered");
 
     if (fallback_resection.checkpoint_callback)
         fallback_resection.checkpoint_callback(scene);
@@ -1698,6 +1710,7 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
+    trace("final_ba_filtered");
     if (!reseeded_images.empty()) {
         std::vector<std::uint8_t> is_reseeded(scene.images.size(), 0);
         for (const Index image_id : reseeded_images) {
@@ -1820,10 +1833,17 @@ ReconstructionSummary run_global_mapping(
 namespace {
 void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config) {
     core::StageScope stage("sfm.alignment_recovery");
+    const auto trace = [&](const char* name) {
+        if (config.resection.diagnostic_callback) config.resection.diagnostic_callback(name, scene);
+    };
+    trace("before_support_prune");
     prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                    config.maximum_final_reprojection_error_pixels);
+    trace("support_pruned");
     bool changed = !recover_stable_resections(scene).empty();
+    trace("stable_resection");
     changed = recover_weakly_connected_views(scene) != 0 || changed;
+    trace("weak_branch_recovery");
     const auto final_rotation_audit = [&] {
         if (config.mode == ReconstructionMode::hierarchical &&
             scene.images.size() > config.hierarchical.cluster.max_views_per_cluster) {
@@ -1887,6 +1907,7 @@ ReconstructionSummary reconstruct_from_frontend(
         prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                        config.maximum_final_reprojection_error_pixels);
     audit_position_support(scene);
+    if (config.resection.diagnostic_callback) config.resection.diagnostic_callback("final", scene);
     return summarize_scene(scene);
 }
 

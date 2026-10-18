@@ -7,6 +7,8 @@
 #include "sfm/rotation_recovery.hpp"
 #include "core/logging.hpp"
 #include "../src/sfm/resection_seeding.hpp"
+#include "../../experiments/sfm_resection_refinement.hpp"
+#include "../../experiments/sfm_pair_group_init.hpp"
 #include <iostream>
 #include <chrono>
 #include <random>
@@ -199,6 +201,38 @@ int main() {
         photara::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
+        {
+            Scene scene = fixture();
+            std::mt19937 rng(81);
+            std::uniform_real_distribution<double> xy(-1.5,1.5), z(4.0,6.0);
+            std::vector<detail::ResectionFitPoint> fit;
+            for (Index f = 0; f < 80; ++f) {
+                const Vec3 truth(xy(rng),xy(rng),z(rng));
+                fit.push_back({f,f,truth+Vec3(0.01,0,0.04),{0,1,2,3}});
+            }
+            Pose3D initial;
+            initial.C = Vec3(1.04,0.01,0.02);
+            initial.R = Eigen::AngleAxisd(0.01,Vec3::UnitY()).toRotationMatrix();
+            const auto before = scene;
+            const auto refined = detail::refine_resection_depths(scene,4,initial,fit);
+            expect((refined.C-Vec3(1,0,0)).norm() < 1e-4 &&
+                   (refined.R-Mat3::Identity()).norm() < 1e-4,
+                   "joint fit-only refinement removes depth-induced camera pose bias");
+            for (Index f = 80; f < 160; ++f) {
+                scene.images[4].features.keypoints[f].x += 200;
+                scene.images[4].features.keypoints[f].y -= 100;
+            }
+            const auto excluded = detail::refine_resection_depths(scene,4,initial,fit);
+            expect((excluded.C-refined.C).norm() < 1e-9 && (excluded.R-refined.R).norm() < 1e-9,
+                   "held-out pixels cannot enter the refinement optimizer");
+            for (Index id = 0; id < scene.images.size(); ++id)
+                expect(scene.images[id].pose.C == before.images[id].pose.C &&
+                       scene.images[id].pose.R == before.images[id].pose.R,
+                       "disposable depth refinement leaves all source camera poses exact");
+            for (Index t = 0; t < scene.tracks.size(); ++t)
+                expect(scene.tracks[t].position == before.tracks[t].position,
+                       "disposable depth refinement cannot rewrite source landmarks");
+        }
         {
             Scene search = fixture();
             search.pairs.clear();
@@ -778,6 +812,36 @@ int main() {
             for (Index i = 0; i < 4; ++i)
                 expect(corridor.images[i].registered,
                        "core cameras must remain registered");
+        }
+        {
+            Scene chain = fixture();
+            const auto frozen = chain;
+            // Every local camera has at most two neighbors: no four-view star.
+            std::erase_if(chain.pairs, [](const auto& p) {
+                return p.id1 >= 4 && p.id2 != p.id1 + 1;
+            });
+            auto local_chain = make_independent_submap(chain, ids);
+            build_tracks(local_chain.scene);
+            expect(!star_initialize(local_chain.scene), "chain control must fail star initialization");
+            SubmapRecoveryOptions pair_options;
+            pair_options.independent_initializer = [](Scene& independent) {
+                for (const auto& image : independent.images)
+                    expect(!image.registered && image.pose.C.isZero(), "initializer must not inherit parent poses");
+                for (const auto& track : independent.tracks)
+                    expect(!track.is_triangulated(), "initializer must not inherit parent depth");
+                return initialize_missing_group_pairs(independent);
+            };
+            const auto chain_report = recover_independent_submap(chain, ids, stable, pair_options);
+            expect(chain_report.accepted && chain_report.reconstructed_views == 4,
+                   "independent pair growth must reconstruct and validate the full chain");
+            for (Index i=0;i<4;++i)
+                expect((chain.images[i].pose.C-frozen.images[i].pose.C).norm()==0 &&
+                       (chain.images[i].pose.R-frozen.images[i].pose.R).norm()==0,
+                       "joint chain initialization must preserve stable cameras exactly");
+            Scene bad_chain = fixture(false);
+            std::erase_if(bad_chain.pairs, [](const auto& p) { return p.id1 >= 4 && p.id2 != p.id1+1; });
+            expect(!recover_independent_submap(bad_chain, ids, stable, pair_options).accepted,
+                   "a reconstructed chain without independent boundary depth must stay rejected");
         }
         std::cout << "submap recovery tests passed\n";
         return 0;
