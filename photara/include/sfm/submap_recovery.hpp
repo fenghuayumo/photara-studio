@@ -43,6 +43,9 @@ struct SubmapRecoveryOptions {
     double minimum_inlier_ratio{0.8};
     double relative_alignment_error{0.01};
     float minimum_angle_degrees{1.F};
+    // Offline initializer receives only the cleared, internal-only submap.
+    // Empty preserves the production star initializer and all acceptance gates.
+    std::function<bool(Scene&)> independent_initializer;
     // Optional evidence export before alignment, including rejected submaps.
     std::function<void(const HierarchicalSubscene&)> independent_model_callback;
 };

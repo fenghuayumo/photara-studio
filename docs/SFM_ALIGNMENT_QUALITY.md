@@ -107,3 +107,64 @@ nomination heuristic from silently accepting a replacement or deleting a view.
 experiment for jointly reconstructing missing connected runs. It uses native
 calibration and the existing independent submap alignment/holdout checks, and
 does not run in Photara's default reconstruction path.
+
+## Missing-run anchor search (2026-10-18)
+
+Further bounded boundary recovery trials are recorded in
+[SFM_BOUNDARY_RECOVERY_EXPERIMENTS.md](SFM_BOUNDARY_RECOVERY_EXPERIMENTS.md).
+They increase Alameda's independent shared-point count but fail geometric
+consensus; no additional default registration gain is established.
+
+Late recovery now also nominates registered anchors through a verified
+target-to-missing-to-registered graph path. Its score is half the weaker edge
+score. This changes search candidates only: no bridge pose, depth, or reference
+geometry enters registration. The total anchor budget stays at 16, with at
+least half the slots available for temporal neighbors. Every nominated anchor
+is freshly descriptor-matched and the existing absolute-pose, independent-depth,
+spatial and held-out checks remain in force.
+
+On the saved native final graphs from the `layout` baseline, one production
+missing-view recovery invocation produced:
+
+| Scene | Before | After | Remaining |
+| --- | ---: | ---: | ---: |
+| London | 1856/1874 | 1858/1874 | 16 |
+| Alameda | 1706/1734 | 1711/1734 | 23 |
+
+London added `indoor_DSC06325.JPG` and `indoor_DSC06330.JPG`; Alameda added
+`indoor_DSC07328.JPG` through `indoor_DSC07332.JPG`. The probe checked all
+original registered camera poses, intrinsics, and original landmark/observation
+contents for exact preservation. Post-run comparison to the supplied reference
+gave the seven added cameras center errors of 0.0052–0.0363 reference median
+steps and rotation differences of 0.043–0.225 degrees. References were read
+only by evaluation, never by recovery. These are incremental final-map recovery
+measurements, not fresh end-to-end frontend or 3DGS quality measurements.
+
+The wider descriptor-ratio experiment, geometry-filtered proposal/multi-view
+depth candidate, and relative-ray search seed each added zero views on these
+two saved graphs before the two-hop anchor change. Increasing the number of
+tentative descriptor matches alone did not fix these missing runs.
+
+Evidence is under `artifacts/sfm-recovery-20261018/`: `bridge_manifest.json`
+records inputs, binary/source hashes, execution results and reference scores;
+each scene has the saved model, accepted-name list and full recovery log.
+`new_view_holdout.json` evaluates every eligible reference track seen by a new
+camera and at least three original cameras, fitting points with original
+cameras only and excluding every newly recovered camera. This avoids the very
+small per-camera sample counts in the standard random-track summary. Neither
+test removes observations based on residuals. Changing coverage also changes
+the standard random-track sample, so its before/after RMS is not a paired
+quality comparison; original camera solutions remain exactly unchanged.
+
+The dedicated new-camera test has 50/45 observations for London's additions:
+native mean 2.50/1.49 px versus reference 2.27/1.42 px. Alameda's five additions
+have 408–917 observations each: native mean 2.92–3.60 px versus reference
+1.26–1.78 px. Thus the extra coverage has useful pose agreement, but Alameda's
+recovered segment still has a material independent reprojection gap. The new
+cameras have not been shown to match reference quality or improve 3DGS output.
+
+Mapping, submap recovery, checkpoint and Studio alignment CTests pass. The
+mapping regression checks that a missing bridge can nominate a distant
+registered anchor within the fixed budget, while never becoming an anchor
+itself. Search-seeding header changes now participate in both frontend and
+reconstruction cache fingerprints.

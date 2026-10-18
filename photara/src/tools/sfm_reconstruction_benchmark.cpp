@@ -5,6 +5,8 @@
 #include "sfm/export_colmap.hpp"
 #include "sfm/reconstruct.hpp"
 
+#include "../../../experiments/sfm_branch_trace.hpp"
+#include <memory>
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -25,6 +27,18 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Unknown positioning backend");
         };
         ReconstructionConfig config;
+        if (const auto* variant = std::getenv("PHOTARA_BENCHMARK_RESECTION_VARIANT")) {
+            const std::string_view name(variant);
+            if (name != "baseline" && name != "conflicts" && name != "band" && name != "both")
+                throw std::invalid_argument("Invalid resection ablation variant");
+            config.resection.preserve_conflict_alternatives = name == "conflicts" || name == "both";
+            config.resection.retry_lower_support_candidates = name == "band" || name == "both";
+        }
+        if (const auto* quota = std::getenv("PHOTARA_BENCHMARK_BOUNDARY_QUOTA")) {
+            const std::string value(quota);
+            if (value != "0" && value != "20") throw std::invalid_argument("Boundary quota must be 0 or 20");
+            config.global_positioning.cross_branch_tracks_per_image = static_cast<unsigned>(std::stoul(value));
+        }
         // Offline ablation only; never changes the application's defaults.
         if (const auto* camera_only = std::getenv("PHOTARA_BENCHMARK_CAMERA_ONLY_INITIALIZER");
             camera_only && std::string_view(camera_only) == "1")
@@ -79,10 +93,27 @@ int main(int argc, char** argv) {
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         };
         const double load_seconds = seconds(load_start);
+        struct SelectionAuditComplete {};
+        const bool selection_only = std::getenv("PHOTARA_BRANCH_SELECTION_ONLY") != nullptr;
+        std::shared_ptr<BranchTrace> trace;
+        if (const auto* targets = std::getenv("PHOTARA_BRANCH_TRACE_TARGETS")) {
+            trace = std::make_shared<BranchTrace>(targets, output.string()+".trace");
+            const unsigned minimum_views = config.global_positioning.min_views_per_track;
+            config.global_positioning.selection_callback = [trace,selection_only,minimum_views](const Scene& snapshot, const std::vector<Index>& selected) {
+                trace->selection(snapshot,selected);
+                if (selection_only) { trace->selection_audit(snapshot,selected,minimum_views); throw SelectionAuditComplete{}; }
+            };
+            config.resection.diagnostic_callback = [trace](const char* stage, const Scene& snapshot) { (*trace)(stage,snapshot); };
+        }
+        if (selection_only && !trace) throw std::invalid_argument("Selection-only requires trace targets");
         const auto start = std::chrono::steady_clock::now();
         // Includes metadata restoration, mapping/BA, final recovery and position
         // audit. No reconstruction cache or reference model enters this path.
-        const auto result = reconstruct_from_frontend(scene, config);
+        ReconstructionSummary result;
+        try { result = reconstruct_from_frontend(scene, config); }
+        catch (const SelectionAuditComplete&) {
+            std::cout << "selection_audit_only=1 no_reconstruction_saved=1\n"; return 0;
+        }
         const double alignment_seconds = seconds(start);
         const auto save_start = std::chrono::steady_clock::now();
         // Exported scenes are also used as 3DGS initializers in downstream

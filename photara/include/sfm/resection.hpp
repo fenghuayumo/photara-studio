@@ -57,12 +57,18 @@ struct ResectionConfig {
     // landmark observations, even when a conservative global track rebuild
     // did not merge the weak edge into the landmark.
     bool use_pair_match_correspondences{true};
+    // Preserve alternative feature/landmark assignments after a conflict.
+    bool preserve_conflict_alternatives{true};
+    // If the strongest-count band fails, try the remaining eligible views.
+    bool retry_lower_support_candidates{true};
     AbsolutePoseOptions ransac{};
     ba::OptimizerOptions local_ba{};
     ba::OptimizerOptions full_ba{};
     // Called after a consistent registration/triangulation update.
     std::function<void(const Scene&)> checkpoint_callback;
     unsigned checkpoint_interval{1};
+    // Read-only development instrumentation; excluded from reconstruction keys.
+    std::function<void(const char*, const Scene&)> diagnostic_callback;
 
     ResectionConfig() {
         ransac.max_reproj_error_px = 4.0;

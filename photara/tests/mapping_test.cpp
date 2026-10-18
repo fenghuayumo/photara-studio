@@ -718,6 +718,100 @@ void test_retrieval_inverted_index() {
     expect(contains(4, 5), "retrieval links third visual cluster");
 }
 
+void test_resection_candidate_failures() {
+    const auto fixture = [] {
+        Scene scene;
+        scene.thread_count = 1;
+        scene.cameras.push_back(cam());
+        scene.images.resize(5);
+        for (Index id = 0; id < 5; ++id) {
+            auto& image = scene.images[id];
+            image.id = id; image.camera_id = 0; image.registered = id < 3;
+            image.pose.C = Vec3(0.4*id,0.1*(id%2),0);
+        }
+        std::mt19937 rng(9721);
+        std::uniform_real_distribution<double> x(-1.5,1.5), y(-1,1), z(4,7);
+        for (Index t = 0; t < 200; ++t) {
+            Track track;
+            track.position = Vec3(x(rng),y(rng),z(rng));
+            for (Index id = 0; id < 3; ++id) {
+                const auto pixel = scene.cameras[0].project(scene.images[id].pose.transform_world_to_camera(track.position));
+                photara::features::Keypoint kp;
+                kp.x = static_cast<float>(pixel.x()); kp.y = static_cast<float>(pixel.y());
+                scene.images[id].features.keypoints.push_back(kp);
+                track.observations.push_back({id,t});
+            }
+            track.num_inliers = 3;
+            scene.tracks.push_back(track);
+        }
+        return scene;
+    };
+    const auto options = [] {
+        ResectionConfig config;
+        config.local_ba_every = 0;
+        config.full_ba_every = {0,0,0};
+        config.final_ba_additional_iterations = 0;
+        config.full_ba.maximum_iterations = 3;
+        config.full_ba.optimize_focal = false;
+        config.full_ba.optimize_aspect_ratio = false;
+        config.full_ba.optimize_distortion = false;
+        config.ransac.max_iterations = 500;
+        return config;
+    };
+    {
+        Scene source = fixture();
+        const auto truth = source.images[3].pose;
+        for (Index f = 0; f < 30; ++f) {
+            const auto pixel = source.cameras[0].project(truth.transform_world_to_camera(source.tracks[f].position));
+            photara::features::Keypoint kp;
+            kp.x = static_cast<float>(pixel.x()); kp.y = static_cast<float>(pixel.y());
+            source.images[3].features.keypoints.push_back(kp);
+        }
+        // Two anchors propose a contested landmark first; a third supplies
+        // the valid alternative for each feature. No direct target track IDs.
+        for (Index anchor = 0; anchor < 3; ++anchor) {
+            ImagePair pair(anchor,3);
+            for (Index f = 0; f < 30; ++f) pair.matches.push_back({anchor < 2 ? 0U : f,f});
+            source.pairs.push_back(pair);
+        }
+        auto legacy = source;
+        auto config = options();
+        config.preserve_conflict_alternatives = false;
+        register_images(legacy,config);
+        expect(!legacy.images[3].registered,"legacy conflict claims lose valid alternate landmark links");
+        config.preserve_conflict_alternatives = true;
+        register_images(source,config);
+        expect(source.images[3].registered && (source.images[3].pose.C-truth.C).norm() < 1e-3,
+            "conflicting landmark proposals cannot consume a feature needed by a correct pose");
+    }
+    {
+        Scene source = fixture();
+        const auto truth = source.images[4].pose;
+        for (Index t = 0; t < 200; ++t) {
+            photara::features::Keypoint bad;
+            bad.x = 320; bad.y = 240;
+            source.images[3].features.keypoints.push_back(bad);
+            source.tracks[t].observations.push_back({3,t});
+            if (t >= 30) continue;
+            const auto pixel = source.cameras[0].project(truth.transform_world_to_camera(source.tracks[t].position));
+            photara::features::Keypoint good;
+            good.x = static_cast<float>(pixel.x()); good.y = static_cast<float>(pixel.y());
+            source.images[4].features.keypoints.push_back(good);
+            source.tracks[t].observations.push_back({4,t});
+        }
+        auto legacy = source;
+        auto config = options();
+        config.retry_lower_support_candidates = false;
+        register_images(legacy,config);
+        expect(!legacy.images[4].registered,"failed high-count band reproduces starvation of valid weaker candidates");
+        config.retry_lower_support_candidates = true;
+        register_images(source,config);
+        expect(source.images[4].registered && (source.images[4].pose.C-truth.C).norm() < 1e-3,
+            "band exhaustion must try a geometrically valid lower-count camera");
+        expect(!source.images[3].registered,"fallback must still reject the unsupported high-count camera");
+    }
+}
+
 void test_local_ba_boundary_selection() {
     Scene scene;
     scene.cameras.assign(3, cam());
@@ -1636,7 +1730,48 @@ void test_global_mapping_preserves_nonuniform_orbit(bool self_calibrate = false)
     }
 }
 
+void test_boundary_track_quota() {
+    Scene scene; scene.thread_count=1; auto camera=cam(); camera.id=0; scene.cameras.push_back(camera);
+    for (Index id=0;id<12;++id) {
+        Image image; image.id=id; image.camera_id=0; image.registered=true;
+        image.features.image_width=640; image.features.image_height=480;
+        image.features.keypoints.resize(21);
+        for (auto& kp:image.features.keypoints) { kp.x=320; kp.y=240; }
+        scene.images.push_back(image);
+    }
+    for (Index a=0;a<12;++a) for (Index b=a+1;b<12;++b) {
+        if ((a<8 && b>=8) && !(a==7 && b==8)) continue;
+        ImagePair pair(a,b); pair.relative_pose=Pose3D::identity(); pair.weight_spatial=1.F;
+        for (Index p=0;p<100;++p) pair.matches.push_back({0,0});
+        scene.pairs.push_back(pair);
+    }
+    for (Index t=0;t<21;++t) {
+        Track track;
+        if (t<8) for (Index id=0;id<8;++id) track.observations.push_back({id,t});
+        else if (t<16) for (Index id=8;id<12;++id) track.observations.push_back({id,t});
+        else if (t<20) for (Index id:{0u,1u,8u,9u}) track.observations.push_back({id,t});
+        else for (Index id:{0u,8u}) track.observations.push_back({id,t});
+        scene.tracks.push_back(track);
+    }
+    struct Selected {};
+    const auto selection=[&](unsigned quota) {
+        auto copy=scene; std::vector<Index> ids;
+        GlobalPositioningOptions options; options.max_tracks_for_positioning=8;
+        options.cross_branch_tracks_per_image=quota;
+        options.selection_callback=[&](const Scene&,const std::vector<Index>& selected) { ids=selected; throw Selected{}; };
+        try { solve_global_positions(copy,options); } catch (const Selected&) {}
+        return ids;
+    };
+    const auto old=selection(0), improved=selection(20);
+    expect(old.size()==8 && improved.size()==8,"boundary quota must preserve the hard budget");
+    expect(std::none_of(old.begin(),old.end(),[](Index id){return id>=16;}),"control must reproduce boundary starvation");
+    expect(std::count_if(improved.begin(),improved.end(),[](Index id){return id>=16 && id<20;})>=2,
+           "quota must preserve eligible core-to-branch tracks");
+    expect(std::find(improved.begin(),improved.end(),20)==improved.end(),"quota must not admit a two-view track");
+}
+
 int main() {
+    test_boundary_track_quota();
     {
         Scene layout;
         layout.images.resize(80);
@@ -1719,7 +1854,17 @@ int main() {
         expect(std::find(anchors.begin(), anchors.end(), 3) == anchors.end() &&
                std::find(anchors.begin(), anchors.end(), 40) == anchors.end(),
                "recovery excludes unregistered anchors and its target");
+        ImagePair continuation(3, 4);
+        continuation.relative_pose = Pose3D::identity();
+        continuation.matches.resize(100);
+        neighbors.pairs.push_back(continuation);
+        const auto extended = select_missing_view_anchors(neighbors, 40);
+        expect(extended.size() == 16 && std::find(extended.begin(), extended.end(), 4) != extended.end(),
+               "missing-run graph bridges nominate distant registered anchors within the same budget");
+        expect(std::find(extended.begin(), extended.end(), 3) == extended.end(),
+               "a missing bridge never becomes a depth anchor");
     }
+    test_resection_candidate_failures();
     test_global_mapping_preserves_nonuniform_orbit();
     test_global_mapping_preserves_nonuniform_orbit(true);
     test_positioning_budget_progress();

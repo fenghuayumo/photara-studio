@@ -8,6 +8,7 @@
 #include <iostream>
 #include <cstdlib>
 #include "../../../experiments/sfm_missing_group_probe.hpp"
+#include "../../../experiments/sfm_boundary_support_probe.hpp"
 
 // Development-only bounded ancestry experiment. Each pass freezes its anchor
 // mask; newly accepted views are promoted only for the NEXT pass. Original
@@ -15,8 +16,8 @@
 int main(int argc, char** argv) {
     try {
         using namespace photara::sfm;
-        if (argc != 3 && !(argc == 4 && (std::string_view(argv[3]) == "--descriptor-map" || std::string_view(argv[3]) == "--groups")))
-            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map|--groups]");
+        if (argc != 3 && !(argc == 4 && (std::string_view(argv[3]) == "--descriptor-map" || std::string_view(argv[3]) == "--groups" || std::string_view(argv[3]) == "--audit-pairs" || std::string_view(argv[3]) == "--inactive-links" || std::string_view(argv[3]) == "--retained-poses")))
+            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map|--groups|--audit-pairs|--inactive-links|--retained-poses]");
         const bool groups = argc == 4 && std::string_view(argv[3]) == "--groups";
         const bool descriptor_map = argc == 4;
         const std::filesystem::path input(argv[1]), output(argv[2]);
@@ -35,9 +36,85 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Cannot load final graph checkpoint");
         if (scene.pairs.empty()) throw std::runtime_error("Resection requires pair geometry");
         photara::core::Logger::instance().configure({}, "photara", photara::core::LogLevel::debug);
+        if (argc == 4 && std::string_view(argv[3]) == "--retained-poses") {
+            // Evaluation-only snapshot. These flags are not registrations:
+            // preserve unsupported retained poses to assess why they failed.
+            Scene snapshot;
+            snapshot.cameras = scene.cameras;
+            std::ofstream csv(reports);
+            csv << "name,originally_registered,retained_pose_available\n";
+            for (const auto& source : scene.images) {
+                Image image;
+                image.id = source.id; image.camera_id = source.camera_id;
+                image.path = source.path; image.pose = source.pose;
+                image.registered = source.registered || (source.pose.C.allFinite() &&
+                    source.pose.R.allFinite() && source.pose.C.norm() > 1e-8);
+                csv << source.path.filename().string() << ',' << source.registered << ',' << image.registered << '\n';
+                snapshot.images.push_back(std::move(image));
+            }
+            save_asfm(snapshot,output);
+            std::cout << "evaluation_snapshot_only=1 geometry_unchanged=1\n";
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--audit-pairs") {
+            std::ofstream csv(reports);
+            if (!csv) throw std::runtime_error("Cannot write support audit");
+            probe_boundary_support(scene,csv);
+            if (!csv) throw std::runtime_error("Failed writing support audit");
+            std::cout << "topology_only=1 geometry_unchanged=1 registered_views=" << scene.registered_count() << '\n';
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--inactive-links") {
+            std::vector<std::uint8_t> stable;
+            std::vector<Pose3D> originals;
+            for (const auto& image : scene.images) { stable.push_back(image.registered); originals.push_back(image.pose); }
+            std::vector<RawPairMatches> links;
+            for (const auto& pair : scene.pairs) {
+                if (!pair.relative_pose || pair.matches.empty() || stable[pair.id1] == stable[pair.id2]) continue;
+                RawPairMatches link;
+                link.id1 = pair.id1; link.id2 = pair.id2;
+                for (const auto& match : pair.matches) link.matches.push_back({match.query,match.train});
+                links.push_back(std::move(link));
+            }
+            const auto recovered = recover_stable_resections(scene,stable,links);
+            std::ofstream csv(reports);
+            csv << "recovered_image\n";
+            for (Index id : recovered) csv << scene.images[id].path.filename().string() << '\n';
+            for (Index id=0;id<scene.images.size();++id)
+                if (stable[id] && (scene.images[id].pose.C != originals[id].C || scene.images[id].pose.R != originals[id].R))
+                    throw std::runtime_error("Frozen original pose changed");
+            save_asfm(scene,output);
+            if (const auto* export_path = std::getenv("PHOTARA_PROBE_EXPORT_COLMAP")) save_colmap_text(scene,export_path);
+            std::cout << "inactive_link_recovered=" << recovered.size() << " frozen_poses_unchanged=1 registered=" << scene.registered_count() << '\n';
+            return 0;
+        }
         if (groups) {
+            std::vector<Pose3D> poses; std::vector<bool> registered;
+            for (const auto& image:scene.images) { poses.push_back(image.pose); registered.push_back(image.registered); }
+            const auto cameras=scene.cameras; const auto old_tracks=scene.tracks.size();
+            const auto fingerprint=[&] {
+                FingerprintBuilder hash;
+                for (std::size_t t=0;t<old_tracks;++t) {
+                    const auto& track=scene.tracks.at(t); hash.append_bytes(track.position.data(),3*sizeof(double));
+                    hash.append(track.num_inliers); hash.append(track.observations.size());
+                    for (const auto& obs:track.observations) { hash.append(obs.image_id); hash.append(obs.feature_id); }
+                }
+                return hash.value();
+            };
+            const auto original=fingerprint();
             std::ofstream csv(reports);
             const auto recovered = probe_missing_groups(scene, csv);
+            for (Index id=0;id<scene.images.size();++id)
+                if (registered[id] && (!scene.images[id].registered || scene.images[id].pose.C!=poses[id].C || scene.images[id].pose.R!=poses[id].R))
+                    throw std::runtime_error("Group recovery changed a frozen camera");
+            if (fingerprint()!=original) throw std::runtime_error("Group recovery changed original landmarks");
+            if (scene.cameras.size()!=cameras.size()) throw std::runtime_error("Group recovery changed calibration groups");
+            for (Index id=0;id<cameras.size();++id) {
+                const auto& a=cameras[id]; const auto& b=scene.cameras[id];
+                if (a.model!=b.model || a.fx!=b.fx || a.fy!=b.fy || a.cx!=b.cx || a.cy!=b.cy || a.k1!=b.k1 || a.k2!=b.k2 || a.p1!=b.p1 || a.p2!=b.p2)
+                    throw std::runtime_error("Group recovery changed frozen intrinsics");
+            }
+            std::cout << "original_poses_unchanged=1 original_landmarks_unchanged=1 intrinsics_unchanged=1\n";
             save_asfm(scene, output);
             if (const auto* export_path = std::getenv("PHOTARA_PROBE_EXPORT_COLMAP"))
                 save_colmap_text(scene, export_path);

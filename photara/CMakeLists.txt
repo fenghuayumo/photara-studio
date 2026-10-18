@@ -459,6 +459,7 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/camera_selection.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/submap_recovery.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/submap_recovery.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/resection_seeding.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/reconstruct.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/geometry.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/pair_weighting.cpp"
@@ -471,6 +472,8 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
+    list(APPEND PHOTARA_RECONSTRUCTION_CACHE_ID_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/resection_seeding.hpp")
     list(SORT PHOTARA_FRONTEND_CACHE_ID_FILES)
     list(SORT PHOTARA_RECONSTRUCTION_CACHE_ID_FILES)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS

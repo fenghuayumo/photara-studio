@@ -440,7 +440,9 @@ SubmapRecoveryReport recover_independent_submap(
     if (images.size() < 4) return reject("too_few_local_views");
     build_tracks(sub.scene);
     StarInitConfig star;
-    if (!star_initialize(sub.scene, star)) {
+    const bool initialized = options.independent_initializer
+        ? options.independent_initializer(sub.scene) : star_initialize(sub.scene, star);
+    if (!initialized) {
         report.reconstructed_views = sub.scene.registered_count();
         return reject("independent_initialization_failed");
     }
