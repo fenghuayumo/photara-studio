@@ -1722,9 +1722,57 @@ std::vector<PositioningAttempt> fallback_attempts(
 
 namespace detail {
 
+double warm_start_layout_change(const Scene& scene, const std::vector<Vec3>& before) {
+    if (before.size() != scene.images.size()) return std::numeric_limits<double>::infinity();
+    std::vector<Index> ids;
+    for (Index id = 0; id < scene.images.size(); ++id)
+        if (scene.images[id].registered && before[id].allFinite() && scene.images[id].pose.C.allFinite())
+            ids.push_back(id);
+    if (ids.size() < 8) return 0;
+    std::vector<double> nearest(before.size(), std::numeric_limits<double>::infinity());
+    for (const auto& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose || pair.zero_baseline || pair.id1 >= before.size() ||
+            pair.id2 >= before.size() || !scene.images[pair.id1].registered || !scene.images[pair.id2].registered) continue;
+        const double length = (before[pair.id1]-before[pair.id2]).norm();
+        if (std::isfinite(length) && length > 1e-10) {
+            nearest[pair.id1] = std::min(nearest[pair.id1], length);
+            nearest[pair.id2] = std::min(nearest[pair.id2], length);
+        }
+    }
+    std::vector<double> baselines;
+    for (const double length : nearest) if (std::isfinite(length)) baselines.push_back(length);
+    if (baselines.size() < 8) return 0;
+    const double unit = percentile(std::move(baselines), 0.5);
+    std::vector<Index> fit = ids;
+    std::vector<double> errors;
+    for (unsigned iteration = 0; iteration < 5; ++iteration) {
+        Eigen::Matrix<double, 3, Eigen::Dynamic> src(3, fit.size()), dst(3, fit.size());
+        for (std::size_t j = 0; j < fit.size(); ++j) {
+            src.col(j) = scene.images[fit[j]].pose.C; dst.col(j) = before[fit[j]];
+        }
+        const Eigen::Matrix4d transform = Eigen::umeyama(src, dst, true);
+        if (!transform.allFinite()) return std::numeric_limits<double>::infinity();
+        errors.clear();
+        for (Index id : ids)
+            errors.push_back((transform.block<3,3>(0,0)*scene.images[id].pose.C +
+                transform.block<3,1>(0,3)-before[id]).norm());
+        const double cutoff = percentile(errors, 0.8) + 1e-12*unit;
+        fit.clear();
+        for (std::size_t j = 0; j < ids.size(); ++j) if (errors[j] <= cutoff) fit.push_back(ids[j]);
+        if (fit.size() < 4) break;
+    }
+    return percentile(std::move(errors), 0.9) / unit;
+}
+
 WarmStartGeometry evaluate_warm_start_geometry(
     const Scene& scene, const std::vector<Index>& optimized_tracks) {
     WarmStartGeometry result;
+    std::vector<double> pixel_angles;
+    for (const auto& camera : scene.cameras) {
+        const double value = camera.pixel_error_to_angular(1.0);
+        if (std::isfinite(value) && value > 0) pixel_angles.push_back(value);
+    }
+    result.pixel_noise_radians = percentile(std::move(pixel_angles), 0.5);
     for (const auto& image : scene.images)
         if (image.registered && !image.pose.C.allFinite()) result.finite_centers = false;
     if (!result.finite_centers) return result;
@@ -1883,17 +1931,28 @@ const char* warm_start_geometry_rejection(
     if (baseline.heldout_tracks >= 16) {
         if (candidate.positive_observations < 0.98 * baseline.positive_observations)
             return "heldout_positive_depth_regression";
-        if (regressed(baseline.heldout_p90_radians, candidate.heldout_p90_radians, half_degree))
+        if (regressed(baseline.heldout_p90_radians, candidate.heldout_p90_radians,
+                      std::max(1e-6, baseline.pixel_noise_radians)))
             return "heldout_angle_regression";
     }
     if (baseline.pair_constraints >= 3) {
+        // A large, well-sampled translation graph supplies loop-scale evidence
+        // that short local point tracks may not contain. Accept noisy two-view
+        // directions when independent point evidence improves substantially,
+        // but do not trade a broad direction regression for a tiny local gain.
+        if (baseline.pair_constraints >= 32 && baseline.heldout_tracks >= 16 &&
+            candidate.layout_change_p90_baselines > 1 &&
+            regressed(baseline.pair_p90_radians, candidate.pair_p90_radians, half_degree) &&
+            candidate.pair_p90_radians-baseline.pair_p90_radians >
+                2*std::max(0.0, baseline.heldout_p90_radians-candidate.heldout_p90_radians))
+            return "translation_graph_regression";
         if (baseline.heldout_tracks < 16 &&
             (regressed(baseline.pair_p90_radians, candidate.pair_p90_radians, half_degree) ||
              regressed(baseline.worst_camera_pair_radians, candidate.worst_camera_pair_radians, half_degree)))
             return "translation_direction_regression";
         // Missing local evidence is uncertainty, not proof of degradation.
-        // With enough held-out tracks, retain the existing fast path unless
-        // its independent whole-scene checks above actually regress. Local
+        // With enough held-out tracks, retain the fast path unless the
+        // independent whole-scene checks above actually regress. Local
         // errors are separately nominated for final triangulation/BA/auditing.
         // Unobserved direction changes are logged separately and cannot justify
         // extending the 512-camera policy to smaller scenes.
@@ -2031,7 +2090,8 @@ GlobalPositioningSummary solve_global_positions(
                     refine_only_points_bearings(
                         scene, options, selected_tracks);
                 if (bearing_summary.success) {
-                    const auto candidate_geometry = detail::evaluate_warm_start_geometry(scene, selected_tracks);
+                    auto candidate_geometry = detail::evaluate_warm_start_geometry(scene, selected_tracks);
+                    candidate_geometry.layout_change_p90_baselines = detail::warm_start_layout_change(scene, warm_centers);
                     const auto reason = detail::warm_start_geometry_rejection(baseline_geometry, candidate_geometry);
                     const auto local_risks = detail::warm_start_local_geometry_risks(baseline_geometry, candidate_geometry);
                     core::Logger::instance().info(
@@ -2040,6 +2100,7 @@ GlobalPositioningSummary solve_global_positions(
                             ? "no_material_regression" : "local_checks_deferred_to_final_geometry",
                         " pairs=", candidate_geometry.pair_constraints,
                         " pair_p90_rad=", baseline_geometry.pair_p90_radians, '/', candidate_geometry.pair_p90_radians,
+                        " layout_change_p90_baselines=", candidate_geometry.layout_change_p90_baselines,
                         " camera_tail_rad=", baseline_geometry.worst_camera_pair_radians, '/', candidate_geometry.worst_camera_pair_radians,
                         " heldout_tracks=", candidate_geometry.heldout_tracks,
                         " heldout_positive=", baseline_geometry.positive_observations, '/', candidate_geometry.positive_observations,
@@ -2055,11 +2116,17 @@ GlobalPositioningSummary solve_global_positions(
                             " after_rad=", candidate_geometry.camera_heldout_radians[id],
                             " pending_final_geometry_audit=1");
                     if (!reason) return bearing_summary;
-                    // The next primary attempt restores all pre-attempt state.
-                    // Keep only the validated initializer for final recovery.
-                    result = bearing_summary;
-                    result.success = false;
-                    result.termination = GlobalPositioningTermination::failed;
+                    // An independently validated camera initializer is already
+                    // available. Do not replace it with worse held-out geometry
+                    // or restart the whole scene randomly. Full triangulation
+                    // and BA can refine its structure without this degradation.
+                    for (std::size_t i = 0; i < scene.images.size(); ++i)
+                        scene.images[i].pose.C = warm_centers[i];
+                    restore_points_only();
+                    attempt_summary.termination = GlobalPositioningTermination::camera_only_fallback;
+                    core::Logger::instance().info(
+                        "global positioning: retaining validated camera initializer reason=", reason);
+                    return attempt_summary;
                 }
             }
             continue;

@@ -36,7 +36,9 @@ int main(int argc, char** argv) {
         if (argc == 9 && (std::string(argv[7]) != "--views-file" || visibility_audit || prune_unobserved))
             throw std::runtime_error("--views-file requires a rendering audit mode");
         const unsigned split = std::stoul(argv[5]);
-        if (split < 2) throw std::runtime_error("SPLIT_EVERY must be >= 2");
+        if (split == 0) throw std::runtime_error("SAMPLE_EVERY must be >= 1 (1 evaluates all views)");
+        if (split == 1 && (visibility_audit || prune_unobserved))
+            throw std::runtime_error("Visibility hold-out audits require SAMPLE_EVERY >= 2");
         photara::splat::DatasetLoadRequest request;
         request.source = argv[1];
         request.image_directory = argv[2];
@@ -245,7 +247,7 @@ int main(int argc, char** argv) {
             // a scene-derived distance, independent of the trained model.
             // Keep all metric views; optionally save a fixed subset of novel
             // poses for large datasets. The selection never depends on quality.
-            const bool save_novel = !projection_audit && (!sampled_novel || (i / split) % 8 == 0 ||
+            const bool save_novel = split > 1 && !projection_audit && (!sampled_novel || (i / split) % 8 == 0 ||
                 i + split >= dataset.scene.views.size());
             std::vector<float> depths;
             if (save_novel)

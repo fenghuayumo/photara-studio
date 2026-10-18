@@ -3,6 +3,7 @@
 #include "sfm/global_positioning.hpp"
 #include "sfm/positioning_control.hpp"
 #include "../src/sfm/positioning_validation.hpp"
+#include "../src/sfm/resection_validation.hpp"
 #include "sfm/global_rotation.hpp"
 #include "sfm/pair_weighting.hpp"
 #include "sfm/reconstruct.hpp"
@@ -290,6 +291,27 @@ void test_warm_start_geometry_acceptance() {
     Scene no_pairs = scene;
     no_pairs.pairs.clear();
     const auto heldout_baseline = detail::evaluate_warm_start_geometry(no_pairs, optimized);
+    auto pixel_regression = heldout_baseline;
+    pixel_regression.heldout_p90_radians += 2.5*heldout_baseline.pixel_noise_radians;
+    expect(detail::warm_start_geometry_rejection(heldout_baseline, pixel_regression) != nullptr,
+           "held-out degradation above pixel noise cannot hide under a half-degree floor");
+    auto broad_before = heldout_baseline, broad_after = heldout_baseline;
+    broad_before.pair_constraints = broad_after.pair_constraints = 100;
+    broad_before.pair_p90_radians = 0.04;
+    broad_after.pair_p90_radians = 0.08;
+    broad_before.heldout_p90_radians = 0.01;
+    broad_after.heldout_p90_radians = 0.009;
+    broad_after.layout_change_p90_baselines = 2;
+    expect(detail::warm_start_geometry_rejection(broad_before, broad_after) != nullptr,
+           "small point-fit gains cannot conceal a broad translation graph regression");
+    broad_after.layout_change_p90_baselines = 0.1;
+    expect(!detail::warm_start_geometry_rejection(broad_before, broad_after),
+           "small layout refinements may tolerate noisy relative directions");
+    broad_after.layout_change_p90_baselines = 2;
+    broad_before.heldout_p90_radians = 0.05;
+    broad_after.heldout_p90_radians = 0.005;
+    expect(!detail::warm_start_geometry_rejection(broad_before, broad_after),
+           "strong independent point correction may override noisy relative translations");
     const auto heldout_drift = detail::evaluate_warm_start_geometry(drift, optimized);
     expect(detail::warm_start_geometry_rejection(heldout_baseline, heldout_drift) != nullptr,
            "heldout rays reject drift independently of relative translation constraints");
@@ -1325,6 +1347,53 @@ void test_parallel_track_colours() {
     std::filesystem::remove_all(directory);
 }
 
+void test_missing_view_with_coincident_anchors() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("photara-coincident-anchors-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    Scene scene;
+    auto camera = cam();
+    camera.width = 320; camera.height = 240;
+    camera.fx = camera.fy = 250; camera.cx = 160; camera.cy = 120;
+    scene.cameras.push_back(camera);
+    scene.thread_count = 2;
+    const Vec3 centers[] = {Vec3(-0.6,0,0), Vec3(0,0.6,0), Vec3(0.6,0,0),
+                            Vec3::Zero(), Vec3::Zero(), Vec3(0.3,0.2,0)};
+    std::mt19937 random(913);
+    std::vector<unsigned> noise(161*121);
+    for (auto& value : noise) value = 20 + random()%216;
+    for (Index id = 0; id < 6; ++id) {
+        Image image;
+        image.id = id; image.camera_id = 0; image.registered = id < 5;
+        image.pose.C = id < 5 ? centers[id] : Vec3::Zero();
+        image.path = directory/(std::to_string(id)+".png");
+        photara::io::GrayImage gray{320,240,std::vector<std::uint8_t>(320*240)};
+        for (unsigned y = 0; y < 240; ++y) for (unsigned x = 0; x < 320; ++x) {
+            const unsigned tx = x+160+int(50*centers[id].x());
+            const unsigned ty = y+120+int(50*centers[id].y());
+            const unsigned gx = tx/4, gy = ty/4, dx = tx%4, dy = ty%4;
+            gray.pixels[y*320+x] = static_cast<std::uint8_t>(((4-dy)*((4-dx)*noise[gy*161+gx] +
+                dx*noise[gy*161+gx+1]) + dy*((4-dx)*noise[(gy+1)*161+gx] + dx*noise[(gy+1)*161+gx+1]))/16);
+        }
+        photara::io::save_gray_png(gray,image.path);
+        scene.images.push_back(std::move(image));
+    }
+    FrontEndOptions recovery;
+    recovery.extractor = "sift"; recovery.matcher = "mutual_ratio";
+    recovery.sift_contrast_threshold = 0.001;
+    recovery.max_features = recovery.progressive_rescue_max_features = 4000;
+    unsigned recovered = 0;
+    try { recovered = recover_missing_views(scene,recovery); }
+    catch (const std::exception& error) { std::cerr << "coincident anchor recovery: " << error.what() << '\n'; }
+    expect(recovered == 1 && scene.images.back().registered &&
+           (scene.images.back().pose.C-centers[5]).norm() < 0.02,
+           "coincident anchors cannot shift batched matches onto the wrong image pairs");
+    for (Index id = 0; id < 5; ++id)
+        expect(scene.images[id].registered && (scene.images[id].pose.C-centers[id]).norm() == 0,
+               "descriptor recovery preserves every frozen anchor including duplicate centers");
+    std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 void test_intrinsic_group_units() {
@@ -1455,11 +1524,209 @@ void test_position_audit_does_not_certify_a_weak_clique() {
            "connected zero-parallax matches cannot certify translation support");
 }
 
+// A complete circular capture may contain deliberately uneven sampling. The
+// image observations, rather than a constant-speed orbit prior, must determine
+// its final camera geometry. The old default flattened this trajectory.
+void test_global_mapping_preserves_nonuniform_orbit(bool self_calibrate = false) {
+    constexpr Index views = 24;
+    constexpr Index points = 160;
+    Scene scene;
+    auto camera = cam();
+    camera.id = 0;
+    camera.trust_intrinsics = true;
+    scene.cameras.push_back(camera);
+    std::vector<Pose3D> truth(views);
+    for (Index i = 0; i < views; ++i) {
+        double angle = 2.0 * std::numbers::pi * i / views;
+        if (i == 21) angle += 0.25;
+        if (i == 22) angle += 0.16;
+        if (i == 23) angle += 0.10;
+        auto& pose = truth[i];
+        // Vary height in the calibration case: a perfectly planar yaw-only
+        // orbit cannot distinguish fy from a vertical scale of the scene.
+        pose.C = Vec3(3.0 * std::cos(angle),
+                      self_calibrate ? 0.8 * std::sin(0.7 * i) : 0.0,
+                      3.0 * std::sin(angle));
+        const Vec3 forward = -pose.C.normalized();
+        const Vec3 right = Vec3::UnitY().cross(forward).normalized();
+        pose.R.row(0) = right.transpose();
+        pose.R.row(1) = forward.cross(right).transpose();
+        pose.R.row(2) = forward.transpose();
+        Image image;
+        image.id = i;
+        image.camera_id = 0;
+        image.features.keypoints.resize(points);
+        scene.images.push_back(std::move(image));
+    }
+    std::mt19937 rng(31);
+    const double point_extent = self_calibrate ? 1.0 : 0.5;
+    std::uniform_real_distribution<double> xyz(-point_extent, point_extent);
+    for (Index p = 0; p < points; ++p) {
+        Vec3 point;
+        bool visible = false;
+        while (!visible) {
+            point = Vec3(xyz(rng), xyz(rng), xyz(rng));
+            visible = true;
+            for (const auto& pose : truth) {
+                const Vec3 local = pose.transform_world_to_camera(point);
+                const Vec2 pixel = camera.project(local);
+                if (local.z() <= 0 || pixel.x() < 1 || pixel.y() < 1 ||
+                    pixel.x() >= camera.width-1 || pixel.y() >= camera.height-1) {
+                    visible = false;
+                    break;
+                }
+            }
+        }
+        for (Index i = 0; i < views; ++i) {
+            const Vec2 pixel = camera.project(truth[i].transform_world_to_camera(point));
+            auto& kp = scene.images[i].features.keypoints[p];
+            kp.x = static_cast<float>(pixel.x());
+            kp.y = static_cast<float>(pixel.y());
+        }
+    }
+    for (Index i = 0; i < views; ++i) {
+        for (Index j = i + 1; j < views; ++j) {
+            ImagePair pair(i, j);
+            pair.relative_pose = truth[j] / truth[i];
+            pair.relative_pose->C.normalize();
+            pair.weight_spatial = 1.F;
+            for (Index p = 0; p < points; ++p) pair.matches.push_back({p, p});
+            scene.pairs.push_back(std::move(pair));
+        }
+    }
+    // Leave orbit settings at production defaults. Only bound the synthetic
+    // positioning problem and force CPU so this regression also runs headless.
+    if (self_calibrate) {
+        // A view-graph/EXIF focal is an initialization, not a calibration.
+        // Precise multi-view observations must be allowed to correct it.
+        scene.cameras[0].trust_intrinsics = false;
+        scene.cameras[0].fx = scene.cameras[0].fy = 560;
+        scene.cameras[0].focal_prior = 560;
+    }
+    GlobalPositioningOptions options;
+    options.backend = PositioningBackend::cpu;
+    options.min_tracks_for_positioning = points;
+    options.max_tracks_for_positioning = points;
+    const auto result = run_global_mapping(scene, {}, options);
+    expect(result.valid && result.registered_views == views,
+           "nonuniform orbit registers all cameras");
+    expect(result.reprojection_observations >= views * points * 9 / 10 &&
+               result.rms_reprojection_error_pixels < (self_calibrate ? 0.2 : 0.05),
+           "nonuniform orbit retains observations with accurate reprojection");
+    std::vector<double> steps;
+    double max_rotation_error = 0.0;
+    for (Index i = 1; i < views; ++i) {
+        steps.push_back((scene.images[i].pose.C-scene.images[i-1].pose.C).norm());
+        max_rotation_error = std::max(max_rotation_error, rotation_error(
+            scene.images[i].pose.R * scene.images[i-1].pose.R.transpose(),
+            truth[i].R * truth[i-1].R.transpose()));
+    }
+    std::sort(steps.begin(), steps.end());
+    expect(steps.back() > 1.7 * steps[steps.size()/2],
+           "nonuniform orbit preserves unequal camera steps");
+    expect(max_rotation_error < (self_calibrate ? 0.2 : 0.05) * std::numbers::pi / 180.0,
+           "nonuniform orbit preserves measured relative rotations");
+    if (self_calibrate) {
+        std::cout << "self_calibration fx=" << scene.cameras[0].fx
+                  << " fy=" << scene.cameras[0].fy
+                  << " rms=" << result.rms_reprojection_error_pixels
+                  << " max_rotation_deg=" << max_rotation_error*180/std::numbers::pi << '\n';
+        expect(std::abs(scene.cameras[0].focal()/camera.focal()-1.0) < 0.01,
+               "late self-calibration corrects an untrusted initial focal");
+    }
+}
+
 int main() {
+    {
+        Scene layout;
+        layout.images.resize(80);
+        std::vector<Vec3> before;
+        const Mat3 gauge_rotation = Eigen::AngleAxisd(0.4, Vec3::UnitZ()).toRotationMatrix();
+        for (Index id = 0; id < layout.images.size(); ++id) {
+            before.emplace_back(id, 0.5*std::sin(0.2*id), 0.3*std::cos(0.1*id));
+            layout.images[id].registered = true;
+            layout.images[id].pose.C = 3*gauge_rotation*before.back()+Vec3(20,-5,7);
+            if (id) {
+                ImagePair pair(id-1,id); pair.relative_pose = Pose3D::identity();
+                layout.pairs.push_back(pair);
+            }
+        }
+        expect(detail::warm_start_layout_change(layout, before) < 1e-8,
+               "bulk layout screening ignores similarity gauge changes");
+        layout.images[20].pose.C += Vec3(1000,0,0);
+        expect(detail::warm_start_layout_change(layout, before) < 1e-8,
+               "one local outlier cannot masquerade as bulk layout regression");
+        for (Index id = 0; id < layout.images.size(); ++id)
+            layout.images[id].pose.C.y() += 0.05*id*id;
+        expect(detail::warm_start_layout_change(layout, before) > 1,
+               "large nonuniform layout distortion is measured in local baseline units");
+    }
+    {
+        std::vector<std::vector<Index>> ancestry(47, {0, 1});
+        ancestry[45] = ancestry[46] = {1, 2};
+        const auto heldout = detail::stratified_resection_holdout(ancestry, 16);
+        expect(std::count(heldout.begin(), heldout.end(), true) == 16 && heldout[45] != heldout[46],
+               "rare independent depth ancestry remains represented in fit and holdout");
+        expect(heldout == detail::stratified_resection_holdout(ancestry, 16),
+               "ancestry stratification is deterministic without residual-dependent retries");
+    }
+    {
+        Scene weak_leaf;
+        weak_leaf.images.resize(40);
+        for (Index i = 0; i < weak_leaf.images.size(); ++i) {
+            weak_leaf.images[i].registered = true;
+            weak_leaf.images[i].pose.C = Vec3(i, 0, 0);
+            if (i) {
+                ImagePair pair(i-1, i);
+                pair.relative_pose = Pose3D::identity();
+                pair.matches.resize(40);
+                weak_leaf.pairs.push_back(pair);
+            }
+        }
+        weak_leaf.images.back().pose.C.x() = 1000;
+        const auto candidates = select_weak_position_repairs(weak_leaf);
+        expect(std::find(candidates.begin(), candidates.end(), 39) != candidates.end(),
+               "an unsupported scale-breaking leaf is nominated independently of references");
+        expect(std::find(candidates.begin(), candidates.end(), 0) == candidates.end(),
+               "ordinary camera spacing is not nominated for position repair");
+        expect(recover_alignment_views(weak_leaf) == 0 && weak_leaf.registered_count() == 40 &&
+               weak_leaf.images.back().pose.C.x() == 1000 && weak_leaf.images[8].pose.C.x() == 8,
+               "failed independent re-localization restores registration and preserves poses");
+    }
+    {
+        Scene neighbors;
+        neighbors.images.resize(80);
+        for (auto& image : neighbors.images) image.registered = true;
+        neighbors.images[40].registered = false;
+        ImagePair revisit(2, 40);
+        revisit.relative_pose = Pose3D::identity();
+        revisit.matches.resize(60);
+        // A mapping-rejected edge is useful for searching, not accepting a pose.
+        revisit.active = false;
+        neighbors.pairs.push_back(revisit);
+        ImagePair unavailable(3, 40);
+        unavailable.relative_pose = Pose3D::identity();
+        unavailable.matches.resize(100);
+        neighbors.images[3].registered = false;
+        neighbors.pairs.push_back(unavailable);
+        const auto anchors = select_missing_view_anchors(neighbors, 40);
+        expect(anchors.size() == 16, "recovery retains a bounded anchor budget");
+        expect(std::find(anchors.begin(), anchors.end(), 2) != anchors.end(),
+               "recovery includes distant verified visual overlap");
+        expect(std::find(anchors.begin(), anchors.end(), 39) != anchors.end() &&
+               std::find(anchors.begin(), anchors.end(), 41) != anchors.end(),
+               "recovery retains temporal anchors on both sides");
+        expect(std::find(anchors.begin(), anchors.end(), 3) == anchors.end() &&
+               std::find(anchors.begin(), anchors.end(), 40) == anchors.end(),
+               "recovery excludes unregistered anchors and its target");
+    }
+    test_global_mapping_preserves_nonuniform_orbit();
+    test_global_mapping_preserves_nonuniform_orbit(true);
     test_positioning_budget_progress();
     test_position_audit_does_not_certify_a_weak_clique();
     test_intrinsic_group_units();
     test_parallel_track_colours();
+    test_missing_view_with_coincident_anchors();
     test_pair_cycle_weighting();
     test_global_rotation_weighting();
     test_global_rotation_dense_graph_iterative_solve();

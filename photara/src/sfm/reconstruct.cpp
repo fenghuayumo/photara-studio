@@ -1654,11 +1654,14 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
-    // Stage 3: open distortion once geometry is stable. Eight iterations are
-    // a probe, not proof of convergence: large scenes can still be correcting
-    // local drift when this budget expires. Continue while the objective's
-    // tail is improving, retaining a bounded total budget.
-    bundle.optimizer.maximum_iterations = 8;
+    // Stage 3: the view-graph focal is an initialization, not a measured
+    // calibration. Keep the strong prior in the early geometric solve, then
+    // relax it once structure is supported so focal/aspect/distortion cannot
+    // force residual calibration error into the camera trajectory. Trusted
+    // cameras remain constant through the bundle's intrinsic-group locks.
+    bundle.optimizer.focal_prior_weight = 0.05;
+    bundle.optimizer.huber_delta = 1.0;
+    bundle.optimizer.maximum_iterations = 100;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_translations = !preserve_orbit_centers;
     bundle.optimizer.optimize_focal = true;
@@ -1880,7 +1883,7 @@ ReconstructionSummary reconstruct_from_frontend(
                            config.global_positioning, config.resection);
     }
     finish_alignment_recovery(scene, config);
-    if (recover_missing_views(scene, config.frontend) > 0)
+    if (recover_alignment_views(scene, config.frontend) > 0)
         prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                        config.maximum_final_reprojection_error_pixels);
     audit_position_support(scene);
@@ -1904,7 +1907,7 @@ ReconstructionSummary reconstruct(
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
         finish_alignment_recovery(scene_out, config);
-        if (recover_missing_views(scene_out, config.frontend) > 0)
+        if (recover_alignment_views(scene_out, config.frontend) > 0)
             prune_unsupported_registrations(scene_out, config.minimum_final_observations_per_image,
                                            config.maximum_final_reprojection_error_pixels);
         audit_position_support(scene_out);

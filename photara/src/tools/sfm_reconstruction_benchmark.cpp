@@ -1,6 +1,8 @@
 #include "core/logging.hpp"
 #include "sfm/asfm.hpp"
+#include "sfm/appearance.hpp"
 #include "sfm/checkpoint.hpp"
+#include "sfm/export_colmap.hpp"
 #include "sfm/reconstruct.hpp"
 
 #include <chrono>
@@ -8,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <string_view>
 
 int main(int argc, char** argv) {
     try {
@@ -22,6 +25,16 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Unknown positioning backend");
         };
         ReconstructionConfig config;
+        // Offline ablation only; never changes the application's defaults.
+        if (const auto* camera_only = std::getenv("PHOTARA_BENCHMARK_CAMERA_ONLY_INITIALIZER");
+            camera_only && std::string_view(camera_only) == "1")
+            config.global_positioning.constraint = GlobalPositioningConstraint::only_cameras;
+        if (const auto* enable = std::getenv("PHOTARA_BENCHMARK_ENABLE_ORBIT");
+            enable && std::string_view(enable) == "1")
+            config.global_positioning.regularize_complete_orbits = true;
+        if (const auto* disable = std::getenv("PHOTARA_BENCHMARK_DISABLE_ORBIT");
+            disable && std::string_view(disable) == "1")
+            config.global_positioning.regularize_complete_orbits = false;
         config.global_positioning.backend = backend(argv[2]);
         const std::string ba = argc >= 5 ? argv[4] : "automatic";
         if (ba == "automatic") set_bundle_backend_preference(BundleBackendPreference::automatic);
@@ -44,6 +57,9 @@ int main(int argc, char** argv) {
         }
         const std::filesystem::path input(argv[1]), output(argv[3]);
         if (std::filesystem::exists(output)) throw std::invalid_argument("Output already exists");
+        if (const auto* export_path = std::getenv("PHOTARA_BENCHMARK_EXPORT_COLMAP");
+            export_path && *export_path && std::filesystem::exists(export_path))
+            throw std::invalid_argument("COLMAP export directory already exists");
         const auto stem = input.stem().string();
         if (!stem.starts_with("tracks-")) throw std::invalid_argument("Expected a tracks checkpoint filename");
         std::size_t consumed = 0;
@@ -69,7 +85,15 @@ int main(int argc, char** argv) {
         const auto result = reconstruct_from_frontend(scene, config);
         const double alignment_seconds = seconds(start);
         const auto save_start = std::chrono::steady_clock::now();
+        // Exported scenes are also used as 3DGS initializers in downstream
+        // comparisons. Match the CLI's colour sampling without timing it as BA.
+        if (const auto* export_path = std::getenv("PHOTARA_BENCHMARK_EXPORT_COLMAP");
+            export_path && *export_path)
+            colour_triangulated_tracks(scene);
         save_asfm(scene, output);
+        if (const auto* export_path = std::getenv("PHOTARA_BENCHMARK_EXPORT_COLMAP");
+            export_path && *export_path)
+            save_colmap_text(scene, export_path);
         // ASFM deliberately omits the pair graph. Retain final active flags and
         // matched features separately so diagnostics do not use pre-solve edges.
         CheckpointOptions graph;
@@ -77,6 +101,7 @@ int main(int argc, char** argv) {
         graph.read = false;
         CheckpointStore(graph).save_scene(CheckpointStage::reconstruction, key, scene);
         std::cout << std::setprecision(12)
+                  << "regularize_complete_orbits=" << config.global_positioning.regularize_complete_orbits << '\n'
                   << "reconstruction_mode=" << mode << '\n'
                   << "cluster_capacity=" << config.hierarchical.cluster.max_views_per_cluster << '\n'
                   << "checkpoint_load_seconds=" << load_seconds << '\n'
