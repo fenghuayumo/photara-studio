@@ -899,6 +899,9 @@ if(TARGET photara_features)
 
     if(PHOTARA_BUILD_STUDIO)
             find_package(Vulkan 1.2 REQUIRED)
+            if(PHOTARA_ENABLE_AGENT_CONTROL)
+                find_package(nlohmann_json CONFIG REQUIRED)
+            endif()
             find_package(glfw3 CONFIG QUIET)
             if(NOT TARGET glfw)
                 find_package(PkgConfig REQUIRED)
@@ -979,6 +982,21 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/ui_viewport.cpp
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
                 ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp)
+            if(PHOTARA_ENABLE_AGENT_CONTROL)
+                target_sources(photara_studio PRIVATE
+                    ${PHOTARA_STUDIO_DIR}/control/control_bus.cpp
+                    ${PHOTARA_STUDIO_DIR}/control/control_commands.cpp
+                    ${PHOTARA_STUDIO_DIR}/control/control_paths.cpp
+                    ${PHOTARA_STUDIO_DIR}/control/control_server.cpp
+                    ${PHOTARA_STUDIO_DIR}/control/control_state.cpp)
+                target_link_libraries(photara_studio PRIVATE
+                    nlohmann_json::nlohmann_json)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_CONTROL_ENABLED=1)
+                if(WIN32)
+                    target_link_libraries(photara_studio PRIVATE ws2_32)
+                endif()
+            endif()
             if(WIN32)
                 # Launch Studio as a GUI application without allocating a console.
                 set_target_properties(photara_studio PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -1062,6 +1080,25 @@ if(TARGET photara_features)
                         $<TARGET_FILE_DIR:photara_studio>
                     COMMAND_EXPAND_LISTS)
             endif()
+    endif()
+endif()
+
+if(PHOTARA_ENABLE_AGENT_CONTROL)
+    find_package(nlohmann_json CONFIG REQUIRED)
+    add_executable(photara_ctl
+        ${CMAKE_CURRENT_SOURCE_DIR}/../apps/ctl/photara_ctl.cpp)
+    target_include_directories(photara_ctl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_BINARY_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor)
+    target_link_libraries(photara_ctl PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_features(photara_ctl PRIVATE cxx_std_20)
+    set_target_properties(photara_ctl PROPERTIES OUTPUT_NAME photara-ctl)
+    if(WIN32)
+        target_link_libraries(photara_ctl PRIVATE ws2_32)
+    endif()
+    if(MSVC)
+        target_compile_options(photara_ctl PRIVATE /utf-8)
     endif()
 endif()
 
