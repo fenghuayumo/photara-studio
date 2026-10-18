@@ -1,4 +1,8 @@
 ﻿#include "app.hpp"
+#if defined(PHOTARA_CONTROL_ENABLED)
+#include "control/control_bus.hpp"
+#include "control/control_server.hpp"
+#endif
 #include "file_dialogs.hpp"
 #include "i18n.hpp"
 #include "ui.hpp"
@@ -36,6 +40,26 @@ std::string g_editor_ini;
 
 int main(const int argc, char** argv) {
     App app;
+#if defined(PHOTARA_CONTROL_ENABLED)
+    bool agent_control_enabled = false;
+    std::uint16_t agent_control_port = 0;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument =
+            argv[index] != nullptr ? argv[index] : "";
+        if (argument == "--enable-agent-control") {
+            agent_control_enabled = true;
+        } else if (argument == "--agent-control-port" && index + 1 < argc) {
+            try {
+                const int value = std::stoi(argv[++index]);
+                if (value > 0 && value <= 65535)
+                    agent_control_port = static_cast<std::uint16_t>(value);
+            } catch (...) {
+            }
+        }
+    }
+    editor::control::ControlBus control_bus;
+    editor::control::Server control_server;
+#endif
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
     const bool transition_smoke = smoke_arg == "--project-transition-smoke";
     const bool mesh_smoke = smoke_arg == "--interop-mesh-smoke";
@@ -183,6 +207,23 @@ int main(const int argc, char** argv) {
     }
     app.preview.create(k_preview_extent, k_preview_extent);
 
+#if defined(PHOTARA_CONTROL_ENABLED)
+    if (agent_control_enabled) {
+        if (control_server.start(control_bus, agent_control_port)) {
+            editor::set_message(
+                app,
+                "Agent control: http://127.0.0.1:" +
+                    std::to_string(control_server.port()),
+                editor::theme::success);
+        } else {
+            editor::set_message(
+                app,
+                "Agent control failed: " + control_server.error(),
+                editor::theme::danger);
+        }
+    }
+#endif
+
     const auto smoke_begin = std::chrono::steady_clock::now();
     // Retrain smoke: the first run must complete, then Train 3DGS is started
     // again exactly like a user click, after the frame that still references
@@ -212,6 +253,9 @@ int main(const int argc, char** argv) {
         editor::poll_splat_simplify(app);
         editor::poll_gaussian_merge(app);
         editor::poll_splat_export(app);
+#if defined(PHOTARA_CONTROL_ENABLED)
+        control_bus.pump_main_thread(app);
+#endif
 
         if (app.smoke_mode && !transition_smoke) {
             if (!app.smoke_started && !app.job.running()) {
@@ -257,6 +301,9 @@ int main(const int argc, char** argv) {
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
             app.preview.consume_without_present();
             editor::publish_preview_ack(app);
+#if defined(PHOTARA_CONTROL_ENABLED)
+            control_bus.pump_post_present(app);
+#endif
             ImGui_ImplGlfw_Sleep(10);
             continue;
         }
@@ -513,6 +560,10 @@ int main(const int argc, char** argv) {
                     editor::theme::warning);
         }
 
+#if defined(PHOTARA_CONTROL_ENABLED)
+        control_bus.pump_post_present(app);
+#endif
+
         if (app.pending_align_viewport_clear) {
             app.pending_align_viewport_clear = false;
             editor::clear_viewport_scene(app);
@@ -529,6 +580,11 @@ int main(const int argc, char** argv) {
             editor::delete_reconstruction_results(app);
         }
     }
+
+#if defined(PHOTARA_CONTROL_ENABLED)
+    control_server.stop();
+    control_bus.stop();
+#endif
 
     if (app.job.running()) app.job.stop();
     if (app.splat_export.cancel) app.splat_export.cancel->store(true);

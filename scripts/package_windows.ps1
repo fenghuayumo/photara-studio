@@ -268,6 +268,10 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $runtime 'photara_studio.exe') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $runtime 'photara.exe') -Destination $stage
+$agentControl = Join-Path $runtime 'photara-ctl.exe'
+if (Test-Path -LiteralPath $agentControl -PathType Leaf) {
+    Copy-Item -LiteralPath $agentControl -Destination $stage
+}
 
 $dumpbin = Find-Dumpbin
 if ($dumpbin) {
@@ -276,9 +280,13 @@ if ($dumpbin) {
         Write-Host "CUDA runtime directory: $cudaDir"
     }
     $searchDirs = @($runtime) + $cudaDirs
-    $dllCount = Copy-RuntimeDependencies $dumpbin $stage $searchDirs @(
+    $dependencyBinaries = @(
         (Join-Path $runtime 'photara_studio.exe'),
         (Join-Path $runtime 'photara.exe'))
+    if (Test-Path -LiteralPath $agentControl -PathType Leaf) {
+        $dependencyBinaries += $agentControl
+    }
+    $dllCount = Copy-RuntimeDependencies $dumpbin $stage $searchDirs $dependencyBinaries
     Write-Host "Collected $dllCount runtime DLL(s) via dumpbin dependency walk."
 } else {
     Write-Warning 'dumpbin.exe not found; falling back to copying every DLL in the Release output.'
