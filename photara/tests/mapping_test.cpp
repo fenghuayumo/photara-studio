@@ -1782,7 +1782,90 @@ void test_boundary_track_quota() {
     expect(std::find(improved.begin(),improved.end(),20)==improved.end(),"quota must not admit a two-view track");
 }
 
+void test_final_alignment_quality() {
+    Scene scene;
+    scene.cameras.push_back(cam());
+    for (Index i = 0; i < 4; ++i) {
+        Image image;
+        image.id = i;
+        image.camera_id = 0;
+        image.registered = true;
+        image.pose.C = Vec3(0.4 * i, 0, 0);
+        scene.images.push_back(std::move(image));
+    }
+    for (Index p = 0; p < 80; ++p) {
+        Track track;
+        track.position = Vec3((p % 10) * 0.12, (p / 10) * 0.1, 4 + (p % 7) * 0.15);
+        for (Index i = 0; i < 4; ++i) {
+            const Vec2 uv = scene.cameras[0].project(
+                scene.images[i].pose.transform_world_to_camera(track.position));
+            photara::features::Keypoint kp;
+            kp.x = static_cast<float>(uv.x());
+            kp.y = static_cast<float>(uv.y());
+            scene.images[i].features.keypoints.push_back(kp);
+            track.observations.push_back({i, p});
+        }
+        // Some native associations were excluded before the final quality pass.
+        track.num_inliers = p < 60 ? 2 : 0;
+        scene.tracks.push_back(std::move(track));
+    }
+    scene.images[2].pose.C.y() += 0.005;
+    rebuild_track_index(scene);
+    const auto camera = scene.cameras[0];
+    expect(refine_alignment_geometry(scene), "final quality accepts supported native refresh");
+    expect(scene.registered_count() == 4, "final quality preserves registration");
+    expect(scene.cameras[0].fx == camera.fx && scene.cameras[0].fy == camera.fy &&
+        scene.cameras[0].cx == camera.cx && scene.cameras[0].cy == camera.cy &&
+        scene.cameras[0].k1 == camera.k1 && scene.cameras[0].k2 == camera.k2 &&
+        scene.cameras[0].p1 == camera.p1 && scene.cameras[0].p2 == camera.p2,
+        "final quality fixes calibration");
+    expect(scene.tracks.back().num_inliers == 4,
+        "final quality recovers previously untriangulated associations");
+    expect(scene.image_tracks.size() == 4 && scene.image_tracks[0].size() == 80,
+        "final quality rebuilds track index");
+
+    Scene duplicates = scene;
+    duplicates.images[3].pose = duplicates.images[0].pose;
+    duplicates.images[3].features = duplicates.images[0].features;
+    ImagePair pair(0, 3);
+    pair.zero_baseline = true;
+    duplicates.pairs.push_back(pair);
+    const auto tied = duplicates.images[0].pose;
+    expect(refine_alignment_geometry(duplicates), "final quality supports duplicate images");
+    expect((duplicates.images[0].pose.R.array() == tied.R.array()).all() &&
+        (duplicates.images[3].pose.R.array() == tied.R.array()).all() &&
+        (duplicates.images[0].pose.C.array() == tied.C.array()).all() &&
+        (duplicates.images[3].pose.C.array() == tied.C.array()).all(),
+        "final quality preserves exact zero-baseline poses");
+
+    Scene degenerate = scene;
+    for (auto& image : degenerate.images) image.pose.C.setZero();
+    degenerate.tracks.back().has_color = true;
+    degenerate.tracks.back().color_r = 17;
+    const auto original = degenerate.tracks.back();
+    const auto original_index = degenerate.image_tracks;
+    expect(!refine_alignment_geometry(degenerate), "unusable final quality is rejected");
+    expect((degenerate.tracks.back().position.array() == original.position.array()).all() &&
+        degenerate.tracks.back().num_inliers == original.num_inliers &&
+        degenerate.tracks.back().observations.size() == original.observations.size() &&
+        degenerate.tracks.back().has_color == original.has_color &&
+        degenerate.tracks.back().color_r == original.color_r &&
+        degenerate.image_tracks.size() == original_index.size(),
+        "rejected final quality restores points, inliers, colors and track index");
+    expect(degenerate.registered_count() == 4 && degenerate.images[2].pose.C.isZero(),
+        "rejected final quality restores poses and registration");
+    bool same_index = true;
+    for (std::size_t i = 0; i < original_index.size(); ++i) {
+        same_index = same_index && degenerate.image_tracks[i].size() == original_index[i].size();
+        for (std::size_t j = 0; j < original_index[i].size() && same_index; ++j)
+            same_index = degenerate.image_tracks[i][j].track_id == original_index[i][j].track_id &&
+                degenerate.image_tracks[i][j].feature_id == original_index[i][j].feature_id;
+    }
+    expect(same_index, "rejected final quality restores every track index entry");
+}
+
 int main() {
+    test_final_alignment_quality();
     test_boundary_track_quota();
     {
         Scene layout;
@@ -2009,6 +2092,19 @@ int main() {
             global.rms_reprojection_error_pixels >=
                 global.mean_reprojection_error_pixels,
         "global mapping reports reprojection statistics");
+
+    ReconstructionConfig product;
+    product.frontend.trust_focal_pixels = true;
+    product.global_positioning = positioning;
+    product.resection = fallback;
+    std::vector<std::string> final_stages;
+    product.resection.diagnostic_callback = [&](const char* stage, const Scene&) {
+        if (std::string_view(stage) == "before_alignment_quality" ||
+            std::string_view(stage) == "final") final_stages.emplace_back(stage);
+    };
+    const auto completed = reconstruct_from_frontend(global_scene, product);
+    expect(completed.valid && final_stages == std::vector<std::string>{"before_alignment_quality", "final"},
+        "product mapping runs quality before final diagnostics and summary");
 
     if (failures == 0) {
         std::cout << "sfm mapping tests passed\n";

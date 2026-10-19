@@ -1106,6 +1106,15 @@ if(PHOTARA_BUILD_BENCHMARKS)
         endif()
         add_executable(photara_pair_verify src/tools/pair_verify.cpp)
         add_executable(photara_sfm_realign src/tools/sfm_realign.cpp)
+        add_executable(photara_sfm_refine src/tools/sfm_refine_reconstruction.cpp)
+        target_link_libraries(photara_sfm_refine PRIVATE Photara::SfM)
+        if(WIN32)
+            add_custom_command(TARGET photara_sfm_refine POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_sfm_refine>
+                    $<TARGET_FILE_DIR:photara_sfm_refine>
+                COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
         add_executable(photara_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
         add_executable(photara_sfm_reconstruction_benchmark src/tools/sfm_reconstruction_benchmark.cpp)
@@ -1197,6 +1206,7 @@ if(PHOTARA_BUILD_BENCHMARKS)
         photara_cpu_sift_parity
         photara_pair_verify
         photara_sfm_realign
+        photara_sfm_refine
         photara_sfm_match_benchmark
         photara_sfm_positioning_benchmark
         photara_sfm_reconstruction_benchmark

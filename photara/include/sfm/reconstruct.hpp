@@ -78,6 +78,11 @@ unsigned prune_unsupported_registrations(
     Scene& scene, unsigned minimum_observations = 30,
     double maximum_reprojection_error_pixels = 2.0);
 
+// Final native track refresh and fixed-calibration joint pose/point BA.
+// Uses all live associations, including observations excluded by earlier BA.
+// Registration stays fixed; a rejected/failed solve restores the input geometry.
+bool refine_alignment_geometry(Scene& scene);
+
 // Mapping and final audits for an already extracted/verified frontend scene.
 ReconstructionSummary reconstruct_from_frontend(
     Scene& scene, const ReconstructionConfig& config = {});
