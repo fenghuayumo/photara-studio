@@ -1356,6 +1356,49 @@ AlignmentObservability analyze_position_observability(const Scene& scene) {
     return audit;
 }
 
+namespace {
+void discard_removed_observations(Scene& scene, const std::vector<std::uint8_t>& removed) {
+    for (Track& track : scene.tracks) {
+        const std::size_t old_inliers = std::min<std::size_t>(track.num_inliers, track.observations.size());
+        unsigned retained_inliers = 0;
+        for (std::size_t index = 0; index < old_inliers; ++index)
+            if (track.observations[index].image_id < removed.size() && !removed[track.observations[index].image_id])
+                ++retained_inliers;
+        std::erase_if(track.observations, [&](const Observation& observation) {
+            return observation.image_id < removed.size() && removed[observation.image_id];
+        });
+        track.num_inliers = static_cast<std::uint8_t>(std::min<std::size_t>(retained_inliers, 255));
+        if (track.num_inliers < 2) track.num_inliers = 0;
+    }
+    rebuild_track_index(scene);
+}
+}  // namespace
+
+unsigned prune_unobservable_registrations(Scene& scene) {
+    if (scene.pairs.empty() || scene.registered_count() < 4) return 0;
+    const auto audit = analyze_alignment_observability(scene);
+    if (audit.reliable_views < 4 || audit.unreliable_views == 0) return 0;
+    std::vector<std::uint8_t> removed(scene.images.size(), 0);
+    unsigned count = 0;
+    // Freeze this mask: cameras rejected in this pass must not let one another
+    // become observable through a cascading re-analysis of their fitted points.
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        auto& image = scene.images[id];
+        if (!image.registered || audit.reliable[id]) continue;
+        removed[id] = 1;
+        image.registered = false;
+        image.position_audit = PositionAudit::not_audited;
+        image.pose = Pose3D::identity();
+        ++count;
+        core::Logger::instance().warning("final independent support: rejected image=", image.path.filename(),
+            " reason=unobservable_alignment");
+    }
+    discard_removed_observations(scene, removed);
+    core::Logger::instance().info("final independent support: rejected=", count,
+        " remaining=", scene.registered_count());
+    return count;
+}
+
 unsigned audit_position_support(Scene& scene) {
     if (scene.pairs.empty() || scene.registered_count() < 4) return 0;
     core::StageScope stage("sfm.position_audit");
@@ -1510,23 +1553,7 @@ unsigned prune_unsupported_registrations(
     }
     if (invalidated == 0) return 0;
 
-    for (Track& track : scene.tracks) {
-        const std::size_t old_inliers = std::min<std::size_t>(
-            track.num_inliers, track.observations.size());
-        unsigned retained_inliers = 0;
-        for (std::size_t index = 0; index < old_inliers; ++index)
-            if (track.observations[index].image_id < removed.size() &&
-                !removed[track.observations[index].image_id])
-                ++retained_inliers;
-        std::erase_if(track.observations, [&](const Observation& observation) {
-            return observation.image_id < removed.size() &&
-                   removed[observation.image_id];
-        });
-        track.num_inliers = static_cast<std::uint8_t>(
-            std::min<std::size_t>(retained_inliers, 255));
-        if (track.num_inliers < 2) track.num_inliers = 0;
-    }
-    rebuild_track_index(scene);
+    discard_removed_observations(scene, removed);
     core::Logger::instance().warning(
         "final registration audit: invalidated=", invalidated,
         " remaining=", scene.registered_count());
@@ -1906,6 +1933,7 @@ ReconstructionSummary reconstruct_from_frontend(
     if (recover_alignment_views(scene, config.frontend) > 0)
         prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                        config.maximum_final_reprojection_error_pixels);
+    prune_unobservable_registrations(scene);
     audit_position_support(scene);
     if (config.resection.diagnostic_callback) config.resection.diagnostic_callback("final", scene);
     return summarize_scene(scene);
@@ -1931,6 +1959,7 @@ ReconstructionSummary reconstruct(
         if (recover_alignment_views(scene_out, config.frontend) > 0)
             prune_unsupported_registrations(scene_out, config.minimum_final_observations_per_image,
                                            config.maximum_final_reprojection_error_pixels);
+        prune_unobservable_registrations(scene_out);
         audit_position_support(scene_out);
         if (config.resection.checkpoint_callback)
             config.resection.checkpoint_callback(scene_out);

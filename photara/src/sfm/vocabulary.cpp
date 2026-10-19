@@ -18,7 +18,7 @@ namespace photara::sfm {
 namespace {
 
 constexpr std::uint32_t k_vocab_magic = 0x41535654u;  // ASVT
-constexpr std::uint32_t k_vocab_version = 1;
+constexpr std::uint32_t k_vocab_version = 2;
 
 float squared_l2(
     const float* left, const float* right, const std::size_t dimension) {
@@ -76,7 +76,8 @@ std::vector<T> read_vector(std::istream& input, const std::size_t maximum) {
 std::vector<features::FeatureIndex> sample_descriptors_spatially(
     const features::FeatureSet& features,
     const std::size_t maximum,
-    const unsigned grid_size) {
+    const unsigned grid_size,
+    const bool systematic) {
     if (maximum == 0 || features.keypoints.empty() || grid_size == 0) return {};
     const std::size_t keep = std::min(maximum, features.keypoints.size());
     if (keep == features.keypoints.size()) {
@@ -116,6 +117,7 @@ std::vector<features::FeatureIndex> sample_descriptors_spatially(
         return response * size_weight;
     };
     for (auto& bucket : buckets) {
+        if (systematic) continue;
         std::sort(
             bucket.begin(), bucket.end(),
             [&](const features::FeatureIndex left,
@@ -126,6 +128,23 @@ std::vector<features::FeatureIndex> sample_descriptors_spatially(
                     return quality_left > quality_right;
                 return left < right;
             });
+    }
+
+    if (systematic) {
+        // Detection order groups scales/octaves. A prefix per spatial cell
+        // ignores later levels when the extractor supplies no response score.
+        // Preserve the same cell quotas while covering each cell's full list.
+        std::vector<std::size_t> quota(cells, 0);
+        for (std::size_t count = 0; count < keep;)
+            for (unsigned cell = 0; cell < cells && count < keep; ++cell)
+                if (quota[cell] < buckets[cell].size()) { ++quota[cell]; ++count; }
+        std::vector<features::FeatureIndex> selected;
+        selected.reserve(keep);
+        for (std::size_t round = 0; selected.size() < keep; ++round)
+            for (unsigned cell = 0; cell < cells && selected.size() < keep; ++cell)
+                if (round < quota[cell])
+                    selected.push_back(buckets[cell][round * buckets[cell].size() / quota[cell]]);
+        return selected;
     }
 
     std::vector<features::FeatureIndex> selected;
@@ -315,8 +334,8 @@ void VocabularyTree::train(
     if (dimension_ == 0) return;
 
     // Sampling and L2-normalizing each image's descriptors is independent per
-    // image; rows are concatenated in image order afterwards so the training
-    // buffer matches the serial collection exactly (including the cap).
+    // image. Supplemental vocabularies can spread the global cap across the
+    // whole collection without replacing the established primary vocabulary.
     std::vector<std::vector<float>> image_rows(images.size());
     parallel::parallel_for(
         images.size(), parallel::resolve_thread_count(0),
@@ -353,21 +372,38 @@ void VocabularyTree::train(
                 }
             }
         });
+    std::size_t available = 0;
+    for (const auto& rows : image_rows) available += rows.size() / dimension_;
+    const std::size_t budget = std::min(config.max_training_descriptors, available);
     std::vector<float> training;
-    training.reserve(
-        std::min(config.max_training_descriptors,
-                 images.size() * config.max_descriptors_per_image) *
-        dimension_);
-    for (const std::vector<float>& rows : image_rows) {
-        const std::size_t remaining =
-            config.max_training_descriptors - training.size() / dimension_;
-        const std::size_t copy =
-            std::min(remaining, rows.size() / dimension_);
-        training.insert(
-            training.end(), rows.begin(),
-            rows.begin() + static_cast<std::ptrdiff_t>(copy * dimension_));
-        if (training.size() / dimension_ >= config.max_training_descriptors)
-            break;
+    training.reserve(budget * dimension_);
+    if (!config.sample_all_images) {
+        for (const auto& rows : image_rows) {
+            const std::size_t copy = std::min(budget - training.size() / dimension_, rows.size() / dimension_);
+            training.insert(training.end(), rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(copy * dimension_));
+            if (training.size() / dimension_ == budget) break;
+        }
+    } else {
+        // Systematic sampling spreads a fixed budget over all candidate rows.
+        // The accumulator avoids multiplication overflow and preserves every
+        // row when the cap is not binding.
+        std::size_t next_row = 0;
+        std::size_t remainder = 0;
+        std::size_t offset = 0;
+        for (const std::vector<float>& rows : image_rows) {
+            const std::size_t count = rows.size() / dimension_;
+            while (budget > 0 && next_row < offset + count && training.size() / dimension_ < budget) {
+                const auto begin = rows.begin() + static_cast<std::ptrdiff_t>((next_row - offset) * dimension_);
+                training.insert(training.end(), begin, begin + static_cast<std::ptrdiff_t>(dimension_));
+                next_row += available / budget;
+                remainder += available % budget;
+                if (remainder >= budget) {
+                    ++next_row;
+                    remainder -= budget;
+                }
+            }
+            offset += count;
+        }
     }
     const std::size_t descriptor_count = training.size() / dimension_;
     if (descriptor_count < config.branching) {
@@ -462,6 +498,7 @@ void VocabularyTree::save(const std::filesystem::path& path) const {
     write_pod(output, static_cast<std::uint64_t>(config_.max_descriptors_per_image));
     write_pod(output, static_cast<std::uint64_t>(config_.max_training_descriptors));
     write_pod(output, config_.sample_grid);
+    write_pod(output, static_cast<std::uint8_t>(config_.sample_all_images));
     write_pod(output, static_cast<std::uint32_t>(metric_));
     write_pod(output, static_cast<std::uint64_t>(dimension_));
     write_pod(output, static_cast<std::uint64_t>(word_count_));
@@ -475,7 +512,7 @@ void VocabularyTree::load(const std::filesystem::path& path) {
     if (!input) throw std::runtime_error("Failed to open vocabulary file");
     const auto magic = read_pod<std::uint32_t>(input);
     const auto version = read_pod<std::uint32_t>(input);
-    if (magic != k_vocab_magic || version != k_vocab_version)
+    if (magic != k_vocab_magic || (version != 1 && version != k_vocab_version))
         throw std::runtime_error("Unsupported vocabulary file");
     config_.branching = read_pod<std::uint32_t>(input);
     config_.depth = read_pod<std::uint32_t>(input);
@@ -486,6 +523,7 @@ void VocabularyTree::load(const std::filesystem::path& path) {
     config_.max_training_descriptors =
         static_cast<std::size_t>(read_pod<std::uint64_t>(input));
     config_.sample_grid = read_pod<unsigned>(input);
+    config_.sample_all_images = version >= 2 && read_pod<std::uint8_t>(input) != 0;
     metric_ = static_cast<features::DescriptorMetric>(
         read_pod<std::uint32_t>(input));
     dimension_ = static_cast<std::size_t>(read_pod<std::uint64_t>(input));

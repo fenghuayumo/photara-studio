@@ -1031,6 +1031,18 @@ void test_alignment_observability_reports_bridge_branch() {
     expect(audit.reliable_views == 4 && audit.unreliable_views == 3,
            "alignment observability retains largest rigid block");
 
+    Scene screened = scene;
+    Track unsupported;
+    unsupported.position = Vec3(0, 0, 4);
+    unsupported.observations = {{0, 0}, {4, 0}};
+    unsupported.num_inliers = 2;
+    screened.tracks.push_back(unsupported);
+    expect(prune_unobservable_registrations(screened) == 3 && screened.registered_count() == 4,
+           "final independent support rejects a floating block despite its local cycle");
+    expect(!screened.images[4].registered && screened.tracks.front().observations.size() == 1 &&
+           screened.tracks.front().num_inliers == 0,
+           "final independent support removes rejected observations and invalidates orphan depths");
+
     Track cross_track;
     cross_track.position = Vec3(0.0, 0.0, 4.0);
     cross_track.observations = {{2, 0}, {4, 0}, {5, 0}};

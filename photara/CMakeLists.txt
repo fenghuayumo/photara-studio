@@ -1116,6 +1116,10 @@ if(PHOTARA_BUILD_BENCHMARKS)
         target_link_libraries(photara_sfm_position_recovery_probe PRIVATE Photara::SfM)
         add_executable(photara_sfm_stable_resection_probe src/tools/sfm_stable_resection_probe.cpp)
         target_link_libraries(photara_sfm_stable_resection_probe PRIVATE Photara::SfM)
+        # Experimental Eigen/Ceres code must match the SfM/BA Eigen ABI.
+        if(MSVC AND PHOTARA_ENABLE_NATIVE_ARCH)
+            target_compile_options(photara_sfm_stable_resection_probe PRIVATE /arch:AVX2)
+        endif()
         if(WIN32)
             foreach(_sfm_tool photara_sfm_reconstruction_benchmark photara_sfm_position_diagnostics photara_sfm_position_recovery_probe photara_sfm_stable_resection_probe)
                 add_custom_command(TARGET ${_sfm_tool} POST_BUILD
@@ -1563,6 +1567,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_mapping_test tests/mapping_test.cpp)
         add_executable(photara_sfm_refine_probe ../experiments/sfm_refine_probe.cpp)
         target_link_libraries(photara_sfm_refine_probe PRIVATE Photara::SfM)
+        add_executable(photara_sfm_retrieval_audit src/tools/sfm_retrieval_audit.cpp)
+        target_link_libraries(photara_sfm_retrieval_audit PRIVATE Photara::SfM)
+        add_executable(photara_sfm_extend src/tools/sfm_extend_reconstruction.cpp)
+        target_link_libraries(photara_sfm_extend PRIVATE Photara::SfM)
         target_link_libraries(photara_mapping_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.mapping COMMAND photara_mapping_test)
         add_executable(photara_vocabulary_test tests/vocabulary_test.cpp)
@@ -1574,6 +1582,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_hierarchical_test tests/hierarchical_test.cpp)
         add_executable(photara_submap_recovery_test tests/submap_recovery_test.cpp)
         target_link_libraries(photara_submap_recovery_test PRIVATE Photara::SfM)
+        # Keep header-instantiated Eigen/Ceres allocation paths compatible.
+        if(MSVC AND PHOTARA_ENABLE_NATIVE_ARCH)
+            target_compile_options(photara_submap_recovery_test PRIVATE /arch:AVX2)
+        endif()
         add_test(NAME photara.sfm.submap_recovery COMMAND photara_submap_recovery_test)
         target_link_libraries(photara_hierarchical_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.hierarchical COMMAND photara_hierarchical_test)
@@ -1651,6 +1663,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_equirect_dataset_check
         photara_mapping_test
         photara_sfm_refine_probe
+        photara_sfm_retrieval_audit
+        photara_sfm_extend
         photara_vocabulary_test
         photara_checkpoint_test
         photara_hierarchical_test

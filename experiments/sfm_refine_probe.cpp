@@ -20,8 +20,8 @@ int main(int argc, char** argv) {
     const std::string mode = argc == 4 ? argv[3] : "";
     const bool polish = mode == "polish" || mode == "polish-weak-prior" ||
         mode == "polish-square" || mode == "polish-pinhole" || mode == "polish-per-view";
-    if (argc != 3 && !(argc == 4 && (mode == "reattach" || mode == "focal" || polish))) {
-        std::cerr << "checkpoint.bin output_prefix [reattach|focal|polish|polish-weak-prior|polish-square|polish-pinhole|polish-per-view]\n"; return 1;
+    if (argc != 3 && !(argc == 4 && (mode == "audit" || mode == "reattach" || mode == "focal" || polish))) {
+        std::cerr << "checkpoint.bin output_prefix [audit|reattach|focal|polish|polish-weak-prior|polish-square|polish-pinhole|polish-per-view]\n"; return 1;
     }
     const std::filesystem::path input(argv[1]), output(argv[2]);
     photara::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
@@ -43,8 +43,13 @@ int main(int argc, char** argv) {
     if (argc == 4 && std::string(argv[3]) == "focal") probe_small_group_focals(scene);
     auto audit=analyze_alignment_observability(scene);
     std::cout << "Original reliable " << audit.reliable_views << '\n';
-    recover_weakly_connected_views(scene);
-    recover_stable_resections(scene);
+    if (mode == "audit") {
+        prune_unobservable_registrations(scene);
+        audit_position_support(scene);
+    } else {
+        recover_weakly_connected_views(scene);
+        recover_stable_resections(scene);
+    }
     audit=analyze_alignment_observability(scene);
     std::vector<unsigned> counts(scene.images.size());
     std::vector<double> squared(scene.images.size());

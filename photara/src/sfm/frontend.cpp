@@ -23,6 +23,8 @@
 #include <cmath>
 #include <condition_variable>
 #include <future>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -58,6 +60,53 @@ struct PairDiagnostics {
     bool attempted_geometry{false};
     bool accepted{false};
 };
+
+void write_feature_diagnostics(const Scene& scene,const FrontEndOptions& options,const char* stage) {
+    if(options.diagnostics_directory.empty())return;
+    std::filesystem::create_directories(options.diagnostics_directory);
+    std::ofstream out(options.diagnostics_directory/(std::string("features-")+stage+".csv"));
+    if(!out)throw std::runtime_error("Cannot write frontend feature diagnostics");
+    out<<"id,name,width,height,features,cells_4x4,descriptor_dimension,descriptor_rows,model,fx,fy,k1,k2,trust_intrinsics\n";
+    for(const auto& image:scene.images) {
+        const auto& features=image.features;const auto& camera=scene.camera_of(image);
+        std::set<std::pair<int,int>> cells;
+        for(const auto& p:features.keypoints)cells.emplace(
+            std::clamp(int(4*p.x/std::max(1u,camera.width)),0,3),std::clamp(int(4*p.y/std::max(1u,camera.height)),0,3));
+        const auto rows=features.descriptor_dimension==0?0:
+            (features.descriptors.size()+features.descriptors_u8.size())/features.descriptor_dimension;
+        out<<image.id<<','<<std::quoted(image.path.filename().string())<<','<<camera.width<<','<<camera.height<<','
+            <<features.keypoints.size()<<','<<cells.size()<<','<<features.descriptor_dimension<<','<<rows<<','
+            <<static_cast<int>(camera.model)<<','<<camera.fx<<','<<camera.fy<<','<<camera.k1<<','<<camera.k2<<','<<camera.trust_intrinsics<<'\n';
+    }
+    if(!out)throw std::runtime_error("Failed writing frontend feature diagnostics");
+}
+
+void write_pair_diagnostics(const Scene& scene,const FrontEndOptions& options,const char* stage,
+    const std::vector<PairCandidate>& candidates,const std::vector<PairDiagnostics>& diagnostics,
+    const std::vector<ImagePair>& accepted) {
+    if(options.diagnostics_directory.empty())return;
+    if(candidates.size()!=diagnostics.size())throw std::logic_error("Mismatched frontend diagnostics");
+    std::filesystem::create_directories(options.diagnostics_directory);
+    std::ofstream out(options.diagnostics_directory/(std::string("pairs-")+stage+".csv"));
+    if(!out)throw std::runtime_error("Cannot write frontend pair diagnostics");
+    std::map<std::pair<Index,Index>,const ImagePair*> pairs;
+    for(const auto& pair:accepted)if(!pair.matches.empty())pairs[{pair.id1,pair.id2}]=&pair;
+    out<<"id1,id2,name1,name2,raw_matches,attempted_geometry,ransac_inliers,filtered_inliers,accepted,stage,planar,ray_angle_rad,spatial_weight,ratio,min_inliers\n";
+    for(std::size_t i=0;i<candidates.size();++i) {
+        const auto& c=candidates[i];const auto& d=diagnostics[i];
+        const auto found=pairs.find({c.id1,c.id2});const auto* p=found==pairs.end()?nullptr:found->second;
+        const char* reason=d.accepted?"accepted":!d.attempted_geometry?"too_few_raw":
+            d.ransac_inliers==0?"estimation_or_pose_recovery":
+            d.ransac_inliers<options.relative.min_inliers?"ransac_support":
+            d.filtered_inliers<options.relative.min_inliers?"geometry_filter":"geometry_rejected";
+        out<<c.id1<<','<<c.id2<<','<<std::quoted(scene.images[c.id1].path.filename().string())<<','
+            <<std::quoted(scene.images[c.id2].path.filename().string())<<','<<d.raw_matches<<','<<d.attempted_geometry<<','
+            <<d.ransac_inliers<<','<<d.filtered_inliers<<','<<d.accepted<<','<<reason<<','
+            <<(p?p->degenerate_planar:false)<<','<<(p?p->mean_ray_angle:0)<<','<<(p?p->weight_spatial:0)<<','
+            <<options.match_ratio<<','<<options.relative.min_inliers<<'\n';
+    }
+    if(!out)throw std::runtime_error("Failed writing frontend pair diagnostics");
+}
 
 struct FrontEndStageKeys {
     std::uint64_t images{};
@@ -267,6 +316,8 @@ FrontEndStageKeys make_stage_keys(
     matches.append(options.retrieval.top_k);
     matches.append(options.retrieval.max_descriptors_per_image);
     matches.append(options.retrieval.sample_grid);
+    matches.append(options.retrieval.systematic_sampling);
+    matches.append(options.retrieval.vocabulary.sample_all_images);
     matches.append(options.retrieval.stop_word_ratio);
     matches.append(options.retrieval.max_posting_images);
     matches.append(options.retrieval.vocabulary.branching);
@@ -295,6 +346,8 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.progressive_max_images);
     geometry.append(options.progressive_rescue_neighbor_window);
     geometry.append(options.progressive_rescue_retrieval_top_k);
+    geometry.append(options.whole_scene_rescue);
+    geometry.append(options.balanced_rescue);
     geometry.append(options.progressive_rescue_max_pairs_per_image);
     geometry.append(options.progressive_rescue_max_features);
     geometry.append_string("progressive_pair_expansion_v3");
@@ -2236,6 +2289,7 @@ FrontEndResult run_frontend(
 
     const auto match_started = std::chrono::steady_clock::now();
     auto candidates = build_pair_candidates(scene, runtime_options);
+    write_feature_diagnostics(scene,runtime_options,"primary");
     mark_content_duplicate_pairs(candidates, image_fingerprint);
     // Group by id1 before GPU matching so slot-0 descriptors stay warm.
     if (matcher->requires_owner_thread())
@@ -2483,6 +2537,7 @@ FrontEndResult run_frontend(
         }
     }
 
+    write_pair_diagnostics(scene,runtime_options,"primary",candidates,diagnostics,scene.pairs);
     const bool can_expand_progressively =
         runtime_options.progressive_pair_expansion &&
         (runtime_options.matcher == "gpu_mutual_ratio" ||
@@ -2702,6 +2757,108 @@ FrontEndResult run_frontend(
             }
             for (const auto& pair : deferred_internal)
                 add_rescue_candidate(pair.id1, pair.id2);
+
+            if (runtime_options.balanced_rescue &&
+                runtime_options.progressive_rescue_retrieval_top_k > 0 &&
+                scene.images.size() >= runtime_options.retrieval_min_images) {
+                RetrievalOptions supplemental = runtime_options.retrieval;
+                supplemental.top_k = runtime_options.progressive_rescue_retrieval_top_k;
+                supplemental.systematic_sampling = true;
+                auto retrieved = retrieve_image_pairs(scene.images, supplemental);
+                struct SupportedProposal { RetrievedPair pair; std::size_t support; };
+                std::vector<SupportedProposal> supported;
+                std::unordered_map<Index, features::FeatureSet> samples;
+                FrontEndOptions ranking_options = runtime_options;
+                ranking_options.max_features = std::max(ranking_options.max_features,
+                    runtime_options.progressive_rescue_max_features);
+                auto ranking_matcher = make_frontend_matcher(ranking_options);
+                const auto budget = runtime_options.progressive_rescue_max_pairs_per_image;
+                for (const auto& pair : retrieved) {
+                    if (!weak[pair.first] && !weak[pair.second]) continue;
+                    const auto key = candidate_key(pair.first, pair.second);
+                    if (primary_pairs.count(key) || rescue_pair_keys.count(key)) continue;
+                    if (budget > 0 &&
+                        ((weak[pair.first] && rescue_degree[pair.first] >= budget) ||
+                         (weak[pair.second] && rescue_degree[pair.second] >= budget))) continue;
+                    const Index query = weak[pair.first] ? pair.first : pair.second;
+                    const Index anchor = query == pair.first ? pair.second : pair.first;
+                    auto [it, inserted] = samples.try_emplace(anchor);
+                    if (inserted) {
+                        const auto& original = scene.images[anchor].features;
+                        auto& sample = it->second;
+                        sample.image_width = original.image_width;
+                        sample.image_height = original.image_height;
+                        sample.descriptor_dimension = original.descriptor_dimension;
+                        sample.metric = original.metric;
+                        sample.storage = original.storage;
+                        sample.extractor_name = original.extractor_name;
+                        const auto ids = sample_descriptors_spatially(original, 2000, 3, true);
+                        for (const auto id : ids) {
+                            sample.keypoints.push_back(original.keypoints[id]);
+                            const auto begin = static_cast<std::size_t>(id) * original.descriptor_dimension;
+                            if (original.storage == features::DescriptorStorage::uint8)
+                                sample.descriptors_u8.insert(sample.descriptors_u8.end(),
+                                    original.descriptors_u8.begin() + begin,
+                                    original.descriptors_u8.begin() + begin + original.descriptor_dimension);
+                            else
+                                sample.descriptors.insert(sample.descriptors.end(),
+                                    original.descriptors.begin() + begin,
+                                    original.descriptors.begin() + begin + original.descriptor_dimension);
+                        }
+                    }
+                    // This asymmetric, inexpensive match ranks proposals only.
+                    // Its feature indices never enter tracks or pose estimation.
+                    const auto support = ranking_matcher->match(
+                        scene.images[query].features, it->second).matches.size();
+                    supported.push_back({pair, support});
+                }
+                ranking_matcher->clear_prepared();
+                std::sort(supported.begin(), supported.end(),
+                    [](const SupportedProposal& a, const SupportedProposal& b) {
+                        if (a.support != b.support) return a.support > b.support;
+                        if (a.pair.score != b.pair.score) return a.pair.score > b.pair.score;
+                        if (a.pair.first != b.pair.first) return a.pair.first < b.pair.first;
+                        return a.pair.second < b.pair.second;
+                    });
+                const auto before = rescue_candidates.size();
+                std::ofstream ranking_csv;
+                if (!runtime_options.diagnostics_directory.empty()) {
+                    ranking_csv.open(runtime_options.diagnostics_directory / "pairs-balanced-proposals.csv");
+                    ranking_csv << "id1,id2,sampled_matches,retrieval_score,selected\n";
+                }
+                for (const auto& proposal : supported) {
+                    const auto& pair = proposal.pair;
+                    const bool selected = add_rescue_candidate(pair.first, pair.second);
+                    if (ranking_csv) ranking_csv << pair.first << ',' << pair.second << ','
+                        << proposal.support << ',' << pair.score << ',' << selected << '\n';
+                }
+                core::Logger::instance().info("balanced supplemental retrieval: added_candidates=",
+                    rescue_candidates.size() - before, " existing_candidates=", before,
+                    " coarse_matches=", supported.size());
+            }
+
+            // Retain every existing proposal before spending the remaining
+            // weak-view budget on a vocabulary trained across the whole scene.
+            // A prefix-trained primary vocabulary can miss revisits in later
+            // rooms. These are fresh matching proposals, never pose constraints.
+            if (runtime_options.whole_scene_rescue &&
+                runtime_options.progressive_rescue_retrieval_top_k > 0 &&
+                scene.images.size() >= runtime_options.retrieval_min_images) {
+                RetrievalOptions supplemental = runtime_options.retrieval;
+                supplemental.top_k = runtime_options.progressive_rescue_retrieval_top_k;
+                supplemental.vocabulary.sample_all_images = true;
+                supplemental.vocabulary_path = runtime_options.checkpoint.directory.empty()
+                    ? std::filesystem::path{}
+                    : runtime_options.checkpoint.directory / "vocabulary-whole-scene-v2.bin";
+                auto retrieved = retrieve_image_pairs(scene.images, supplemental);
+                std::sort(retrieved.begin(), retrieved.end(),
+                    [](const RetrievedPair& a, const RetrievedPair& b) { return a.score > b.score; });
+                const auto before = rescue_candidates.size();
+                for (const auto& pair : retrieved)
+                    if (weak[pair.first] || weak[pair.second]) add_rescue_candidate(pair.first, pair.second);
+                core::Logger::instance().info("whole-scene supplemental retrieval: added_candidates=",
+                    rescue_candidates.size() - before, " existing_candidates=", before);
+            }
         }
         if (!rescue_candidates.empty()) {
             optimize_pairs_order(rescue_candidates, scene);
@@ -2728,6 +2885,8 @@ FrontEndResult run_frontend(
                 rescue_pair_slots, rescue_progress, true,
                 runtime_options.live_preview);
             rescue_progress.finish();
+
+            write_pair_diagnostics(scene,rescue_options,"rescue",rescue_candidates,rescue_diagnostics,rescue_pair_slots);
 
             unsigned rescued_pairs = 0, strengthened_pairs = 0;
             std::unordered_map<std::uint64_t, std::size_t> existing_pairs;
@@ -2762,6 +2921,7 @@ FrontEndResult run_frontend(
     }
     // Descriptors are no longer needed after matching and weak-view rescue;
     // keep keypoints only for track construction and mapping.
+    write_feature_diagnostics(scene,runtime_options,"final");
     release_descriptors(scene);
     matcher->clear_prepared();
 
