@@ -78,6 +78,11 @@ struct FrontEndOptions {
     std::size_t progressive_max_images{500};
     std::size_t progressive_rescue_neighbor_window{16};
     std::size_t progressive_rescue_retrieval_top_k{64};
+    // Supplement existing proposals with a scene-wide vocabulary. London
+    // benefits, but Alameda loses a camera; require explicit selection.
+    bool whole_scene_rescue{false};
+    // Supplemental histogram sampling across detector levels; under evaluation.
+    bool balanced_rescue{false};
     std::size_t progressive_rescue_max_pairs_per_image{96};
     // Re-detect only weak views at this larger budget. Existing descriptors
     // remain first so cached primary-match feature indices stay valid.
@@ -85,6 +90,9 @@ struct FrontEndOptions {
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};
+    // Optional stage-level feature/pair CSVs for diagnosing cold frontend runs.
+    // Does not affect feature, correspondence or geometry selection.
+    std::filesystem::path diagnostics_directory;
     // Editor sidecar. Null when running from the CLI without --working-sfm.
     AlignLivePreview* live_preview{};
 };

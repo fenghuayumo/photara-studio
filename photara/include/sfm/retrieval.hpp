@@ -17,6 +17,8 @@ struct RetrievalOptions {
     std::size_t top_k{50};
     std::size_t max_descriptors_per_image{2000};
     unsigned sample_grid{3};
+    // Histogram-only alternative; does not retrain or replace the vocabulary.
+    bool systematic_sampling{false};
     float stop_word_ratio{0.5F};
     std::size_t max_posting_images{64};
     VocabularyConfig vocabulary{};

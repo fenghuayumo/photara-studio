@@ -9,6 +9,10 @@
 #include "../src/sfm/resection_seeding.hpp"
 #include "../../experiments/sfm_resection_refinement.hpp"
 #include "../../experiments/sfm_pair_group_init.hpp"
+#include "../../experiments/sfm_local_proposals.hpp"
+#include "../../experiments/sfm_ray_group_alignment.hpp"
+#include "../../experiments/sfm_structureless_probe.hpp"
+#include "../../experiments/sfm_cross_anchor_precision.hpp"
 #include <iostream>
 #include <chrono>
 #include <random>
@@ -195,9 +199,271 @@ void test_rotation_recovery() {
                "ambiguous rotation consensus must leave the reconstruction unchanged");
 }
 
+void test_native_local_proposals() {
+    for (bool fisheye : {false,true}) {
+        Scene scene=fixture(true,fisheye);
+        const auto original=scene;
+        const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
+        std::vector<RawPairMatches> raw;
+        for (const auto [a,b] : {std::pair{0u,4u},std::pair{0u,5u},std::pair{4u,5u}}) {
+            RawPairMatches pair; pair.id1=a;pair.id2=b;
+            for (Index f=0;f<(a==0 ? 24u : 160u);++f) pair.matches.push_back({f,f});
+            raw.push_back(std::move(pair));
+        }
+        // There are deliberately no surviving frontend pairs. Only the raw
+        // proposals can restore this weak but cyclic boundary.
+        scene.pairs.clear();
+        const auto summary=verify_local_raw_proposals(scene,stable,raw);
+        expect(summary.boundary_pairs==2 && summary.weak_boundary_pairs==2 &&
+               summary.cycle_supported_matches==48,
+               "native raw verification must restore discarded cyclic weak proposals");
+        expect(scene.cameras[0].fx==original.cameras[0].fx && scene.cameras[0].k1==original.cameras[0].k1,
+               "proposal verification cannot change calibration");
+        for (Index id=0;id<scene.images.size();++id)
+            expect(scene.images[id].pose.C==original.images[id].pose.C &&
+                   scene.images[id].pose.R==original.images[id].pose.R &&
+                   scene.images[id].registered==original.images[id].registered,
+                   "proposal verification cannot register or move a camera");
+        auto disconnected=raw; disconnected.erase(disconnected.begin()+1);
+        const auto no_cycle=verify_local_raw_proposals(scene,stable,disconnected);
+        expect(no_cycle.boundary_pairs==0 && no_cycle.rejected_weak_pairs==1,
+               "a weak pair without an independent feature cycle remains excluded");
+        auto wrong=raw;
+        for (auto& match:wrong[1].matches) match.train=(match.train+71)%160;
+        expect(verify_local_raw_proposals(scene,stable,wrong).boundary_pairs==0,
+               "wrong/repeated boundary associations must not create feature cycles");
+        const auto before=scene.pairs.size();
+        wrong=raw; wrong.back().matches.front().query=10000;
+        bool invalid=false;
+        try { verify_local_raw_proposals(scene,stable,wrong); }
+        catch (const std::invalid_argument&) { invalid=true; }
+        expect(invalid && scene.pairs.size()==before,"invalid raw proposals must fail before commit");
+    }
+}
+
+Scene ray_fixture(bool fisheye=false) {
+    Scene scene=fixture(true,fisheye);
+    std::erase_if(scene.pairs,[](const auto& p) {return p.id1<4 && p.id2>=4;});
+    // Each local point is observed by just ONE original anchor. No landmark
+    // can supply a stable-only triangulated depth, but the segment jointly
+    // connects to four distinct cameras.
+    for (Index a=0;a<4;++a) for (Index b=4;b<8;++b) {
+        ImagePair pair(a,b);pair.relative_pose=Pose3D{};pair.weight_spatial=1;
+        for (Index f=a;f<160;f+=4) pair.matches.push_back({f,f});
+        scene.pairs.push_back(std::move(pair));
+    }
+    for (Index t=0;t<scene.tracks.size();++t) {
+        scene.tracks[t].observations={{t%4,t}};scene.tracks[t].num_inliers=0;
+    }
+    return scene;
+}
+
+void test_ray_group_alignment() {
+    const std::vector<Index> targets{4,5,6,7};
+    const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
+    for (bool fisheye:{false,true}) {
+        auto scene=ray_fixture(fisheye);const auto original=scene;
+        const auto report=experiment::recover_ray_group(scene,targets,stable);
+        if (!report.accepted) std::cerr << "ray fixture rejection: " << report.reason << " fit=" << report.fit_inliers << " heldout=" << report.heldout_inliers << '\n';
+        expect(report.accepted && report.fit_tracks>=100 && report.heldout_tracks>=30,
+               "joint ray alignment must validate without any stable-only triangulated depths");
+        for(Index id:targets)
+            expect((scene.images[id].pose.C-Vec3(0.25*id,0.12*(id%2),0)).norm()<0.01,
+                   "ray alignment must recover the metric camera locations");
+        for(Index id=0;id<4;++id)
+            expect(scene.images[id].pose.C==original.images[id].pose.C && scene.images[id].pose.R==original.images[id].pose.R,
+                   "ray alignment/segment BA must freeze original cameras exactly");
+        expect(scene.cameras[0].fx==original.cameras[0].fx && scene.cameras[0].k1==original.cameras[0].k1,
+               "segment BA must keep native calibration fixed");
+    }
+    auto single=ray_fixture();
+    std::erase_if(single.pairs,[](const auto& p) {return p.id1<4 && p.id2>=4 && p.id1!=0;});
+    expect(!experiment::recover_ray_group(single,targets,stable).accepted,"one anchor cannot certify segment scale");
+    auto negligible=ray_fixture();for(Index id=0;id<4;++id) negligible.images[id].pose.C.setZero();
+    expect(!experiment::recover_ray_group(negligible,targets,stable).accepted,"coincident anchors cannot certify scale");
+    auto planar=ray_fixture();
+    for(Index f=0;f<160;++f) {
+        const auto& kp=planar.images[0].features.keypoints[f];
+        const Vec3 ray=planar.cameras[0].unproject_normalized(Vec2(kp.x,kp.y));
+        const Vec3 point=(5/ray.z())*ray;
+        for(Index id=0;id<8;++id) {
+            const Vec2 pixel=planar.cameras[0].project(point-Vec3(0.25*id,0.12*(id%2),0));
+            planar.images[id].features.keypoints[f].x=static_cast<float>(pixel.x());
+            planar.images[id].features.keypoints[f].y=static_cast<float>(pixel.y());
+        }
+    }
+    expect(!experiment::recover_ray_group(planar,targets,stable).accepted,"planar local geometry remains conservatively rejected");
+    auto ambiguous=ray_fixture();
+    for(auto& pair:ambiguous.pairs) if(pair.id1<4 && pair.id2>=4) {
+        const auto matches=pair.matches;
+        for(const auto& match:matches) pair.matches.push_back({match.query,(match.train+1)%160});
+    }
+    expect(!experiment::recover_ray_group(ambiguous,targets,stable).accepted,"ambiguous anchor features must not become ray votes");
+    auto wrong=ray_fixture();const auto original=wrong;
+    for(auto& pair:wrong.pairs) if(pair.id1<4 && pair.id2>=4)
+        for(auto& m:pair.matches) m.train=(m.train+71)%160;
+    expect(!experiment::recover_ray_group(wrong,targets,stable).accepted,"wrong boundary links must fail ray consensus");
+    for(Index id=0;id<wrong.images.size();++id)
+        expect(wrong.images[id].pose.C==original.images[id].pose.C && wrong.images[id].pose.R==original.images[id].pose.R,
+               "rejected ray candidate cannot change original or target poses");
+    auto withheld=ray_fixture();
+    auto independent=make_independent_submap(withheld,targets);build_tracks(independent.scene);
+    expect(initialize_missing_group_pairs(independent.scene),"holdout test needs independent initialization");
+    for(Index t=0;t<independent.scene.tracks.size();t+=5) {
+        const Index feature=independent.scene.tracks[t].observations.front().feature_id;
+        for(Index id=0;id<4;++id)
+            withheld.images[id].features.keypoints[feature]=original.images[id].features.keypoints[(feature+71)%160];
+    }
+    const auto heldout=experiment::recover_ray_group(withheld,targets,stable);
+    expect(!heldout.accepted && heldout.reason=="heldout_ray_geometry_failed",
+           "strong fit cannot bypass corrupted disjoint held-out ray tracks");
+}
+
+void test_geometric_track_completion() {
+    Scene scene;PinholeCamera camera;camera.width=1000;camera.height=800;
+    camera.fx=camera.fy=600;camera.cx=500;camera.cy=400;scene.cameras.push_back(camera);
+    for(Index a=0;a<6;++a) {
+        Image image;image.id=a;image.camera_id=0;image.registered=a<5;image.pose.C=Vec3(.4*a,0,0);
+        image.features.keypoints.resize(4);
+        for(Index f=0;f<4;++f) {
+            const auto p=camera.project(image.pose.transform_world_to_camera(Vec3(.2*f,.3*f,5.+f)));
+            image.features.keypoints[f].x=float(p.x());image.features.keypoints[f].y=float(p.y());
+        }
+        scene.images.push_back(image);
+    }
+    for(Index f=0;f<3;++f)for(Index a:{0u,2u}) {
+        Track track;track.position=Vec3(.2*f,.3*f,5.+f);track.observations={{a,f},{a+1,f}};track.num_inliers=2;scene.tracks.push_back(track);
+    }
+    Track deferred;deferred.observations={{0,3},{1,3},{2,3}};scene.tracks.push_back(deferred);
+    for(Index a=0;a<5;++a) {
+        ImagePair pair(a,a+1);pair.relative_pose=Pose3D{};
+        for(Index f=0;f<3;++f)pair.matches.push_back({f,f});
+        // A cross-point union must fail its geometric check.
+        if(a==1)pair.matches.push_back({0,2});
+        scene.pairs.push_back(pair);
+    }
+    const auto poses=scene.images;
+    expect(experiment::stable_depth_support(scene,5)==0,"control target has no depth through final anchor");
+    const auto report=experiment::complete_stable_tracks(scene);
+    expect(report.merged==3 && report.added==3 && report.retriangulated==1,"completion must merge, extend and retriangulate with fixed cameras");
+    expect(report.projection_rejected+report.conflicts>0,"inconsistent cross-point matches must be rejected");
+    expect(experiment::stable_depth_support(scene,5)==3,"completion must expose newly supported target features");
+    for(Index i=0;i<scene.images.size();++i)
+        expect(scene.images[i].pose.C==poses[i].pose.C && scene.images[i].registered==poses[i].registered,"completion cannot change camera poses or registration");
+    for(const auto& track:scene.tracks)if(track.is_triangulated()) {
+        std::set<Index> ids;
+        for(unsigned o=0;o<track.num_inliers;++o)expect(ids.insert(track.observations[o].image_id).second &&
+            experiment::completion_projects(scene,track.observations[o],track.position),"completed inliers must be unique and pass actual projection");
+    }
+}
+
+void test_cross_anchor_precision() {
+    for(bool fisheye:{false,true}) {
+        Scene scene;PinholeCamera camera;camera.width=1000;camera.height=800;
+        camera.fx=camera.fy=500;camera.cx=500;camera.cy=400;
+        if(fisheye){camera.model=photara::CameraModel::opencv_fisheye;camera.k1=.02;}
+        scene.cameras.push_back(camera);
+        std::mt19937 rng(721);std::uniform_real_distribution<double> xy(-2.5,2.5),z(4,8);
+        std::vector<Vec3> points;for(unsigned f=0;f<240;++f)points.emplace_back(xy(rng),xy(rng),z(rng));
+        for(Index a=0;a<4;++a) {
+            Image image;image.id=a;image.camera_id=0;image.registered=a<3;image.pose.C=Vec3(.6*a,.15*(a%2),0);
+            for(const auto& X:points) {
+                const auto p=camera.project(image.pose.transform_world_to_camera(X));
+                photara::features::Keypoint kp;kp.x=float(p.x());kp.y=float(p.y());image.features.keypoints.push_back(kp);
+            }
+            scene.images.push_back(image);
+        }
+        for(Index a=0;a<3;++a) {
+            ImagePair pair(a,a+1);pair.relative_pose=Pose3D{};
+            for(Index f=0;f<240;++f)pair.matches.push_back({f,f});scene.pairs.push_back(pair);
+        }
+        const std::vector<std::uint8_t> stable{1,1,1,0};
+        const auto split=experiment::partition_precision(scene,stable);
+        expect(split.samples.size()==48,"reserved components must supply independent stable-only depths");
+        expect(experiment::score_precision(scene,3,scene.images[3].pose,split).accepted,"accurate native poses must pass cross-anchor precision");
+        auto bad=scene.images[3].pose;bad.C.x()+=.1;
+        const auto biased=experiment::score_precision(scene,3,bad,split);
+        expect(!biased.accepted && biased.count==48 && biased.p95>2,"biased poses must fail without hiding bad evaluation pixels");
+        auto behind=scene.images[3].pose;behind.C.z()=100;
+        expect(!experiment::score_precision(scene,3,behind,split).accepted,"negative depth cannot pass precision");
+        auto fit=scene;experiment::exclude_precision_partition(fit,split);
+        for(const auto& track:fit.tracks)for(const auto& obs:track.observations)
+            expect(!split.reserved.contains({obs.image_id,obs.feature_id}),"reserved ancestry cannot leak into rebuilt fit tracks");
+        for(const auto& pair:fit.pairs)for(const auto& m:pair.matches)
+            expect(!split.reserved.contains({pair.id1,m.query}) && !split.reserved.contains({pair.id2,m.train}),"reserved pixels cannot leak through alternative edges");
+        auto conflict=scene;conflict.pairs[0].matches.push_back({0,1});
+        const auto ambiguous=experiment::partition_precision(conflict,stable);
+        expect(ambiguous.ambiguous>0 && ambiguous.reserved.contains({0,0}) && ambiguous.reserved.contains({0,1}),"conflicting components must be held out together");
+        auto weak=scene;weak.pairs.erase(weak.pairs.begin());
+        expect(experiment::partition_precision(weak,stable).samples.empty(),"two-anchor depths lack an independent anchor check");
+        auto corrupted=scene;
+        for(auto& kp:corrupted.images[2].features.keypoints)kp.y+=40;
+        expect(experiment::partition_precision(corrupted,stable).samples.empty(),"bad withheld stable anchors cannot certify depth");
+    }
+}
+
+void test_structureless_pose() {
+    for(bool fisheye:{false,true}) {
+        Scene scene;PinholeCamera camera;
+        camera.width=1000;camera.height=800;camera.fx=camera.fy=450;camera.cx=500;camera.cy=400;
+        camera.trust_intrinsics=true;
+        if(fisheye){camera.model=photara::CameraModel::opencv_fisheye;camera.k1=0.02;}
+        scene.cameras.push_back(camera);
+        for(Index a=0;a<4;++a) {
+            Image image;image.id=a;image.camera_id=0;image.registered=a<3;
+            image.pose.C=Vec3(0.7*a,0.2*(a%2),0);
+            image.features.keypoints.resize(180);scene.images.push_back(image);
+        }
+        Pose3D truth;truth.R=Eigen::AngleAxisd(0.13,Vec3::UnitY()).toRotationMatrix();truth.C=Vec3(.5,-.3,.2);
+        std::mt19937 rng(813);std::uniform_real_distribution<double> xy(-2.5,2.5),z(4.,9.);
+        for(Index a=0;a<3;++a) {ImagePair pair(a,3);pair.relative_pose=Pose3D{};scene.pairs.push_back(pair);}
+        for(Index f=0;f<180;++f) {
+            const Vec3 point(xy(rng),xy(rng),z(rng));const Index a=f%3;
+            const Vec2 p=camera.project(scene.images[a].pose.transform_world_to_camera(point));
+            const Vec2 q=camera.project(truth.transform_world_to_camera(point));
+            scene.images[a].features.keypoints[f].x=float(p.x());scene.images[a].features.keypoints[f].y=float(p.y());
+            scene.images[3].features.keypoints[f].x=float(q.x());scene.images[3].features.keypoints[f].y=float(q.y());
+            scene.pairs[a].matches.push_back({f,f});
+        }
+        // Target retained pose is deliberately unrelated; there are no 3D tracks.
+        scene.images[3].pose.C=Vec3(900,-400,700);
+        const auto original=scene.images[3].pose;
+        auto report=experiment::estimate_structureless(scene,3,512);
+        if(!report.accepted)std::cerr<<"structureless positive: "<<report.reason<<" fit="<<report.fit_inliers<<" condition="<<report.condition<<'\n';
+        expect(report.accepted,"structure-less pose must recover without existing 3D or target initialization");
+        expect((report.pose.C-truth.C).norm()<.001 && (report.pose.R-truth.R).norm()<.001,"structure-less coordinate convention must recover absolute pose");
+        expect(scene.images[3].pose.C==original.C && !scene.images[3].registered,"pose hypothesis cannot mutate input");
+        auto one=scene;one.pairs.resize(1);
+        expect(!experiment::estimate_structureless(one,3,128).accepted,"single-anchor scale cannot be accepted");
+        auto coincident=scene;for(Index a=0;a<3;++a)coincident.images[a].pose.C.setZero();
+        expect(!experiment::estimate_structureless(coincident,3,128).accepted,"coincident anchors cannot certify metric translation");
+        auto wrong=scene;
+        // Keep feature IDs and the split fixed while corrupting every held-out
+        // target measurement; renumbering matches would change the split itself.
+        for(Index f=0;f<180;f+=5)wrong.images[3].features.keypoints[f]=scene.images[3].features.keypoints[(f+27)%180];
+        expect(!experiment::estimate_structureless(wrong,3,512).accepted,"corrupted whole held-out features cannot be accepted");
+        auto ambiguous=scene;
+        for(auto& pair:ambiguous.pairs) {const auto matches=pair.matches;for(const auto& m:matches)pair.matches.push_back({m.query,(m.train+3)%180});}
+        expect(!experiment::estimate_structureless(ambiguous,3,128).accepted,"ambiguous anchor-feature associations cannot vote twice");
+        auto planar=scene;
+        for(Index f=0;f<180;++f) {
+            const Vec3 X(-2.+.2*(f%20),-1.+.25*(f/20),6.);const Index a=f%3;
+            const Vec2 p=camera.project(planar.images[a].pose.transform_world_to_camera(X)),q=camera.project(truth.transform_world_to_camera(X));
+            planar.images[a].features.keypoints[f].x=float(p.x());planar.images[a].features.keypoints[f].y=float(p.y());
+            planar.images[3].features.keypoints[f].x=float(q.x());planar.images[3].features.keypoints[f].y=float(q.y());
+        }
+        expect(!experiment::estimate_structureless(planar,3,256).accepted,"planar geometry must not certify the experimental pose");
+    }
+}
+
 int main() {
     try {
         test_rotation_recovery();
+        test_native_local_proposals();
+        test_ray_group_alignment();
+        test_structureless_pose();
+        test_cross_anchor_precision();
+        test_geometric_track_completion();
         photara::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};

@@ -127,10 +127,13 @@ struct ReconstructCli {
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{photara::sfm::FrontEndOptions{}.neighbor_window};
     bool retrieval_augmentation{photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval};
+    bool whole_scene_rescue{false};
+    bool balanced_rescue{false};
     float match_ratio{0.8F};
     bool mutual_check{true};
     double sift_contrast{0.005};
     std::filesystem::path cache_dir;
+    std::filesystem::path frontend_diagnostics_dir;
     std::string extractor{"siftgpu"};
     std::string matcher{"gpu_mutual_ratio"};
     std::string pipeline;  // empty / none | lightglue_end2end
@@ -717,11 +720,17 @@ ReconstructCli parse_cli(int argc, char** argv) {
              photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval ? "true" : "false"))
         ("match-ratio", "Lowe ratio test threshold",
          cxxopts::value<float>()->default_value("0.8"))
+        ("whole-scene-rescue", "Supplement weak-view retrieval with a vocabulary sampled across the scene",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("balanced-rescue", "Supplement weak-view retrieval with samples across detector levels",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mutual-check", "Mutual match consistency check",
          cxxopts::value<bool>()->default_value("true"))
         ("sift-contrast", "SIFT contrast threshold",
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("frontend-diagnostics-dir", "Write per-image and per-pair frontend stage CSVs",
          cxxopts::value<std::string>()->default_value(""))
         ("ba-backend",
          "Bundle adjustment backend: automatic (default), cpu, cuda, or vulkan. "
@@ -1429,6 +1438,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     cli.neighbor_window = result["window"].as<std::size_t>();
     cli.retrieval_augmentation = result["retrieval-augmentation"].as<bool>();
+    cli.whole_scene_rescue = result["whole-scene-rescue"].as<bool>();
+    cli.balanced_rescue = result["balanced-rescue"].as<bool>();
     cli.match_ratio = result["match-ratio"].as<float>();
     cli.mutual_check = result["mutual-check"].as<bool>();
     cli.sift_contrast = result["sift-contrast"].as<double>();
@@ -2116,6 +2127,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--mesh-tsdf-smooth-mu must be in [-1,0]");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
+    cli.frontend_diagnostics_dir = utf8_to_path(result["frontend-diagnostics-dir"].as<std::string>());
     if (!cache_text.empty() && cache_text != "-")
         cli.cache_dir = utf8_to_path(cache_text);
 
@@ -4790,7 +4802,10 @@ int main(int argc, char** argv) {
         // Sequential window + BoW retrieval (learned vocabulary).
         // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
         config.frontend.augment_sequential_with_retrieval = cli.retrieval_augmentation;
+        config.frontend.whole_scene_rescue = cli.whole_scene_rescue;
+        config.frontend.balanced_rescue = cli.balanced_rescue;
         config.frontend.checkpoint.directory = cli.cache_dir;
+        config.frontend.diagnostics_directory = cli.frontend_diagnostics_dir;
         photara::sfm::AlignLivePreview live_preview;
         if (!cli.working_sfm.empty()) {
             auto live_path =

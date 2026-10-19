@@ -9,6 +9,9 @@
 #include <cstdlib>
 #include "../../../experiments/sfm_missing_group_probe.hpp"
 #include "../../../experiments/sfm_boundary_support_probe.hpp"
+#include "../../../experiments/sfm_local_boundary_audit.hpp"
+#include "../../../experiments/sfm_structureless_probe.hpp"
+#include "../../../experiments/sfm_cross_anchor_precision.hpp"
 
 // Development-only bounded ancestry experiment. Each pass freezes its anchor
 // mask; newly accepted views are promoted only for the NEXT pass. Original
@@ -16,8 +19,8 @@
 int main(int argc, char** argv) {
     try {
         using namespace photara::sfm;
-        if (argc != 3 && !(argc == 4 && (std::string_view(argv[3]) == "--descriptor-map" || std::string_view(argv[3]) == "--groups" || std::string_view(argv[3]) == "--audit-pairs" || std::string_view(argv[3]) == "--inactive-links" || std::string_view(argv[3]) == "--retained-poses")))
-            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--descriptor-map|--groups|--audit-pairs|--inactive-links|--retained-poses]");
+        if (argc != 3 && !(argc == 4 && (std::string_view(argv[3]) == "--cross-anchor-precision" || std::string_view(argv[3]) == "--structureless" || std::string_view(argv[3]) == "--audit-local-boundary" || std::string_view(argv[3]) == "--descriptor-map" || std::string_view(argv[3]) == "--groups" || std::string_view(argv[3]) == "--audit-pairs" || std::string_view(argv[3]) == "--inactive-links" || std::string_view(argv[3]) == "--retained-poses")))
+            throw std::invalid_argument("Usage: photara_sfm_stable_resection_probe reconstruction-HEX.bin NEW_OUTPUT.asfm [--cross-anchor-precision|--structureless|--descriptor-map|--groups|--audit-pairs|--audit-local-boundary|--inactive-links|--retained-poses]");
         const bool groups = argc == 4 && std::string_view(argv[3]) == "--groups";
         const bool descriptor_map = argc == 4;
         const std::filesystem::path input(argv[1]), output(argv[2]);
@@ -36,6 +39,50 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Cannot load final graph checkpoint");
         if (scene.pairs.empty()) throw std::runtime_error("Resection requires pair geometry");
         photara::core::Logger::instance().configure({}, "photara", photara::core::LogLevel::debug);
+        if (argc == 4 && std::string_view(argv[3]) == "--cross-anchor-precision") {
+            const auto* cache=std::getenv("PHOTARA_GROUP_FRONTEND_CACHE");
+            if(!cache)throw std::invalid_argument("Precision probe requires PHOTARA_GROUP_FRONTEND_CACHE");
+            std::ofstream csv(reports);
+            if(!csv)throw std::runtime_error("Cannot write precision report");
+            photara::sfm::experiment::probe_cross_anchor_precision(scene,cache,csv);
+            std::cout<<"precision_audit_only=1 parent_geometry_unchanged=1 registered="<<scene.registered_count()<<'\n';
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--structureless") {
+            const auto* cache=std::getenv("PHOTARA_GROUP_FRONTEND_CACHE");
+            if (!cache) throw std::invalid_argument("Structure-less probe requires PHOTARA_GROUP_FRONTEND_CACHE");
+            const auto anchors_path=std::filesystem::path(output.string()+".anchors.csv");
+            if (std::filesystem::exists(anchors_path)) throw std::invalid_argument("Anchor report already exists");
+            std::ofstream csv(reports),anchors_csv(anchors_path);
+            std::ofstream completion_csv;
+            if(std::getenv("PHOTARA_TRACK_COMPLETION")) {
+                const auto path=std::filesystem::path(output.string()+".tracks.csv");
+                if(std::filesystem::exists(path))throw std::invalid_argument("Completion report already exists");
+                completion_csv.open(path);
+                if(!completion_csv)throw std::runtime_error("Cannot write completion report");
+            }
+            std::filesystem::path windows,exports;
+            if(completion_csv.is_open()) {
+                exports=output.string()+".candidates";
+                if(!std::filesystem::create_directory(exports))throw std::invalid_argument("Candidates output already exists");
+            }
+            if(std::getenv("PHOTARA_BOUNDARY_WINDOWS")) {
+                windows=output.string()+".windows";
+                if(!std::filesystem::create_directory(windows))throw std::invalid_argument("Windows output already exists");
+            }
+            photara::sfm::experiment::probe_structureless_caches(scene,cache,csv,anchors_csv,
+                completion_csv.is_open()?&completion_csv:nullptr,windows,exports);
+            std::cout << "pose_hypotheses_only=1 parent_geometry_unchanged=1 registered="<<scene.registered_count()<<'\n';
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--audit-local-boundary") {
+            const auto* cache=std::getenv("PHOTARA_GROUP_FRONTEND_CACHE");
+            if (!cache) throw std::invalid_argument("Local audit requires PHOTARA_GROUP_FRONTEND_CACHE");
+            std::ofstream csv(reports);
+            audit_local_boundary(scene,cache,csv);
+            std::cout << "audit_only=1 parent_geometry_unchanged=1\n";
+            return 0;
+        }
         if (argc == 4 && std::string_view(argv[3]) == "--retained-poses") {
             // Evaluation-only snapshot. These flags are not registrations:
             // preserve unsupported retained poses to assess why they failed.

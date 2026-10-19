@@ -94,7 +94,8 @@ std::vector<RetrievedPair> retrieve_image_pairs(
                 features.keypoints.empty())
                 return;
             const auto samples = sample_descriptors_spatially(
-                features, options.max_descriptors_per_image, options.sample_grid);
+                features, options.max_descriptors_per_image, options.sample_grid,
+                options.systematic_sampling);
             Histogram& histogram = histograms[image_id];
             histogram.reserve(samples.size());
             for (const features::FeatureIndex index : samples) {

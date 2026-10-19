@@ -6,6 +6,8 @@
 #include "sfm/submap_recovery.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm_pair_group_init.hpp"
+#include "sfm_local_proposals.hpp"
+#include "sfm_ray_group_alignment.hpp"
 #include <cstdlib>
 #include <unordered_set>
 
@@ -33,7 +35,7 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
     std::map<Index, std::vector<Index>> groups;
     for (Index id = 0; id < scene.images.size(); ++id)
         if (!scene.images[id].registered) groups[root(id)].push_back(id);
-    reports << "group,missing,local_registered,candidates,shared,fit,heldout,heldout_inliers,accepted,reason,boundary_matches,candidate_tracks,stable_multiview_tracks,stable_triangulated_tracks\n";
+    reports << "group,missing,local_registered,candidates,shared,fit,heldout,heldout_inliers,accepted,reason,boundary_matches,candidate_tracks,stable_multiview_tracks,stable_triangulated_tracks,ray_attempted,ray_tracks,ray_fit,ray_holdout,ray_anchors,ray_fit_inliers,ray_holdout_inliers,ray_mean,ray_after_mean,ray_condition,ray_fit_observations,ray_holdout_observations\n";
     unsigned recovered = 0, attempted = 0;
     for (const auto& [group_id, group] : groups) {
         if (group.size() < 4 || group.size() > 32 || attempted >= 2) continue;
@@ -113,7 +115,10 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
         options.camera_model = calibration.model;
         options.focal_pixels = calibration.fx;
         options.trust_focal_pixels = true;
-        auto local = run_frontend(paths, options).scene;
+        std::vector<RawPairMatches> replay_raw;
+        const auto* replay=std::getenv("PHOTARA_GROUP_REPLAY_ROOT");
+        auto local = replay ? load_local_proposal_snapshot(std::filesystem::path(replay)/std::to_string(group_id),replay_raw)
+                            : run_frontend(paths, options).scene;
         // Match by full path rather than assuming frontend image enumeration.
         std::map<std::filesystem::path, Index> by_path;
         for (Index id : globals) by_path.emplace(scene.images[id].path, id);
@@ -131,6 +136,15 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
             if (stable[id]) local.images[id].pose = scene.images[global].pose;
             else targets.push_back(id);
         }
+        if (std::getenv("PHOTARA_GROUP_NATIVE_RAW")) {
+            if (!replay) throw std::invalid_argument("Native raw verification requires a fixed replay snapshot");
+            const auto summary=verify_local_raw_proposals(local,stable,replay_raw,
+                std::getenv("PHOTARA_GROUP_NO_WEAK_CYCLES")==nullptr);
+            photara::core::Logger::instance().info("group native raw proposals: group=",group_id,
+                " raw=",summary.raw_pairs," accepted=",summary.accepted_pairs," boundary=",summary.boundary_pairs,
+                " weak_boundary=",summary.weak_boundary_pairs," cycle_matches=",summary.cycle_supported_matches,
+                " rejected_weak=",summary.rejected_weak_pairs);
+        } else {
         if (std::getenv("PHOTARA_GROUP_FROZEN_ANCHOR_GEOMETRY")) {
             if (!options.checkpoint.enabled())
                 throw std::runtime_error("Frozen-anchor experiment requires its own frontend cache");
@@ -212,6 +226,7 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
             pair.weight_spatial = result.weight_spatial;
             pair.mean_ray_angle = result.mean_ray_angle;
         }
+        }
         build_tracks(local);
         auto draft = make_independent_submap(local, targets);
         build_tracks(draft.scene);
@@ -230,19 +245,38 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
             if (draft.scene.images[id].registered) candidates.push_back(targets[id]);
         if (candidates.size() < 4) {
             reports << group_id << ',' << group.size() << ',' << draft.scene.registered_count()
-                << ",0,0,0,0,0,0,independent_initialization_incomplete,0,0,0,0\n"; reports.flush(); continue;
+                << ",0,0,0,0,0,0,independent_initialization_incomplete,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n"; reports.flush(); continue;
         }
         for (Index id : candidates) local.images[id].registered = true;
         SubmapRecoveryOptions recovery;
         if (pair_init) recovery.independent_initializer = initialize_missing_group_pairs;
         const auto result = recover_independent_submap(local, candidates, stable, recovery);
+        bool accepted=result.accepted;
+        std::string reason=result.reason;
+        experiment::RayGroupReport ray;
+        const bool ray_attempted=!result.accepted && std::getenv("PHOTARA_GROUP_RAY_ALIGNMENT");
+        if (ray_attempted) {
+            ray=experiment::recover_ray_group(local,candidates,stable,
+                std::getenv("PHOTARA_GROUP_NO_SEGMENT_BA")==nullptr);
+            photara::core::Logger::instance().info("group ray alignment: group=",group_id,
+                " tracks=",ray.tracks," fit_tracks=",ray.fit_tracks," heldout_tracks=",ray.heldout_tracks,
+                " fit_observations=",ray.fit_observations," heldout_observations=",ray.heldout_observations,
+                " anchors=",ray.anchors," fit_inliers=",ray.fit_inliers," heldout_inliers=",ray.heldout_inliers,
+                " mean=",ray.heldout_mean," after_mean=",ray.heldout_after_mean," condition=",ray.condition_ratio,
+                " accepted=",ray.accepted," reason=",ray.reason);
+            accepted=ray.accepted;reason="generalized_"+ray.reason;
+        }
         reports << group_id << ',' << group.size() << ',' << draft.scene.registered_count() << ','
             << candidates.size() << ',' << result.shared_points << ',' << result.fit_inliers << ','
-            << result.validation_points << ',' << result.validation_inliers << ',' << result.accepted << ','
-            << result.reason << ',' << result.boundary_matches << ',' << result.candidate_tracks << ','
-            << result.stable_multiview_tracks << ',' << result.stable_triangulated_tracks << '\n'; reports.flush();
-        if (!result.accepted) continue;
-        std::set<Index> accepted(candidates.begin(), candidates.end());
+            << result.validation_points << ',' << result.validation_inliers << ',' << accepted << ','
+            << reason << ',' << result.boundary_matches << ',' << result.candidate_tracks << ','
+            << result.stable_multiview_tracks << ',' << result.stable_triangulated_tracks << ','
+            << ray_attempted << ',' << ray.tracks << ',' << ray.fit_tracks << ',' << ray.heldout_tracks << ','
+            << ray.anchors << ',' << ray.fit_inliers << ',' << ray.heldout_inliers << ','
+            << ray.heldout_mean << ',' << ray.heldout_after_mean << ',' << ray.condition_ratio << ','
+            << ray.fit_observations << ',' << ray.heldout_observations << '\n'; reports.flush();
+        if (!accepted) continue;
+        std::set<Index> accepted_ids(candidates.begin(), candidates.end());
         std::vector<Index> offsets(local.images.size());
         for (Index id = 0; id < local.images.size(); ++id) {
             auto& destination = scene.images[globals[id]].features.keypoints;
@@ -258,12 +292,12 @@ inline unsigned probe_missing_groups(photara::sfm::Scene& scene, std::ostream& r
         for (const auto& source : local.tracks) {
             bool needed = false;
             for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o)
-                needed = needed || accepted.contains(source.observations[o].image_id);
+                needed = needed || accepted_ids.contains(source.observations[o].image_id);
             if (!needed || !source.is_triangulated()) continue;
             Track track; track.position = source.position;
             for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o) {
                 const auto& obs = source.observations[o];
-                if (stable[obs.image_id] || accepted.contains(obs.image_id))
+                if (stable[obs.image_id] || accepted_ids.contains(obs.image_id))
                     track.observations.push_back({globals[obs.image_id], offsets[obs.image_id]+obs.feature_id});
             }
             track.num_inliers = static_cast<std::uint8_t>(track.observations.size());

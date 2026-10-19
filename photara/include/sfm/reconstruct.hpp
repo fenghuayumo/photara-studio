@@ -63,6 +63,11 @@ AlignmentObservability analyze_position_observability(const Scene& scene);
 // Persist uncertainty separately from registration; nomination never changes poses.
 unsigned audit_position_support(Scene& scene);
 
+// A well-constrained main component must not certify a leaf/block from its
+// jointly optimized depths alone. Clear unsupported registrations and their
+// track observations; do nothing when no established main component exists.
+unsigned prune_unobservable_registrations(Scene& scene);
+
 // Split untrusted camera/lens states for late BA. Millimetre focal lengths
 // only scale a pixel-space initialization; existing camera groups stay distinct.
 unsigned split_intrinsics_by_camera_identity(Scene& scene);
