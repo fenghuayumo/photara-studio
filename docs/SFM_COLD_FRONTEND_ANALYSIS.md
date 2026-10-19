@@ -791,3 +791,9 @@ plausible explanation; the log alone does not establish the root cause or
 implicate algorithmic quality. No threshold is relaxed and this failed run
 provides no evidence for or against Alameda reconstruction accuracy. No
 background retry is left running.
+
+The subsequent user-requested continuation is recorded separately in
+[`SFM_FROZEN_TRACK_EXTENSION.md`](SFM_FROZEN_TRACK_EXTENSION.md), with new
+artifacts under `artifacts/sfm-continued-20261019/`. It distinguishes resumed
+frontend runs from cold runs and evaluates fresh track associations with
+retained camera poses.

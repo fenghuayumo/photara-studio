@@ -106,6 +106,18 @@ int main(int argc, char** argv) {
             config.resection.diagnostic_callback = [trace](const char* stage, const Scene& snapshot) { (*trace)(stage,snapshot); };
         }
         if (selection_only && !trace) throw std::invalid_argument("Selection-only requires trace targets");
+        // Optional evidence for the product's final quality stage. This only
+        // observes the normal library entry point; it does not change options.
+        if (const auto* baseline = std::getenv("PHOTARA_BENCHMARK_QUALITY_BASELINE")) {
+            const std::filesystem::path path(baseline);
+            if (std::filesystem::exists(path))
+                throw std::invalid_argument("Quality baseline already exists");
+            const auto observer = config.resection.diagnostic_callback;
+            config.resection.diagnostic_callback = [path, observer](const char* stage, const Scene& snapshot) {
+                if (observer) observer(stage, snapshot);
+                if (std::string_view(stage) == "before_alignment_quality") save_asfm(snapshot, path);
+            };
+        }
         const auto start = std::chrono::steady_clock::now();
         // Includes metadata restoration, mapping/BA, final recovery and position
         // audit. No reconstruction cache or reference model enters this path.

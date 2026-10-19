@@ -370,7 +370,7 @@ std::uint64_t reconstruction_key(
     FingerprintBuilder key;
     key.append_string("reconstruction");
     // Invalidate mapping checkpoints when supported modes or configuration change.
-    key.append_string("scaled-weights-20k-v38-local-risk-resection-rotation");
+    key.append_string("scaled-weights-20k-v39-final-native-track-refresh");
     key.append_string(PHOTARA_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -1914,6 +1914,100 @@ void ensure_camera_identity_metadata(
 
 }  // namespace
 
+bool refine_alignment_geometry(Scene& scene) {
+    if (scene.registered_count() < 2 || scene.tracks.empty()) return false;
+    core::StageScope stage("sfm.alignment_quality");
+    const auto support = [&] {
+        std::vector<unsigned> counts(scene.images.size(), 0);
+        for (const auto& track : scene.tracks) {
+            if (!track.is_triangulated() || !track.position.allFinite()) continue;
+            for (unsigned o = 0; o < track.num_inliers; ++o) {
+                const auto& obs = track.observations[o];
+                const auto& image = scene.images.at(obs.image_id);
+                if (!image.registered) continue;
+                const auto& kp = image.features.keypoints.at(obs.feature_id);
+                const double error = scene.camera_of(image).checked_reprojection_error(
+                    image.pose.transform_world_to_camera(track.position), Vec2(kp.x, kp.y));
+                if (std::isfinite(error) && error <= 2) ++counts[obs.image_id];
+            }
+        }
+        return counts;
+    };
+    const auto previous_support = support();
+    std::vector<Pose3D> previous_poses;
+    previous_poses.reserve(scene.images.size());
+    for (const auto& image : scene.images) previous_poses.push_back(image.pose);
+    auto previous_tracks = std::move(scene.tracks);
+    auto previous_index = std::move(scene.image_tracks);
+    bool restored = false;
+    const auto restore = [&] {
+        if (restored) return;
+        scene.tracks = std::move(previous_tracks);
+        scene.image_tracks = std::move(previous_index);
+        for (Index i = 0; i < scene.images.size(); ++i)
+            scene.images[i].pose = previous_poses[i];
+        restored = true;
+    };
+    try {
+        scene.tracks = previous_tracks;
+        for (auto& track : scene.tracks) {
+            track.position.setZero();
+            track.num_inliers = 0;
+            track.has_color = false;
+        }
+        TriangulationOptions triangulation;
+        triangulation.reproj_threshold_px = 2;
+        triangulation.min_angle_deg = 1;
+        triangulation.split_tracks = false;
+        triangulate_tracks(scene, false, triangulation);
+        BundleOptions bundle;
+        bundle.optimizer.maximum_iterations = 100;
+        bundle.optimizer.huber_delta = 1;
+        bundle.write_intrinsics = false;
+        // Identical source images are already tied by mapping. Keep those
+        // measured poses fixed so a free BA cannot split their copies again.
+        std::vector<bool> tied(scene.images.size(), false);
+        for (const auto& pair : scene.pairs) {
+            if (!pair.zero_baseline) continue;
+            if (pair.id1 < tied.size()) tied[pair.id1] = true;
+            if (pair.id2 < tied.size()) tied[pair.id2] = true;
+        }
+        for (Index i = 0; i < scene.images.size(); ++i) {
+            if (!scene.images[i].registered) continue;
+            if (tied[i]) bundle.fixed_image_ids.push_back(i);
+            else bundle.free_image_ids.push_back(i);
+        }
+        // An empty fixed set means the standard global problem and gauge.
+        if (bundle.fixed_image_ids.empty()) bundle.free_image_ids.clear();
+        const auto result = run_bundle_adjustment(scene, bundle);
+        bool accepted = result.success &&
+            std::isfinite(result.optimizer.final_cost) &&
+            result.optimizer.final_cost <= result.optimizer.initial_cost;
+        for (const auto& image : scene.images)
+            if (image.registered && (!image.pose.R.allFinite() || !image.pose.C.allFinite()))
+                accepted = false;
+        const auto updated_support = support();
+        for (Index i = 0; i < scene.images.size(); ++i)
+            if (updated_support[i] < std::min(previous_support[i], 30u)) accepted = false;
+        if (!accepted) {
+            restore();
+            core::Logger::instance().warning(
+                "alignment quality rejected: retaining previous poses and tracks");
+            return false;
+        }
+        rebuild_track_index(scene);
+        core::Logger::instance().info("alignment quality accepted: cameras=",
+            scene.registered_count(), " points=", result.num_points,
+            " observations=", result.num_observations);
+        return true;
+    } catch (const std::exception& error) {
+        restore();
+        core::Logger::instance().warning(
+            "alignment quality failed; restored previous geometry: ", error.what());
+        return false;
+    }
+}
+
 ReconstructionSummary reconstruct_from_frontend(
     Scene& scene, const ReconstructionConfig& config) {
     scene.thread_count = parallel::resolve_thread_count(config.frontend.thread_count);
@@ -1934,6 +2028,9 @@ ReconstructionSummary reconstruct_from_frontend(
         prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                        config.maximum_final_reprojection_error_pixels);
     prune_unobservable_registrations(scene);
+    if (config.resection.diagnostic_callback)
+        config.resection.diagnostic_callback("before_alignment_quality", scene);
+    refine_alignment_geometry(scene);
     audit_position_support(scene);
     if (config.resection.diagnostic_callback) config.resection.diagnostic_callback("final", scene);
     return summarize_scene(scene);
@@ -1955,11 +2052,8 @@ ReconstructionSummary reconstruct(
         scene_out.thread_count =
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
-        finish_alignment_recovery(scene_out, config);
-        if (recover_alignment_views(scene_out, config.frontend) > 0)
-            prune_unsupported_registrations(scene_out, config.minimum_final_observations_per_image,
-                                           config.maximum_final_reprojection_error_pixels);
-        prune_unobservable_registrations(scene_out);
+        // This versioned checkpoint already contains recovery, final audits,
+        // and the accepted quality pass. Do not optimize it again on cache hits.
         audit_position_support(scene_out);
         if (config.resection.checkpoint_callback)
             config.resection.checkpoint_callback(scene_out);

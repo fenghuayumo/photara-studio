@@ -1,19 +1,32 @@
 // Extend a retained full-feature ASFM with newly verified correspondences.
-// Candidate poses/points never enter the solver; the retained map is frozen.
+// Candidate poses/points never enter the solver; retained cameras stay frozen.
 #include "sfm/asfm.hpp"
+#include "sfm/appearance.hpp"
 #include "sfm/checkpoint.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "sfm/triangulation.hpp"
+#include "sfm/tracks.hpp"
 #include "core/logging.hpp"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
+#include <bit>
+#include <map>
+#include <array>
 
 int main(int argc, char** argv) {
     using namespace photara::sfm;
     try {
-        if (argc != 4) throw std::runtime_error(
-            "baseline-full.asfm correspondence-checkpoint.bin output.asfm");
+        bool fresh_tracks = false, merge_features = false;
+        if (argc < 4) throw std::runtime_error(
+            "baseline-full.asfm {tracks,reconstruction}-HEX.bin output.asfm [--fresh-tracks] [--merge-features]");
+        for (int arg = 4; arg < argc; ++arg) {
+            if (std::string_view(argv[arg]) == "--fresh-tracks") fresh_tracks = true;
+            else if (std::string_view(argv[arg]) == "--merge-features") merge_features = true;
+            else throw std::runtime_error("unknown extension option");
+        }
         const std::filesystem::path input(argv[2]), output(argv[3]);
         auto csv_path = output;
         csv_path.replace_extension();
@@ -23,26 +36,63 @@ int main(int argc, char** argv) {
         photara::core::Logger::instance().configure(output.parent_path(), "frozen-extension");
         Scene baseline = load_asfm(argv[1]), correspondences;
         const auto stem = input.stem().string();
-        const auto key = std::stoull(stem.substr(stem.find('-') + 1), nullptr, 16);
+        const auto stage = stem.starts_with("tracks-") ? CheckpointStage::tracks
+            : CheckpointStage::reconstruction;
+        const std::string prefix = stage == CheckpointStage::tracks ? "tracks-" : "reconstruction-";
+        if (!stem.starts_with(prefix)) throw std::runtime_error("expected tracks or reconstruction checkpoint");
+        const auto key_text = stem.substr(prefix.size());
+        if (key_text.empty() || key_text.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+            throw std::runtime_error("invalid checkpoint key");
+        const auto key = std::stoull(key_text, nullptr, 16);
         CheckpointOptions options;
         options.directory = input.parent_path();
         options.write = false;
-        if (!CheckpointStore(options).load_scene(CheckpointStage::reconstruction, key, correspondences))
+        if (!CheckpointStore(options).load_scene(stage, key, correspondences))
             throw std::runtime_error("cannot read correspondence checkpoint");
         if (baseline.images.size() != correspondences.images.size())
             throw std::runtime_error("image sets differ");
         std::vector<std::uint8_t> stable(baseline.images.size());
         std::vector<Pose3D> frozen;
+        std::vector<std::vector<Index>> feature_map(merge_features ? baseline.images.size() : 0);
         for (Index i = 0; i < baseline.images.size(); ++i) {
             auto& old = baseline.images[i];
             const auto& fresh = correspondences.images[i];
             if (old.path.lexically_normal() != fresh.path.lexically_normal() ||
                 old.features.image_width != fresh.features.image_width ||
-                old.features.image_height != fresh.features.image_height ||
-                old.features.keypoints.size() > fresh.features.keypoints.size())
+                old.features.image_height != fresh.features.image_height)
                 throw std::runtime_error("incompatible image/features: " + old.path.string());
-            // Reject compact/remapped feature indices and extraction changes.
-            for (std::size_t j = 0; j < old.features.keypoints.size(); ++j) {
+            if (merge_features) {
+                // Exact keypoint identity only, never nearest-pixel matching.
+                // Keep every retained index; remap candidate associations and
+                // append new features. Distinct duplicate occurrences remain
+                // distinct indices instead of collapsing track identities.
+                const auto signature = [](const auto& p) {
+                    return std::array<std::uint32_t, 5>{std::bit_cast<std::uint32_t>(p.x),
+                        std::bit_cast<std::uint32_t>(p.y), std::bit_cast<std::uint32_t>(p.scale),
+                        std::bit_cast<std::uint32_t>(p.orientation), std::bit_cast<std::uint32_t>(p.response)};
+                };
+                std::map<std::array<std::uint32_t, 5>, std::vector<Index>> available;
+                for (std::size_t j = old.features.keypoints.size(); j > 0; --j)
+                    available[signature(old.features.keypoints[j - 1])].push_back(static_cast<Index>(j - 1));
+                auto& remap = feature_map[i];
+                remap.reserve(fresh.features.keypoints.size());
+                for (const auto& point : fresh.features.keypoints) {
+                    auto& indices = available[signature(point)];
+                    if (!indices.empty()) {
+                        remap.push_back(indices.back());
+                        indices.pop_back();
+                    } else {
+                        remap.push_back(static_cast<Index>(old.features.keypoints.size()));
+                        old.features.keypoints.push_back(point);
+                    }
+                }
+                stable[i] = old.registered;
+                frozen.push_back(old.pose);
+                continue;
+            }
+            // Without explicit merging, reject reordered/extracted features.
+            const auto shared_features = std::min(old.features.keypoints.size(), fresh.features.keypoints.size());
+            for (std::size_t j = 0; j < shared_features; ++j) {
                 const auto& a = old.features.keypoints[j];
                 const auto& b = fresh.features.keypoints[j];
                 if (a.x != b.x || a.y != b.y || a.scale != b.scale ||
@@ -51,9 +101,37 @@ int main(int argc, char** argv) {
             }
             stable[i] = old.registered;
             frozen.push_back(old.pose);
-            if (!stable[i]) old.features = fresh.features;
+            // Missing-view searches may have appended a longer suffix to the
+            // retained map. Keep it: candidate indices in the checked common
+            // prefix already refer to exactly the same keypoints.
+            if ((!stable[i] || fresh_tracks) && fresh.features.keypoints.size() > old.features.keypoints.size())
+                old.features = fresh.features;
         }
-        // Do not import candidate registration, poses, intrinsics or tracks.
+        if (merge_features) {
+            for (auto& pair : correspondences.pairs) {
+                for (auto& match : pair.matches) {
+                    match.query = feature_map.at(pair.id1).at(match.query);
+                    match.train = feature_map.at(pair.id2).at(match.train);
+                }
+            }
+            for (auto& track : correspondences.tracks)
+                for (auto& observation : track.observations)
+                    observation.feature_id = feature_map.at(observation.image_id).at(observation.feature_id);
+        }
+        if (fresh_tracks) {
+            // Import associations only. Re-estimate every depth from the
+            // retained poses; candidate coordinates and inlier labels must
+            // never influence either fitting or held-out validation.
+            baseline.tracks = std::move(correspondences.tracks);
+            for (auto& track : baseline.tracks) {
+                track.position.setZero();
+                track.num_inliers = 0;
+                track.has_color = false;
+            }
+            rebuild_track_index(baseline);
+        }
+        // Import boundary geometry, never candidate registration, poses or
+        // intrinsics. Track associations are opt-in above.
         for (auto& pair : correspondences.pairs) {
             if (!pair.active || pair.zero_baseline || pair.id1 >= stable.size() ||
                 pair.id2 >= stable.size() || stable[pair.id1] == stable[pair.id2]) continue;
@@ -65,6 +143,15 @@ int main(int argc, char** argv) {
         correspondences.clear();
         const auto before = baseline.registered_count();
         const auto recovered = recover_stable_resections(baseline, stable);
+        if (fresh_tracks) {
+            TriangulationOptions tri;
+            tri.reproj_threshold_px = 2;
+            tri.min_angle_deg = 1;
+            tri.split_tracks = false;
+            triangulate_tracks(baseline, false, tri);
+            rebuild_track_index(baseline);
+            colour_triangulated_tracks(baseline);
+        }
         for (Index i = 0; i < stable.size(); ++i) {
             if (!stable[i]) continue;
             if (!baseline.images[i].registered ||
