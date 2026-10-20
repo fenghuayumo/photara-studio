@@ -94,7 +94,7 @@ void rebuild_track_index(Scene& scene) {
 }
 
 void build_tracks(Scene& scene, const float min_pair_weight) {
-    core::StageScope stage("sfm.build_tracks");
+    core::StageScope stage("sfm.build_tracks", core::LogLevel::info, "cpu");
     scene.tracks.clear();
     scene.image_tracks.clear();
     std::size_t total_features = 0;
@@ -310,7 +310,7 @@ std::pair<float, float> filter_tracks(
     const float min_angle_deg,
     const float mult_depth_near,
     const float mult_depth_far) {
-    core::StageScope stage("sfm.filter_tracks", core::LogLevel::debug);
+    core::StageScope stage("sfm.filter_tracks", core::LogLevel::debug, "cpu");
     std::vector<TrackFilterStats> stats(scene.tracks.size());
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
     parallel::parallel_for(scene.tracks.size(), threads, [&](const std::size_t i) {

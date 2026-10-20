@@ -1220,6 +1220,7 @@ GlobalPositioningSummary refine_only_points_bearings(
     std::unique_ptr<ba::CudaBearingOptimizer> cuda_solver;
 #endif
     bool have_gpu_solver = false;
+    const char* selected_backend = "cpu";
     if (want_cuda) {
 #if !defined(PHOTARA_HAS_CUDA)
         if (explicit_cuda) {
@@ -1241,6 +1242,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 prepare_bearing();
                 cuda_solver = std::make_unique<ba::CudaBearingOptimizer>(gpu_problem);
                 have_gpu_solver = true;
+                selected_backend = "cuda";
                 core::Logger::instance().info(
                     "global positioning backend=cuda bearing_schur cameras=",
                     gpu_cameras.size(), " points=", gpu_tracks.size(),
@@ -1274,6 +1276,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 prepare_bearing();
                 vulkan_solver = std::make_unique<ba::VulkanBearingOptimizer>(gpu_problem);
                 have_gpu_solver = true;
+                selected_backend = "vulkan";
                 core::Logger::instance().info(
                     "global positioning backend=vulkan bearing_schur cameras=",
                     gpu_cameras.size(), " points=", gpu_tracks.size(),
@@ -1285,6 +1288,16 @@ GlobalPositioningSummary refine_only_points_bearings(
         }
 #endif
     }
+
+    core::Logger::instance().info(
+        "sfm backend selection: stage=positioning requested=",
+        automatic ? "automatic" : explicit_cuda ? "cuda" : explicit_vulkan ? "vulkan" : "cpu",
+        " selected=", selected_backend,
+        " reason=", have_gpu_solver ? "gpu_supported" :
+            options.backend == PositioningBackend::cpu ? "requested_cpu" :
+            observations < 50000 ? "below_observation_threshold" :
+            scene.registered_count() > 2000 ? "above_camera_limit" : "gpu_unavailable_or_initialization_failed",
+        " observations=", observations, " cameras=", scene.registered_count());
 
     core::Logger::instance().info(
         "global positioning attempt: only_points/bearing_schur",
@@ -1346,6 +1359,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 std::vector<double> weights;
                 weights.reserve(losses.size());
                 for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "vulkan");
                 const auto step = vulkan_solver->solve(
                     weights, static_cast<unsigned>(solver_options.max_num_iterations),
                     options.function_tolerance, solver_options.max_solver_time_in_seconds);
@@ -1369,6 +1383,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 std::vector<double> weights;
                 weights.reserve(losses.size());
                 for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cuda");
                 const auto step = cuda_solver->solve(
                     weights, static_cast<unsigned>(solver_options.max_num_iterations),
                     options.function_tolerance, solver_options.max_solver_time_in_seconds);
@@ -1387,6 +1402,7 @@ GlobalPositioningSummary refine_only_points_bearings(
         }
 #endif
         if (!solved_on_gpu) {
+            core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cpu");
             ceres::Solve(solver_options, &problem, &pass_summary);
             log_cpu_positioning_pass("only_points/bearing_schur", pass, solver_options, pass_summary);
         }
@@ -1527,6 +1543,13 @@ bool attempt_positioning(
     if (built.problem.NumResidualBlocks() == 0) return false;
 
     core::Logger::instance().info(
+        "sfm backend selection: stage=positioning requested=",
+        options.backend == PositioningBackend::automatic ? "automatic" :
+        options.backend == PositioningBackend::cuda ? "cuda" :
+        options.backend == PositioningBackend::vulkan ? "vulkan" : "cpu",
+        " selected=cpu reason=cpu_only_attempt attempt=", attempt.label);
+
+    core::Logger::instance().info(
         "global positioning attempt: ", attempt.label,
         " residuals=", built.problem.NumResidualBlocks(),
         " pairs=", built.valid_pairs,
@@ -1597,7 +1620,10 @@ bool attempt_positioning(
                 options.irls_inner_iterations, options.max_num_iterations)));
 
         ceres::Solver::Summary pass_summary;
-        ceres::Solve(solver_options, &built.problem, &pass_summary);
+        {
+            core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cpu");
+            ceres::Solve(solver_options, &built.problem, &pass_summary);
+        }
         log_cpu_positioning_pass(attempt.label, pass, solver_options, pass_summary);
         total_solve_seconds += pass_summary.total_time_in_seconds;
         result.iterations +=

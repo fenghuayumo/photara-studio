@@ -61,7 +61,7 @@ BundleBackendPreference bundle_backend_preference() {
 }
 
 BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) {
-    core::StageScope packing("bundle_pack");
+    core::StageScope packing("bundle_pack", core::LogLevel::info, "cpu");
     BundleSummary summary;
 
     std::unordered_set<Index> free_set(
@@ -245,29 +245,26 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
 #else
     const bool use_vulkan = false;
 #endif
-    if (backend == BundleBackendPreference::vulkan && !use_vulkan &&
-        supported_parameterization) {
+    const char* requested = backend == BundleBackendPreference::cuda ? "cuda" :
+        backend == BundleBackendPreference::vulkan ? "vulkan" :
+        backend == BundleBackendPreference::cpu ? "cpu" : "automatic";
+    const char* reason = backend == BundleBackendPreference::cpu ? "requested_cpu" :
+        has_partial_pose_locks ? "partial_pose_locks" :
+        !supported_parameterization ? "unsupported_parameterization" :
+        problem.observations.size() < options.cuda_min_observations ? "below_observation_threshold" :
+        "gpu_unavailable_or_not_built";
+    core::Logger::instance().info(
+        "sfm backend selection: stage=bundle requested=", requested,
+        " selected=", use_cuda ? "cuda" : use_vulkan ? "vulkan" : "cpu",
+        " reason=", (use_cuda || use_vulkan) ? "gpu_supported" : reason,
+        " observations=", problem.observations.size(),
+        " minimum=", options.cuda_min_observations,
+        " intrinsic_groups=", problem.intrinsics.size());
+    if (!use_cuda && !use_vulkan &&
+        (backend == BundleBackendPreference::cuda ||
+         backend == BundleBackendPreference::vulkan))
         core::Logger::instance().warning(
-            "ba-backend=vulkan requested but this solve stays on the CPU: "
-            "observations=", problem.observations.size(),
-            " minimum=", options.cuda_min_observations,
-#if defined(PHOTARA_HAS_VULKAN_BA)
-            " vulkan_available=", ba::VulkanOptimizer::is_available() ? 1 : 0
-#else
-            " vulkan_available=0 solver was not built"
-#endif
-        );
-    }
-#if defined(PHOTARA_HAS_CUDA)
-    if (backend == BundleBackendPreference::cuda && !use_cuda &&
-        options.prefer_cuda && supported_parameterization) {
-        core::Logger::instance().warning(
-            "ba-backend=cuda requested but this solve stays on the CPU: "
-            "observations=", problem.observations.size(),
-            " minimum=", options.cuda_min_observations,
-            " cuda_available=", ba::CudaOptimizer::is_available() ? 1 : 0);
-    }
-#endif
+            "requested GPU bundle solver stays on CPU: reason=", reason);
     packing.finish();
     bool solved = false;
     if (use_cuda) {
@@ -276,6 +273,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             core::Logger::instance().info(
                 "bundle backend=cuda device=", ba::CudaOptimizer::device_name(),
                 " observations=", problem.observations.size());
+            core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "cuda");
             summary.optimizer = ba::optimize_cuda(problem, opt);
             summary.backend = BundleBackend::cuda;
             if (!summary.optimizer.usable()) {
@@ -297,6 +295,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             core::Logger::instance().info(
                 "bundle backend=vulkan device=", ba::VulkanOptimizer::device_name(),
                 " observations=", problem.observations.size());
+            core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "vulkan");
             summary.optimizer = ba::optimize_vulkan(problem, opt);
             summary.backend = BundleBackend::vulkan;
             if (!summary.optimizer.usable()) {
@@ -314,6 +313,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
 #endif
     }
     if (!solved) {
+        core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "cpu");
         summary.optimizer = ba::optimize_cpu(problem, opt);
         summary.backend = BundleBackend::cpu;
     }
