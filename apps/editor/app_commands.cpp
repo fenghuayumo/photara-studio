@@ -423,6 +423,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.camera_model = app.settings.camera_model;
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
+    settings.refine_weak_cameras = app.settings.refine_weak_cameras;
     settings.max_features = static_cast<unsigned>(
         std::max(0, app.settings.max_features));
     settings.scene_mode = app.settings.scene_mode;
@@ -516,6 +517,7 @@ void apply_project_settings(
     app.settings.camera_model = settings.camera_model;
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
+    app.settings.refine_weak_cameras = settings.refine_weak_cameras;
     app.settings.max_features = static_cast<int>(settings.max_features);
     app.settings.scene_mode = settings.scene_mode;
     app.settings.focus_region = settings.focus_region;

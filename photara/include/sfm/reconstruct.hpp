@@ -29,6 +29,9 @@ struct ReconstructionConfig {
     double maximum_final_reprojection_error_pixels{2.0};
     GlobalRotationOptions global_rotation{};
     GlobalPositioningOptions global_positioning{};
+    // Optional final repair of weak registered poses; other poses/calibration
+    // stay fixed. Independent held-out improvement is required for admission.
+    bool refine_weak_cameras{false};
 };
 
 struct ReconstructionSummary {

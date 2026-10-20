@@ -87,6 +87,11 @@ struct FrontEndOptions {
     // Re-detect only weak views at this larger budget. Existing descriptors
     // remain first so cached primary-match feature indices stay valid.
     unsigned progressive_rescue_max_features{54000};
+    // Post-refinement resection may add overlap neighbors of its original anchors.
+    // Zero disables the retry; earlier product recovery keeps its 16-view budget.
+    unsigned missing_view_retry_max_neighbors{24};
+    // Additional consensus floor, used by conservative post-refinement recovery.
+    double missing_view_minimum_consensus_ratio{0};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};
@@ -120,7 +125,17 @@ FrontEndResult run_frontend(
 // Mix verified visual neighbors with temporal neighbors at a fixed total budget.
 std::vector<Index> select_missing_view_anchors(
     const Scene& scene, Index target, unsigned maximum_neighbors = 16);
-unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {});
+std::vector<Index> select_missing_view_support_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors = 24);
+// A non-empty target list limits both normal and low-contrast attempts.
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {},
+    const std::vector<Index>& target_ids = {}, bool require_pose_improvement = false);
+// Revisit missing views after pose refinement without moving existing geometry.
+// Requires at least half-consensus for both fitting and held-out observations.
+unsigned recover_post_refinement_views(Scene& scene, const FrontEndOptions& options = {});
+// Conservative registered-camera repair. Failure leaves the input scene intact.
+std::vector<Index> select_weak_alignment_views(const Scene& scene);
+unsigned refine_weak_alignment_views(Scene& scene, const FrontEndOptions& options = {});
 // Bounded, independently validated re-localization of weak scale-breaking leaves
 // together with missing views. Other registered poses and intrinsics stay fixed.
 std::vector<Index> select_weak_position_repairs(const Scene& scene);

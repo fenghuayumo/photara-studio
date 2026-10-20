@@ -244,6 +244,7 @@ void append_alignment_backends(
     std::ostringstream& command, const ProjectSettings& settings) {
     command << " --ba-backend " << alignment_backend_flag(settings)
             << " --positioning-backend " << alignment_backend_flag(settings);
+    if (settings.refine_weak_cameras) command << " --refine-weak-cameras";
 }
 
 void append_alignment_cache(

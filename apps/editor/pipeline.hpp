@@ -260,6 +260,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // Recompute alignment by default; cache reuse is an explicit opt-in.
     // Saved projects retain their explicit choice.
     bool reuse_cache = false;
+    bool refine_weak_cameras = false;
     // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
     // mesh/dense, preview sidecars). Empty keeps them next to the project
     // (<project folder>/<project name>.cache); a set folder collects every

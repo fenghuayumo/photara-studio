@@ -732,6 +732,50 @@ int main() {
             }
         }
         Scene no_anchor = fixture(false);
+        {
+            StableResectionOptions complete;
+            complete.minimum_consensus_ratio = 1;
+            {
+                auto guard = complete;
+                guard.require_pose_improvement = true;
+                Scene drifting = fixture();
+                expect(recover_stable_resections(drifting, stable, {}, guard).size() == 4,
+                    "independent improvement gate admits correction of drifting poses");
+                Scene correct = fixture();
+                for (Index i = 4; i < 8; ++i) {
+                    correct.images[i].pose.R.setIdentity();
+                    correct.images[i].pose.C = Vec3(0.25*i, 0.12*(i%2), 0);
+                }
+                const auto previous = correct.images;
+                expect(recover_stable_resections(correct, stable, {}, guard).empty(),
+                    "independent improvement gate keeps an already accurate pose");
+                for (Index i = 0; i < 8; ++i)
+                    expect(correct.images[i].pose.C == previous[i].pose.C &&
+                           correct.images[i].pose.R == previous[i].pose.R,
+                        "rejected needless pose changes preserve every old pose");
+            }
+            Scene clean = fixture();
+            expect(recover_stable_resections(clean, stable, {}, complete).size() == 4,
+                "consensus floor accepts completely corroborated native recovery");
+            Scene outliers = fixture();
+            const auto pixels = outliers.images[4].features.keypoints;
+            for (Index p = 0; p < pixels.size(); p += 8)
+                outliers.images[4].features.keypoints[p] = pixels[(p + 67) % pixels.size()];
+            Scene strict = outliers;
+            const auto original = strict.images[4].pose;
+            const auto ordinary = recover_stable_resections(outliers, stable);
+            expect(std::find(ordinary.begin(), ordinary.end(), 4) != ordinary.end(),
+                "native fixture has an ordinary robust pose consensus");
+            const auto gated = recover_stable_resections(strict, stable, {}, complete);
+            expect(std::find(gated.begin(), gated.end(), 4) == gated.end() &&
+                strict.images[4].pose.C == original.C && strict.images[4].pose.R == original.R,
+                "stronger consensus floor rejects without changing the candidate pose");
+            bool invalid = false;
+            complete.minimum_consensus_ratio = 1.1;
+            try { recover_stable_resections(strict, stable, {}, complete); }
+            catch (const std::invalid_argument&) { invalid = true; }
+            expect(invalid, "consensus floor rejects invalid ratios");
+        }
         expect(recover_stable_resections(no_anchor).empty(), "resection must reject missing stable depths");
         const auto patch_fixture = [&] {
             Scene patch = fixture();
