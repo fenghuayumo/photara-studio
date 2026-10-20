@@ -7,12 +7,15 @@
 #include "sfm/scene.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace photara::sfm {
 
 class AlignLivePreview;
+struct MissingViewRecoveryCache;
+std::shared_ptr<MissingViewRecoveryCache> make_missing_view_recovery_cache();
 
 struct FrontEndOptions {
     CameraModel camera_model{CameraModel::automatic};
@@ -90,6 +93,9 @@ struct FrontEndOptions {
     // Post-refinement resection may add overlap neighbors of its original anchors.
     // Zero disables the retry; earlier product recovery keeps its 16-view budget.
     unsigned missing_view_retry_max_neighbors{24};
+    // Copies share bounded recovery work across targets and rounds.
+    // This internal context never stores final pose acceptance.
+    std::shared_ptr<MissingViewRecoveryCache> missing_view_cache{make_missing_view_recovery_cache()};
     // Additional consensus floor, used by conservative post-refinement recovery.
     double missing_view_minimum_consensus_ratio{0};
     bool compress_descriptors_u8{true};
