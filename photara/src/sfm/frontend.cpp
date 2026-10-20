@@ -15,6 +15,7 @@
 #include "sfm/submap_recovery.hpp"
 #include "sfm/reconstruct.hpp"
 #include "resection_seeding.hpp"
+#include "recovery_cache.hpp"
 
 #include <algorithm>
 #include <array>
@@ -42,6 +43,18 @@
 #include <vector>
 
 namespace photara::sfm {
+struct MissingViewRecoveryCache {
+    std::recursive_mutex mutex;
+    detail::RecoveryMemo<features::FeatureSet> features{384ULL * 1024 * 1024};
+    detail::RecoveryMemo<features::MatchSet> matches{96ULL * 1024 * 1024};
+    // Empty pairs also memoize failed verification.
+    detail::RecoveryMemo<ImagePair> geometry{32ULL * 1024 * 1024};
+};
+
+std::shared_ptr<MissingViewRecoveryCache> make_missing_view_recovery_cache() {
+    return std::make_shared<MissingViewRecoveryCache>();
+}
+
 namespace {
 
 #if !defined(PHOTARA_FRONTEND_CACHE_BUILD_ID)
@@ -3130,6 +3143,8 @@ std::vector<Index> select_weak_position_repairs(const Scene& scene) {
 
 unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
     const std::vector<Index>& target_ids, bool require_pose_improvement) {
+    auto& memo = *options.missing_view_cache;
+    std::lock_guard cache_lock(memo.mutex);
     if (!std::isfinite(options.missing_view_minimum_consensus_ratio) ||
         options.missing_view_minimum_consensus_ratio < 0 || options.missing_view_minimum_consensus_ratio > 1)
         throw std::invalid_argument("invalid missing-view consensus ratio");
@@ -3175,10 +3190,58 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
         recovery.matcher = "mutual_ratio";
     auto extractor = make_frontend_extractor(recovery);
     auto matcher = make_frontend_matcher(recovery);
-    // Reuse only the current neighborhood, keeping memory bounded regardless
-    // of the number of missing views. A low-contrast retry gets fresh caches.
+    // Neighborhood storage pins active entries while the bounded cross-round
+    // memo can evict old work. Low-contrast extraction has a different key.
     std::map<Index, features::FeatureSet> feature_cache;
     std::map<std::pair<Index, Index>, features::MatchSet> match_cache;
+    std::map<Index, std::uint64_t> feature_keys;
+    std::map<Index, std::uint64_t> image_keys;
+    std::size_t feature_hits = 0, feature_misses = 0, match_hits = 0, match_misses = 0;
+    std::size_t geometry_hits = 0, geometry_misses = 0;
+    const auto feature_key = [&](Index id) {
+        auto [it, added] = image_keys.try_emplace(id);
+        if (added) {
+            const auto mask = find_feature_mask_path(options.mask_dir, scene.images[id].path);
+            std::vector<std::filesystem::path> files{scene.images[id].path};
+            if (!mask.empty()) files.push_back(mask);
+            it->second = fingerprint_images(files);
+        }
+        FingerprintBuilder key;
+        key.append_string("missing-view-features-v1");
+        append_cache_build_identity(key);
+        key.append(it->second);
+        key.append_string(recovery.extractor);
+        key.append(recovery.sift_contrast_threshold);
+        key.append(recovery.max_features);
+        return key.value();
+    };
+    const auto match_key = [&](Index query, Index train) {
+        FingerprintBuilder key;
+        key.append_string("missing-view-directed-match-v1");
+        key.append(feature_keys.at(query)); key.append(feature_keys.at(train));
+        key.append_string(recovery.matcher);
+        key.append(recovery.match_ratio); key.append(recovery.mutual_check);
+        return key.value();
+    };
+    const auto geometry_key = [&](Index first, Index second, bool anchored) {
+        FingerprintBuilder key;
+        key.append_string(anchored ? "missing-view-anchor-v1" : "missing-view-boundary-v1");
+        key.append(anchored ? match_key(first, second) : match_key(second, first));
+        append_relative_options(key, recovery.relative);
+        for (Index id : {first, second}) {
+            const auto& image = scene.images[id];
+            const auto& camera = scene.camera_of(image);
+            key.append(camera.model); key.append(camera.width); key.append(camera.height);
+            for (double value : {camera.fx, camera.fy, camera.cx, camera.cy,
+                    camera.k1, camera.k2, camera.p1, camera.p2}) key.append(value);
+            // The local recovery scene always trusts these intrinsics.
+            if (anchored) {
+                key.append_bytes(image.pose.R.data(), 9 * sizeof(double));
+                key.append_bytes(image.pose.C.data(), 3 * sizeof(double));
+            }
+        }
+        return key.value();
+    };
     unsigned recovered_count = 0;
     for (Index target : missing) for (unsigned attempt = 0; attempt < 2; ++attempt) {
         // Rebuild only local depths. Neither the inherited missing pose nor
@@ -3210,12 +3273,24 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
                 image.id = static_cast<Index>(local.images.size());
                 auto cached = feature_cache.find(global);
                 if (cached == feature_cache.end()) {
-                    const auto gray = io::load_gray(image.path);
-                    auto extracted = select_top_features_grid_3x3(
-                        apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
-                            find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
-                    extracted.compress_descriptors_u8();
-                    cached = feature_cache.emplace(global, std::move(extracted)).first;
+                    const auto key = feature_key(global);
+                    feature_keys[global] = key;
+                    const auto* saved = memo.features.find(key);
+                    if (saved) {
+                        ++feature_hits;
+                        cached = feature_cache.emplace(global, *saved).first;
+                    } else {
+                        ++feature_misses;
+                        const auto gray = io::load_gray(image.path);
+                        auto extracted = select_top_features_grid_3x3(
+                            apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
+                                find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
+                        extracted.compress_descriptors_u8();
+                        memo.features.insert(key, extracted,
+                            extracted.keypoints.capacity() * sizeof(features::Keypoint) +
+                            extracted.descriptors.capacity() * sizeof(float) + extracted.descriptors_u8.capacity());
+                        cached = feature_cache.emplace(global, std::move(extracted)).first;
+                    }
                 }
                 image.features = cached->second;
                 local.images.push_back(std::move(image));
@@ -3233,6 +3308,13 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
             const auto key = std::make_pair(neighbors[query], neighbors[train]);
             pair_keys.push_back(key);
             if (!match_cache.contains(key)) {
+                if (const auto* saved = memo.matches.find(match_key(key.first, key.second))) {
+                    match_cache.emplace(key, *saved);
+                    ++match_hits;
+                }
+            }
+            if (!match_cache.contains(key)) {
+                ++match_misses;
                 uncached_keys.push_back(key);
                 match_pairs.emplace_back(&feature_cache.at(key.first), &feature_cache.at(key.second));
             }
@@ -3249,8 +3331,11 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
             core::StageScope matching_stage("sfm.missing_view_match");
             matched_pairs = matcher->match_batch(match_pairs);
         }
-        for (std::size_t i = 0; i < uncached_keys.size(); ++i)
+        for (std::size_t i = 0; i < uncached_keys.size(); ++i) {
+            memo.matches.insert(match_key(uncached_keys[i].first, uncached_keys[i].second),
+                matched_pairs.at(i), matched_pairs.at(i).matches.capacity() * sizeof(features::FeatureMatch));
             match_cache.emplace(uncached_keys[i], std::move(matched_pairs.at(i)));
+        }
         core::Logger::instance().debug("missing view match reuse: pairs=", pair_keys.size(),
             " reused=", pair_keys.size() - uncached_keys.size(), " submitted=", uncached_keys.size());
         matched_pairs.clear();
@@ -3268,6 +3353,16 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
                     const double angular = std::max(local.camera_of(first).pixel_error_to_angular(4),
                                                     local.camera_of(second).pixel_error_to_angular(4));
                     const auto& matched = matched_pairs.at(matched_index++);
+                    const auto key = geometry_key(neighbors[a], neighbors[b], true);
+                    if (const auto* saved = memo.geometry.find(key)) {
+                        ++geometry_hits;
+                        if (!saved->matches.empty()) {
+                            pair = *saved; pair.id1 = a; pair.id2 = b;
+                            local.pairs.push_back(std::move(pair));
+                        }
+                        continue;
+                    }
+                    ++geometry_misses;
                     for (const auto& m : matched.matches) {
                         const auto& x = first.features.keypoints[m.query];
                         const auto& y = second.features.keypoints[m.train];
@@ -3277,15 +3372,30 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
                         if (normal.norm() > 1e-10 && std::abs(normal.normalized().dot(v)) <= std::sin(angular))
                             pair.matches.push_back({m.query, m.train});
                     }
-                    if (pair.matches.size() >= 8) local.pairs.push_back(std::move(pair));
+                    if (pair.matches.size() < 8) pair.matches.clear();
+                    memo.geometry.insert(key, pair, pair.matches.capacity() * sizeof(FeatureMatch));
+                    if (!pair.matches.empty()) local.pairs.push_back(std::move(pair));
                 }
                 RawPairMatches boundary;
                 boundary.id1 = candidate; boundary.id2 = a;
                 boundary.matches = std::move(matched_pairs.at(matched_index++).matches);
                 std::vector<features::FeatureMatch> reversed;
                 for (auto m : boundary.matches) { std::swap(m.query, m.train); reversed.push_back(m); }
-                auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
-                if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+                const auto key = geometry_key(neighbors[a], target, false);
+                if (const auto* saved = memo.geometry.find(key)) {
+                    ++geometry_hits;
+                    if (!saved->matches.empty()) {
+                        auto pair = *saved; pair.id1 = a; pair.id2 = candidate;
+                        boundary_geometry.push_back(std::move(pair));
+                    }
+                } else {
+                    ++geometry_misses;
+                    auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
+                    const ImagePair empty(a, candidate);
+                    const auto& value = verified.pair ? *verified.pair : empty;
+                    memo.geometry.insert(key, value, value.matches.capacity() * sizeof(FeatureMatch));
+                    if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+                }
                 tentative.push_back(std::move(boundary));
             }
         }
@@ -3476,6 +3586,10 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
         break;
     }
     if (recovered_count) rebuild_track_index(scene);
+    core::Logger::instance().debug("missing view cache: feature_hits=", feature_hits, " feature_misses=", feature_misses,
+        " match_hits=", match_hits, " match_misses=", match_misses,
+        " geometry_hits=", geometry_hits, " geometry_misses=", geometry_misses,
+        " retained_bytes=", memo.features.bytes() + memo.matches.bytes() + memo.geometry.bytes());
     // A blurred frame can have fewer strong corners than the final support
     // minimum. Retry only the still-missing views with low-contrast SIFT;
     // previously accepted geometry is not rebuilt or optimized.

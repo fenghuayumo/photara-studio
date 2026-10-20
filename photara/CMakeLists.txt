@@ -455,6 +455,7 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/checkpoint.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/frontend.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/recovery_cache.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/camera_selection.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/camera_selection.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/submap_recovery.hpp"
