@@ -21,6 +21,11 @@ int main() {
     Logger::instance().debug("debug-message");
     Logger::instance().trace("trace-message");
     {
+        StageScope stage("sfm.test", LogLevel::info, "cpu");
+        stage.finish("items=2");
+        stage.finish();  // Explicit completion and destruction must log only once.
+    }
+    {
         ProgressReporter progress("parallel-work", 400, std::chrono::milliseconds(5));
         std::vector<std::jthread> workers;
         for (int worker = 0; worker < 4; ++worker) {
@@ -32,7 +37,12 @@ int main() {
     std::ifstream input(log_path);
     const std::string contents{
         std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    const bool valid = contents.find("[error] error-message") != std::string::npos &&
+    const auto stage_end = contents.find("stage finished: sfm.test elapsed_s=");
+    const bool valid = stage_end != std::string::npos &&
+        contents.find("stage finished: sfm.test", stage_end + 1) == std::string::npos &&
+        contents.find("backend=cpu items=2", stage_end) != std::string::npos &&
+        contents.find("stage started: sfm.test backend=cpu") != std::string::npos &&
+        contents.find("[error] error-message") != std::string::npos &&
         contents.find("[warning] warning-message") != std::string::npos &&
         contents.find("[info] info-message") != std::string::npos &&
         contents.find("[debug] debug-message") != std::string::npos &&

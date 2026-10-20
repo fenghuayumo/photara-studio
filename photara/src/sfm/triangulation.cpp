@@ -783,7 +783,7 @@ static unsigned triangulate_tracks_impl(
     const bool outliers_only,
     const TriangulationOptions& options) {
     unsigned inlier_tracks = 0;
-    core::StageScope stage("sfm.triangulate_tracks", core::LogLevel::debug);
+    core::StageScope stage("sfm.triangulate_tracks", core::LogLevel::debug, "cpu");
     scene.registration_generation = std::max<std::uint32_t>(
         scene.registration_generation, scene.registered_count());
     const std::size_t initial_track_count = scene.tracks.size();

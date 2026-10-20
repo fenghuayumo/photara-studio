@@ -274,6 +274,7 @@ double apply_step(
 GlobalRotationSummary estimate_global_rotations(
     Scene& scene,
     const GlobalRotationOptions& options) {
+    core::StageScope stage("sfm.global_rotation", core::LogLevel::info, "cpu");
     GlobalRotationSummary summary;
     const std::vector<Edge> edges = collect_edges(
         scene, options.use_pair_weights, options.reject_planar_pairs);

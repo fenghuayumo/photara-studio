@@ -474,6 +474,7 @@ void initialize_cameras(
 void select_scene_camera_models(
     Scene& scene, const std::vector<RawPairMatches>& raw_pairs,
     const std::vector<PairCandidate>& candidates, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.select_camera_models", core::LogLevel::info, "cpu");
     for (auto& camera : scene.cameras) {
         std::vector<std::size_t> eligible;
         for (std::size_t i=0; i<raw_pairs.size(); ++i) {
@@ -1431,6 +1432,7 @@ unsigned recompute_relative_poses_with_calibrated_focals(
 
 void finalize_view_graph(
     Scene& scene, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.finalize_view_graph", core::LogLevel::info, "cpu");
     compute_pair_weights(scene, options.pair_weighting);
     const bool focal_updated = calibrate_view_graph_focals(scene);
     const bool exif_focal_updated = calibrate_exif_view_graph_focals(scene);
@@ -1603,7 +1605,7 @@ std::vector<PairCandidate> build_pair_candidates(
     std::vector<PairCandidate> pairs;
     if (options.neighbor_window > 0)
         pairs = build_pair_list(scene.images.size(), options.neighbor_window);
-    core::StageScope retrieval_stage("sfm.retrieve_image_pairs");
+    core::StageScope retrieval_stage("sfm.retrieve_image_pairs", core::LogLevel::info, "cpu");
     const auto retrieved = retrieve_image_pairs(scene.images, options.retrieval);
     pairs.reserve(pairs.size() + retrieved.size());
     for (const RetrievedPair& pair : retrieved)
@@ -1970,6 +1972,13 @@ FrontEndResult run_frontend(
 
     FrontEndOptions runtime_options = options;
     normalize_feature_selection(runtime_options);
+    core::Logger::instance().info(
+        "sfm feature selection: requested_extractor=", options.extractor,
+        " selected_extractor=", runtime_options.extractor,
+        " requested_matcher=", options.matcher,
+        " selected_matcher=", runtime_options.matcher,
+        " pipeline=", runtime_options.pipeline.empty() ? "composable" : runtime_options.pipeline);
+
     if (runtime_options.retrieval.vocabulary_path.empty() &&
         !runtime_options.checkpoint.directory.empty()) {
         runtime_options.retrieval.vocabulary_path =
@@ -2033,6 +2042,7 @@ FrontEndResult run_frontend(
                 "LightGlue requires ONNX Runtime "
                 "(PHOTARA_ENABLE_ONNX / PHOTARA_ONNXRUNTIME_ROOT)");
 
+        core::StageScope extract_stage("sfm.extract_features", core::LogLevel::info, "mixed");
         const auto extract_started = std::chrono::steady_clock::now();
         const bool feature_cache_hit = checkpoints.load_scene(
             CheckpointStage::features, stage_keys.features, scene);
@@ -2052,6 +2062,8 @@ FrontEndResult run_frontend(
                                             extract_started)
                                             .count();
 
+        extract_stage.finish();
+        core::StageScope match_stage("sfm.match_and_verify", core::LogLevel::info, "mixed");
         const auto match_started = std::chrono::steady_clock::now();
         const bool use_retrieval =
             runtime_options.retrieval.top_k > 0 &&
@@ -2135,7 +2147,7 @@ FrontEndResult run_frontend(
             std::vector<ImagePair> pairs(candidates.size());
             core::ProgressReporter geometry_progress(
                 "verify pair geometry", candidates.size());
-            core::StageScope geometry_timing("sfm.verify_geometry");
+            core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
             parallel::parallel_for(
                 candidates.size(), threads, [&](const std::size_t ci) {
                     GeometryVerifyResult verified = verify_pair_geometry(
@@ -2159,7 +2171,7 @@ FrontEndResult run_frontend(
             (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0)) {
             select_scene_camera_models(scene, raw_pairs, candidates, options);
             std::vector<ImagePair> pairs(candidates.size());
-            core::StageScope geometry_timing("sfm.verify_geometry");
+            core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
             parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
                 auto verified = verify_pair_geometry(scene,candidates[i],raw_pairs[i].matches,options.relative);
                 diagnostics[i] = verified.diagnostics;
@@ -2180,6 +2192,7 @@ FrontEndResult run_frontend(
                 std::chrono::steady_clock::now() - match_started)
                 .count();
 
+        match_stage.finish();
         const auto tracks_started = std::chrono::steady_clock::now();
         finalize_view_graph(scene, options);
         checkpoints.save_scene(
@@ -2214,6 +2227,7 @@ FrontEndResult run_frontend(
     if (!matcher)
         throw std::runtime_error("Failed to create feature matcher");
 
+    core::StageScope extract_stage("sfm.extract_features", core::LogLevel::info, "mixed");
     const auto extract_started = std::chrono::steady_clock::now();
     const bool feature_cache_hit = checkpoints.load_scene(
         CheckpointStage::features, stage_keys.features, scene);
@@ -2287,6 +2301,8 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();
 
+    extract_stage.finish();
+    core::StageScope match_stage("sfm.match_and_verify", core::LogLevel::info, "mixed");
     const auto match_started = std::chrono::steady_clock::now();
     auto candidates = build_pair_candidates(scene, runtime_options);
     write_feature_diagnostics(scene,runtime_options,"primary");
@@ -2511,7 +2527,7 @@ FrontEndResult run_frontend(
         std::vector<ImagePair> pairs(candidates.size());
         core::ProgressReporter geometry_progress(
             "verify pair geometry", candidates.size());
-        core::StageScope geometry_timing("sfm.verify_geometry");
+        core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
         parallel::parallel_for(
             candidates.size(), threads, [&](const std::size_t ci) {
                 const PairCandidate cand = candidates[ci];
@@ -2933,6 +2949,7 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - match_started)
             .count();
 
+    match_stage.finish();
     const auto tracks_started = std::chrono::steady_clock::now();
     finalize_view_graph(scene, options);
     checkpoints.save_scene(
@@ -3182,7 +3199,7 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         for (const auto& key : pair_keys) matched_pairs.push_back(match_cache.at(key));
         std::size_t matched_index = 0;
         {
-            core::StageScope geometry_stage("sfm.missing_view_geometry");
+            core::StageScope geometry_stage("sfm.missing_view_geometry", core::LogLevel::info, "cpu");
             for (Index a = 0; a < candidate; ++a) {
                 for (Index b = a + 1; b < candidate; ++b) {
                     ImagePair pair(a, b);
