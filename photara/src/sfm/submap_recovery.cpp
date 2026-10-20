@@ -669,7 +669,11 @@ std::vector<Index> recover_stable_resections(
 
 std::vector<Index> recover_stable_resections(
     Scene& scene, const std::vector<std::uint8_t>& stable,
-    const std::vector<RawPairMatches>& tentative_matches) {
+    const std::vector<RawPairMatches>& tentative_matches,
+    const StableResectionOptions& validation_options) {
+    if (!std::isfinite(validation_options.minimum_consensus_ratio) ||
+        validation_options.minimum_consensus_ratio < 0 || validation_options.minimum_consensus_ratio > 1)
+        throw std::invalid_argument("invalid resection consensus ratio");
     if (stable.size()!=scene.images.size())
         throw std::invalid_argument("stable mask must cover every scene image");
     AlignmentObservability audit;
@@ -860,6 +864,9 @@ std::vector<Index> recover_stable_resections(
         const auto pose = estimate_absolute_pose(bearings, points, camera, options);
         core::Logger::instance().info("stable resection fit: image=", image.path.filename(),
             " success=", pose.success, " inliers=", pose.num_inliers, '/', points.size());
+        if (pose.success && pose.num_inliers < validation_options.minimum_consensus_ratio * points.size()) {
+            reject("insufficient_fit_consensus"); continue;
+        }
         if (!tentative_matches.empty() && pose.success) {
             std::set<Index> inlier_anchors;
             for (std::size_t j = 0; j < fit_tracks.size(); ++j)
@@ -1010,7 +1017,35 @@ std::vector<Index> recover_stable_resections(
             (1+z2/fit_count);
         core::Logger::instance().info("stable resection validation: image=",image.path.filename(),
             " inliers=",heldout,'/',validation.size()," fit_ratio=",fit_ratio);
-        if (heldout < 12 || heldout < minimum_validation_ratio * validation.size()) { reject("heldout_consensus_failed"); continue; }
+        if (heldout < 12 || heldout < std::max(minimum_validation_ratio,
+                validation_options.minimum_consensus_ratio) * validation.size()) {
+            reject("heldout_consensus_failed"); continue;
+        }
+        if (validation_options.require_pose_improvement) {
+            double old_cost = 0, new_cost = 0;
+            unsigned old_inliers = 0;
+            for (const auto& m : validation) {
+                const auto& pixel = image.features.keypoints[m.feature];
+                const Vec2 xy(pixel.x, pixel.y);
+                const double old_error = camera.checked_reprojection_error(
+                    image.pose.transform_world_to_camera(m.point), xy);
+                const double new_error = camera.checked_reprojection_error(
+                    pose.pose.transform_world_to_camera(m.point), xy);
+                old_inliers += std::isfinite(old_error) && old_error <= 2;
+                const auto cost = [](double error) {
+                    const double clipped = std::isfinite(error) ? std::min(error, 4.0) : 4.0;
+                    return clipped * clipped;
+                };
+                old_cost += cost(old_error); new_cost += cost(new_error);
+            }
+            core::Logger::instance().info("stable resection improvement: image=", image.path.filename(),
+                " old_cost=", old_cost, " new_cost=", new_cost,
+                " old_inliers=", old_inliers, " new_inliers=", heldout);
+            if (heldout < old_inliers || new_cost >= 0.9 * old_cost ||
+                old_cost - new_cost < 0.01 * validation.size()) {
+                reject("no_independent_pose_improvement"); continue;
+            }
+        }
         core::Logger::instance().info("stable resection validation geometry: image=", image.path.filename(),
             " cells=", cells.size(), " noncollinear=", noncollinear(heldout_points));
         if (cells.size() < 3) {

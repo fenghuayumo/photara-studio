@@ -958,6 +958,8 @@ constexpr Entry k_entries[] = {
     {"Mixed", "混合", "混在", "혼합"},
     {"Max features per image", "每图最大特征数", "画像あたり最大特徴", "이미지당 최대 특징"},
     {"Reuse cached alignment", "复用缓存对齐", "キャッシュしたアライメントを再利用", "캐시된 정렬 재사용"},
+    {"Refine weak cameras", "精修弱约束相机", "弱い制約のカメラを改善", "제약이 약한 카메라 보정"},
+    {"Spend extra time refining weak registered cameras. Keeps the original pose when independent checks do not improve.", "额外花费时间精修已注册的弱约束相机。独立验证未改善时保留原位姿。", "登録済みの弱い制約のカメラを追加処理で改善します。独立検証で改善しない場合は元の姿勢を保持します。", "등록된 제약이 약한 카메라를 추가 보정합니다. 독립 검증에서 개선되지 않으면 기존 포즈를 유지합니다."},
     {"Reuse compatible alignment stages from the project cache.\n"
      "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
      "Off by default for new projects. Off recomputes alignment;\n"

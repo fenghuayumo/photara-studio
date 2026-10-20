@@ -27,6 +27,11 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Unknown positioning backend");
         };
         ReconstructionConfig config;
+        if (const auto* refine = std::getenv("PHOTARA_BENCHMARK_REFINE_WEAK_CAMERAS")) {
+            if (std::string_view(refine) != "0" && std::string_view(refine) != "1")
+                throw std::invalid_argument("Weak-camera refinement flag must be 0 or 1");
+            config.refine_weak_cameras = std::string_view(refine) == "1";
+        }
         if (const auto* variant = std::getenv("PHOTARA_BENCHMARK_RESECTION_VARIANT")) {
             const std::string_view name(variant);
             if (name != "baseline" && name != "conflicts" && name != "band" && name != "both")
@@ -116,6 +121,16 @@ int main(int argc, char** argv) {
             config.resection.diagnostic_callback = [path, observer](const char* stage, const Scene& snapshot) {
                 if (observer) observer(stage, snapshot);
                 if (std::string_view(stage) == "before_alignment_quality") save_asfm(snapshot, path);
+            };
+        }
+        if (const auto* baseline = std::getenv("PHOTARA_BENCHMARK_WEAK_BASELINE")) {
+            const std::filesystem::path path(baseline);
+            if (std::filesystem::exists(path))
+                throw std::invalid_argument("Weak-camera baseline already exists");
+            const auto observer = config.resection.diagnostic_callback;
+            config.resection.diagnostic_callback = [path, observer](const char* stage, const Scene& snapshot) {
+                if (observer) observer(stage, snapshot);
+                if (std::string_view(stage) == "before_weak_camera_refinement") save_asfm(snapshot, path);
             };
         }
         const auto start = std::chrono::steady_clock::now();

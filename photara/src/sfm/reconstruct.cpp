@@ -370,7 +370,7 @@ std::uint64_t reconstruction_key(
     FingerprintBuilder key;
     key.append_string("reconstruction");
     // Invalidate mapping checkpoints when supported modes or configuration change.
-    key.append_string("scaled-weights-20k-v39-final-native-track-refresh");
+    key.append_string("scaled-weights-20k-v42-optional-weak-camera-refinement");
     key.append_string(PHOTARA_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -381,6 +381,9 @@ std::uint64_t reconstruction_key(
     // Include it so CUDA/Vulkan A/B runs cannot reuse each other's checkpoint.
     key.append(static_cast<std::uint32_t>(bundle_backend_preference()));
     key.append(static_cast<std::uint32_t>(config.mode));
+    key.append(config.frontend.missing_view_retry_max_neighbors);
+    key.append(config.frontend.missing_view_minimum_consensus_ratio);
+    key.append(config.refine_weak_cameras);
     key.append(config.star.min_views);
     key.append(config.star.max_views);
     key.append(config.star.min_tracks_per_view);
@@ -2031,6 +2034,11 @@ ReconstructionSummary reconstruct_from_frontend(
     if (config.resection.diagnostic_callback)
         config.resection.diagnostic_callback("before_alignment_quality", scene);
     refine_alignment_geometry(scene);
+    if (config.refine_weak_cameras) {
+        if (config.resection.diagnostic_callback)
+            config.resection.diagnostic_callback("before_weak_camera_refinement", scene);
+        refine_weak_alignment_views(scene, config.frontend);
+    }
     audit_position_support(scene);
     if (config.resection.diagnostic_callback) config.resection.diagnostic_callback("final", scene);
     return summarize_scene(scene);

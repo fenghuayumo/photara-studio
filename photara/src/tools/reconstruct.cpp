@@ -99,6 +99,7 @@ struct ReconstructCli {
     std::string mode{"global"};
     bool trust_focal{false};
     bool structural_pair_expansion{false};
+    bool refine_weak_cameras{false};
     bool positioning_cuda{true};
     photara::sfm::PositioningBackend positioning_backend{
         photara::sfm::PositioningBackend::automatic};
@@ -672,6 +673,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("refine-weak-cameras", "Optional final refinement of weak registered cameras (extra runtime)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("export-colmap",
          "Also write the aligned scene as a COLMAP text model into this folder",
@@ -1363,6 +1366,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
     cli.structural_pair_expansion = result["sfm-structural-rescue"].as<bool>();
+    cli.refine_weak_cameras = result["refine-weak-cameras"].as<bool>();
     if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
@@ -2579,6 +2583,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.video_rotate = cli.video_rotate;
     settings.camera_model = static_cast<int>(cli.camera_model);
     if (cli.mode == "hierarchical") settings.sfm_mode = 2;
+    settings.refine_weak_cameras = cli.refine_weak_cameras;
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
     settings.focus_region = cli.splat_focus_region;
@@ -4738,6 +4743,7 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         photara::sfm::ReconstructionConfig config;
+        config.refine_weak_cameras = cli.refine_weak_cameras;
         config.global_positioning.prefer_cuda = cli.positioning_cuda;
         config.global_positioning.backend = cli.positioning_backend;
         std::chrono::steady_clock::time_point last_alignment_preview{};

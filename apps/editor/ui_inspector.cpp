@@ -676,6 +676,9 @@ Action draw_inspector(App& app) {
             ImGui::Spacing();
         }
 #endif
+        ImGui::Checkbox(tr("Refine weak cameras"), &app.settings.refine_weak_cameras);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Spend extra time refining weak registered cameras. Keeps the original pose when independent checks do not improve."));
         ImGui::Checkbox(tr("Reuse cached alignment"), &app.settings.reuse_cache);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(

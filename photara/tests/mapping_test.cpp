@@ -1488,8 +1488,10 @@ void test_missing_view_with_coincident_anchors() {
     recovery.extractor = "sift"; recovery.matcher = "mutual_ratio";
     recovery.sift_contrast_threshold = 0.001;
     recovery.max_features = recovery.progressive_rescue_max_features = 4000;
+    expect(recover_missing_views(scene, recovery, {0}) == 0 && !scene.images.back().registered,
+           "targeted recovery leaves unselected missing cameras untouched");
     unsigned recovered = 0;
-    try { recovered = recover_missing_views(scene,recovery); }
+    try { recovered = recover_missing_views(scene,recovery,{5}); }
     catch (const std::exception& error) { std::cerr << "coincident anchor recovery: " << error.what() << '\n'; }
     expect(recovered == 1 && scene.images.back().registered &&
            (scene.images.back().pose.C-centers[5]).norm() < 0.02,
@@ -1926,7 +1928,10 @@ int main() {
     {
         Scene neighbors;
         neighbors.images.resize(80);
-        for (auto& image : neighbors.images) image.registered = true;
+        for (Index i = 0; i < neighbors.images.size(); ++i) {
+            neighbors.images[i].registered = true;
+            neighbors.images[i].pose.C = Vec3(i, 0, 0);
+        }
         neighbors.images[40].registered = false;
         ImagePair revisit(2, 40);
         revisit.relative_pose = Pose3D::identity();
@@ -1958,6 +1963,77 @@ int main() {
                "missing-run graph bridges nominate distant registered anchors within the same budget");
         expect(std::find(extended.begin(), extended.end(), 3) == extended.end(),
                "a missing bridge never becomes a depth anchor");
+        const auto add_overlap = [&](Index a, Index b, unsigned matches) {
+            ImagePair pair(a, b);
+            pair.relative_pose = Pose3D::identity();
+            pair.matches.resize(matches);
+            neighbors.pairs.push_back(std::move(pair));
+        };
+        add_overlap(2, 70, 60);
+        add_overlap(4, 70, 60);
+        add_overlap(2, 71, 500);
+        add_overlap(2, 72, 29);
+        neighbors.images[73].registered = false;
+        add_overlap(2, 73, 100);
+        neighbors.images[74].pose.C = neighbors.images[2].pose.C;
+        add_overlap(2, 74, 500);
+        add_overlap(4, 74, 500);
+        const auto support = select_missing_view_support_anchors(neighbors, 40, 18);
+        expect(support.size() == 18 && std::equal(extended.begin(), extended.end(), support.begin()),
+               "support retry preserves every original anchor within a bounded extension");
+        expect(support[16] == 70 && support[17] == 71,
+               "support retry prefers multi-anchor overlap over a single large pair");
+        expect(std::find(support.begin(), support.end(), 72) == support.end() &&
+               std::find(support.begin(), support.end(), 73) == support.end() &&
+               std::find(support.begin(), support.end(), 74) == support.end(),
+               "support retry excludes weak edges, unregistered and coincident depth anchors");
+        expect(select_missing_view_support_anchors(neighbors, 40, 0).empty() &&
+               select_missing_view_support_anchors(neighbors, 100, 24).empty(),
+               "support retry handles disabled and invalid requests");
+    }
+    {
+        Scene weak;
+        weak.images.resize(10);
+        for (Index i = 0; i < weak.images.size(); ++i) {
+            weak.images[i].id = i;
+            weak.images[i].registered = true;
+            weak.images[i].pose.C = Vec3(i, 0, 0);
+            weak.images[i].features.keypoints.resize(1);
+        }
+        weak.images[2].registered = false;
+        ImagePair duplicate(0, 1); duplicate.zero_baseline = true;
+        weak.pairs.push_back(std::move(duplicate));
+        const auto add_track = [&](std::initializer_list<Index> ids) {
+            Track track; track.position = Vec3(1, 1, 5);
+            for (Index id : ids) track.observations.push_back({id, 0});
+            track.num_inliers = static_cast<std::uint8_t>(ids.size());
+            weak.tracks.push_back(std::move(track));
+        };
+        for (unsigned i = 0; i < 30; ++i) add_track({3, 8, 9});
+        for (unsigned i = 0; i < 400; ++i) add_track({4, 7});
+        for (unsigned i = 0; i < 5; ++i) add_track({5, 8, 9});
+        expect(select_weak_alignment_views(weak) == std::vector<Index>{5, 6},
+            "native weak selection excludes duplicate, missing and sufficiently supported cameras");
+        const auto original_images = weak.images;
+        const auto original_tracks = weak.tracks;
+        FrontEndOptions invalid;
+        invalid.missing_view_minimum_consensus_ratio = 1.1;
+        expect(refine_weak_alignment_views(weak, invalid) == 0,
+            "a failed optional repair retains the input scene");
+        bool unchanged = weak.tracks.size() == original_tracks.size() && weak.pairs.size() == 1;
+        for (Index i = 0; i < weak.images.size(); ++i)
+            unchanged = unchanged && weak.images[i].registered == original_images[i].registered &&
+                weak.images[i].pose.C == original_images[i].pose.C &&
+                weak.images[i].pose.R == original_images[i].pose.R;
+        for (std::size_t i = 0; i < weak.tracks.size(); ++i)
+            unchanged = unchanged && weak.tracks[i].position == original_tracks[i].position &&
+                weak.tracks[i].num_inliers == original_tracks[i].num_inliers &&
+                weak.tracks[i].observations.size() == original_tracks[i].observations.size();
+        expect(unchanged, "failed repair restores registrations, poses, pair graph and tracks atomically");
+        Scene bounded; bounded.images.resize(20);
+        for (auto& image : bounded.images) image.registered = true;
+        expect(select_weak_alignment_views(bounded).size() == 8,
+            "optional camera repair has a bounded candidate budget");
     }
     test_resection_candidate_failures();
     test_global_mapping_preserves_nonuniform_orbit();
@@ -2094,17 +2170,25 @@ int main() {
         "global mapping reports reprojection statistics");
 
     ReconstructionConfig product;
+    expect(!product.refine_weak_cameras, "product camera repair is opt-in");
     product.frontend.trust_focal_pixels = true;
     product.global_positioning = positioning;
     product.resection = fallback;
     std::vector<std::string> final_stages;
     product.resection.diagnostic_callback = [&](const char* stage, const Scene&) {
         if (std::string_view(stage) == "before_alignment_quality" ||
+            std::string_view(stage) == "before_weak_camera_refinement" ||
             std::string_view(stage) == "final") final_stages.emplace_back(stage);
     };
     const auto completed = reconstruct_from_frontend(global_scene, product);
     expect(completed.valid && final_stages == std::vector<std::string>{"before_alignment_quality", "final"},
         "product mapping runs quality before final diagnostics and summary");
+    final_stages.clear();
+    product.refine_weak_cameras = true;
+    const auto refined_product = reconstruct_from_frontend(global_scene, product);
+    expect(refined_product.valid && final_stages == std::vector<std::string>{
+            "before_alignment_quality", "before_weak_camera_refinement", "final"},
+        "optional camera refinement runs after quality and before final diagnostics");
 
     if (failures == 0) {
         std::cout << "sfm mapping tests passed\n";

@@ -1,9 +1,12 @@
 #include "sfm/asfm.hpp"
+#include "sfm/appearance.hpp"
 #include "sfm/checkpoint.hpp"
 #include "sfm/rotation_recovery.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "sfm/tracks.hpp"
 #include "core/logging.hpp"
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <fstream>
@@ -54,7 +57,7 @@ int main(int argc, char** argv) {
         const bool audit_rotations = argc == 5 && std::string_view(argv[3]) == "--rotation-audit";
         const bool map_hierarchical = argc == 5 && std::string_view(argv[3]) == "--hierarchical";
         if (argc != 3 && argc != 4 && !audit_rotations && !map_hierarchical) {
-            std::cerr << "Usage: photara_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection]\n"
+            std::cerr << "Usage: photara_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection|--missing-views|--missing-views-control|--post-refinement|--weak-views|--weak-views-proposal|--audit-only]\n"
                          "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --rotation-audit INPUT.asfm\n"
                          "       photara_sfm_realign tracks-HEX.bin NEW_OUTPUT_DIRECTORY --hierarchical CLUSTER_CAPACITY\n";
             return 1;
@@ -77,6 +80,110 @@ int main(int argc, char** argv) {
                                                                : CheckpointStage::reconstruction, fingerprint, scene))
             throw std::runtime_error("cannot load checkpoint");
         if (audit_rotations) return rotation_audit(scene, argv[4], output);
+        if (argc == 4 && std::string_view(argv[3]) == "--weak-views") {
+            const auto repaired = refine_weak_alignment_views(scene);
+            audit_position_support(scene);
+            std::filesystem::create_directories(output);
+            colour_triangulated_tracks(scene);
+            save_asfm(scene, output / "reconstruction.asfm");
+            std::cout << "weak-view repair: repaired=" << repaired << '\n';
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--weak-views-proposal") {
+            // Nomination uses native support only, never reference residuals.
+            std::vector<unsigned> total(scene.images.size()), multi(scene.images.size());
+            for (const auto& track : scene.tracks) {
+                if (!track.is_triangulated()) continue;
+                for (unsigned o = 0; o < track.num_inliers; ++o) {
+                    const Index id = track.observations[o].image_id;
+                    ++total.at(id);
+                    multi[id] += track.num_inliers >= 3;
+                }
+            }
+            std::vector<bool> tied(scene.images.size(), false);
+            for (const auto& pair : scene.pairs) if (pair.zero_baseline) {
+                tied.at(pair.id1) = true; tied.at(pair.id2) = true;
+            }
+            std::vector<Index> targets;
+            for (Index i = 0; i < scene.images.size(); ++i)
+                if (scene.images[i].registered && !tied[i] && multi[i] < 30 && total[i] < 400)
+                    targets.push_back(i);
+            std::sort(targets.begin(), targets.end(), [&](Index a, Index b) {
+                if (multi[a] != multi[b]) return multi[a] < multi[b];
+                if (total[a] != total[b]) return total[a] < total[b];
+                return a < b;
+            });
+            if (targets.size() > 8) targets.resize(8);
+            std::vector<Pose3D> original;
+            for (Index id : targets) {
+                std::cout << "weak view nominated: " << scene.images[id].path.filename()
+                          << " support=" << total[id] << " multi=" << multi[id] << '\n';
+                original.push_back(scene.images[id].pose);
+                scene.images[id].registered = false;
+            }
+            const auto old_track_count = scene.tracks.size();
+            FrontEndOptions recovery;
+            recovery.missing_view_minimum_consensus_ratio = 0.5;
+            const unsigned repaired = targets.empty() ? 0 : recover_missing_views(scene, recovery, targets);
+            std::vector<bool> moved(scene.images.size(), false);
+            for (std::size_t i = 0; i < targets.size(); ++i) {
+                auto& image = scene.images[targets[i]];
+                if (!image.registered) { image.pose = original[i]; image.registered = true; }
+                else moved[targets[i]] = true;
+            }
+            // Remove stale target observations only from pre-existing tracks.
+            // Newly certified tracks and all other cameras remain untouched.
+            for (std::size_t t = 0; t < old_track_count; ++t) {
+                auto& track = scene.tracks[t];
+                std::vector<Observation> kept;
+                unsigned inliers = 0;
+                for (std::size_t o = 0; o < track.observations.size(); ++o) {
+                    const auto& obs = track.observations[o];
+                    if (moved[obs.image_id]) continue;
+                    kept.push_back(obs);
+                    inliers += o < track.num_inliers;
+                }
+                track.observations = std::move(kept);
+                track.num_inliers = inliers >= 2 ? static_cast<std::uint8_t>(inliers) : 0;
+            }
+            rebuild_track_index(scene);
+            audit_position_support(scene);
+            std::filesystem::create_directories(output);
+            colour_triangulated_tracks(scene);
+            save_asfm(scene, output / "reconstruction.asfm");
+            std::cout << "weak-view repair: nominated=" << targets.size() << " repaired=" << repaired << '\n';
+            return 0;
+        }
+        if (argc == 4 && std::string_view(argv[3]) == "--audit-only") {
+            const auto alignment = analyze_alignment_observability(scene);
+            const auto position = analyze_position_observability(scene);
+            std::filesystem::create_directories(output);
+            std::ofstream audit(output / "registration_audit.csv");
+            audit << "name,registered,alignment_supported,position_supported\n";
+            for (Index i = 0; i < scene.images.size(); ++i)
+                audit << std::quoted(scene.images[i].path.filename().string()) << ','
+                      << scene.images[i].registered << ',' << unsigned(alignment.reliable[i]) << ','
+                      << unsigned(position.reliable[i]) << '\n';
+            if (!audit) throw std::runtime_error("Cannot write registration audit");
+            return 0;
+        }
+        if (argc == 4 && (std::string_view(argv[3]) == "--post-refinement" ||
+                          std::string_view(argv[3]) == "--missing-views" ||
+                          std::string_view(argv[3]) == "--missing-views-control")) {
+            FrontEndOptions recovery;
+            if (std::string_view(argv[3]) == "--missing-views-control")
+                recovery.missing_view_retry_max_neighbors = 0;
+            const auto before = scene.registered_count();
+            const auto recovered = std::string_view(argv[3]) == "--post-refinement"
+                ? recover_post_refinement_views(scene, recovery) : recover_missing_views(scene, recovery);
+            std::filesystem::create_directories(output);
+            colour_triangulated_tracks(scene);
+            save_asfm(scene, output / "reconstruction.asfm");
+            std::cout << "missing-view recovery: before=" << before
+                      << " recovered=" << recovered << " after=" << scene.registered_count()
+                      << " retry_anchor_budget=" << recovery.missing_view_retry_max_neighbors << '\n';
+            return 0;
+        }
         if (map_hierarchical) {
             ReconstructionConfig config;
             config.mode = ReconstructionMode::hierarchical;

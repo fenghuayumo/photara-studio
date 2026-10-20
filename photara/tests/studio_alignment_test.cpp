@@ -53,6 +53,16 @@ int main() {
                 "default alignment explicitly disables stage caching");
         require(command.find("--camera-warm-start") == std::string::npos,
                 "Studio leaves warm start policy internal instead of exposing tuning");
+        require(!settings.refine_weak_cameras && command.find("--refine-weak-cameras") == std::string::npos,
+                "weak-camera refinement stays opt-in for new Studio projects");
+        settings.refine_weak_cameras = true;
+        command = editor::build_align_command("photara.exe", settings, layout);
+        require(command.find("--refine-weak-cameras") != std::string::npos,
+                "Studio forwards the optional camera refinement to the product CLI");
+        command = editor::build_train_command("photara.exe", settings, layout, {});
+        require(command.find("--refine-weak-cameras") != std::string::npos,
+                "training-triggered alignment uses the same refinement policy");
+        settings.refine_weak_cameras = false;
         settings.reuse_cache = true;
         command = editor::build_align_command("photara.exe", settings, layout);
         require(command.find("--cache-dir \"") != std::string::npos,

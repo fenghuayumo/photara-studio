@@ -13,6 +13,7 @@
 #include <cctype>
 #include "sfm/align_live.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "sfm/reconstruct.hpp"
 #include "resection_seeding.hpp"
 
 #include <algorithm>
@@ -3050,6 +3051,51 @@ std::vector<Index> select_missing_view_anchors(
     return visual;
 }
 
+std::vector<Index> select_missing_view_support_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors) {
+    maximum_neighbors = std::min(maximum_neighbors, 32u);
+    auto result = select_missing_view_anchors(scene, target, std::min(maximum_neighbors, 16u));
+    if (result.size() >= maximum_neighbors || result.empty()) return result;
+    std::vector<bool> seed(scene.images.size(), false);
+    for (Index id : result) seed[id] = true;
+    std::map<Index, std::map<Index, double>> links;
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.zero_baseline || pair.matches.size() < 30 ||
+            pair.id1 >= seed.size() || pair.id2 >= seed.size()) continue;
+        for (const auto [anchor, other] : {std::pair{pair.id1, pair.id2}, std::pair{pair.id2, pair.id1}}) {
+            if (!seed[anchor] || seed[other] || other == target || !scene.images[other].registered) continue;
+            const double score = std::min<std::size_t>(pair.matches.size(), 1000) *
+                std::max(0.25F, pair.weight_spatial);
+            if (std::isfinite(score)) links[other][anchor] = std::max(links[other][anchor], score);
+        }
+    }
+    // Shared overlap with several original anchors is a search proposal only;
+    // it neither supplies a depth nor certifies the target's unknown pose.
+    struct Candidate { Index id; std::size_t anchors; double score; };
+    std::vector<Candidate> candidates;
+    for (const auto& [id, witnesses] : links) {
+        double score = 0;
+        for (const auto& [anchor, weight] : witnesses) score += weight;
+        candidates.push_back({id, witnesses.size(), score});
+    }
+    const auto distance = [target](Index id) { return id > target ? id-target : target-id; };
+    std::sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) {
+        if (a.anchors != b.anchors) return a.anchors > b.anchors;
+        if (a.score != b.score) return a.score > b.score;
+        if (distance(a.id) != distance(b.id)) return distance(a.id) < distance(b.id);
+        return a.id < b.id;
+    });
+    for (const auto& candidate : candidates) {
+        if (result.size() >= maximum_neighbors) break;
+        const auto& center = scene.images[candidate.id].pose.C;
+        if (!center.allFinite() || std::any_of(result.begin(), result.end(), [&](Index id) {
+                return (center - scene.images[id].pose.C).norm() < 1e-10;
+            })) continue;
+        result.push_back(candidate.id);
+    }
+    return result;
+}
+
 std::vector<Index> select_weak_position_repairs(const Scene& scene) {
     std::vector<unsigned> degree(scene.images.size());
     std::vector<double> longest(scene.images.size());
@@ -3082,10 +3128,15 @@ std::vector<Index> select_weak_position_repairs(const Scene& scene) {
     return targets;
 }
 
-unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
+    const std::vector<Index>& target_ids, bool require_pose_improvement) {
+    if (!std::isfinite(options.missing_view_minimum_consensus_ratio) ||
+        options.missing_view_minimum_consensus_ratio < 0 || options.missing_view_minimum_consensus_ratio > 1)
+        throw std::invalid_argument("invalid missing-view consensus ratio");
     std::vector<Index> missing;
     for (Index id = 0; id < scene.images.size(); ++id)
-        if (!scene.images[id].registered) missing.push_back(id);
+        if (!scene.images[id].registered && (target_ids.empty() ||
+            std::find(target_ids.begin(), target_ids.end(), id) != target_ids.end())) missing.push_back(id);
     if (missing.empty() || scene.registered_count() < 3 ||
         scene.registered_count() * 2 < scene.images.size()) return 0;
     // Work inward from both sides of a missing run, rather than failing the
@@ -3129,10 +3180,17 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
     std::map<Index, features::FeatureSet> feature_cache;
     std::map<std::pair<Index, Index>, features::MatchSet> match_cache;
     unsigned recovered_count = 0;
-    for (Index target : missing) {
+    for (Index target : missing) for (unsigned attempt = 0; attempt < 2; ++attempt) {
         // Rebuild only local depths. Neither the inherited missing pose nor
         // the main map's triangulated points enter this independent solve.
-        std::vector<Index> neighbors = select_missing_view_anchors(scene, target);
+        std::vector<Index> neighbors = attempt == 0
+            ? select_missing_view_anchors(scene, target)
+            : select_missing_view_support_anchors(scene, target, options.missing_view_retry_max_neighbors);
+        if (attempt != 0) {
+            if (neighbors.size() <= select_missing_view_anchors(scene, target).size()) break;
+            core::Logger::instance().info("missing view support retry: image=",
+                scene.images[target].path.filename(), " anchors=", neighbors.size());
+        }
         neighbors.push_back(target);
         const auto retained = [&](Index id) {
             return std::find(neighbors.begin(), neighbors.end(), id) != neighbors.end();
@@ -3253,10 +3311,14 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             verified_boundary.push_back(std::move(boundary));
         }
         std::vector<Index> recovered;
+        StableResectionOptions validation;
+        validation.require_pose_improvement = require_pose_improvement;
+        validation.minimum_consensus_ratio = std::max(options.missing_view_minimum_consensus_ratio,
+            attempt == 0 ? 0.0 : 0.5);
         if (!verified_boundary.empty())
-            recovered = recover_stable_resections(local, stable, verified_boundary);
+            recovered = recover_stable_resections(local, stable, verified_boundary, validation);
         if (recovered.empty())
-            recovered = recover_stable_resections(local, stable, tentative);
+            recovered = recover_stable_resections(local, stable, tentative, validation);
         if (recovered.empty()) {
             // A small PnP consensus is only a search seed, never a registered
             // camera. Geometry-guided matching can resolve descriptor aliases;
@@ -3350,7 +3412,7 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
                     std::erase_if(pair.matches, [&](const auto& m) {
                         return independent_links.at({m.query, feature_tracks[pair.id2].at(m.train)}).size() < 2;
                     });
-                recovered = recover_stable_resections(local, stable, guided);
+                recovered = recover_stable_resections(local, stable, guided, validation);
             }
         }
         if (recovered.empty()) continue;
@@ -3411,6 +3473,7 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             else *previous = std::move(pair);
         }
         ++recovered_count;
+        break;
     }
     if (recovered_count) rebuild_track_index(scene);
     // A blurred frame can have fewer strong corners than the final support
@@ -3421,11 +3484,19 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         FrontEndOptions finer = options;
         finer.sift_contrast_threshold = 0.001;
         finer.match_ratio = std::max(options.match_ratio, options.progressive_rescue_match_ratio);
-        recovered_count += recover_missing_views(scene, finer);
+        recovered_count += recover_missing_views(scene, finer, target_ids, require_pose_improvement);
     }
     core::Logger::instance().info("missing view recovery: candidates=", missing.size(),
         " recovered=", recovered_count, " frozen_registered_poses=1 frozen_intrinsics=1 frozen_landmarks=1");
     return recovered_count;
+}
+
+unsigned recover_post_refinement_views(Scene& scene, const FrontEndOptions& options) {
+    if (scene.registered_count() == scene.images.size()) return 0;
+    core::StageScope stage("sfm.post_refinement_recovery", core::LogLevel::info, "mixed");
+    auto recovery = options;
+    recovery.missing_view_minimum_consensus_ratio = std::max(0.5, recovery.missing_view_minimum_consensus_ratio);
+    return recover_missing_views(scene, recovery);
 }
 
 unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
@@ -3437,7 +3508,9 @@ unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
     }
     unsigned recovered = 0;
     try {
-        recovered = recover_missing_views(scene, options);
+        auto initial_recovery = options;
+        initial_recovery.missing_view_retry_max_neighbors = 0;
+        recovered = recover_missing_views(scene, initial_recovery);
     } catch (...) {
         for (std::size_t i = 0; i < targets.size(); ++i) {
             scene.images[targets[i]].pose = original[i];
@@ -3457,6 +3530,94 @@ unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
     if (repaired) filter_tracks(scene, 2.F, 1.F, 0.F, 0.F);
     core::Logger::instance().info("independent position repair: nominated=", targets.size(), " repaired=", repaired);
     return recovered;
+}
+
+std::vector<Index> select_weak_alignment_views(const Scene& scene) {
+    std::vector<unsigned> total(scene.images.size()), multi(scene.images.size());
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        for (unsigned o = 0; o < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++o) {
+            const Index id = track.observations[o].image_id;
+            ++total.at(id);
+            multi[id] += track.num_inliers >= 3;
+        }
+    }
+    std::vector<bool> tied(scene.images.size(), false);
+    for (const auto& pair : scene.pairs) if (pair.zero_baseline) {
+        tied.at(pair.id1) = true; tied.at(pair.id2) = true;
+    }
+    std::vector<Index> targets;
+    for (Index i = 0; i < scene.images.size(); ++i)
+        if (scene.images[i].registered && !tied[i] && multi[i] < 30 && total[i] < 400)
+            targets.push_back(i);
+    std::sort(targets.begin(), targets.end(), [&](Index a, Index b) {
+        if (multi[a] != multi[b]) return multi[a] > multi[b];
+        if (total[a] != total[b]) return total[a] < total[b];
+        return a < b;
+    });
+    if (targets.size() > 8) targets.resize(8);
+    return targets;
+}
+
+unsigned refine_weak_alignment_views(Scene& scene, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.weak_camera_refinement", core::LogLevel::info, "mixed");
+    const auto targets = select_weak_alignment_views(scene);
+    if (targets.empty()) return 0;
+    try {
+        // Recovery appends features/tracks and replaces certified boundary pairs.
+        // Work transactionally so failure at any point also restores that state.
+        Scene candidate = scene;
+        const auto old_track_count = candidate.tracks.size();
+        for (Index id : targets) candidate.images[id].registered = false;
+        auto recovery = options;
+        recovery.missing_view_minimum_consensus_ratio = std::max(
+            0.5, recovery.missing_view_minimum_consensus_ratio);
+        unsigned repaired = 0;
+        std::vector<bool> moved(scene.images.size(), false);
+        for (Index id : targets) {
+            core::Logger::instance().info("weak camera trial: image=", candidate.images[id].path.filename());
+            const unsigned accepted = recover_missing_views(candidate, recovery, {id}, true);
+            if (accepted) {
+                moved[id] = true;
+                ++repaired;
+            } else {
+                candidate.images[id].pose = scene.images[id].pose;
+                candidate.images[id].registered = true;
+            }
+        }
+        if (!repaired) return 0;
+        for (std::size_t t = 0; t < old_track_count; ++t) {
+            auto& track = candidate.tracks[t];
+            std::vector<Observation> kept;
+            unsigned inliers = 0;
+            for (std::size_t o = 0; o < track.observations.size(); ++o) {
+                const auto& obs = track.observations[o];
+                if (moved.at(obs.image_id)) continue;
+                kept.push_back(obs);
+                inliers += o < track.num_inliers;
+            }
+            track.observations = std::move(kept);
+            track.num_inliers = inliers >= 2 ? static_cast<std::uint8_t>(inliers) : 0;
+        }
+        rebuild_track_index(candidate);
+        const auto before = analyze_alignment_observability(scene);
+        const auto after = analyze_alignment_observability(candidate);
+        for (Index i = 0; i < scene.images.size(); ++i) {
+            const auto& old = scene.images[i]; const auto& updated = candidate.images[i];
+            if (old.registered != updated.registered ||
+                (!moved[i] && (old.pose.C != updated.pose.C || old.pose.R != updated.pose.R)) ||
+                (updated.registered && (!updated.pose.C.allFinite() || !updated.pose.R.allFinite())) ||
+                ((moved[i] || before.reliable[i]) && !after.reliable[i]))
+                throw std::runtime_error("weak camera repair failed final support/invariance checks");
+        }
+        scene = std::move(candidate);
+        core::Logger::instance().info("weak camera refinement accepted: nominated=", targets.size(),
+            " repaired=", repaired, " frozen_other_poses=1 frozen_intrinsics=1");
+        return repaired;
+    } catch (const std::exception& error) {
+        core::Logger::instance().warning("weak camera refinement rejected; retaining input map: ", error.what());
+        return 0;
+    }
 }
 
 }  // namespace photara::sfm
