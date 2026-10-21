@@ -171,7 +171,7 @@ struct ReconstructCli {
     std::filesystem::path splat_checkpoint;
     std::filesystem::path splat_checkpoint_control;
     bool splat_resume{false};
-    unsigned splat_checkpoint_seconds{120};
+    unsigned splat_checkpoint_seconds{0};
     unsigned splat_iterations{30'000};
     photara::splat::TrainingMode splat_mode{photara::splat::TrainingMode::standard};
     unsigned splat_log_interval{100};
