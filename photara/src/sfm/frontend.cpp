@@ -2610,6 +2610,11 @@ FrontEndResult run_frontend(
              runtime_options.extractor == "vulkan_sift") &&
             runtime_options.progressive_rescue_max_features >
                 runtime_options.max_features) {
+            // Weak-view rescue switches back from matching to extraction.
+            // Release Vulkan's retained match partials before its shared SIFT
+            // workspace is rebuilt, rather than overlapping both workspaces.
+            if (runtime_options.matcher == "vulkan_mutual_ratio")
+                matcher->clear_prepared();
             std::unique_ptr<features::FeatureExtractor> rescue_extractor;
             if (runtime_options.extractor == "vulkan_sift") {
                 features::SiftVulkanOptions extraction_options;

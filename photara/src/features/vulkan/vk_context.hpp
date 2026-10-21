@@ -145,6 +145,8 @@ public:
                                      bool host_cached = false);
     // Allocation rounding is also used by SIFT's concurrency reservation.
     [[nodiscard]] static VkDeviceSize allocation_size(VkDeviceSize bytes);
+    // Large planes should not nearly double just to fit a power-of-two pool.
+    static constexpr VkDeviceSize large_allocation_granularity = 16ULL << 20;
     struct PoolStats {
         VkDeviceSize device_live{}, device_cached{}, device_peak{};
         VkDeviceSize host_live{}, host_cached{}, host_peak{};

@@ -42,6 +42,17 @@ void test_buffer_pool() {
     if (released.device_live != after.device_live ||
         released.device_cached != after.device_cached)
         throw std::runtime_error("Vulkan pool retained oversized scratch");
+    // Distinct 16 MiB classes can share a power-of-two exponent. Returning
+    // 48 MiB and then asking for 64 MiB must never reuse an undersized buffer.
+    for (const auto mib : {17ULL, 33ULL, 49ULL, 129ULL, 157ULL, 261ULL}) {
+        const auto bytes = mib << 20;
+        const auto rounded = Context::allocation_size(bytes);
+        if (rounded < bytes || rounded - bytes >= Context::large_allocation_granularity)
+            throw std::runtime_error("Vulkan large allocation rounding wasted a size class");
+        auto buffer = context.allocate(bytes, false);
+        if (buffer->size_bytes() != rounded)
+            throw std::runtime_error("Vulkan pool returned an incorrect size class");
+    }
 }
 
 std::vector<std::uint8_t> make_image(
@@ -195,6 +206,7 @@ void test_matcher() {
     }
 
     VulkanMutualRatioMatcherOptions options;
+    const auto matcher_baseline = vulkan_backend::Context::get().pool_stats();
     VulkanMutualRatioMatcher matcher(options);
     FeatureSet small = query, tail = train, empty = query;
     small.keypoints.resize(33);
@@ -241,6 +253,13 @@ void test_matcher() {
     for (auto& job : jobs) job.get();
     if (context.pool_stats().device_live != before_clones)
         throw std::runtime_error("Vulkan matcher clones duplicated descriptor cache");
+    matcher.clear_prepared();
+    const auto cleared = context.pool_stats();
+    if (cleared.device_live != matcher_baseline.device_live ||
+        cleared.host_live != matcher_baseline.host_live)
+        throw std::runtime_error("Vulkan matcher retained a workspace or descriptor mirror");
+    require_same_matches(matcher.match(query, train), expected,
+                         "matcher workspace release/rebuild parity");
     std::cout << "vulkan matcher parity: ok (query=" << query.keypoints.size()
               << " train=" << train.keypoints.size() << ")\n";
 }
@@ -541,6 +560,68 @@ void test_against_siftgpu() {
 
 int main(int argc, char** argv) {
     try {
+        const bool growth = argc == 4 && std::string_view(argv[1]) == "--benchmark-matcher-growth";
+        if (argc == 4 && (std::string_view(argv[1]) == "--benchmark-matcher" || growth)) {
+            const auto count = std::stoul(argv[2]);
+            const auto rounds = std::stoul(argv[3]);
+            if (count < 2 || count > 40000 || rounds == 0)
+                throw std::invalid_argument("Invalid matcher benchmark size/rounds");
+            FeatureSet query;
+            query.image_width = query.image_height = 1000;
+            query.descriptor_dimension = 128;
+            query.metric = DescriptorMetric::l2_root;
+            query.storage = DescriptorStorage::uint8;
+            query.keypoints.resize(count);
+            query.descriptors_u8.resize(count * 128);
+            std::mt19937 random(20261021);
+            for (std::size_t i = 0; i < count; ++i) {
+                float values[128], norm = 0;
+                for (auto& v : values) { v = float(random() % 80); norm += v * v; }
+                const float scale = 512.0F / std::sqrt(norm);
+                for (std::size_t k = 0; k < 128; ++k)
+                    query.descriptors_u8[i * 128 + k] =
+                        static_cast<std::uint8_t>(std::round(values[k] * scale));
+            }
+            query.mark_descriptors_modified();
+            FeatureSet train = query;
+            VulkanMutualRatioMatcherOptions options;
+            options.maximum_features = count;
+            auto matcher = std::make_unique<VulkanMutualRatioMatcher>(options);
+            std::vector<FeatureMatcher::Pair> pairs(8, {&query, &train});
+            std::size_t shift = 0;
+            const auto check = [&](const std::vector<MatchSet>& outputs) {
+                for (const auto& output : outputs) {
+                    if (output.matches.size() != count)
+                        throw std::runtime_error("Benchmark self-match count changed");
+                    for (const auto& match : output.matches)
+                        if ((std::size_t(match.query) + shift) % count != std::size_t(match.train))
+                            throw std::runtime_error("Benchmark self-match index changed");
+                }
+            };
+            check(matcher->match_batch(pairs));
+            for (int sample = 0; sample < 3; ++sample) {
+                if (growth) matcher = std::make_unique<VulkanMutualRatioMatcher>(options);
+                const auto start = std::chrono::steady_clock::now();
+                for (std::size_t i = 0; i < rounds; ++i) {
+                    if (growth) {
+                        std::rotate(query.descriptors_u8.begin(), query.descriptors_u8.begin() + 128,
+                                    query.descriptors_u8.end());
+                        query.mark_descriptors_modified();
+                        shift = (shift + 1) % count;
+                    }
+                    check(matcher->match_batch(pairs));
+                }
+                const auto elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - start).count();
+                const auto stats = vulkan_backend::Context::get().pool_stats();
+                std::cout << "matcher_benchmark count=" << count << " pairs=" << rounds * 8
+                          << " sample=" << sample << " seconds=" << elapsed
+                          << " device_live=" << stats.device_live
+                          << " device_peak=" << stats.device_peak
+                          << " device_cached=" << stats.device_cached << '\n';
+            }
+            return 0;
+        }
         if (argc >= 4 && std::string_view(argv[1]) == "--snapshot") {
             SiftVulkanOptions options;
             options.maximum_features = std::stoul(argv[2]);
@@ -566,7 +647,8 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
-        if (argc != 1) throw std::invalid_argument("Use --snapshot MAX_FEATURES IMAGE...");
+        if (argc != 1) throw std::invalid_argument(
+            "Use --snapshot MAX_FEATURES IMAGE... or --benchmark-matcher FEATURES ROUNDS");
         test_buffer_pool();
         test_matcher();
         test_extractor();

@@ -106,6 +106,10 @@ workspace; CPU image decoding can still run across workers. Matching releases
 that workspace and uses a shared descriptor cache across matcher clones.
 Idle device/staging buffer pools are bounded at 256/128 MiB and two buffers
 per size bucket. Host-visible allocations prefer non-device-local memory.
+Large feature allocations use 16 MiB size classes instead of power-of-two
+rounding. Clearing prepared matching state releases the descriptor mirror as
+well as scratch, so later extraction/BA phases do not retain an invalid cache.
+See the [memory budget follow-up](SFM_VULKAN_MEMORY_BUDGET.md) for validation.
 
 Current CUDA extraction still includes per-level host sorting, transfers and
 synchronization. The frontend uses a thread-affine CUDA coordinator; Vulkan
@@ -130,6 +134,9 @@ and both configurations limited to four frontend workers. CUDA extraction took
 they do not isolate SIFT's contribution to the final quality difference.
 The [Vulkan memory optimization record](SFM_VULKAN_MEMORY_OPTIMIZATION.md)
 tracks the subsequent implementation and validation separately.
+The [matcher allocation follow-up](SFM_VULKAN_PERFORMANCE_OPTIMIZATION.md)
+records scratch reuse, cache growth/eviction checks and separate matcher versus
+full-dataset performance results.
 
 To measure the current checkout, build the tools and run, for example:
 
