@@ -56,6 +56,54 @@ double rotation_error(const Mat3& measured, const Mat3& expected) {
     return Eigen::AngleAxisd(measured * expected.transpose()).angle();
 }
 
+void test_cycle_supported_weak_tracks() {
+    const auto fixture = [] {
+        Scene scene;
+        scene.images.resize(5);
+        for (Index id = 0; id < 5; ++id) {
+            scene.images[id].id = id;
+            scene.images[id].features.keypoints.resize(2);
+        }
+        const auto edge = [&](Index a, Index b, float weight) {
+            ImagePair pair(a, b);
+            pair.relative_pose = Pose3D::identity();
+            pair.weight_spatial = weight;
+            pair.matches.push_back({0, 0});
+            scene.pairs.push_back(pair);
+        };
+        edge(0, 1, 10.F); edge(2, 3, 10.F);
+        edge(0, 2, .1F); edge(1, 3, .1F); edge(0, 4, .1F);
+        return scene;
+    };
+    auto scene = fixture();
+    build_tracks(scene, 3.F);
+    expect(scene.tracks.size() == 2, "weight floor retains strong tracks");
+    scene = fixture();
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 1 && scene.tracks[0].observations.size() == 4,
+           "distinct image pairs close a feature-consistent weak cycle");
+    scene = fixture();
+    scene.pairs.erase(scene.pairs.begin() + 3);
+    scene.pairs[2].matches.push_back({0, 0});
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2, "duplicate matches do not certify a weak link");
+    scene = fixture();
+    scene.pairs[3].matches[0].train = 1;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2, "inconsistent features do not close a cycle");
+    scene = fixture();
+    scene.pairs[1].id1 = 0; scene.pairs[1].id2 = 2;
+    scene.pairs[1].matches[0] = {1, 0};
+    scene.pairs[3].id2 = 2;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2,
+           "cycle support cannot merge different features from the same image");
+    scene = fixture();
+    for (auto& pair : scene.pairs) pair.weight_spatial = .1F;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.empty(), "weak-only cycles cannot bootstrap strong support");
+}
+
 void test_pair_cycle_weighting() {
     Scene scene;
     scene.images.resize(4);
@@ -1867,6 +1915,7 @@ void test_final_alignment_quality() {
 }
 
 int main() {
+    test_cycle_supported_weak_tracks();
     test_final_alignment_quality();
     test_boundary_track_quota();
     {

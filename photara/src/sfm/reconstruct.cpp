@@ -1597,7 +1597,7 @@ ReconstructionSummary run_global_mapping(
     trace("weights_refreshed");
     // openMVS rebuilds tracks after relative-rotation filtering with
     // ReconstructionConfig::minPairWeight (default 3).
-    build_tracks(scene, 3.F);
+    build_tracks(scene, 3.F, true);
     trace("tracks_rebuilt");
     core::Logger::instance().info(
         "global: rotation_images=", rotation_summary.estimated_images,

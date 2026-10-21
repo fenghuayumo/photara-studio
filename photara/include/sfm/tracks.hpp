@@ -7,7 +7,10 @@
 namespace photara::sfm {
 
 // Union-find track building from geometrically verified pair matches (openMVS BuildTracks).
-void build_tracks(Scene& scene, float min_pair_weight = 0.F);
+// Optionally retain positive low-weight links only when distinct image pairs
+// close a feature-consistent cycle through the strong-edge components.
+void build_tracks(Scene& scene, float min_pair_weight = 0.F,
+                  bool retain_cycle_supported_links = false);
 void rebuild_track_index(Scene& scene);
 
 // Filter triangulated tracks by reprojection / angle / depth bounds.
