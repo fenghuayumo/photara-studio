@@ -571,6 +571,9 @@ void Context::release_device_budget(std::uint64_t bytes) {
 }
 
 VkDeviceSize Context::allocation_size(VkDeviceSize bytes) {
+    if (bytes > large_allocation_granularity)
+        return ((bytes - 1) / large_allocation_granularity + 1) *
+               large_allocation_granularity;
     if (bytes <= 16) return 16;
     const std::size_t bucket = 64 - static_cast<std::size_t>(
                                        std::countl_zero(static_cast<std::uint64_t>(bytes - 1)));
@@ -579,8 +582,13 @@ VkDeviceSize Context::allocation_size(VkDeviceSize bytes) {
 
 BufferRef Context::allocate(VkDeviceSize bytes, bool host_visible, bool host_cached) {
     const VkDeviceSize rounded = allocation_size(bytes);
+    // Small power-of-two classes occupy [0, 24]. Larger classes have one
+    // bucket per 16 MiB; neighboring non-power-of-two sizes must not alias.
     const std::size_t bucket = static_cast<std::size_t>(
-        std::bit_width(static_cast<std::uint64_t>(rounded - 1)));
+        rounded <= large_allocation_granularity
+            ? std::bit_width(static_cast<std::uint64_t>(rounded - 1))
+            : std::bit_width(large_allocation_granularity - 1) +
+                  rounded / large_allocation_granularity - 1);
     std::unique_ptr<Buffer> buffer;
     {
         std::lock_guard lock(mutex_);

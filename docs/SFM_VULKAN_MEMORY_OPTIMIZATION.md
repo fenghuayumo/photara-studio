@@ -3,6 +3,8 @@
 This change prioritizes peak memory. It does not establish a Vulkan speedup.
 The [CUDA/Vulkan baseline](SFM_CUDA_VULKAN_IPHONE_COMPARISON.md) preserves the
 earlier measurements on all 739 indoor images.
+The [subsequent matcher allocation optimization](SFM_VULKAN_PERFORMANCE_OPTIMIZATION.md)
+retains these pool limits and records its performance and memory checks separately.
 
 ## Implementation
 
