@@ -3,6 +3,7 @@
 #include "io/mesh.hpp"
 #include "splat/formats.hpp"
 #include "splat/simplify.hpp"
+#include "../mvs/marching_cubes_const.hpp"
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <bit>
@@ -379,6 +380,8 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
     for (const auto &node : tree)
         if (node.left < 0)
             ++leaf_count;
+    const std::size_t total_units = std::max<std::size_t>(
+        1, leaf_count * static_cast<std::size_t>(o.levels));
     for (auto &node : tree)
         if (node.left < 0) {
             auto chunk = h.gather(node.ids);
@@ -391,6 +394,12 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
                     options.min_opacity = 0;
                     options.vulkan = o.vulkan;
                     options.cancelled = o.cancelled;
+                    const std::size_t work_unit = done * o.levels + level;
+                    options.progress = [&](float p) {
+                        report(o, 0.05F + 0.9F *
+                            (static_cast<float>(work_unit) + std::clamp(p, 0.F, 1.F)) /
+                            static_cast<float>(total_units));
+                    };
                     chunk = simplify_gaussians(chunk, options);
                 }
                 Host current(chunk);
@@ -398,8 +407,11 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
                 std::iota(ids.begin(), ids.end(), 0u);
                 auto b = bounds(current, ids);
                 node.bound.unite(b);
+                std::vector<unsigned> morton_keys(current.n);
+                for (std::size_t i = 0; i < current.n; ++i)
+                    morton_keys[i] = morton(current.mean(i), b);
                 std::stable_sort(ids.begin(), ids.end(), [&](unsigned a, unsigned c) {
-                    return morton(current.mean(a), b) < morton(current.mean(c), b);
+                    return morton_keys[a] < morton_keys[c];
                 });
                 auto ordered = current.gather(ids);
                 const auto name = std::to_string(level) + "_" + std::to_string(done);
@@ -614,7 +626,79 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
     return g;
 }
 
-mvs::Mesh collision_mesh(const CollisionGrid &g) {
+namespace {
+mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
+    if (g.solid.size() != std::size_t(g.dimensions[0]) * g.dimensions[1] * g.dimensions[2] ||
+        g.voxel_size <= 0)
+        throw std::invalid_argument("Invalid collision grid");
+    if (std::any_of(g.dimensions.begin(), g.dimensions.end(), [](const unsigned dimension) {
+            return dimension > static_cast<unsigned>(std::numeric_limits<int>::max() - 1);
+        }))
+        throw std::invalid_argument("Collision grid dimension exceeds marching-cubes limits");
+    const int nx = static_cast<int>(g.dimensions[0]);
+    const int ny = static_cast<int>(g.dimensions[1]);
+    const int nz = static_cast<int>(g.dimensions[2]);
+    const auto occupied = [&](const int x, const int y, const int z) {
+        if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return false;
+        return g.solid[static_cast<std::size_t>(x) +
+                       std::size_t(nx) * (static_cast<std::size_t>(y) +
+                       std::size_t(ny) * static_cast<std::size_t>(z))] != 0;
+    };
+    mvs::Mesh mesh;
+    std::unordered_map<std::uint64_t, int> edge_vertices;
+    const std::size_t surface_hint = std::min<std::size_t>(g.solid.size(), 1U << 20U);
+    edge_vertices.reserve(surface_hint);
+    auto vertex = [&](const int x, const int y, const int z, const int axis) {
+        const std::uint64_t linear =
+            (static_cast<std::uint64_t>(x + 1) * (static_cast<std::uint64_t>(ny) + 2U) +
+             static_cast<std::uint64_t>(y + 1)) * (static_cast<std::uint64_t>(nz) + 2U) +
+            static_cast<std::uint64_t>(z + 1);
+        const std::uint64_t key = linear * 3U + static_cast<unsigned>(axis);
+        if (const auto found = edge_vertices.find(key); found != edge_vertices.end())
+            return found->second;
+        if (mesh.vertices.size() >= static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            throw std::runtime_error("Collision mesh exceeds 32-bit index limit");
+        Eigen::Vector3f p(
+            g.origin[0] + static_cast<float>(x) * g.voxel_size,
+            g.origin[1] + static_cast<float>(y) * g.voxel_size,
+            g.origin[2] + static_cast<float>(z) * g.voxel_size);
+        p[axis] += 0.5F * g.voxel_size;
+        const int id = static_cast<int>(mesh.vertices.size());
+        mesh.vertices.push_back(p);
+        edge_vertices.emplace(key, id);
+        return id;
+    };
+
+    // Like splat-transform's smooth default, voxel occupancy is sampled as a
+    // binary scalar field and the surface is extracted at the 0.5 isovalue.
+    // The one-sample empty border closes surfaces that touch the grid bounds.
+    for (int z = -1; z < nz; ++z)
+        for (int y = -1; y < ny; ++y)
+            for (int x = -1; x < nx; ++x) {
+                int cube = 0;
+                for (int corner = 0; corner < 8; ++corner)
+                    if (occupied(x + shift[corner].x(), y + shift[corner].y(),
+                                 z + shift[corner].z()))
+                        cube |= 1 << corner;
+                if (cube == 0 || cube == 255) continue;
+                std::array<int, 12> edge_ids;
+                edge_ids.fill(-1);
+                for (int edge = 0; edge < 12; ++edge) {
+                    if ((edge_table[cube] & (1 << edge)) == 0) continue;
+                    edge_ids[static_cast<std::size_t>(edge)] = vertex(
+                        x + edge_shift[edge].x(), y + edge_shift[edge].y(),
+                        z + edge_shift[edge].z(), edge_shift[edge].w());
+                }
+                for (int tri = 0; tri_table[cube][tri] >= 0; tri += 3)
+                    mesh.faces.emplace_back(
+                        edge_ids[static_cast<std::size_t>(tri_table[cube][tri])],
+                        edge_ids[static_cast<std::size_t>(tri_table[cube][tri + 1])],
+                        edge_ids[static_cast<std::size_t>(tri_table[cube][tri + 2])]);
+            }
+    return mesh;
+}
+
+mvs::Mesh collision_mesh_faces(const CollisionGrid &g) {
     if (g.solid.size() != std::size_t(g.dimensions[0]) * g.dimensions[1] * g.dimensions[2] ||
         g.voxel_size <= 0)
         throw std::invalid_argument("Invalid collision grid");
@@ -667,6 +751,17 @@ mvs::Mesh collision_mesh(const CollisionGrid &g) {
                 }
     return mesh;
 }
+} // namespace
+
+mvs::Mesh collision_mesh(const CollisionGrid &g) {
+    return collision_mesh_faces(g);
+}
+
+mvs::Mesh collision_mesh(const CollisionGrid &g, const CollisionOptions::MeshShape shape) {
+    return shape == CollisionOptions::MeshShape::smooth
+        ? collision_mesh_smooth(g)
+        : collision_mesh_faces(g);
+}
 
 void export_collision(const GaussianModel &model, const std::filesystem::path &folder,
                       const CollisionOptions &o) {
@@ -674,7 +769,7 @@ void export_collision(const GaussianModel &model, const std::filesystem::path &f
     auto grid = voxelize_gaussians(model, o);
     check(o);
     save_octree(grid, staging.work);
-    auto mesh = collision_mesh(grid);
+    auto mesh = collision_mesh(grid, o.mesh_shape);
     check(o);
     if (mesh.faces.empty())
         throw std::runtime_error("No collision surface; lower the opacity threshold or voxel size");

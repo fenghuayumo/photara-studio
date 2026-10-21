@@ -2327,7 +2327,7 @@ void poll_splat_export(App& app) {
         state.error.clear();
         set_message(app, "Exported splat assets: " + path_to_utf8(state.output), theme::success);
     } catch (const std::exception& error) {
-        state.error = error.what();
+        state.error = tr(error.what());
         set_message(app, state.error, theme::danger);
     }
     state.cancel.reset();

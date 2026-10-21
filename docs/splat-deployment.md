@@ -48,8 +48,11 @@ The outputs are:
 
 - `scene.voxel.json`: voxel bounds, resolution, and octree statistics;
 - `scene.voxel.bin`: little-endian Laine–Karras nodes and 4×4×4 leaf masks;
-- `scene.collision.glb`: triangles on exposed voxel faces, with shared corners
-  and outward winding.
+- `scene.collision.glb`: by default, the binary voxel field's Marching Cubes
+  surface at the 0.5 isovalue, matching splat-transform's default smooth mode.
+  The optional voxel-faces mode emits the exact exposed voxel faces instead.
+  Coplanar merging may produce a different triangle count from splat-transform,
+  but does not change the extracted surface.
 
 The default coordinate conversion rotates 180 degrees about Z (flips X and Y),
 matching the PlayCanvas splat import transform. Both collision outputs use this
@@ -59,9 +62,10 @@ Y up in the chosen output frame.
 
 Optional host fills close enclosed solid-object cavities by boundary flood fill,
 or fill below the first occupied voxel in each XZ column. Cavity fill is not the
-reference tool's room-navigation exterior-fill mode. Capsule carving, connected
-cluster filtering, and a smooth marching-cubes collision surface are not
-implemented in this version. Collision meshes use the voxel-faces mode.
+reference tool's room-navigation exterior-fill mode. Capsule carving and
+connected-cluster filtering are not implemented in this version. Smooth
+collision meshes are extracted from the same occupancy grid used for the voxel
+octree.
 
 The current compute workspace is a bounded dense grid (default 16 million
 voxels); the exported octree is sparse. Oversized grids or candidate lists fail
