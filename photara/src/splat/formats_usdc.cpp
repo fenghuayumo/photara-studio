@@ -1,4 +1,5 @@
 #include "formats_usdc.hpp"
+#include "format_coordinates.hpp"
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,8 @@ namespace {
 namespace usd = lightusd::next;
 constexpr const char *sh_name = "radiance:sphericalHarmonicsCoefficients";
 constexpr const char *degree_name = "radiance:sphericalHarmonicsDegree";
+constexpr const char *legacy_comment = "Photara native C++ 3D Gaussian export";
+constexpr const char *y_up_comment = "Photara native C++ 3D Gaussian export; coordinates=RUB-v1";
 void finite(const std::vector<float> &values) {
     for (float value : values)
         if (!std::isfinite(value))
@@ -60,6 +63,7 @@ std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
         throw std::runtime_error("Invalid USDC Gaussian model shape");
     for (const auto *values : {&positions, &scales, &quats, &opacity, &sh})
         finite(*values);
+    convert_rdf_rub(positions, quats, sh, bases);
     Eigen::Vector3f low = Eigen::Vector3f::Constant(std::numeric_limits<float>::infinity());
     Eigen::Vector3f high = -low;
     std::vector<float> normalized_quats(n * 4), color(n * 3);
@@ -122,7 +126,8 @@ std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
     layer.meta().upAxis_set = true;
     layer.meta().metersPerUnit = 1;
     layer.meta().metersPerUnit_set = true;
-    layer.meta().comment = "Photara native C++ 3D Gaussian export";
+    layer.meta().comment = y_up_comment;
+    layer.meta().comment_set = true;
     layer.finalize();
     std::vector<std::uint8_t> bytes;
     auto result = usd::WriteLayerToUSDCMemory(bytes, layer);
@@ -148,6 +153,12 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
     if (!p || p->type_name() != "ParticleField3DGaussianSplat" || layer->prim_count() != 1 ||
         p->property("xformOpOrder"))
         throw std::runtime_error("USDC import supports a single untransformed /Gaussians prim");
+    // Old Photara files mislabeled their untouched RDF coordinates as Y-up.
+    // Preserve their native import behavior; new and external Y-up files need
+    // the inverse frame conversion. USD does not support a '-Y' upAxis token.
+    const bool legacy_rdf = layer->meta().comment == legacy_comment;
+    if (!legacy_rdf && layer->meta().upAxis != "Y")
+        throw std::runtime_error("USDC Gaussian import currently requires Y-up coordinates");
     auto positions = array(*p, "positions", 3), scales = array(*p, "scales", 3),
          q = array(*p, "orientations", 4), op = array(*p, "opacities", 1),
          sh = array(*p, sh_name, 3);
@@ -181,6 +192,8 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
         o = std::clamp(o, 1e-7F, 1.F - 1e-7F);
         o = std::log(o / (1 - o));
     }
+    if (!legacy_rdf)
+        convert_rdf_rub(positions, wxyz, sh, bases);
     GaussianModel m;
     m.sh_degree = static_cast<unsigned>(*degree);
     m.means = tinytensor::Tensor::from_vector(positions, {n, 3}, device);

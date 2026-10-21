@@ -707,6 +707,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/geometry_vulkan.cpp
                 src/splat/pam_vulkan.cpp
                 src/splat/deployment_vulkan.cpp
+                src/splat/sog_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
@@ -723,6 +724,7 @@ if(PHOTARA_ENABLE_FEATURES)
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/deployment.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/sog_cluster.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
@@ -1439,6 +1441,19 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
         endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
+        add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
+        target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.formats COMMAND photara_splat_formats_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.formats_vulkan COMMAND photara_splat_formats_test --vulkan)
+            set_tests_properties(photara.splat.formats_vulkan PROPERTIES TIMEOUT 180)
+        endif()
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_formats_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_formats_test>
+                    $<TARGET_FILE_DIR:photara_splat_formats_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_model_handoff_test tests/model_handoff_test.cpp)
         target_link_libraries(photara_model_handoff_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.model_handoff COMMAND photara_model_handoff_test)
@@ -1661,6 +1676,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_logging_test
         photara_splat_checkpoint_test
         photara_splat_test
+        photara_splat_formats_test
         photara_splat_usdc_test
         photara_splat_deployment_test
         photara_splat_merge_test

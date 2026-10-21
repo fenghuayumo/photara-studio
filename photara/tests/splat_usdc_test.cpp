@@ -37,10 +37,22 @@ void near(const std::vector<float> &a, const std::vector<float> &b, float tolera
     for (std::size_t i = 0; i < a.size(); ++i)
         require(std::abs(a[i] - b[i]) <= tolerance, "USDC round trip changed data");
 }
+void verify_fixture(const GaussianModel& restored) {
+    const auto source = fixture(3);
+    near(source.means.to_vector(), restored.means.to_vector(), 1e-6F);
+    near(source.log_scales.to_vector(), restored.log_scales.to_vector(), 1e-6F);
+    near(source.sh.to_vector(), restored.sh.to_vector(), 1e-6F);
+    near(restored.quaternions.to_vector(),
+         {1, 0, 0, 0, std::sqrt(.5F), 0, 0, std::sqrt(.5F), .5F, .5F, .5F, .5F}, 1e-6F);
+}
 int main(int argc, char **argv) {
     try {
         if (argc == 3 && std::string(argv[1]) == "--write") {
             save_gaussians(fixture(3), std::filesystem::u8path(argv[2]), GaussianFormat::usdc);
+            return 0;
+        }
+        if (argc == 3 && std::string(argv[1]) == "--read-fixture") {
+            verify_fixture(load_gaussians(std::filesystem::u8path(argv[2]), tinytensor::Device::CPU));
             return 0;
         }
         auto folder = std::filesystem::temp_directory_path() /

@@ -1,4 +1,5 @@
 #include "formats_glb.hpp"
+#include "format_coordinates.hpp"
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -28,10 +29,6 @@ using boost::property_tree::ptree;
 constexpr std::uint32_t k_glb_magic = 0x46546c67U;
 constexpr std::uint32_t k_json_chunk = 0x4e4f534aU;
 constexpr std::uint32_t k_bin_chunk = 0x004e4942U;
-constexpr std::array<float, 24> k_rdf_to_rub_sh_signs{
-    -1.F, -1.F, 1.F, -1.F, 1.F, 1.F, -1.F, 1.F,
-    -1.F, 1.F, -1.F, -1.F, 1.F, -1.F, 1.F, -1.F,
-    1.F, -1.F, 1.F, 1.F, -1.F, 1.F, -1.F, 1.F};
 
 [[nodiscard]] std::uint32_t read_u32(
     const Bytes& bytes, const std::size_t offset) {
