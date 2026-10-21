@@ -70,9 +70,6 @@ struct FrontEndOptions {
     // preserves the fast path for well-connected views while recovering
     // difficult viewpoints without paying for an unconditional all-pairs run.
     bool progressive_pair_expansion{true};
-    // Experimental: extra graph connectivity has not yet demonstrated correct
-    // branch coordinates on Alameda. Keep disabled in the default pipeline.
-    bool structural_pair_expansion{false};
     unsigned progressive_min_verified_degree{4};
     float progressive_rescue_match_ratio{0.85F};
     unsigned progressive_rescue_min_inliers{20};
@@ -81,11 +78,6 @@ struct FrontEndOptions {
     std::size_t progressive_max_images{500};
     std::size_t progressive_rescue_neighbor_window{16};
     std::size_t progressive_rescue_retrieval_top_k{64};
-    // Supplement existing proposals with a scene-wide vocabulary. London
-    // benefits, but Alameda loses a camera; require explicit selection.
-    bool whole_scene_rescue{false};
-    // Supplemental histogram sampling across detector levels; under evaluation.
-    bool balanced_rescue{false};
     std::size_t progressive_rescue_max_pairs_per_image{96};
     // Re-detect only weak views at this larger budget. Existing descriptors
     // remain first so cached primary-match feature indices stay valid.
