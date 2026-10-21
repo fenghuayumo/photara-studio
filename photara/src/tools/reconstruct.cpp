@@ -98,8 +98,6 @@ struct ReconstructCli {
     photara::CameraModel camera_model{photara::CameraModel::automatic};
     std::string mode{"global"};
     bool trust_focal{false};
-    bool structural_pair_expansion{false};
-    bool refine_weak_cameras{false};
     bool positioning_cuda{true};
     photara::sfm::PositioningBackend positioning_backend{
         photara::sfm::PositioningBackend::automatic};
@@ -128,8 +126,6 @@ struct ReconstructCli {
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{photara::sfm::FrontEndOptions{}.neighbor_window};
     bool retrieval_augmentation{photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval};
-    bool whole_scene_rescue{false};
-    bool balanced_rescue{false};
     float match_ratio{0.8F};
     bool mutual_check{true};
     double sift_contrast{0.005};
@@ -672,10 +668,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("auto"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("refine-weak-cameras", "Optional final refinement of weak registered cameras (extra runtime)",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("export-colmap",
          "Also write the aligned scene as a COLMAP text model into this folder",
          cxxopts::value<std::string>()->default_value(""))
@@ -723,10 +715,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
              photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval ? "true" : "false"))
         ("match-ratio", "Lowe ratio test threshold",
          cxxopts::value<float>()->default_value("0.8"))
-        ("whole-scene-rescue", "Supplement weak-view retrieval with a vocabulary sampled across the scene",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("balanced-rescue", "Supplement weak-view retrieval with samples across detector levels",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mutual-check", "Mutual match consistency check",
          cxxopts::value<bool>()->default_value("true"))
         ("sift-contrast", "SIFT contrast threshold",
@@ -1365,8 +1353,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.export_colmap_dir = result["export-colmap"].as<std::string>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
-    cli.structural_pair_expansion = result["sfm-structural-rescue"].as<bool>();
-    cli.refine_weak_cameras = result["refine-weak-cameras"].as<bool>();
     if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
@@ -1442,8 +1428,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     cli.neighbor_window = result["window"].as<std::size_t>();
     cli.retrieval_augmentation = result["retrieval-augmentation"].as<bool>();
-    cli.whole_scene_rescue = result["whole-scene-rescue"].as<bool>();
-    cli.balanced_rescue = result["balanced-rescue"].as<bool>();
     cli.match_ratio = result["match-ratio"].as<float>();
     cli.mutual_check = result["mutual-check"].as<bool>();
     cli.sift_contrast = result["sift-contrast"].as<double>();
@@ -2583,7 +2567,6 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.video_rotate = cli.video_rotate;
     settings.camera_model = static_cast<int>(cli.camera_model);
     if (cli.mode == "hierarchical") settings.sfm_mode = 2;
-    settings.refine_weak_cameras = cli.refine_weak_cameras;
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
     settings.focus_region = cli.splat_focus_region;
@@ -4743,7 +4726,6 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         photara::sfm::ReconstructionConfig config;
-        config.refine_weak_cameras = cli.refine_weak_cameras;
         config.global_positioning.prefer_cuda = cli.positioning_cuda;
         config.global_positioning.backend = cli.positioning_backend;
         std::chrono::steady_clock::time_point last_alignment_preview{};
@@ -4783,7 +4765,6 @@ int main(int argc, char** argv) {
         photara::core::Logger::instance().info(
             "sfm_masking=", !config.frontend.mask_dir.empty(),
             " sam_use_mask_for_sfm=", cli.sam_use_mask_for_sfm);
-        config.frontend.structural_pair_expansion = cli.structural_pair_expansion;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;
         config.frontend.match_ratio = cli.match_ratio;
@@ -4808,8 +4789,6 @@ int main(int argc, char** argv) {
         // Sequential window + BoW retrieval (learned vocabulary).
         // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
         config.frontend.augment_sequential_with_retrieval = cli.retrieval_augmentation;
-        config.frontend.whole_scene_rescue = cli.whole_scene_rescue;
-        config.frontend.balanced_rescue = cli.balanced_rescue;
         config.frontend.checkpoint.directory = cli.cache_dir;
         config.frontend.diagnostics_directory = cli.frontend_diagnostics_dir;
         photara::sfm::AlignLivePreview live_preview;

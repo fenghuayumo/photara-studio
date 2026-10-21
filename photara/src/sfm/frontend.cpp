@@ -353,15 +353,12 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
     geometry.append(options.progressive_pair_expansion);
-    geometry.append(options.structural_pair_expansion);
     geometry.append(options.progressive_min_verified_degree);
     geometry.append(options.progressive_rescue_match_ratio);
     geometry.append(options.progressive_rescue_min_inliers);
     geometry.append(options.progressive_max_images);
     geometry.append(options.progressive_rescue_neighbor_window);
     geometry.append(options.progressive_rescue_retrieval_top_k);
-    geometry.append(options.whole_scene_rescue);
-    geometry.append(options.balanced_rescue);
     geometry.append(options.progressive_rescue_max_pairs_per_image);
     geometry.append(options.progressive_rescue_max_features);
     geometry.append_string("progressive_pair_expansion_v3");
@@ -2590,20 +2587,14 @@ FrontEndResult run_frontend(
             }
         }
         std::vector<std::uint8_t> weak(scene.images.size(), 0);
-        const auto structural_risk = runtime_options.structural_pair_expansion
-            ? find_structural_pair_risks(scene)
-            : std::vector<std::uint8_t>(scene.images.size(), 0);
-        unsigned structural_weak_images = 0;
         unsigned weak_images = 0;
         for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
-            if (structural_risk[image_id]) ++structural_weak_images;
             if (verified_degree[image_id] >=
                 runtime_options.progressive_min_verified_degree &&
                 // Stable resection validates depths from at least three
                 // anchors. Two neighbors can only form a locally connected
                 // pocket and must not suppress feature augmentation.
-                nonplanar_degree[image_id] >= 3 &&
-                !structural_risk[image_id])
+                nonplanar_degree[image_id] >= 3)
                 continue;
             weak[image_id] = 1;
             ++weak_images;
@@ -2697,7 +2688,7 @@ FrontEndResult run_frontend(
         // genuinely disconnected/structurally weak small view graphs.
         const bool exhaustive_rescue =
             scene.images.size() <= runtime_options.progressive_max_images &&
-            (has_low_degree_views || structural_weak_images > 0);
+            has_low_degree_views;
         rescue_pair_keys.reserve(
             weak_images *
             std::max<std::size_t>(
@@ -2748,14 +2739,8 @@ FrontEndResult run_frontend(
             // low-texture/video frames without an O(weak_views * images) pass.
             const std::size_t radius =
                 runtime_options.progressive_rescue_neighbor_window;
-            std::vector<PairCandidate> deferred_internal;
             const auto propose = [&](Index first, Index second) {
-                // Spend the bounded budget on potential main-map anchors
-                // before adding more edges wholly inside a flagged branch.
-                if (structural_risk[first] && structural_risk[second])
-                    deferred_internal.push_back({first, second});
-                else
-                    add_rescue_candidate(first, second);
+                add_rescue_candidate(first, second);
             };
             for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
                 if (!weak[image_id]) continue;
@@ -2785,110 +2770,8 @@ FrontEndResult run_frontend(
                     propose(pair.first, pair.second);
                 }
             }
-            for (const auto& pair : deferred_internal)
-                add_rescue_candidate(pair.id1, pair.id2);
 
-            if (runtime_options.balanced_rescue &&
-                runtime_options.progressive_rescue_retrieval_top_k > 0 &&
-                scene.images.size() >= runtime_options.retrieval_min_images) {
-                RetrievalOptions supplemental = runtime_options.retrieval;
-                supplemental.top_k = runtime_options.progressive_rescue_retrieval_top_k;
-                supplemental.systematic_sampling = true;
-                auto retrieved = retrieve_image_pairs(scene.images, supplemental);
-                struct SupportedProposal { RetrievedPair pair; std::size_t support; };
-                std::vector<SupportedProposal> supported;
-                std::unordered_map<Index, features::FeatureSet> samples;
-                FrontEndOptions ranking_options = runtime_options;
-                ranking_options.max_features = std::max(ranking_options.max_features,
-                    runtime_options.progressive_rescue_max_features);
-                auto ranking_matcher = make_frontend_matcher(ranking_options);
-                const auto budget = runtime_options.progressive_rescue_max_pairs_per_image;
-                for (const auto& pair : retrieved) {
-                    if (!weak[pair.first] && !weak[pair.second]) continue;
-                    const auto key = candidate_key(pair.first, pair.second);
-                    if (primary_pairs.count(key) || rescue_pair_keys.count(key)) continue;
-                    if (budget > 0 &&
-                        ((weak[pair.first] && rescue_degree[pair.first] >= budget) ||
-                         (weak[pair.second] && rescue_degree[pair.second] >= budget))) continue;
-                    const Index query = weak[pair.first] ? pair.first : pair.second;
-                    const Index anchor = query == pair.first ? pair.second : pair.first;
-                    auto [it, inserted] = samples.try_emplace(anchor);
-                    if (inserted) {
-                        const auto& original = scene.images[anchor].features;
-                        auto& sample = it->second;
-                        sample.image_width = original.image_width;
-                        sample.image_height = original.image_height;
-                        sample.descriptor_dimension = original.descriptor_dimension;
-                        sample.metric = original.metric;
-                        sample.storage = original.storage;
-                        sample.extractor_name = original.extractor_name;
-                        const auto ids = sample_descriptors_spatially(original, 2000, 3, true);
-                        for (const auto id : ids) {
-                            sample.keypoints.push_back(original.keypoints[id]);
-                            const auto begin = static_cast<std::size_t>(id) * original.descriptor_dimension;
-                            if (original.storage == features::DescriptorStorage::uint8)
-                                sample.descriptors_u8.insert(sample.descriptors_u8.end(),
-                                    original.descriptors_u8.begin() + begin,
-                                    original.descriptors_u8.begin() + begin + original.descriptor_dimension);
-                            else
-                                sample.descriptors.insert(sample.descriptors.end(),
-                                    original.descriptors.begin() + begin,
-                                    original.descriptors.begin() + begin + original.descriptor_dimension);
-                        }
-                    }
-                    // This asymmetric, inexpensive match ranks proposals only.
-                    // Its feature indices never enter tracks or pose estimation.
-                    const auto support = ranking_matcher->match(
-                        scene.images[query].features, it->second).matches.size();
-                    supported.push_back({pair, support});
-                }
-                ranking_matcher->clear_prepared();
-                std::sort(supported.begin(), supported.end(),
-                    [](const SupportedProposal& a, const SupportedProposal& b) {
-                        if (a.support != b.support) return a.support > b.support;
-                        if (a.pair.score != b.pair.score) return a.pair.score > b.pair.score;
-                        if (a.pair.first != b.pair.first) return a.pair.first < b.pair.first;
-                        return a.pair.second < b.pair.second;
-                    });
-                const auto before = rescue_candidates.size();
-                std::ofstream ranking_csv;
-                if (!runtime_options.diagnostics_directory.empty()) {
-                    ranking_csv.open(runtime_options.diagnostics_directory / "pairs-balanced-proposals.csv");
-                    ranking_csv << "id1,id2,sampled_matches,retrieval_score,selected\n";
-                }
-                for (const auto& proposal : supported) {
-                    const auto& pair = proposal.pair;
-                    const bool selected = add_rescue_candidate(pair.first, pair.second);
-                    if (ranking_csv) ranking_csv << pair.first << ',' << pair.second << ','
-                        << proposal.support << ',' << pair.score << ',' << selected << '\n';
-                }
-                core::Logger::instance().info("balanced supplemental retrieval: added_candidates=",
-                    rescue_candidates.size() - before, " existing_candidates=", before,
-                    " coarse_matches=", supported.size());
-            }
 
-            // Retain every existing proposal before spending the remaining
-            // weak-view budget on a vocabulary trained across the whole scene.
-            // A prefix-trained primary vocabulary can miss revisits in later
-            // rooms. These are fresh matching proposals, never pose constraints.
-            if (runtime_options.whole_scene_rescue &&
-                runtime_options.progressive_rescue_retrieval_top_k > 0 &&
-                scene.images.size() >= runtime_options.retrieval_min_images) {
-                RetrievalOptions supplemental = runtime_options.retrieval;
-                supplemental.top_k = runtime_options.progressive_rescue_retrieval_top_k;
-                supplemental.vocabulary.sample_all_images = true;
-                supplemental.vocabulary_path = runtime_options.checkpoint.directory.empty()
-                    ? std::filesystem::path{}
-                    : runtime_options.checkpoint.directory / "vocabulary-whole-scene-v2.bin";
-                auto retrieved = retrieve_image_pairs(scene.images, supplemental);
-                std::sort(retrieved.begin(), retrieved.end(),
-                    [](const RetrievedPair& a, const RetrievedPair& b) { return a.score > b.score; });
-                const auto before = rescue_candidates.size();
-                for (const auto& pair : retrieved)
-                    if (weak[pair.first] || weak[pair.second]) add_rescue_candidate(pair.first, pair.second);
-                core::Logger::instance().info("whole-scene supplemental retrieval: added_candidates=",
-                    rescue_candidates.size() - before, " existing_candidates=", before);
-            }
         }
         if (!rescue_candidates.empty()) {
             optimize_pairs_order(rescue_candidates, scene);
@@ -2939,7 +2822,6 @@ FrontEndResult run_frontend(
             }
             core::Logger::instance().info(
                 "progressive pair expansion: weak_images=", weak_images,
-                " structural_weak_images=", structural_weak_images,
                 " strategy=", exhaustive_rescue ? "exhaustive" : "bounded",
                 " attempted=", rescue_candidates.size(),
                 " accepted=", rescued_pairs,
