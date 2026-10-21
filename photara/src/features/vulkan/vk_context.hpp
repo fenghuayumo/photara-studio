@@ -143,12 +143,19 @@ public:
     // device-local buffers are recycled the same way.
     [[nodiscard]] BufferRef allocate(VkDeviceSize bytes, bool host_visible,
                                      bool host_cached = false);
+    // Allocation rounding is also used by SIFT's concurrency reservation.
+    [[nodiscard]] static VkDeviceSize allocation_size(VkDeviceSize bytes);
+    struct PoolStats {
+        VkDeviceSize device_live{}, device_cached{}, device_peak{};
+        VkDeviceSize host_live{}, host_cached{}, host_peak{};
+    };
+    [[nodiscard]] PoolStats pool_stats();
+    static constexpr VkDeviceSize device_cache_limit = 256ULL << 20;
+    static constexpr VkDeviceSize host_cache_limit = 128ULL << 20;
 
-    // Soft device-memory budget for concurrent feature work. One SIFT pyramid
-    // keeps a few hundred megabytes alive in the buffer pool, so the SfM
-    // frontend's per-worker extractor clones would otherwise exhaust the device
-    // (vkAllocateMemory returns VK_ERROR_OUT_OF_DEVICE_MEMORY). Callers reserve
-    // an estimate for the duration of one extraction.
+    // Soft budget for active feature work, capped at 4 GiB (one oversized
+    // image may run alone). SIFT reserves rounded workspace allocations and
+    // shares its rolling buffers across clones; idle pools are bounded above.
     void acquire_device_budget(std::uint64_t bytes);
     void release_device_budget(std::uint64_t bytes);
 
@@ -208,7 +215,6 @@ private:
 
     [[nodiscard]] Session& session();
 
-    static VkDeviceSize pooled_size(VkDeviceSize bytes);
     void recycle(std::unique_ptr<Buffer> buffer, bool host_visible,
                  std::size_t bucket);
     friend class BufferRef;
@@ -235,6 +241,7 @@ private:
     std::mutex mutex_;
     std::vector<PoolBucket> device_pools_;
     std::vector<PoolBucket> host_pools_;
+    PoolStats pool_stats_;
 
     bool alive_ = true;
     bool integer_dot_product_ = false;

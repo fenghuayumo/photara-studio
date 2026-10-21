@@ -75,8 +75,8 @@ public:
     // Grows the host-visible descriptor mirror so that `bytes` more descriptors
     // fit. Growth copies the used prefix, keeping every cached offset valid, and
     // happens before a batch is recorded, where the queue is idle. Allocating
-    // the whole budget up front would reserve hundreds of megabytes per matcher
-    // clone, and the SfM frontend creates one clone per worker thread.
+    // the whole budget up front would reserve hundreds of megabytes even for
+    // small scenes. All worker clones share this mirror and its device cache.
     void ensure_capacity(std::size_t bytes) {
         if (descriptors.valid() && used + bytes <= capacity) return;
         if (used + bytes > budget) {
@@ -146,6 +146,9 @@ VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(
     VulkanMutualRatioMatcherOptions options)
     : impl_(std::make_shared<Impl>(std::move(options))) {}
 
+VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
 VulkanMutualRatioMatcher::~VulkanMutualRatioMatcher() = default;
 VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(
     VulkanMutualRatioMatcher&&) noexcept = default;
@@ -159,7 +162,9 @@ bool VulkanMutualRatioMatcher::is_available() const noexcept {
 }
 
 std::unique_ptr<FeatureMatcher> VulkanMutualRatioMatcher::clone() const {
-    return std::make_unique<VulkanMutualRatioMatcher>(impl_->options);
+    // GPU dispatches already synchronize per batch. Share their bounded cache
+    // and mutex rather than allocating up to 768 MiB for every CPU worker.
+    return std::unique_ptr<FeatureMatcher>(new VulkanMutualRatioMatcher(impl_));
 }
 
 void VulkanMutualRatioMatcher::clear_prepared() {
@@ -179,6 +184,9 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
     std::span<const Pair> pairs) const {
     std::vector<MatchSet> result(pairs.size());
     if (pairs.empty()) return result;
+    // Extraction and matching are separate frontend phases. Reclaim their
+    // shared scratch before growing the descriptor cache and match partials.
+    SiftVulkanExtractor::release_working_memory();
 
     Context& context = *impl_->context;
     const Context::TilePlan plan = context.descriptor_tile_plan();

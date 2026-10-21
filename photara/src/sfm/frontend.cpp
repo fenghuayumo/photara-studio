@@ -2354,7 +2354,11 @@ FrontEndResult run_frontend(
     bool geometry_verified_in_pipeline = false;
     if (!match_cache_hit) {
         raw_pairs.resize(candidates.size());
-        if (matcher->requires_owner_thread()) {
+        // Vulkan clones share a bounded device cache. Submit batches through
+        // the existing GPU coordinator instead of serializing single-pair
+        // worker calls on that cache. Preserve its existing candidate order.
+        if (matcher->requires_owner_thread() ||
+            runtime_options.matcher == "vulkan_mutual_ratio") {
             std::vector<ImagePair> pair_slots;
             // Automatic calibration consumes raw matches, then invalidates
             // every preliminary geometry estimate. Hybrid rescue still needs

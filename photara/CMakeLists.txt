@@ -320,7 +320,8 @@ if(PHOTARA_ENABLE_FEATURES)
         message(STATUS "Photara Vulkan feature backend: ON "
             "(dxc=${PHOTARA_FEATURES_DXC_EXECUTABLE})")
         add_executable(photara_vulkan_features_test tests/vulkan_features_test.cpp)
-        target_link_libraries(photara_vulkan_features_test PRIVATE Photara::Features)
+        target_link_libraries(photara_vulkan_features_test PRIVATE
+            Photara::Features photara_vk::photara_vk Vulkan::Vulkan)
         target_compile_features(photara_vulkan_features_test PRIVATE cxx_std_20)
         if(WIN32)
             add_custom_command(TARGET photara_vulkan_features_test POST_BUILD

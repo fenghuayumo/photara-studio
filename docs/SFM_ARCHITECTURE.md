@@ -95,12 +95,26 @@ Entry point: `sfm::run_frontend` in `src/sfm/frontend.cpp`, logged as stage
 | Backend | Description |
 |---|---|
 | `siftgpu` (default) | Native CUDA SIFT; `--sift-contrast` controls the peak threshold |
+| `vulkan_sift` | Vulkan implementation of the same SIFT pipeline; automatic fallback when CUDA is unavailable |
 | `sift` | Native CPU SIFT/RootSIFT (same pipeline as CUDA / Vulkan) |
 | `superpoint`, `disk`, `aliked` | ONNX extractors configured by `--extractor-model` |
 
 `--max-features` defaults to 27,000. Descriptors are compressed to `uint8` by
 default. The CUDA extractor uses a thread-affine coordinator; other extractors
 are cloned per worker when required.
+
+CUDA uses shared-memory Gaussian filtering and rolling/reused pyramid and
+gradient buffers to reduce device memory. Vulkan also uses rolling pyramid
+buffers and a descriptor reconstruction pass, with one reusable GPU workspace
+shared by extractor clones. Matching releases that workspace, shares its
+descriptor cache across clones and uses the frontend batch coordinator.
+Bounded idle buffer pools prevent extraction allocations persisting into BA.
+Keypoint compaction and scheduling
+differ from Vulkan, and cross-backend floating-point results need not be
+bit-identical. Earlier extraction timings predate the native CUDA replacement
+and do not establish which current backend is faster. See
+[Feature backends](FEATURES_BACKENDS.md#current-sift-implementation-and-parity)
+for current parity requirements, optimizations and benchmark commands.
 
 #### SfM valid-region masks
 
