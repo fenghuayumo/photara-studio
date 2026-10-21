@@ -278,7 +278,7 @@ void draw_splat_export_modal(App& app) {
     auto& state = app.splat_export;
     const bool running = state.job.valid();
     ImGui::BeginDisabled(running);
-    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming (Vulkan)"), tr("Collision Mesh (Vulkan)")
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming"), tr("Collision Mesh")
 #ifdef PHOTARA_HAS_USDC
         , "USDC (OpenUSD 3DGS)"
 #endif
@@ -319,11 +319,19 @@ void draw_splat_export_modal(App& app) {
     } else if (state.format == 5) {
         ImGui::InputFloat(tr("Voxel size"), &state.collision.voxel_size, .01F, .1F, "%.3f");
         ImGui::SliderFloat(tr("Voxel opacity"), &state.collision.opacity, .001F, 1.F, "%.3f");
+        int mesh_shape = state.collision.mesh_shape ==
+                photara::splat::CollisionOptions::MeshShape::smooth
+            ? 0 : 1;
+        const char* mesh_shapes[] = {tr("Smooth (default)"), tr("Voxel faces")};
+        if (ImGui::Combo(tr("Collision mesh shape"), &mesh_shape, mesh_shapes, 2))
+            state.collision.mesh_shape = mesh_shape == 0
+                ? photara::splat::CollisionOptions::MeshShape::smooth
+                : photara::splat::CollisionOptions::MeshShape::faces;
         const char* fills[] = {tr("No fill"), tr("Fill enclosed cavities"), tr("Fill below ground")};
         ImGui::Combo(tr("Fill mode"), &state.fill_mode, fills, 3);
         ImGui::Checkbox(tr("PlayCanvas coordinates"), &state.collision.playcanvas_coordinates);
         theme::caption("PlayCanvas flips X/Y. Mesh and voxel data share that frame.");
-        theme::caption("Voxel faces mesh. Increase voxel size for large scenes.");
+        theme::caption("Smooth mode follows splat-transform's default.");
     }
 
     ImGui::Spacing();
@@ -348,7 +356,6 @@ void draw_splat_export_modal(App& app) {
     ImGui::PushFont(theme::mono_font());
     if (state.format == 4) {
         ImGui::TextUnformatted("lod-meta.json + unbundled SOG chunks");
-        ImGui::TextUnformatted(tr("Browse selects the parent of a new folder."));
     } else if (state.format == 5) {
         ImGui::TextUnformatted("scene.voxel.json + scene.voxel.bin");
         ImGui::TextUnformatted("scene.collision.glb");
@@ -357,6 +364,8 @@ void draw_splat_export_modal(App& app) {
                                             : out.filename())
             .c_str());
     ImGui::PopFont();
+    if (state.format == 4)
+        theme::caption("Browse selects the parent of a new folder.");
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::EndDisabled();

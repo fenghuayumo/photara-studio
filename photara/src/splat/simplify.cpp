@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
-#include <queue>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -381,7 +380,8 @@ void build_kd(
 void knn_search(
     const std::vector<KdNode>& nodes, const SplatSet& set, const std::size_t query,
     const unsigned k, std::int32_t node,
-    std::priority_queue<std::pair<float, std::uint32_t>>& heap) {
+    std::array<std::pair<float, std::uint32_t>, 16>& heap,
+    unsigned& heap_size) {
     if (node < 0) return;
     const KdNode& cur = nodes[static_cast<std::size_t>(node)];
     const float* q = mean_at(set, query);
@@ -389,19 +389,21 @@ void knn_search(
     const float dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
     const float d2 = dx * dx + dy * dy + dz * dz;
     if (cur.index != query) {
-        if (heap.size() < k) {
-            heap.push({d2, cur.index});
-        } else if (d2 < heap.top().first) {
-            heap.pop();
-            heap.push({d2, cur.index});
+        if (heap_size < k) {
+            heap[heap_size++] = {d2, cur.index};
+            std::push_heap(heap.begin(), heap.begin() + heap_size);
+        } else if (d2 < heap[0].first) {
+            std::pop_heap(heap.begin(), heap.begin() + heap_size);
+            heap[heap_size - 1] = {d2, cur.index};
+            std::push_heap(heap.begin(), heap.begin() + heap_size);
         }
     }
     const float delta = q[cur.axis] - p[cur.axis];
     const std::int32_t first = delta <= 0.F ? cur.left : cur.right;
     const std::int32_t second = delta <= 0.F ? cur.right : cur.left;
-    knn_search(nodes, set, query, k, first, heap);
-    if (heap.size() < k || delta * delta < heap.top().first)
-        knn_search(nodes, set, query, k, second, heap);
+    knn_search(nodes, set, query, k, first, heap, heap_size);
+    if (heap_size < k || delta * delta < heap[0].first)
+        knn_search(nodes, set, query, k, second, heap, heap_size);
 }
 
 std::vector<std::array<std::uint32_t, 16>> knn_graph(
@@ -419,14 +421,16 @@ std::vector<std::array<std::uint32_t, 16>> knn_graph(
 #pragma omp parallel for schedule(static)
 #endif
     for (std::int64_t i = 0; i < static_cast<std::int64_t>(set.n); ++i) {
-        std::priority_queue<std::pair<float, std::uint32_t>> heap;
-        knn_search(nodes, set, static_cast<std::size_t>(i), kk, 0, heap);
+        std::array<std::pair<float, std::uint32_t>, 16> heap{};
+        unsigned heap_size = 0;
+        knn_search(nodes, set, static_cast<std::size_t>(i), kk, 0, heap, heap_size);
         std::array<std::uint32_t, 16> row{};
         row.fill(~0U);
-        int slot = static_cast<int>(heap.size()) - 1;
-        while (!heap.empty() && slot >= 0) {
-            row[static_cast<std::size_t>(slot)] = heap.top().second;
-            heap.pop();
+        int slot = static_cast<int>(heap_size) - 1;
+        while (heap_size && slot >= 0) {
+            std::pop_heap(heap.begin(), heap.begin() + heap_size);
+            row[static_cast<std::size_t>(slot)] = heap[heap_size - 1].second;
+            --heap_size;
             --slot;
         }
         graph[static_cast<std::size_t>(i)] = row;
