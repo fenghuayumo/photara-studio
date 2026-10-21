@@ -166,7 +166,10 @@ Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
         if ((flags & required) != required) continue;
         const auto bonus = flags & preferred;
         const auto bonus_count = static_cast<std::uint32_t>(
-            std::popcount(static_cast<std::uint32_t>(bonus)));
+            std::popcount(static_cast<std::uint32_t>(bonus))) +
+            // Keep staging/readback in system RAM on discrete GPUs instead of
+            // consuming the host-visible device-local (Resizable BAR) heap.
+            (host_visible && (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0 ? 8U : 0U);
         if (!best || bonus_count > best->second) best = std::make_pair(index, bonus_count);
     }
     if (!best)
@@ -450,7 +453,8 @@ Context::Context() {
             if ((memory_properties_.memoryHeaps[heap].flags &
                  VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0)
                 device_local += memory_properties_.memoryHeaps[heap].size;
-        budget_bytes_ = std::max<std::uint64_t>(256ULL << 20, device_local / 3);
+        budget_bytes_ = std::max<std::uint64_t>(256ULL << 20,
+            std::min<std::uint64_t>(4ULL << 30, device_local / 4));
     }
 
     photara::vk::ExternalDevice external;
@@ -488,6 +492,8 @@ Context::~Context() {
         vkDeviceWaitIdle(device_);
     }
     sessions.clear();
+    device_pools_.clear();
+    host_pools_.clear();
     for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
     runtime_ = {};
     vkDestroyDevice(device_, nullptr);
@@ -564,7 +570,7 @@ void Context::release_device_budget(std::uint64_t bytes) {
     budget_condition_.notify_all();
 }
 
-VkDeviceSize Context::pooled_size(VkDeviceSize bytes) {
+VkDeviceSize Context::allocation_size(VkDeviceSize bytes) {
     if (bytes <= 16) return 16;
     const std::size_t bucket = 64 - static_cast<std::size_t>(
                                        std::countl_zero(static_cast<std::uint64_t>(bytes - 1)));
@@ -572,23 +578,32 @@ VkDeviceSize Context::pooled_size(VkDeviceSize bytes) {
 }
 
 BufferRef Context::allocate(VkDeviceSize bytes, bool host_visible, bool host_cached) {
-    const VkDeviceSize rounded = pooled_size(bytes);
+    const VkDeviceSize rounded = allocation_size(bytes);
     const std::size_t bucket = static_cast<std::size_t>(
         std::bit_width(static_cast<std::uint64_t>(rounded - 1)));
-    auto& pools = host_visible ? host_pools_ : device_pools_;
-    if (pools.size() <= bucket) pools.resize(bucket + 1);
     std::unique_ptr<Buffer> buffer;
     {
         std::lock_guard lock(mutex_);
+        auto& pools = host_visible ? host_pools_ : device_pools_;
+        if (pools.size() <= bucket) pools.resize(bucket + 1);
         auto& free_list = pools[bucket].free_buffers;
         if (!free_list.empty()) {
             buffer = std::move(free_list.back());
             free_list.pop_back();
+            (host_visible ? pool_stats_.host_cached : pool_stats_.device_cached) -= rounded;
         }
     }
     if (buffer == nullptr)
         buffer = std::make_unique<Buffer>(physical_, device_, rounded, host_visible,
                                           host_cached);
+    {
+        std::lock_guard lock(mutex_);
+        auto& live = host_visible ? pool_stats_.host_live : pool_stats_.device_live;
+        auto& peak = host_visible ? pool_stats_.host_peak : pool_stats_.device_peak;
+        const auto cached = host_visible ? pool_stats_.host_cached : pool_stats_.device_cached;
+        live += rounded;
+        peak = std::max(peak, live + cached);
+    }
     return BufferRef(*this, std::move(buffer), host_visible, bucket);
 }
 
@@ -596,9 +611,24 @@ void Context::recycle(std::unique_ptr<Buffer> buffer, bool host_visible,
                       std::size_t bucket) {
     std::lock_guard lock(mutex_);
     if (!alive_ || buffer == nullptr) return;
+    const auto bytes = buffer->size_bytes();
+    (host_visible ? pool_stats_.host_live : pool_stats_.device_live) -= bytes;
     auto& pools = host_visible ? host_pools_ : device_pools_;
     if (pools.size() <= bucket) pools.resize(bucket + 1);
-    pools[bucket].free_buffers.push_back(std::move(buffer));
+    auto& cached = host_visible ? pool_stats_.host_cached : pool_stats_.device_cached;
+    const auto limit = host_visible ? host_cache_limit : device_cache_limit;
+    auto& free_list = pools[bucket].free_buffers;
+    // A process-wide byte cap and a per-size cap prevent each worker/image
+    // shape from leaving its whole pyramid resident through matching and BA.
+    if (free_list.size() < 2 && bytes <= limit && cached <= limit - bytes) {
+        cached += bytes;
+        free_list.push_back(std::move(buffer));
+    }
+}
+
+Context::PoolStats Context::pool_stats() {
+    std::lock_guard lock(mutex_);
+    return pool_stats_;
 }
 
 const photara::vk::ComputePipeline& Context::pipeline(Shader shader) {

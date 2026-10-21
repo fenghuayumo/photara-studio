@@ -1,11 +1,14 @@
 #include "features/features.hpp"
 #include "features/vulkan_features.hpp"
+#include "../src/features/vulkan/vk_context.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <future>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -14,6 +17,32 @@
 namespace {
 
 using namespace photara::features;
+
+void test_buffer_pool() {
+    if (!SiftVulkanExtractor::is_built()) return;
+    using vulkan_backend::Context;
+    auto& context = Context::get();
+    const auto before = context.pool_stats();
+    {
+        std::vector<vulkan_backend::BufferRef> buffers;
+        for (int i = 0; i < 12; ++i)
+            buffers.push_back(context.allocate(1ULL << 20, false));
+    }
+    const auto after = context.pool_stats();
+    if (after.device_live != before.device_live ||
+        after.device_cached > Context::device_cache_limit ||
+        after.host_cached > Context::host_cache_limit ||
+        after.device_cached > before.device_cached + (2ULL << 20))
+        throw std::runtime_error("Vulkan pool retained unbounded idle allocations");
+    {
+        // Oversized scratch must be freed rather than retained indefinitely.
+        auto oversized = context.allocate(Context::device_cache_limit + 1, false);
+    }
+    const auto released = context.pool_stats();
+    if (released.device_live != after.device_live ||
+        released.device_cached != after.device_cached)
+        throw std::runtime_error("Vulkan pool retained oversized scratch");
+}
 
 std::vector<std::uint8_t> make_image(
     std::uint32_t width, std::uint32_t height, std::uint32_t seed,
@@ -34,9 +63,9 @@ std::vector<std::uint8_t> make_image(
 
 // Deterministic textured image (smooth structure + blobs + a little noise),
 // matching the generator used by photara_vulkan_features_parity. Uniform noise
-// is a poor parity target: its DoG is nearly flat at the detection threshold,
-// so SiftGPU's own undefined pyramid-border reads make its keypoint set vary
-// by ~10% between runs.
+// is sensitive to floating-point differences near the DoG detection threshold.
+// The current native CUDA engine uses guarded border reads; determinism is
+// checked below separately from cross-backend numerical agreement.
 std::vector<std::uint8_t> make_textured_image(std::uint32_t width,
                                               std::uint32_t height,
                                               std::uint32_t seed) {
@@ -190,6 +219,28 @@ void test_matcher() {
     small.mark_descriptors_modified();
     require_same_matches(matcher.match(small, tail), oracle(small, tail, true),
                          "vulkan matcher zero descriptors");
+    // Worker clones must share one cache while generation changes and cache
+    // clears remain serialized with GPU use. Keep clones alive when measuring
+    // live memory so independent per-worker mirrors cannot pass this check.
+    const auto expected = oracle(query, train, true);
+    require_same_matches(matcher.match(query, train), expected, "shared matcher warmup");
+    auto& context = vulkan_backend::Context::get();
+    const auto before_clones = context.pool_stats().device_live;
+    std::vector<std::unique_ptr<FeatureMatcher>> clones;
+    std::vector<std::future<void>> jobs;
+    for (int i = 0; i < 8; ++i) clones.push_back(matcher.clone());
+    for (auto& clone : clones) {
+        jobs.push_back(std::async(std::launch::async, [&, worker = clone.get()] {
+            for (int pass = 0; pass < 3; ++pass) {
+                worker->clear_prepared();
+                require_same_matches(worker->match(query, train), expected,
+                                     "concurrent shared matcher parity");
+            }
+        }));
+    }
+    for (auto& job : jobs) job.get();
+    if (context.pool_stats().device_live != before_clones)
+        throw std::runtime_error("Vulkan matcher clones duplicated descriptor cache");
     std::cout << "vulkan matcher parity: ok (query=" << query.keypoints.size()
               << " train=" << train.keypoints.size() << ")\n";
 }
@@ -252,6 +303,34 @@ void test_extractor() {
     if (features0.descriptor_dimension != 128 ||
         features0.descriptors.size() != features0.keypoints.size() * 128)
         throw std::runtime_error("vulkan sift descriptor layout mismatch");
+
+    auto& context = vulkan_backend::Context::get();
+    const auto workspace_bytes = context.pool_stats().device_live;
+    std::vector<std::unique_ptr<FeatureExtractor>> clones;
+    std::vector<std::future<void>> extraction_jobs;
+    for (int i = 0; i < 4; ++i) clones.push_back(extractor.clone());
+    for (auto& clone : clones) {
+        extraction_jobs.push_back(std::async(std::launch::async, [&, worker = clone.get()] {
+            const auto output = worker->extract_gray(first, width, height);
+            if (output.descriptors != features0.descriptors ||
+                output.keypoints.size() != features0.keypoints.size())
+                throw std::runtime_error("Concurrent Vulkan extraction changed descriptors");
+            for (std::size_t i = 0; i < output.keypoints.size(); ++i) {
+                const auto& a = output.keypoints[i];
+                const auto& b = features0.keypoints[i];
+                if (a.x != b.x || a.y != b.y || a.scale != b.scale || a.orientation != b.orientation)
+                    throw std::runtime_error("Concurrent Vulkan extraction changed keypoints");
+            }
+        }));
+    }
+    for (auto& job : extraction_jobs) job.get();
+    if (context.pool_stats().device_live != workspace_bytes)
+        throw std::runtime_error("Vulkan extractor clones duplicated rolling workspace");
+    SiftVulkanExtractor::release_working_memory();
+    if (context.pool_stats().device_live >= workspace_bytes)
+        throw std::runtime_error("Vulkan SIFT workspace was retained between phases");
+    if (extractor.extract_gray(first, width, height).descriptors != features0.descriptors)
+        throw std::runtime_error("Releasing Vulkan SIFT scratch changed subsequent extraction");
 
     for (const auto& keypoint : features0.keypoints) {
         if (!(keypoint.x >= 0.F && keypoint.x < float(width)) ||
@@ -354,10 +433,9 @@ void test_against_siftgpu() {
 
     // Feature-level parity: the Vulkan translation must reproduce the SiftGPU
     // keypoint set (the same DoG extrema, sub-pixel offsets and orientations).
-    // SiftGPU itself is not run-to-run reproducible for the keypoints sitting
-    // on the pyramid border, where its tex1Dfetch reads run past the texture,
-    // so the check allows a small margin and uses a textured image whose
-    // keypoints are stable across runs.
+    // Both native backends guard pyramid-border reads. CUDA must reproduce
+    // this fixture exactly across runs; cross-backend comparisons allow the
+    // floating-point tolerances asserted below.
     {
         const auto counts = [](const FeatureSet& a, const FeatureSet& b) {
             return double(std::min(a.keypoints.size(), b.keypoints.size())) /
@@ -461,8 +539,35 @@ void test_against_siftgpu() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc >= 4 && std::string_view(argv[1]) == "--snapshot") {
+            SiftVulkanOptions options;
+            options.maximum_features = std::stoul(argv[2]);
+            SiftVulkanExtractor extractor(options);
+            const auto hash = [](const void* data, std::size_t bytes) {
+                auto* values = static_cast<const unsigned char*>(data);
+                std::uint64_t value = 14695981039346656037ULL;
+                for (std::size_t i = 0; i < bytes; ++i) {
+                    value ^= values[i]; value *= 1099511628211ULL;
+                }
+                return value;
+            };
+            for (int i = 3; i < argc; ++i) {
+                auto features = extractor.extract_file(std::filesystem::path(argv[i]));
+                const auto floats = hash(features.descriptors.data(), features.descriptors.size()*sizeof(float));
+                std::vector<float> keys;
+                for (const auto& k : features.keypoints)
+                    keys.insert(keys.end(), {k.x,k.y,k.scale,k.orientation,k.response});
+                features.compress_descriptors_u8();
+                std::cout << std::filesystem::path(argv[i]).filename().string() << ' '
+                          << features.keypoints.size() << ' ' << hash(keys.data(),keys.size()*sizeof(float))
+                          << ' ' << floats << ' ' << hash(features.descriptors_u8.data(),features.descriptors_u8.size()) << '\n';
+            }
+            return 0;
+        }
+        if (argc != 1) throw std::invalid_argument("Use --snapshot MAX_FEATURES IMAGE...");
+        test_buffer_pool();
         test_matcher();
         test_extractor();
         test_against_siftgpu();

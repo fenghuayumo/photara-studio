@@ -42,6 +42,10 @@ public:
     [[nodiscard]] static bool is_built() noexcept;
     [[nodiscard]] bool is_available() const noexcept;
 
+    // Reclaim the shared rolling workspace between extraction and matching.
+    // Waits for any in-progress extraction before freeing its buffers.
+    static void release_working_memory();
+
     [[nodiscard]] std::string_view name() const override { return "vulkan_sift"; }
     [[nodiscard]] ExtractorInfo info() const override;
     [[nodiscard]] std::unique_ptr<FeatureExtractor> clone() const override;
@@ -94,6 +98,7 @@ public:
 
 private:
     class Impl;
+    explicit VulkanMutualRatioMatcher(std::shared_ptr<Impl> impl);
     std::shared_ptr<Impl> impl_;
 };
 
