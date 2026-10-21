@@ -93,7 +93,8 @@ void rebuild_track_index(Scene& scene) {
     }
 }
 
-void build_tracks(Scene& scene, const float min_pair_weight) {
+void build_tracks(Scene& scene, const float min_pair_weight,
+                  const bool retain_cycle_supported_links) {
     core::StageScope stage("sfm.build_tracks", core::LogLevel::info, "cpu");
     scene.tracks.clear();
     scene.image_tracks.clear();
@@ -134,37 +135,91 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
             if (weight_left != weight_right) return weight_left > weight_right;
             return left < right;
         });
+    const auto merge = [&](Index g1, Index g2, Index image1, Index image2) {
+        accumulate(g1, image1);
+        accumulate(g2, image2);
+        const Index r1 = ds.find(g1), r2 = ds.find(g2);
+        if (r1 == r2) return false;
+        auto& map1 = component_images[r1];
+        auto& map2 = component_images[r2];
+        if (intersects(map1, map2)) return false;
+        ds.unite(r1, r2);
+        const Index root = ds.find(r1);
+        const Index other = root == r1 ? r2 : r1;
+        auto& merged = component_images[root];
+        auto other_it = component_images.find(other);
+        if (other_it != component_images.end()) {
+            merge_smaller_into_larger(merged, other_it->second);
+            component_images.erase(other_it);
+        }
+        return true;
+    };
     for (const Index pair_index : pair_order) {
         progress.advance();
         const ImagePair& pair = scene.pairs[pair_index];
         if (!pair.active || pair.matches.empty()) continue;
         if (pair.composite_weight() <= min_pair_weight) continue;
-        const Index off1 = feature_offsets[pair.id1];
-        const Index off2 = feature_offsets[pair.id2];
-        for (const FeatureMatch& match : pair.matches) {
-            const Index g1 = off1 + match.query;
-            const Index g2 = off2 + match.train;
-            accumulate(g1, pair.id1);
-            accumulate(g2, pair.id2);
-
-            const Index r1 = ds.find(g1);
-            const Index r2 = ds.find(g2);
-            if (r1 == r2) continue;
-
-            auto& map1 = component_images[r1];
-            auto& map2 = component_images[r2];
-            if (intersects(map1, map2)) continue;
-
-            ds.unite(r1, r2);
-            const Index root = ds.find(r1);
-            const Index other = root == r1 ? r2 : r1;
-            auto& merged = component_images[root];
-            auto other_it = component_images.find(other);
-            if (other_it != component_images.end()) {
-                merge_smaller_into_larger(merged, other_it->second);
-                component_images.erase(other_it);
+        for (const FeatureMatch& match : pair.matches)
+            merge(feature_offsets[pair.id1] + match.query,
+                  feature_offsets[pair.id2] + match.train, pair.id1, pair.id2);
+    }
+    if (retain_cycle_supported_links && min_pair_weight > 0) {
+        struct Link { Index first, second, root1, root2, order; };
+        std::vector<Link> links;
+        // Freeze support before any weak union: new weak links cannot certify
+        // one another recursively. Two distinct image pairs must connect the
+        // same disjoint strong components, closing a multi-view feature cycle.
+        for (Index order = 0; order < pair_order.size(); ++order) {
+            const auto& pair = scene.pairs[pair_order[order]];
+            const float weight = pair.composite_weight();
+            if (!pair.active || !pair.relative_pose || pair.zero_baseline ||
+                !std::isfinite(weight) || weight <= 0 || weight > min_pair_weight) continue;
+            for (const auto& match : pair.matches) {
+                const Index first = feature_offsets[pair.id1] + match.query;
+                const Index second = feature_offsets[pair.id2] + match.train;
+                Index r1 = ds.find(first), r2 = ds.find(second);
+                if (r1 == r2) continue;
+                const auto a = component_images.find(r1), b = component_images.find(r2);
+                if (a == component_images.end() && b == component_images.end()) continue;
+                const bool overlap = a != component_images.end() && b != component_images.end()
+                    ? intersects(a->second, b->second)
+                    : a != component_images.end()
+                        ? std::binary_search(a->second.begin(), a->second.end(), pair.id2)
+                        : std::binary_search(b->second.begin(), b->second.end(), pair.id1);
+                if (overlap) continue;
+                if (r2 < r1) std::swap(r1, r2);
+                links.push_back({first, second, r1, r2, order});
             }
         }
+        std::sort(links.begin(), links.end(), [](const auto& a, const auto& b) {
+            if (a.root1 != b.root1) return a.root1 < b.root1;
+            if (a.root2 != b.root2) return a.root2 < b.root2;
+            return a.order < b.order;
+        });
+        std::size_t kept = 0;
+        for (std::size_t begin = 0; begin < links.size();) {
+            std::size_t end = begin + 1;
+            while (end < links.size() && links[end].root1 == links[begin].root1 &&
+                   links[end].root2 == links[begin].root2) ++end;
+            if (links[begin].order != links[end - 1].order)
+                for (std::size_t i = begin; i < end; ++i) links[kept++] = links[i];
+            begin = end;
+        }
+        links.resize(kept);
+        // Preserve the same confidence ordering as the strong pass. Components
+        // may now overlap after other accepted groups; merge rechecks conflicts.
+        std::sort(links.begin(), links.end(), [](const auto& a, const auto& b) {
+            if (a.order != b.order) return a.order < b.order;
+            if (a.first != b.first) return a.first < b.first;
+            return a.second < b.second;
+        });
+        std::size_t merged = 0;
+        for (const auto& link : links) {
+            const auto& pair = scene.pairs[pair_order[link.order]];
+            merged += merge(link.first, link.second, pair.id1, pair.id2);
+        }
+        core::Logger::instance().debug("track weak-link cycles: certified_matches=", kept,
+            " merged_components=", merged);
     }
     // component_images is only needed during union; free before assembly.
     component_images.clear();
