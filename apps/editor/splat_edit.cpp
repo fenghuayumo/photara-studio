@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -545,6 +546,10 @@ bool ray_plane(
 void SplatEdit::clear() {
     key_.clear();
     synced_ = false;
+    depth_range_enabled_ = depth_range_initialized_ = false;
+    depth_readout_until_ = 0.;
+    selection_depth_near_ = 0.F;
+    selection_depth_far_ = 100.F;
     dirty_ = false;
     rings_hit_ = false;
     hit_chosen_ = false;
@@ -694,6 +699,80 @@ bool SplatEdit::rings_ready() const noexcept {
     return count_ > 0 &&
            log_scales_.size() >= static_cast<std::size_t>(count_) * 3U &&
            quaternions_.size() >= static_cast<std::size_t>(count_) * 4U;
+}
+
+bool SplatEdit::accepts_depth(const float depth) const noexcept {
+    return !depth_range_enabled_ ||
+        (depth >= selection_depth_near_ && depth <= selection_depth_far_);
+}
+
+void SplatEdit::set_selection_depth_range(
+    const bool enabled, const float near_depth, const float far_depth) {
+    if (gesture_active() || !std::isfinite(near_depth) || !std::isfinite(far_depth)) return;
+    selection_depth_near_ = std::max(0.F, std::min(near_depth, far_depth));
+    selection_depth_far_ = std::max(selection_depth_near_, std::max(near_depth, far_depth));
+    depth_range_enabled_ = enabled;
+    depth_range_initialized_ = true;
+}
+
+bool SplatEdit::fit_selection_depth_range(
+    const splat_render::Camera& camera, const bool selected_only) {
+    if (gesture_active()) return false;
+    float near_depth = std::numeric_limits<float>::max(), far_depth = 0.F;
+    for (std::uint32_t index = 0; index < count_; ++index) {
+        if (selected_only && !selected_[index]) continue;
+        const float* center = centers_.data() + static_cast<std::size_t>(index) * 4U;
+        if (center[3] < k_min_opacity) continue;
+        const RayHit hit = project_center(camera, center[0], center[1], center[2]);
+        if (!hit.valid || !std::isfinite(hit.depth)) continue;
+        near_depth = std::min(near_depth, hit.depth);
+        far_depth = std::max(far_depth, hit.depth);
+    }
+    if (near_depth > far_depth) return false;
+    // Small padding retains the selected centres after float roundoff.
+    const float padding = std::max(1e-4F, (far_depth - near_depth) * .01F);
+    set_selection_depth_range(true, near_depth - padding, far_depth + padding);
+    return true;
+}
+
+void SplatEdit::apply_depth_preview(splat_render::DisplayOptions& display) const {
+    display.selection_depth_enabled = tools_open_ && depth_range_enabled_ && !volume_tool();
+    display.selection_depth_near = selection_depth_near_;
+    display.selection_depth_far = selection_depth_far_;
+}
+
+bool SplatEdit::handle_depth_shortcuts(
+    const splat_render::Camera& camera, const bool pointer_in_view) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!pointer_in_view || !synced_ || !tools_open_ || volume_tool() ||
+        gesture_active() || io.WantTextInput || !io.KeyCtrl || io.KeyAlt || io.KeySuper ||
+        ImGui::IsAnyItemActive() || ImGui::IsPopupOpen(nullptr,
+            ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
+        ImGui::IsMouseDown(0) || ImGui::IsMouseDown(1) || ImGui::IsMouseDown(2)) return false;
+    if (!io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+        if (fit_selection_depth_range(camera, true)) depth_readout_until_ = ImGui::GetTime() + 2.;
+        return false;
+    }
+    if (io.MouseWheel == 0.F) return false;
+    if (!depth_range_enabled_ && !fit_selection_depth_range(camera, selected_count_ > 0)) return false;
+    const double near_depth = selection_depth_near_, far_depth = selection_depth_far_;
+    const double centre = (near_depth + far_depth) * .5;
+    const double minimum = std::max(1e-5, centre * 1e-5);
+    const double width = std::max(minimum, far_depth - near_depth);
+    if (io.KeyShift) {
+        const double half = std::min(centre, std::clamp(
+            width * std::pow(1.15, std::clamp(io.MouseWheel, -20.F, 20.F)), minimum, 1e29) * .5);
+        set_selection_depth_range(true, static_cast<float>(std::max(0., centre - half)),
+            static_cast<float>(std::min(1e30, centre + half)));
+    } else {
+        // Towards the viewer for wheel-up, away for wheel-down. Never cross zero.
+        const double step = std::max(width * .1, centre * .01);
+        const double shifted_near = std::clamp(near_depth - io.MouseWheel * step, 0., 1e30 - width);
+        set_selection_depth_range(true, static_cast<float>(shifted_near),
+                                  static_cast<float>(shifted_near + width));
+    }
+    depth_readout_until_ = ImGui::GetTime() + 2.;
+    return true;
 }
 
 float SplatEdit::ellipse_reach(
@@ -904,7 +983,7 @@ void SplatEdit::select_at(
         const float* center = centers_.data() + static_cast<std::size_t>(index) * 4U;
         if (center[3] < k_min_opacity) continue;
         const RayHit hit = project_center(camera, center[0], center[1], center[2]);
-        if (!hit.valid) continue;
+        if (!hit.valid || !accepts_depth(hit.depth)) continue;
         const float du = hit.u - raster.x;
         const float dv = hit.v - raster.y;
         const float d2 = du * du + dv * dv;
@@ -981,7 +1060,7 @@ void SplatEdit::apply_region(
         const float* center = centers_.data() + static_cast<std::size_t>(index) * 4U;
         if (center[3] < k_min_opacity) continue;
         const RayHit hit = project_center(camera, center[0], center[1], center[2]);
-        if (!hit.valid) continue;
+        if (!hit.valid || !accepts_depth(hit.depth)) continue;
         bool inside = false;
         const float circle_radius = mode == 1
             ? std::sqrt((rb.x - ra.x) * (rb.x - ra.x) + (rb.y - ra.y) * (rb.y - ra.y))
@@ -1767,9 +1846,16 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
             buffer, size, "%s  |  %s", gesture_line.c_str(),
             tr("Delete removes the selection"));
     }
+    if (depth_range_enabled_) {
+        const std::string gesture_line(buffer);
+        std::snprintf(buffer, size, "%s %.6g – %.6g  |  %s",
+            tr("Selection depth range"), selection_depth_near_, selection_depth_far_,
+            gesture_line.c_str());
+    }
 }
 
-bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_max) {
+bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_max,
+                             const splat_render::Camera& camera) {
     toolbar_visible_ = false;
     if (!synced_ || !tools_open_) return false;
     struct Item {
@@ -1815,6 +1901,9 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         {icons::Icon::depth_through, "##splat_through", "All depths",
          "The next gesture selects every layer it covers, including Gaussians hidden behind the front one.",
          "N", 21, false},
+        {icons::Icon::sliders, "##splat_depth_range", "Selection depth range",
+         "Limit screen selection to a near and far depth. Click to adjust.",
+         nullptr, 24, false},
         {icons::Icon::points, "##splat_centres", "Select by centre",
          "A Gaussian counts only when its centre is inside the gesture.",
          nullptr, 22, true},
@@ -1874,6 +1963,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             : item.action == 21 ? !front_only_
             : item.action == 22 ? !rings_hit_
             : item.action == 23 ? rings_hit_
+            : item.action == 24 ? depth_range_enabled_
                                 : false;
         ImGui::SetCursorScreenPos(min);
         ImGui::PushID(item.id);
@@ -1918,10 +2008,45 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         } else if (item.action == 23) {
             rings_hit_ = true;
             hit_chosen_ = true;
+        } else if (item.action == 24) {
+            ImGui::OpenPopup("##selection_depth_range");
         }
     }
+    const bool depth_popup = ImGui::IsPopupOpen("##selection_depth_range");
+    if (ImGui::BeginPopup("##selection_depth_range")) {
+        ImGui::TextUnformatted(tr("Selection depth range"));
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 280.F);
+        ImGui::TextWrapped("%s", tr("Filter Gaussian centres by depth in the current camera, in scene units. Panorama uses camera distance. This changes selection only."));
+        ImGui::TextWrapped("%s", tr("Ctrl+D: fit selection | Ctrl+wheel: move range | Ctrl+Shift+wheel: change thickness"));
+        ImGui::BeginDisabled(gesture_active() || volume_tool());
+        bool enabled = depth_range_enabled_;
+        if (ImGui::Checkbox(tr("Limit selection depth"), &enabled)) {
+            if (enabled && !depth_range_initialized_)
+                fit_selection_depth_range(camera, false);
+            depth_range_enabled_ = enabled;
+        }
+        ImGui::BeginDisabled(!depth_range_enabled_);
+        float near_depth = selection_depth_near_, far_depth = selection_depth_far_;
+        const float speed = std::max(1e-4F, (far_depth - near_depth) * .01F);
+        ImGui::SetNextItemWidth(170.F);
+        bool changed = ImGui::DragFloat(tr("Near"), &near_depth, speed, 0.F, far_depth, "%.6g", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetNextItemWidth(170.F);
+        changed |= ImGui::DragFloat(tr("Far"), &far_depth, speed, near_depth, 1e30F, "%.6g", ImGuiSliderFlags_AlwaysClamp);
+        if (changed) set_selection_depth_range(true, near_depth, far_depth);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(selected_count_ == 0);
+        if (ImGui::Button(tr("Fit depth to selection"))) fit_selection_depth_range(camera, true);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Fit depth to model"))) fit_selection_depth_range(camera, false);
+        ImGui::EndDisabled();
+        if (volume_tool()) ImGui::TextWrapped("%s", tr("Depth range applies to screen tools. Box and sphere use their own 3D boundaries."));
+        ImGui::PopTextWrapPos();
+        ImGui::EndPopup();
+    }
     const bool over_volume = draw_volume_bar(view_min, view_max);
-    return over_volume ||
+    return depth_popup || over_volume ||
            ImGui::IsMouseHoveringRect(toolbar_min_, toolbar_max_, false);
 }
 
@@ -2044,6 +2169,21 @@ void SplatEdit::draw_overlay(
             draw->AddCircleFilled(polygon_[i], radius + 1.4F, IM_COL32(6, 10, 16, 160));
             draw->AddCircleFilled(polygon_[i], radius, first && closable ? mark : stroke);
         }
+    }
+    if (depth_range_enabled_ && tools_open_ && !volume_tool() && in_view &&
+        !over_bar && !over_volume_bar &&
+        (ImGui::GetIO().KeyCtrl || ImGui::GetTime() < depth_readout_until_)) {
+        char text[192];
+        std::snprintf(text, sizeof(text), "%s  %.6g – %.6g\n%s  %.6g",
+            tr("Selection depth range"), selection_depth_near_, selection_depth_far_,
+            tr("Thickness"), selection_depth_far_ - selection_depth_near_);
+        const ImVec2 size = ImGui::CalcTextSize(text);
+        const ImVec2 origin{
+            std::max(view_min.x, std::min(mouse.x + 18.F, view_max.x - size.x - 16.F)),
+            std::max(view_min.y, std::min(mouse.y + 22.F, view_max.y - size.y - 16.F))};
+        draw->AddRectFilled({origin.x - 6.F, origin.y - 5.F},
+            {origin.x + size.x + 6.F, origin.y + size.y + 5.F}, IM_COL32(15, 18, 24, 235), 5.F);
+        draw->AddText(origin, theme::u32(theme::text_bright), text);
     }
     draw->PopClipRect();
 }

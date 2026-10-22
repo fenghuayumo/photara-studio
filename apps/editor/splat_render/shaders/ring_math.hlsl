@@ -9,6 +9,7 @@ struct SplatFrame {
     [[vk::offset(96)]] float4 distortion;
     [[vk::offset(112)]] float4 viewport;
     [[vk::offset(128)]] uint4 meta;
+    [[vk::offset(144)]] float4 selection_depth;
 };
 
 static const float k_pi = 3.14159265;

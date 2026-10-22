@@ -89,6 +89,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     float3 rgb = sh_color(
         harmonics, id, center, frame.meta.x, frame.meta.z, frame.eye.xyz);
+    float3 camera_point = transform_point(frame, center);
+    float selection_depth = uint(frame.eye.w + .5) == k_model_equirect
+        ? length(camera_point) : camera_point.z;
+    if (frame.selection_depth.x > .5 &&
+        (selection_depth < frame.selection_depth.y || selection_depth > frame.selection_depth.z))
+        rgb *= .18;
     // axis1 lives in (scale.w, row0.w), axis2 in (row1.w, row2.w), pixel in box.xy.
     store_quad(
         slot, float4(rgb, opacity), float4(center, 1.0), float4(scale, axis1.x),

@@ -998,9 +998,10 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.splat_edit.draw_overlay(draw, min, max, ring_camera);
     }
     const bool over_toolbar =
-        ring_edit && app.splat_edit.draw_toolbar(app, min, max);
+        ring_edit && app.splat_edit.draw_toolbar(app, min, max, ring_camera);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
-    if (ring_edit && app.splat_edit.consume_alt_wheel(viewport_input))
+    if (ring_edit && (app.splat_edit.handle_depth_shortcuts(ring_camera, viewport_input) ||
+                     app.splat_edit.consume_alt_wheel(viewport_input)))
         ImGui::GetIO().MouseWheel = 0.F;
     const bool armed = ring_edit && app.splat_edit.tool_armed();
     const bool frame_key = viewport_input && !armed &&
@@ -1441,7 +1442,8 @@ bool draw_splat_image(
         if (app.display_channel == DisplayChannel::depth) shading = splat_render::Shading::depth;
         if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
     }
-    const auto display = orbit ? app.display_options : image_qa_display_options(app);
+    auto display = orbit ? app.display_options : image_qa_display_options(app);
+    if (orbit) app.splat_edit.apply_depth_preview(display);
     if (!app.splat_renderer->draw(camera, target, shading, display))
         return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);
@@ -1519,9 +1521,10 @@ void draw_splat_render_tab(
     write_working_subject_bounds(app);
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
     app.splat_edit.draw_overlay(draw, min, max, preview_camera);
-    const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
+    const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max, preview_camera);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
-    if (app.splat_edit.consume_alt_wheel(viewport_input))
+    if (app.splat_edit.handle_depth_shortcuts(preview_camera, viewport_input) ||
+        app.splat_edit.consume_alt_wheel(viewport_input))
         ImGui::GetIO().MouseWheel = 0.F;
     const bool armed = app.splat_edit.tool_armed();
     if (!armed &&

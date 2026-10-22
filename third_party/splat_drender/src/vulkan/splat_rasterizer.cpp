@@ -529,22 +529,25 @@ public:
         // bounded by the command-buffer ring, so GPU-driven frames no longer
         // report one frozen measurement forever.
         harvest_ready_count_mirrors();
-        // 76 bytes of per-frame constants: the one buffer worth keeping mapped.
+        // Per-frame camera and optional editor depth-cue constants.
         // Two slots: with the previous frame's dispatches still queued, writing
         // the camera for this frame into the same memory would race with them.
         camera_slot_ ^= 1U;
         frame_camera_ = &camera_[camera_slot_];
         Buffer& camera_buffer =
-            grow(*frame_camera_, 19 * sizeof(float), BufferMemory::host_visible);
+            grow(*frame_camera_, 22 * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
         const std::uint32_t grid_y = div_up(camera.height, k_tile);
         const std::uint32_t tiles = grid_x * grid_y;
         const std::uint32_t tile_bits = tiles > 1 ? 32u - static_cast<std::uint32_t>(std::countl_zero(tiles - 1)) : 0u;
         const auto pixels = static_cast<std::uint32_t>(static_cast<std::uint64_t>(camera.width) * camera.height);
         const int wrap_width = camera.mode == 3 ? static_cast<int>(camera.width) : 0;
-        float camera_pack[19]{};
+        float camera_pack[22]{};
         std::memcpy(camera_pack, camera.world_to_camera.data(), 16 * sizeof(float));
         std::memcpy(camera_pack + 16, camera.center.data(), 3 * sizeof(float));
+        camera_pack[19] = settings.preview_selection_depth ? 1.F : 0.F;
+        camera_pack[20] = settings.preview_selection_near;
+        camera_pack[21] = settings.preview_selection_far;
         camera_buffer.upload(camera_pack, sizeof(camera_pack));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
