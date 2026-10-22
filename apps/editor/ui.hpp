@@ -16,6 +16,7 @@ void draw_view_settings(App& app);
 void build_dock_space(App& app);
 void draw_scene_panel(App& app);
 void draw_viewport_panel(App& app);
+bool handle_view_camera_shortcuts(App& app, bool viewport_hot);
 void draw_console_panel(App& app);
 void draw_status_bar(App& app);
 void draw_controls_window(App& app);

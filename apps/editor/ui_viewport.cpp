@@ -1575,6 +1575,48 @@ void draw_splat_render_tab(
     draw->PopClipRect();
 }
 
+bool handle_view_camera_shortcuts(App& app, const bool viewport_hot) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!viewport_hot || app.workspace != ViewportWorkspace::scene_3d ||
+        io.WantTextInput || io.KeyShift || io.KeySuper ||
+        ImGui::IsAnyItemActive() ||
+        ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
+        app.splat_edit.gesture_active() || app.camera.interacting ||
+        ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+        ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+        ImGui::IsMouseDown(ImGuiMouseButton_Middle))
+        return false;
+
+    if (io.KeyAlt) {
+        if (io.KeyCtrl) return false;
+        if (ImGui::IsKeyPressed(ImGuiKey_1, false))
+            set_editor_projection(app.camera, EditorProjection::perspective);
+        else if (ImGui::IsKeyPressed(ImGuiKey_2, false))
+            set_editor_projection(app.camera, EditorProjection::fisheye);
+        else if (ImGui::IsKeyPressed(ImGuiKey_3, false))
+            set_editor_projection(app.camera, EditorProjection::panorama);
+        else
+            return false;
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
+        set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::back
+                                                   : OrthographicView::front);
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
+        set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::left
+                                                   : OrthographicView::right);
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
+        set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::bottom
+                                                   : OrthographicView::top);
+    } else if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Keypad5, false)) {
+        set_editor_projection(app.camera,
+            app.camera.projection == EditorProjection::orthographic
+                ? EditorProjection::perspective : EditorProjection::orthographic);
+    } else {
+        return false;
+    }
+    app.preview_follow_view = false;
+    return true;
+}
+
 void draw_viewport_panel(App& app) {
     if (!app.show_viewport) {
         app.viewport_bounds_valid = false;
@@ -1671,6 +1713,9 @@ void draw_viewport_panel(App& app) {
     const ImVec2 view_min = ImGui::GetCursorScreenPos();
     const ImVec2 region = ImGui::GetContentRegionAvail();
     const ImVec2 view_max{view_min.x + region.x, view_min.y + region.y};
+    handle_view_camera_shortcuts(app,
+        ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(view_min, view_max) &&
+        !view_mode_rail_contains(view_min, ImGui::GetIO().MousePos));
     if (app.workspace == ViewportWorkspace::image_2d) {
         refresh_image_qa_folder(
             app.image_qa, reconstruction_images_path(app));

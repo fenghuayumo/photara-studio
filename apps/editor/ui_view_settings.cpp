@@ -147,10 +147,17 @@ void draw_view_settings(App& app) {
         int projection = static_cast<int>(app.camera.projection);
         const char* projections[] = {
             tr("Perspective"), tr("Orthographic"), tr("Fisheye"), tr("Panorama")};
-        if (ImGui::Combo("##editor_projection", &projection, projections, 4)) {
-            set_editor_projection(
-                app.camera, static_cast<EditorProjection>(projection));
-            app.preview_follow_view = false;
+        const char* projection_keys[] = {"Alt+1", "Num 5", "Alt+2", "Alt+3"};
+        if (ImGui::BeginCombo("##editor_projection", projections[projection])) {
+            for (int index = 0; index < 4; ++index) {
+                const bool selected = projection == index;
+                if (ImGui::MenuItem(projections[index], projection_keys[index], selected)) {
+                    set_editor_projection(app.camera, static_cast<EditorProjection>(index));
+                    app.preview_follow_view = false;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(tr(
@@ -162,6 +169,8 @@ void draw_view_settings(App& app) {
         theme::caption("Standard view");
         constexpr const char* view_labels[] = {
             "Front", "Back", "Left", "Right", "Top", "Bottom"};
+        constexpr const char* view_keys[] = {
+            "Num 1", "Ctrl+Num 1", "Ctrl+Num 3", "Num 3", "Num 7", "Ctrl+Num 7"};
         constexpr OrthographicView views[] = {
             OrthographicView::front, OrthographicView::back,
             OrthographicView::left, OrthographicView::right,
@@ -186,7 +195,7 @@ void draw_view_settings(App& app) {
                 active_view >= 0 ? tr(view_labels[active_view]) : tr("Free view"))) {
             for (int index = 0; index < 6; ++index) {
                 const bool selected = index == active_view;
-                if (ImGui::Selectable(tr(view_labels[index]), selected)) {
+                if (ImGui::MenuItem(tr(view_labels[index]), view_keys[index], selected)) {
                     set_orthographic_view(app.camera, views[index]);
                     app.preview_follow_view = false;
                 }
