@@ -273,7 +273,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int cache_retention_days = 0;
     // Machine-level compute policy. Stored in editor.prefs, never in .ascan.
     // training_backend: 0 cuda, 1 vulkan.
-    // alignment_backend: 0 automatic, 1 cpu, 2 cuda (positioning and BA).
+    // alignment_backend: 0 automatic, 1 cpu, 2 cuda, 3 vulkan (positioning and BA).
     // automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
     int training_backend = 0;
@@ -429,6 +429,14 @@ inline bool studio_vulkan_training() {
 
 inline bool studio_ba_cuda() {
 #if defined(PHOTARA_STUDIO_BA_CUDA)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_ba_vulkan() {
+#if defined(PHOTARA_STUDIO_BA_VULKAN)
     return true;
 #else
     return false;

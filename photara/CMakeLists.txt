@@ -1034,6 +1034,10 @@ if(TARGET photara_features)
                 target_compile_definitions(photara_studio PRIVATE
                     PHOTARA_STUDIO_BA_CUDA=1)
             endif()
+            if(PHOTARA_HAS_VULKAN_BA)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_BA_VULKAN=1)
+            endif()
             if(TARGET splat_drender::vulkan)
                 target_compile_definitions(photara_studio PRIVATE
                     PHOTARA_STUDIO_VULKAN_TRAINING=1)

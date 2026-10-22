@@ -1173,8 +1173,8 @@ void load_editor_preferences(App& app) {
             const int choice = preference_choice(value, tokens, 2);
             if (choice >= 0) app.settings.training_backend = choice;
         } else if (key == "alignment") {
-            static const char* tokens[] = {"automatic", "cpu", "cuda"};
-            const int choice = preference_choice(value, tokens, 3);
+            static const char* tokens[] = {"automatic", "cpu", "cuda", "vulkan"};
+            const int choice = preference_choice(value, tokens, 4);
             if (choice >= 0) app.settings.alignment_backend = choice;
         } else if (key == "sam") {
             static const char* tokens[] = {"auto", "cuda", "vulkan"};
@@ -1202,7 +1202,8 @@ void store_editor_preferences(const App& app) {
     const char* training = app.settings.training_backend == 1 ? "vulkan" : "cuda";
     const char* alignment = app.settings.alignment_backend == 1
         ? "cpu"
-        : app.settings.alignment_backend == 2 ? "cuda" : "automatic";
+        : app.settings.alignment_backend == 2 ? "cuda"
+        : app.settings.alignment_backend == 3 ? "vulkan" : "automatic";
     const char* sam = app.settings.sam_backend == 1
         ? "cuda"
         : app.settings.sam_backend == 2 ? "vulkan" : "auto";
