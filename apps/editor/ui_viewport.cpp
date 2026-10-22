@@ -975,10 +975,13 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         &app.reconstruction_box,
         app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
 
+    const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    if (orbit_pose_changed(camera_before_gizmo, app.camera))
+        app.preview_follow_view = false;
     write_working_subject_bounds(app);
     const bool ring_edit =
         app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
@@ -1225,10 +1228,13 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box,
         app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
 
+    const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    if (orbit_pose_changed(camera_before_gizmo, app.camera))
+        app.preview_follow_view = false;
     write_working_subject_bounds(app);
     const bool viewport_input = hovered && !gizmo_captures;
     const bool used_double_click = handle_viewport_double_click(
@@ -1503,10 +1509,13 @@ void draw_splat_render_tab(
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, overlay, hovered,
         app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box);
+    const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    if (orbit_pose_changed(camera_before_gizmo, app.camera))
+        app.preview_follow_view = false;
     write_working_subject_bounds(app);
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
     app.splat_edit.draw_overlay(draw, min, max, preview_camera);

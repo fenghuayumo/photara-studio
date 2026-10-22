@@ -67,6 +67,14 @@ Vec3 normalize(const Vec3 v) {
     return length > 1e-20F ? v * (1.F / length) : Vec3{0.F, 0.F, 1.F};
 }
 
+Vec3 orbit_right(const Vec3 forward, const float yaw) {
+    const Vec3 lateral = cross(forward, k_world_up);
+    if (dot(lateral, lateral) > 1e-8F) return normalize(lateral);
+    // At the exact top/bottom views the forward vector is parallel to world
+    // up. Preserve a stable screen-right direction from the orbit yaw.
+    return {-std::cos(yaw), 0.F, std::sin(yaw)};
+}
+
 const char* camera_model_label(const photara::CameraModel model) {
     switch (model) {
         case photara::CameraModel::opencv_fisheye:
@@ -161,13 +169,13 @@ struct ViewFrame {
 ViewFrame build_frame(
     const OrbitCamera& camera, const ImVec2 min, const ImVec2 max) {
     ViewFrame frame;
-    const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
+    const float pitch = std::clamp(camera.pitch, -k_pi * 0.5F, k_pi * 0.5F);
     const Vec3 offset{
         std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
         std::cos(pitch) * std::cos(camera.yaw)};
     frame.eye = camera.target + offset * camera.distance;
     frame.forward = normalize(camera.target - frame.eye);
-    frame.right = normalize(cross(frame.forward, k_world_up));
+    frame.right = orbit_right(frame.forward, camera.yaw);
     frame.up = cross(frame.right, frame.forward);
     const float height = std::max(1.F, max.y - min.y);
     const float width = std::max(1.F, max.x - min.x);
@@ -2305,7 +2313,7 @@ void OrbitCamera::frame(const SparseScene& scene) {
 }
 
 void OrbitCamera::focus_on(const Vec3& point) {
-    const float clamped_pitch = std::clamp(pitch, -1.53F, 1.53F);
+    const float clamped_pitch = std::clamp(pitch, -k_pi * 0.5F, k_pi * 0.5F);
     const Vec3 offset{
         std::cos(clamped_pitch) * std::sin(yaw), -std::sin(clamped_pitch),
         std::cos(clamped_pitch) * std::cos(yaw)};
@@ -2317,7 +2325,8 @@ void OrbitCamera::focus_on(const Vec3& point) {
     if (length < 1e-8F) return;
     const Vec3 direction = delta * (1.F / length);
     pitch = std::clamp(
-        std::asin(std::clamp(-direction.y, -1.F, 1.F)), -1.53F, 1.53F);
+        std::asin(std::clamp(-direction.y, -1.F, 1.F)),
+        -k_pi * 0.5F, k_pi * 0.5F);
     yaw = std::atan2(direction.x, direction.z);
 }
 
@@ -2396,12 +2405,12 @@ void update_orbit_camera(
          ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
         camera.interacting = true;
 
-    const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
+    const float pitch = std::clamp(camera.pitch, -k_pi * 0.5F, k_pi * 0.5F);
     const Vec3 offset{
         std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
         std::cos(pitch) * std::cos(camera.yaw)};
     const Vec3 forward = normalize(offset * -1.F);
-    const Vec3 right = normalize(cross(forward, k_world_up));
+    const Vec3 right = orbit_right(forward, camera.yaw);
     const Vec3 up = cross(right, forward);
 
     if (camera.interacting) {
@@ -2413,7 +2422,8 @@ void update_orbit_camera(
         if (orbiting || looking) {
             camera.yaw -= delta.x * 0.008F;
             camera.pitch = std::clamp(
-                camera.pitch + delta.y * 0.008F, -1.53F, 1.53F);
+                camera.pitch + delta.y * 0.008F,
+                -k_pi * 0.5F, k_pi * 0.5F);
         } else {
             const float pan_ref =
                 camera.projection == EditorProjection::orthographic
@@ -3025,13 +3035,13 @@ SplatPreviewCamera make_preview_camera_from_view(
 SplatPreviewCamera make_preview_camera(
     const OrbitCamera& camera, const std::uint32_t width,
     const std::uint32_t height) {
-    const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
+    const float pitch = std::clamp(camera.pitch, -k_pi * 0.5F, k_pi * 0.5F);
     const Vec3 offset{
         std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
         std::cos(pitch) * std::cos(camera.yaw)};
     const Vec3 eye = camera.target + offset * camera.distance;
     const Vec3 forward = normalize(camera.target - eye);
-    const Vec3 right = normalize(cross(forward, k_world_up));
+    const Vec3 right = orbit_right(forward, camera.yaw);
     const Vec3 up = cross(right, forward);
     // OpenCV / COLMAP: X right, Y down, Z forward.
     const Vec3 x = right;
@@ -3072,7 +3082,8 @@ void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose) {
     const float horizontal =
         std::sqrt(offset.x * offset.x + offset.z * offset.z);
     camera.pitch = std::clamp(
-        std::atan2(-offset.y, std::max(horizontal, 1e-8F)), -1.53F, 1.53F);
+        std::atan2(-offset.y, std::max(horizontal, 1e-8F)),
+        -k_pi * 0.5F, k_pi * 0.5F);
     camera.yaw = std::atan2(offset.x, offset.z);
     if (pose.fy > 1e-3F && pose.height > 0) {
         const float half = static_cast<float>(pose.height) * 0.5F / pose.fy;
@@ -3122,6 +3133,38 @@ void set_editor_projection(
     if (projection == EditorProjection::perspective && camera.fov_degrees > 120.F)
         camera.fov_degrees = 90.F;
     camera.projection = projection;
+}
+
+void set_orthographic_view(OrbitCamera& camera, const OrthographicView view) {
+    set_editor_projection(camera, EditorProjection::orthographic);
+    constexpr float half_pi = k_pi * 0.5F;
+    switch (view) {
+        case OrthographicView::front:
+            camera.yaw = 0.F;
+            camera.pitch = 0.F;
+            break;
+        case OrthographicView::back:
+            camera.yaw = k_pi;
+            camera.pitch = 0.F;
+            break;
+        case OrthographicView::left:
+            camera.yaw = -half_pi;
+            camera.pitch = 0.F;
+            break;
+        case OrthographicView::right:
+            camera.yaw = half_pi;
+            camera.pitch = 0.F;
+            break;
+        case OrthographicView::top:
+            // Positive world Y is up; the orbit pitch uses negative Y for top.
+            camera.yaw = k_pi;
+            camera.pitch = -half_pi;
+            break;
+        case OrthographicView::bottom:
+            camera.yaw = k_pi;
+            camera.pitch = half_pi;
+            break;
+    }
 }
 
 }  // namespace editor
