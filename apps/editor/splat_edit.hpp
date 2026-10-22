@@ -67,6 +67,9 @@ public:
         return count_ > 0 && tool_ != Tool::none;
     }
     [[nodiscard]] bool front_only() const noexcept { return front_only_; }
+    [[nodiscard]] bool gesture_active() const noexcept {
+        return stroking_ || !polygon_.empty() || volume_drag_ >= 0;
+    }
     // Top-of-viewport selection tools. Off by default after a model loads.
     [[nodiscard]] bool tools_open() const noexcept { return tools_open_; }
     void set_tools_open(App& app, bool open);

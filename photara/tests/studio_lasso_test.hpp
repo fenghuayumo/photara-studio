@@ -1,6 +1,6 @@
 #pragma once
 
-#include "app.hpp"
+#include "ui.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -30,6 +30,7 @@ inline void test_studio_lasso() {
         ImGui::SetNextWindowPos({0.F, 0.F});
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Lasso gesture test");
+        handle_view_camera_shortcuts(app, true);
         edit.handle_pointer(app, {0.F, 0.F}, io.DisplaySize, camera,
                             io.MousePos.x >= 0.F && io.MousePos.x < 800.F &&
                             io.MousePos.y >= 0.F && io.MousePos.y < 600.F, false);
@@ -112,6 +113,13 @@ inline void test_studio_lasso() {
     if (!edit.front_only()) key(ImGuiKey_N);
     loop(concave);
     check(edit.selected_count() == 3, "Perspective lasso must use the same raster coordinates as rendering");
+    key(ImGuiKey_P);
+    move({100, 100}); io.AddMouseButtonEvent(0, true); frame();
+    io.AddMouseButtonEvent(0, false); frame();
+    key(ImGuiKey_Keypad5);
+    check(camera.model == splat_render::k_camera_pinhole &&
+          app.camera.projection == editor::EditorProjection::perspective,
+          "Pending polygon points must block camera projection shortcuts");
     edit.clear();
     ImGui::DestroyContext();
 }
