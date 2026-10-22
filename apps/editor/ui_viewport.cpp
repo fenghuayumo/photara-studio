@@ -3,6 +3,7 @@
 #include "i18n.hpp"
 #include "icons.hpp"
 #include "viewport_gizmo.hpp"
+#include "image_qa_projection.hpp"
 
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
@@ -691,6 +692,11 @@ bool handle_viewport_double_click(
 
 bool qa_preview_camera(const App& app, SplatPreviewCamera& camera);
 
+bool qa_undistort_to_pinhole(const App& app) {
+    return app.settings.ai_priors && app.settings.training_mode != 0 &&
+        (app.settings.ai_depth_weight > 0.F || app.settings.ai_normal_weight > 0.F);
+}
+
 void sync_qa_preview_camera(App& app) {
     if (app.layout.preview_camera_file.empty()) return;
     if (app.image_qa.selected < 0 ||
@@ -699,9 +705,11 @@ void sync_qa_preview_camera(App& app) {
     SplatPreviewCamera preview;
     if (!qa_preview_camera(app, preview)) return;
     const auto width = preview.width, height = preview.height;
+    const auto camera_key = image_qa_camera_key(preview);
     const unsigned view = static_cast<unsigned>(app.image_qa.selected);
     if (app.qa_camera_valid && app.qa_preview_view == view &&
         app.qa_camera_mode == app.image_qa.mode &&
+        app.qa_camera_key == camera_key &&
         app.preview_raster_width == width &&
         app.preview_raster_height == height)
         return;
@@ -721,8 +729,10 @@ void sync_qa_preview_camera(App& app) {
     }
     app.qa_preview_view = view;
     app.qa_camera_mode = app.image_qa.mode;
+    app.qa_camera_key = camera_key;
     app.qa_camera_timeline = gpu::consumed_timeline_value();
     app.qa_camera_valid = true;
+    app.image_qa.metrics_dirty = true;
     write_preview_view_index(app.layout, app.preview_view);
     photara::splat::VisualizeOptions vis;
     vis.mode = photara::splat::VisualizationMode::splat;
@@ -763,7 +773,7 @@ void capture_qa_render(App& app) {
     }
     if (!training && (!image_qa_needs_metrics(app.qa_raster_mode) ||
         app.qa_raster_view != app.image_qa.selected)) return;
-    if (!app.image_qa_session.has_gt() ||
+    if (app.image_qa_session.loading() || !app.image_qa_session.has_gt() ||
         app.image_qa_session.loaded_view() != app.image_qa.selected)
         return;
     if (std::chrono::steady_clock::now() < app.qa_metrics_after) return;
@@ -1442,24 +1452,10 @@ bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
         return false;
     const ViewPose& pose =
         app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
-    std::uint32_t width = k_preview_extent;
-    std::uint32_t height = k_preview_extent;
-    if (pose.width > 0 && pose.height > 0) {
-        if (pose.width >= pose.height) {
-            width = k_preview_extent;
-            height = std::max<std::uint32_t>(
-                1, static_cast<std::uint32_t>(std::lround(
-                       static_cast<double>(k_preview_extent) * pose.height /
-                       pose.width)));
-        } else {
-            height = k_preview_extent;
-            width = std::max<std::uint32_t>(
-                1, static_cast<std::uint32_t>(std::lround(
-                       static_cast<double>(k_preview_extent) * pose.width /
-                       pose.height)));
-        }
-    }
-    camera = make_preview_camera_from_view(pose, width, height);
+    if (!pose.registered || pose.width == 0 || pose.height == 0) return false;
+    camera = photara::splat::training_data::training_camera(
+        image_qa_training_view(pose, pose.image_path),
+        image_qa_training_options(false, {}, qa_undistort_to_pinhole(app)));
     return true;
 }
 
@@ -1717,6 +1713,7 @@ void draw_viewport_panel(App& app) {
         input.render_live = training_now && live_preview_active(app);
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
+        input.undistort_to_pinhole = qa_undistort_to_pinhole(app);
         input.use_metric_mask =
             (app.settings.use_mask || app.settings.sam_masks) &&
             app.settings.mask_mode == 0;

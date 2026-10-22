@@ -1681,6 +1681,12 @@ SceneLoad sparse_scene_from_dataset(
             pose.k2 = view.k2;
             pose.k3 = view.p1;
             pose.k4 = view.p2;
+            pose.src_fx = view.src_fx;
+            pose.src_fy = view.src_fy;
+            pose.src_cx = view.src_cx;
+            pose.src_cy = view.src_cy;
+            pose.src_width = view.src_width;
+            pose.src_height = view.src_height;
             if (photara::uses_native_splat_projection(view.source_model) &&
                 view.src_width != 0 && view.src_height != 0) {
                 pose.fx = view.src_fx;
