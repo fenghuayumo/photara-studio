@@ -3268,6 +3268,11 @@ void poll_camera_photos(App& app) {
         sampled_view_indices(app.scene, markers);
         for (const std::size_t index : markers)
             app.photos.request(index, app.scene.views[index].image_path);
+        const int hovered = app.renderer.hovered_view();
+        if (hovered >= 0 && static_cast<std::size_t>(hovered) < app.scene.views.size())
+            app.photos.request(static_cast<std::size_t>(hovered), app.scene.views[hovered].image_path);
+        if (app.preview_follow_view && app.preview_view < app.scene.views.size())
+            app.photos.request(app.preview_view, app.scene.views[app.preview_view].image_path);
     }
     app.photos.poll();
 }
