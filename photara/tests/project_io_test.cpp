@@ -27,7 +27,15 @@ int failures = 0;
 std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
+    settings.extractor_model.clear(); settings.lightglue_model.clear();
     auto bytes = encode_settings(settings, project);
+    // Remove v15 alignment fields and the v16 capture-type field before
+    // constructing the historical v12 fixture. Model paths above are empty.
+    const auto alignment_suffix = 4 * sizeof(std::int32_t) + sizeof(double) +
+        sizeof(std::uint64_t) + 2 * sizeof(std::uint8_t) +
+        4 * sizeof(std::uint64_t) + settings.feature_extractor.size() +
+        settings.feature_matcher.size();
+    bytes.resize(bytes.size() - alignment_suffix);
     bytes.pop_back();  // v14 optional camera-refinement flag.
     bytes.resize(bytes.size() - sizeof(std::uint8_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint64_t) - 2 * sizeof(float));
@@ -384,6 +392,26 @@ int main() {
     expect(round_trip.video_scale == 0.5F, "video scale");
     expect(round_trip.video_rotate == 90, "video rotate");
     expect(round_trip.camera_model == 2, "settings camera model");
+    {
+        auto sequence = settings;
+        sequence.image_directory = ascan_path.parent_path() / "frames";
+        sequence.alignment_capture_type = 1;
+        expect(decode_settings(encode_settings(sequence, ascan_path), ascan_path)
+                   .alignment_capture_type == 1,
+               "frame folders retain their selected video-sequence capture type");
+        sequence.image_directory = ascan_path.parent_path() / "capture.mp4";
+        auto legacy = encode_settings(sequence, ascan_path);
+        legacy[0] = 15;
+        legacy.resize(legacy.size() - sizeof(std::int32_t));
+        expect(decode_settings(legacy, ascan_path).alignment_capture_type == 1,
+               "older projects infer sequence capture from video source files");
+        sequence.image_directory = ascan_path.parent_path() / "photos";
+        legacy = encode_settings(sequence, ascan_path);
+        legacy[0] = 15;
+        legacy.resize(legacy.size() - sizeof(std::int32_t));
+        expect(decode_settings(legacy, ascan_path).alignment_capture_type == 0,
+               "older photo-folder projects retain unordered matching");
+    }
     expect(round_trip.strategy == 1, "settings splat strategy");
     expect(
         round_trip.densification_cap == 2'500'000,

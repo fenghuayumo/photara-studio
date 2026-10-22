@@ -7,6 +7,7 @@
 #include "sfm/scene.hpp"
 
 #include <cstdint>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -14,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 14;
+inline constexpr std::uint32_t k_settings_version = 16;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -48,6 +49,18 @@ struct Settings : photara::splat::TrainingLossSettings {
     float video_scale = 1.0F;
     int video_rotate = 0;
     int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
+    int alignment_quality = 1; // 0 fast, 1 medium, 2 high.
+    int alignment_capture_type = 0; // 0 unordered photos, 1 ordered/video frames.
+    int camera_sharing = 0; // 0 folder, 1 all images, 2 each image.
+    int matching_strategy = 0; // 0 automatic, 1 sequential, 2 exhaustive.
+    double initial_focal_pixels = 0.0; // 0 uses EXIF / automatic initialization.
+    bool trust_initial_focal = false;
+    std::size_t sequential_overlap = 6;
+    bool retrieval_augmentation = true;
+    std::string feature_extractor{"siftgpu"};
+    std::string feature_matcher{"gpu_mutual_ratio"};
+    std::filesystem::path extractor_model;
+    std::filesystem::path lightglue_model;
     int sfm_mode = 0;  // 0 global, 2 hierarchical (1 is a legacy project value)
     bool reuse_cache = false;
     bool refine_weak_cameras = false;
