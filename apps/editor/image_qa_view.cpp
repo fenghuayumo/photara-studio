@@ -1,4 +1,5 @@
 #include "image_qa_view.hpp"
+#include "image_qa_projection.hpp"
 
 #include "i18n.hpp"
 #include "icons.hpp"
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -25,7 +27,7 @@ using i18n::tr;
 
 constexpr float k_toolbar_h = 48.F;
 constexpr float k_filmstrip_h = 104.F;
-constexpr std::uint32_t k_qa_long_edge = 1600;
+constexpr std::uint32_t k_qa_long_edge = k_image_qa_long_edge;
 constexpr std::uint32_t k_metric_long_edge = k_image_qa_metric_extent;
 
 bool is_image_extension(std::string extension) {
@@ -718,9 +720,17 @@ ImTextureID ImageQaSession::error_id() const {
 
 void ImageQaSession::request_gt(
     const int view_index, const std::filesystem::path& path,
-    const bool use_mask, const std::filesystem::path& mask_dir) {
+    const bool use_mask, const std::filesystem::path& mask_dir,
+    const ViewPose* projection, const bool undistort_to_pinhole) {
     if (path.empty() || view_index < 0) return;
     auto key = path.native();
+    const auto options = image_qa_training_options(use_mask, mask_dir, undistort_to_pinhole);
+    std::optional<photara::mvs::MvsView> projected_view;
+    if (projection && projection->registered && projection->width && projection->height) {
+        projected_view = image_qa_training_view(*projection, path);
+        key += std::filesystem::path("|projection|" +
+            image_qa_projection_key(*projected_view, options)).native();
+    }
     std::filesystem::path mask_path;
     bool mask_path_failed = false;
     if (use_mask) {
@@ -741,6 +751,13 @@ void ImageQaSession::request_gt(
     }
     if (loaded_view_ == view_index && loaded_key_ == key && has_gt()) return;
     if (loading_ && pending_view_ == view_index && pending_key_ == key) return;
+    if (loaded_view_ == view_index && loaded_key_ != key) {
+        // A render captured against another calibration/raw-photo target must
+        // not be scored while the replacement projection is being loaded.
+        render_cpu_ = {};
+        render_view_ = -1;
+        metrics_ = {};
+    }
     harvest_retired();
     // A capture that is already decoded in this session is published in place.
     if (const auto found = gt_cache_.find(key); found != gt_cache_.end()) {
@@ -777,8 +794,26 @@ void ImageQaSession::request_gt(
     error_.reset();
     ++capture_revision_;
     pending_ = std::async(std::launch::async, [path, use_mask, mask_path,
-                                            mask_path_failed] {
+                                            mask_path_failed, projected_view, options] {
         Capture capture;
+        if (projected_view) {
+            auto image_options = options;
+            photara::splat::training_data::TrainingImage target;
+            try {
+                if (mask_path_failed) throw std::runtime_error("unreadable mask");
+                target = photara::splat::training_data::load_training_image(
+                    *projected_view, image_options);
+            } catch (...) {
+                if (!use_mask) throw;
+                image_options.use_mask = false;
+                target = photara::splat::training_data::load_training_image(
+                    *projected_view, image_options);
+                capture.mask_failed = true;
+            }
+            capture.image = std::move(target.rgb);
+            capture.mask = std::move(target.mask);
+            return capture;
+        }
         capture.image = load_qa_image(path);
         if (use_mask) {
             try {
@@ -976,9 +1011,14 @@ void draw_image_qa(
     if (!live_a.empty())
         session.request_gt(
             live->index_a >= 0 ? live->index_a : state.selected, live_a);
-    else if (!item.path.empty())
+    else if (!item.path.empty()) {
         session.request_gt(
-            state.selected, item.path, input.use_metric_mask, input.mask_dir);
+            state.selected, item.path, input.use_metric_mask, input.mask_dir,
+            image_qa_needs_render(state.mode) ? item.pose : nullptr,
+            input.undistort_to_pinhole);
+        if (image_qa_needs_metrics(state.mode) && !session.has_render_pixels())
+            state.metrics_dirty = true;
+    }
     if (live_matching && input.pair_session != nullptr && !live->path_b.empty())
         input.pair_session->request_gt(
             live->index_b >= 0 ? live->index_b : 0, live->path_b);

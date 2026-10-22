@@ -3,6 +3,7 @@
 #include "mvs/types.hpp"
 #include "splat/options.hpp"
 #include "splat/types.hpp"
+#include "splat/training_image.hpp"
 #include "io/image.hpp"
 
 #include <cstddef>
@@ -83,10 +84,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-[[nodiscard]] Camera training_camera(
-    const mvs::MvsView& view, const TrainingOptions& options,
-    float resolution_scale = 1.F);
 
 // Same decode/undistortion/resizing as training, without allocating GPU tensors.
 [[nodiscard]] io::RgbImage prior_input_image(

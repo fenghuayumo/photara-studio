@@ -4,6 +4,7 @@
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
 #include "splat/trainer.hpp"
+#include "studio_image_qa_test.hpp"
 #include "../src/splat/checkpoint.hpp"
 #include <filesystem>
 #include <cstdio>
@@ -16,8 +17,14 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 }
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 3) {
+            test_studio_image_qa_dataset(argv[1], argv[2]);
+            return 0;
+        }
+        if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
+        test_studio_image_qa_projection();
         editor::RunMonitor monitor;
         monitor.begin(editor::JobKind::train);
         require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
