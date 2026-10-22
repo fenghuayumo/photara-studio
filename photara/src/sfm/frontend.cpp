@@ -13,7 +13,9 @@
 #include <cctype>
 #include "sfm/align_live.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "sfm/reconstruct.hpp"
 #include "resection_seeding.hpp"
+#include "recovery_cache.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +25,8 @@
 #include <cmath>
 #include <condition_variable>
 #include <future>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -39,6 +43,18 @@
 #include <vector>
 
 namespace photara::sfm {
+struct MissingViewRecoveryCache {
+    std::recursive_mutex mutex;
+    detail::RecoveryMemo<features::FeatureSet> features{384ULL * 1024 * 1024};
+    detail::RecoveryMemo<features::MatchSet> matches{96ULL * 1024 * 1024};
+    // Empty pairs also memoize failed verification.
+    detail::RecoveryMemo<ImagePair> geometry{32ULL * 1024 * 1024};
+};
+
+std::shared_ptr<MissingViewRecoveryCache> make_missing_view_recovery_cache() {
+    return std::make_shared<MissingViewRecoveryCache>();
+}
+
 namespace {
 
 #if !defined(PHOTARA_FRONTEND_CACHE_BUILD_ID)
@@ -58,6 +74,53 @@ struct PairDiagnostics {
     bool attempted_geometry{false};
     bool accepted{false};
 };
+
+void write_feature_diagnostics(const Scene& scene,const FrontEndOptions& options,const char* stage) {
+    if(options.diagnostics_directory.empty())return;
+    std::filesystem::create_directories(options.diagnostics_directory);
+    std::ofstream out(options.diagnostics_directory/(std::string("features-")+stage+".csv"));
+    if(!out)throw std::runtime_error("Cannot write frontend feature diagnostics");
+    out<<"id,name,width,height,features,cells_4x4,descriptor_dimension,descriptor_rows,model,fx,fy,k1,k2,trust_intrinsics\n";
+    for(const auto& image:scene.images) {
+        const auto& features=image.features;const auto& camera=scene.camera_of(image);
+        std::set<std::pair<int,int>> cells;
+        for(const auto& p:features.keypoints)cells.emplace(
+            std::clamp(int(4*p.x/std::max(1u,camera.width)),0,3),std::clamp(int(4*p.y/std::max(1u,camera.height)),0,3));
+        const auto rows=features.descriptor_dimension==0?0:
+            (features.descriptors.size()+features.descriptors_u8.size())/features.descriptor_dimension;
+        out<<image.id<<','<<std::quoted(image.path.filename().string())<<','<<camera.width<<','<<camera.height<<','
+            <<features.keypoints.size()<<','<<cells.size()<<','<<features.descriptor_dimension<<','<<rows<<','
+            <<static_cast<int>(camera.model)<<','<<camera.fx<<','<<camera.fy<<','<<camera.k1<<','<<camera.k2<<','<<camera.trust_intrinsics<<'\n';
+    }
+    if(!out)throw std::runtime_error("Failed writing frontend feature diagnostics");
+}
+
+void write_pair_diagnostics(const Scene& scene,const FrontEndOptions& options,const char* stage,
+    const std::vector<PairCandidate>& candidates,const std::vector<PairDiagnostics>& diagnostics,
+    const std::vector<ImagePair>& accepted) {
+    if(options.diagnostics_directory.empty())return;
+    if(candidates.size()!=diagnostics.size())throw std::logic_error("Mismatched frontend diagnostics");
+    std::filesystem::create_directories(options.diagnostics_directory);
+    std::ofstream out(options.diagnostics_directory/(std::string("pairs-")+stage+".csv"));
+    if(!out)throw std::runtime_error("Cannot write frontend pair diagnostics");
+    std::map<std::pair<Index,Index>,const ImagePair*> pairs;
+    for(const auto& pair:accepted)if(!pair.matches.empty())pairs[{pair.id1,pair.id2}]=&pair;
+    out<<"id1,id2,name1,name2,raw_matches,attempted_geometry,ransac_inliers,filtered_inliers,accepted,stage,planar,ray_angle_rad,spatial_weight,ratio,min_inliers\n";
+    for(std::size_t i=0;i<candidates.size();++i) {
+        const auto& c=candidates[i];const auto& d=diagnostics[i];
+        const auto found=pairs.find({c.id1,c.id2});const auto* p=found==pairs.end()?nullptr:found->second;
+        const char* reason=d.accepted?"accepted":!d.attempted_geometry?"too_few_raw":
+            d.ransac_inliers==0?"estimation_or_pose_recovery":
+            d.ransac_inliers<options.relative.min_inliers?"ransac_support":
+            d.filtered_inliers<options.relative.min_inliers?"geometry_filter":"geometry_rejected";
+        out<<c.id1<<','<<c.id2<<','<<std::quoted(scene.images[c.id1].path.filename().string())<<','
+            <<std::quoted(scene.images[c.id2].path.filename().string())<<','<<d.raw_matches<<','<<d.attempted_geometry<<','
+            <<d.ransac_inliers<<','<<d.filtered_inliers<<','<<d.accepted<<','<<reason<<','
+            <<(p?p->degenerate_planar:false)<<','<<(p?p->mean_ray_angle:0)<<','<<(p?p->weight_spatial:0)<<','
+            <<options.match_ratio<<','<<options.relative.min_inliers<<'\n';
+    }
+    if(!out)throw std::runtime_error("Failed writing frontend pair diagnostics");
+}
 
 struct FrontEndStageKeys {
     std::uint64_t images{};
@@ -267,6 +330,8 @@ FrontEndStageKeys make_stage_keys(
     matches.append(options.retrieval.top_k);
     matches.append(options.retrieval.max_descriptors_per_image);
     matches.append(options.retrieval.sample_grid);
+    matches.append(options.retrieval.systematic_sampling);
+    matches.append(options.retrieval.vocabulary.sample_all_images);
     matches.append(options.retrieval.stop_word_ratio);
     matches.append(options.retrieval.max_posting_images);
     matches.append(options.retrieval.vocabulary.branching);
@@ -288,7 +353,6 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
     geometry.append(options.progressive_pair_expansion);
-    geometry.append(options.structural_pair_expansion);
     geometry.append(options.progressive_min_verified_degree);
     geometry.append(options.progressive_rescue_match_ratio);
     geometry.append(options.progressive_rescue_min_inliers);
@@ -421,6 +485,7 @@ void initialize_cameras(
 void select_scene_camera_models(
     Scene& scene, const std::vector<RawPairMatches>& raw_pairs,
     const std::vector<PairCandidate>& candidates, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.select_camera_models", core::LogLevel::info, "cpu");
     for (auto& camera : scene.cameras) {
         std::vector<std::size_t> eligible;
         for (std::size_t i=0; i<raw_pairs.size(); ++i) {
@@ -1378,6 +1443,7 @@ unsigned recompute_relative_poses_with_calibrated_focals(
 
 void finalize_view_graph(
     Scene& scene, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.finalize_view_graph", core::LogLevel::info, "cpu");
     compute_pair_weights(scene, options.pair_weighting);
     const bool focal_updated = calibrate_view_graph_focals(scene);
     const bool exif_focal_updated = calibrate_exif_view_graph_focals(scene);
@@ -1550,7 +1616,7 @@ std::vector<PairCandidate> build_pair_candidates(
     std::vector<PairCandidate> pairs;
     if (options.neighbor_window > 0)
         pairs = build_pair_list(scene.images.size(), options.neighbor_window);
-    core::StageScope retrieval_stage("sfm.retrieve_image_pairs");
+    core::StageScope retrieval_stage("sfm.retrieve_image_pairs", core::LogLevel::info, "cpu");
     const auto retrieved = retrieve_image_pairs(scene.images, options.retrieval);
     pairs.reserve(pairs.size() + retrieved.size());
     for (const RetrievedPair& pair : retrieved)
@@ -1917,6 +1983,13 @@ FrontEndResult run_frontend(
 
     FrontEndOptions runtime_options = options;
     normalize_feature_selection(runtime_options);
+    core::Logger::instance().info(
+        "sfm feature selection: requested_extractor=", options.extractor,
+        " selected_extractor=", runtime_options.extractor,
+        " requested_matcher=", options.matcher,
+        " selected_matcher=", runtime_options.matcher,
+        " pipeline=", runtime_options.pipeline.empty() ? "composable" : runtime_options.pipeline);
+
     if (runtime_options.retrieval.vocabulary_path.empty() &&
         !runtime_options.checkpoint.directory.empty()) {
         runtime_options.retrieval.vocabulary_path =
@@ -1980,6 +2053,7 @@ FrontEndResult run_frontend(
                 "LightGlue requires ONNX Runtime "
                 "(PHOTARA_ENABLE_ONNX / PHOTARA_ONNXRUNTIME_ROOT)");
 
+        core::StageScope extract_stage("sfm.extract_features", core::LogLevel::info, "mixed");
         const auto extract_started = std::chrono::steady_clock::now();
         const bool feature_cache_hit = checkpoints.load_scene(
             CheckpointStage::features, stage_keys.features, scene);
@@ -1999,6 +2073,8 @@ FrontEndResult run_frontend(
                                             extract_started)
                                             .count();
 
+        extract_stage.finish();
+        core::StageScope match_stage("sfm.match_and_verify", core::LogLevel::info, "mixed");
         const auto match_started = std::chrono::steady_clock::now();
         const bool use_retrieval =
             runtime_options.retrieval.top_k > 0 &&
@@ -2082,7 +2158,7 @@ FrontEndResult run_frontend(
             std::vector<ImagePair> pairs(candidates.size());
             core::ProgressReporter geometry_progress(
                 "verify pair geometry", candidates.size());
-            core::StageScope geometry_timing("sfm.verify_geometry");
+            core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
             parallel::parallel_for(
                 candidates.size(), threads, [&](const std::size_t ci) {
                     GeometryVerifyResult verified = verify_pair_geometry(
@@ -2106,7 +2182,7 @@ FrontEndResult run_frontend(
             (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0)) {
             select_scene_camera_models(scene, raw_pairs, candidates, options);
             std::vector<ImagePair> pairs(candidates.size());
-            core::StageScope geometry_timing("sfm.verify_geometry");
+            core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
             parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
                 auto verified = verify_pair_geometry(scene,candidates[i],raw_pairs[i].matches,options.relative);
                 diagnostics[i] = verified.diagnostics;
@@ -2127,6 +2203,7 @@ FrontEndResult run_frontend(
                 std::chrono::steady_clock::now() - match_started)
                 .count();
 
+        match_stage.finish();
         const auto tracks_started = std::chrono::steady_clock::now();
         finalize_view_graph(scene, options);
         checkpoints.save_scene(
@@ -2161,6 +2238,7 @@ FrontEndResult run_frontend(
     if (!matcher)
         throw std::runtime_error("Failed to create feature matcher");
 
+    core::StageScope extract_stage("sfm.extract_features", core::LogLevel::info, "mixed");
     const auto extract_started = std::chrono::steady_clock::now();
     const bool feature_cache_hit = checkpoints.load_scene(
         CheckpointStage::features, stage_keys.features, scene);
@@ -2234,8 +2312,11 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();
 
+    extract_stage.finish();
+    core::StageScope match_stage("sfm.match_and_verify", core::LogLevel::info, "mixed");
     const auto match_started = std::chrono::steady_clock::now();
     auto candidates = build_pair_candidates(scene, runtime_options);
+    write_feature_diagnostics(scene,runtime_options,"primary");
     mark_content_duplicate_pairs(candidates, image_fingerprint);
     // Group by id1 before GPU matching so slot-0 descriptors stay warm.
     if (matcher->requires_owner_thread())
@@ -2273,7 +2354,11 @@ FrontEndResult run_frontend(
     bool geometry_verified_in_pipeline = false;
     if (!match_cache_hit) {
         raw_pairs.resize(candidates.size());
-        if (matcher->requires_owner_thread()) {
+        // Vulkan clones share a bounded device cache. Submit batches through
+        // the existing GPU coordinator instead of serializing single-pair
+        // worker calls on that cache. Preserve its existing candidate order.
+        if (matcher->requires_owner_thread() ||
+            runtime_options.matcher == "vulkan_mutual_ratio") {
             std::vector<ImagePair> pair_slots;
             // Automatic calibration consumes raw matches, then invalidates
             // every preliminary geometry estimate. Hybrid rescue still needs
@@ -2457,7 +2542,7 @@ FrontEndResult run_frontend(
         std::vector<ImagePair> pairs(candidates.size());
         core::ProgressReporter geometry_progress(
             "verify pair geometry", candidates.size());
-        core::StageScope geometry_timing("sfm.verify_geometry");
+        core::StageScope geometry_timing("sfm.verify_geometry", core::LogLevel::info, "cpu");
         parallel::parallel_for(
             candidates.size(), threads, [&](const std::size_t ci) {
                 const PairCandidate cand = candidates[ci];
@@ -2483,6 +2568,7 @@ FrontEndResult run_frontend(
         }
     }
 
+    write_pair_diagnostics(scene,runtime_options,"primary",candidates,diagnostics,scene.pairs);
     const bool can_expand_progressively =
         runtime_options.progressive_pair_expansion &&
         (runtime_options.matcher == "gpu_mutual_ratio" ||
@@ -2505,20 +2591,14 @@ FrontEndResult run_frontend(
             }
         }
         std::vector<std::uint8_t> weak(scene.images.size(), 0);
-        const auto structural_risk = runtime_options.structural_pair_expansion
-            ? find_structural_pair_risks(scene)
-            : std::vector<std::uint8_t>(scene.images.size(), 0);
-        unsigned structural_weak_images = 0;
         unsigned weak_images = 0;
         for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
-            if (structural_risk[image_id]) ++structural_weak_images;
             if (verified_degree[image_id] >=
                 runtime_options.progressive_min_verified_degree &&
                 // Stable resection validates depths from at least three
                 // anchors. Two neighbors can only form a locally connected
                 // pocket and must not suppress feature augmentation.
-                nonplanar_degree[image_id] >= 3 &&
-                !structural_risk[image_id])
+                nonplanar_degree[image_id] >= 3)
                 continue;
             weak[image_id] = 1;
             ++weak_images;
@@ -2530,6 +2610,11 @@ FrontEndResult run_frontend(
              runtime_options.extractor == "vulkan_sift") &&
             runtime_options.progressive_rescue_max_features >
                 runtime_options.max_features) {
+            // Weak-view rescue switches back from matching to extraction.
+            // Release Vulkan's retained match partials before its shared SIFT
+            // workspace is rebuilt, rather than overlapping both workspaces.
+            if (runtime_options.matcher == "vulkan_mutual_ratio")
+                matcher->clear_prepared();
             std::unique_ptr<features::FeatureExtractor> rescue_extractor;
             if (runtime_options.extractor == "vulkan_sift") {
                 features::SiftVulkanOptions extraction_options;
@@ -2612,7 +2697,7 @@ FrontEndResult run_frontend(
         // genuinely disconnected/structurally weak small view graphs.
         const bool exhaustive_rescue =
             scene.images.size() <= runtime_options.progressive_max_images &&
-            (has_low_degree_views || structural_weak_images > 0);
+            has_low_degree_views;
         rescue_pair_keys.reserve(
             weak_images *
             std::max<std::size_t>(
@@ -2663,14 +2748,8 @@ FrontEndResult run_frontend(
             // low-texture/video frames without an O(weak_views * images) pass.
             const std::size_t radius =
                 runtime_options.progressive_rescue_neighbor_window;
-            std::vector<PairCandidate> deferred_internal;
             const auto propose = [&](Index first, Index second) {
-                // Spend the bounded budget on potential main-map anchors
-                // before adding more edges wholly inside a flagged branch.
-                if (structural_risk[first] && structural_risk[second])
-                    deferred_internal.push_back({first, second});
-                else
-                    add_rescue_candidate(first, second);
+                add_rescue_candidate(first, second);
             };
             for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
                 if (!weak[image_id]) continue;
@@ -2700,8 +2779,8 @@ FrontEndResult run_frontend(
                     propose(pair.first, pair.second);
                 }
             }
-            for (const auto& pair : deferred_internal)
-                add_rescue_candidate(pair.id1, pair.id2);
+
+
         }
         if (!rescue_candidates.empty()) {
             optimize_pairs_order(rescue_candidates, scene);
@@ -2729,6 +2808,8 @@ FrontEndResult run_frontend(
                 runtime_options.live_preview);
             rescue_progress.finish();
 
+            write_pair_diagnostics(scene,rescue_options,"rescue",rescue_candidates,rescue_diagnostics,rescue_pair_slots);
+
             unsigned rescued_pairs = 0, strengthened_pairs = 0;
             std::unordered_map<std::uint64_t, std::size_t> existing_pairs;
             for (std::size_t i = 0; i < scene.pairs.size(); ++i)
@@ -2750,7 +2831,6 @@ FrontEndResult run_frontend(
             }
             core::Logger::instance().info(
                 "progressive pair expansion: weak_images=", weak_images,
-                " structural_weak_images=", structural_weak_images,
                 " strategy=", exhaustive_rescue ? "exhaustive" : "bounded",
                 " attempted=", rescue_candidates.size(),
                 " accepted=", rescued_pairs,
@@ -2762,6 +2842,7 @@ FrontEndResult run_frontend(
     }
     // Descriptors are no longer needed after matching and weak-view rescue;
     // keep keypoints only for track construction and mapping.
+    write_feature_diagnostics(scene,runtime_options,"final");
     release_descriptors(scene);
     matcher->clear_prepared();
 
@@ -2773,6 +2854,7 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - match_started)
             .count();
 
+    match_stage.finish();
     const auto tracks_started = std::chrono::steady_clock::now();
     finalize_view_graph(scene, options);
     checkpoints.save_scene(
@@ -2834,14 +2916,30 @@ std::vector<Index> select_missing_view_anchors(
         return distance(a) < distance(b);
     });
     std::map<Index, double> scores;
+    std::map<Index, double> bridges;
     for (const auto& pair : scene.pairs) {
         if (!pair.relative_pose || pair.matches.empty()) continue;
         const Index other = pair.id1 == target ? pair.id2 : pair.id2 == target ? pair.id1 : k_invalid;
-        if (other >= scene.images.size() || other == target || !scene.images[other].registered) continue;
+        if (other >= scene.images.size() || other == target) continue;
         // Inactive edges remain search proposals only. Replacement poses still
         // require independent depths and withheld-observation validation.
         const double score = pair.matches.size() * std::max(0.25F, pair.weight_spatial);
-        if (std::isfinite(score)) scores[other] = std::max(scores[other], score);
+        if (!std::isfinite(score)) continue;
+        if (scene.images[other].registered) scores[other] = std::max(scores[other], score);
+        else bridges[other] = std::max(bridges[other], score);
+    }
+    // Missing runs can hide a useful revisit from the target's direct graph.
+    // A two-hop path only nominates an anchor for fresh descriptor matching;
+    // it contributes no pose/depth evidence to the resection itself.
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.matches.empty()) continue;
+        for (const auto [bridge, anchor] : {std::pair{pair.id1, pair.id2}, std::pair{pair.id2, pair.id1}}) {
+            const auto found = bridges.find(bridge);
+            if (found == bridges.end() || anchor >= scene.images.size() || !scene.images[anchor].registered) continue;
+            const double weight = pair.matches.size()*std::max(0.25F, pair.weight_spatial);
+            const double score = 0.5*std::min(found->second, weight);
+            if (std::isfinite(score)) scores[anchor] = std::max(scores[anchor], score);
+        }
     }
     std::vector<Index> visual;
     for (const auto& [id, score] : scores) visual.push_back(id);
@@ -2855,6 +2953,51 @@ std::vector<Index> select_missing_view_anchors(
         if (std::find(visual.begin(), visual.end(), id) == visual.end()) visual.push_back(id);
     }
     return visual;
+}
+
+std::vector<Index> select_missing_view_support_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors) {
+    maximum_neighbors = std::min(maximum_neighbors, 32u);
+    auto result = select_missing_view_anchors(scene, target, std::min(maximum_neighbors, 16u));
+    if (result.size() >= maximum_neighbors || result.empty()) return result;
+    std::vector<bool> seed(scene.images.size(), false);
+    for (Index id : result) seed[id] = true;
+    std::map<Index, std::map<Index, double>> links;
+    for (const auto& pair : scene.pairs) {
+        if (!pair.relative_pose || pair.zero_baseline || pair.matches.size() < 30 ||
+            pair.id1 >= seed.size() || pair.id2 >= seed.size()) continue;
+        for (const auto [anchor, other] : {std::pair{pair.id1, pair.id2}, std::pair{pair.id2, pair.id1}}) {
+            if (!seed[anchor] || seed[other] || other == target || !scene.images[other].registered) continue;
+            const double score = std::min<std::size_t>(pair.matches.size(), 1000) *
+                std::max(0.25F, pair.weight_spatial);
+            if (std::isfinite(score)) links[other][anchor] = std::max(links[other][anchor], score);
+        }
+    }
+    // Shared overlap with several original anchors is a search proposal only;
+    // it neither supplies a depth nor certifies the target's unknown pose.
+    struct Candidate { Index id; std::size_t anchors; double score; };
+    std::vector<Candidate> candidates;
+    for (const auto& [id, witnesses] : links) {
+        double score = 0;
+        for (const auto& [anchor, weight] : witnesses) score += weight;
+        candidates.push_back({id, witnesses.size(), score});
+    }
+    const auto distance = [target](Index id) { return id > target ? id-target : target-id; };
+    std::sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) {
+        if (a.anchors != b.anchors) return a.anchors > b.anchors;
+        if (a.score != b.score) return a.score > b.score;
+        if (distance(a.id) != distance(b.id)) return distance(a.id) < distance(b.id);
+        return a.id < b.id;
+    });
+    for (const auto& candidate : candidates) {
+        if (result.size() >= maximum_neighbors) break;
+        const auto& center = scene.images[candidate.id].pose.C;
+        if (!center.allFinite() || std::any_of(result.begin(), result.end(), [&](Index id) {
+                return (center - scene.images[id].pose.C).norm() < 1e-10;
+            })) continue;
+        result.push_back(candidate.id);
+    }
+    return result;
 }
 
 std::vector<Index> select_weak_position_repairs(const Scene& scene) {
@@ -2889,10 +3032,17 @@ std::vector<Index> select_weak_position_repairs(const Scene& scene) {
     return targets;
 }
 
-unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options,
+    const std::vector<Index>& target_ids, bool require_pose_improvement) {
+    auto& memo = *options.missing_view_cache;
+    std::lock_guard cache_lock(memo.mutex);
+    if (!std::isfinite(options.missing_view_minimum_consensus_ratio) ||
+        options.missing_view_minimum_consensus_ratio < 0 || options.missing_view_minimum_consensus_ratio > 1)
+        throw std::invalid_argument("invalid missing-view consensus ratio");
     std::vector<Index> missing;
     for (Index id = 0; id < scene.images.size(); ++id)
-        if (!scene.images[id].registered) missing.push_back(id);
+        if (!scene.images[id].registered && (target_ids.empty() ||
+            std::find(target_ids.begin(), target_ids.end(), id) != target_ids.end())) missing.push_back(id);
     if (missing.empty() || scene.registered_count() < 3 ||
         scene.registered_count() * 2 < scene.images.size()) return 0;
     // Work inward from both sides of a missing run, rather than failing the
@@ -2931,15 +3081,70 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         recovery.matcher = "mutual_ratio";
     auto extractor = make_frontend_extractor(recovery);
     auto matcher = make_frontend_matcher(recovery);
-    // Reuse only the current neighborhood, keeping memory bounded regardless
-    // of the number of missing views. A low-contrast retry gets fresh caches.
+    // Neighborhood storage pins active entries while the bounded cross-round
+    // memo can evict old work. Low-contrast extraction has a different key.
     std::map<Index, features::FeatureSet> feature_cache;
     std::map<std::pair<Index, Index>, features::MatchSet> match_cache;
+    std::map<Index, std::uint64_t> feature_keys;
+    std::map<Index, std::uint64_t> image_keys;
+    std::size_t feature_hits = 0, feature_misses = 0, match_hits = 0, match_misses = 0;
+    std::size_t geometry_hits = 0, geometry_misses = 0;
+    const auto feature_key = [&](Index id) {
+        auto [it, added] = image_keys.try_emplace(id);
+        if (added) {
+            const auto mask = find_feature_mask_path(options.mask_dir, scene.images[id].path);
+            std::vector<std::filesystem::path> files{scene.images[id].path};
+            if (!mask.empty()) files.push_back(mask);
+            it->second = fingerprint_images(files);
+        }
+        FingerprintBuilder key;
+        key.append_string("missing-view-features-v1");
+        append_cache_build_identity(key);
+        key.append(it->second);
+        key.append_string(recovery.extractor);
+        key.append(recovery.sift_contrast_threshold);
+        key.append(recovery.max_features);
+        return key.value();
+    };
+    const auto match_key = [&](Index query, Index train) {
+        FingerprintBuilder key;
+        key.append_string("missing-view-directed-match-v1");
+        key.append(feature_keys.at(query)); key.append(feature_keys.at(train));
+        key.append_string(recovery.matcher);
+        key.append(recovery.match_ratio); key.append(recovery.mutual_check);
+        return key.value();
+    };
+    const auto geometry_key = [&](Index first, Index second, bool anchored) {
+        FingerprintBuilder key;
+        key.append_string(anchored ? "missing-view-anchor-v1" : "missing-view-boundary-v1");
+        key.append(anchored ? match_key(first, second) : match_key(second, first));
+        append_relative_options(key, recovery.relative);
+        for (Index id : {first, second}) {
+            const auto& image = scene.images[id];
+            const auto& camera = scene.camera_of(image);
+            key.append(camera.model); key.append(camera.width); key.append(camera.height);
+            for (double value : {camera.fx, camera.fy, camera.cx, camera.cy,
+                    camera.k1, camera.k2, camera.p1, camera.p2}) key.append(value);
+            // The local recovery scene always trusts these intrinsics.
+            if (anchored) {
+                key.append_bytes(image.pose.R.data(), 9 * sizeof(double));
+                key.append_bytes(image.pose.C.data(), 3 * sizeof(double));
+            }
+        }
+        return key.value();
+    };
     unsigned recovered_count = 0;
-    for (Index target : missing) {
+    for (Index target : missing) for (unsigned attempt = 0; attempt < 2; ++attempt) {
         // Rebuild only local depths. Neither the inherited missing pose nor
         // the main map's triangulated points enter this independent solve.
-        std::vector<Index> neighbors = select_missing_view_anchors(scene, target);
+        std::vector<Index> neighbors = attempt == 0
+            ? select_missing_view_anchors(scene, target)
+            : select_missing_view_support_anchors(scene, target, options.missing_view_retry_max_neighbors);
+        if (attempt != 0) {
+            if (neighbors.size() <= select_missing_view_anchors(scene, target).size()) break;
+            core::Logger::instance().info("missing view support retry: image=",
+                scene.images[target].path.filename(), " anchors=", neighbors.size());
+        }
         neighbors.push_back(target);
         const auto retained = [&](Index id) {
             return std::find(neighbors.begin(), neighbors.end(), id) != neighbors.end();
@@ -2959,12 +3164,24 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
                 image.id = static_cast<Index>(local.images.size());
                 auto cached = feature_cache.find(global);
                 if (cached == feature_cache.end()) {
-                    const auto gray = io::load_gray(image.path);
-                    auto extracted = select_top_features_grid_3x3(
-                        apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
-                            find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
-                    extracted.compress_descriptors_u8();
-                    cached = feature_cache.emplace(global, std::move(extracted)).first;
+                    const auto key = feature_key(global);
+                    feature_keys[global] = key;
+                    const auto* saved = memo.features.find(key);
+                    if (saved) {
+                        ++feature_hits;
+                        cached = feature_cache.emplace(global, *saved).first;
+                    } else {
+                        ++feature_misses;
+                        const auto gray = io::load_gray(image.path);
+                        auto extracted = select_top_features_grid_3x3(
+                            apply_feature_mask(extractor->extract_gray(gray.pixels, gray.width, gray.height),
+                                find_feature_mask_path(options.mask_dir, image.path)), recovery.max_features);
+                        extracted.compress_descriptors_u8();
+                        memo.features.insert(key, extracted,
+                            extracted.keypoints.capacity() * sizeof(features::Keypoint) +
+                            extracted.descriptors.capacity() * sizeof(float) + extracted.descriptors_u8.capacity());
+                        cached = feature_cache.emplace(global, std::move(extracted)).first;
+                    }
                 }
                 image.features = cached->second;
                 local.images.push_back(std::move(image));
@@ -2982,6 +3199,13 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             const auto key = std::make_pair(neighbors[query], neighbors[train]);
             pair_keys.push_back(key);
             if (!match_cache.contains(key)) {
+                if (const auto* saved = memo.matches.find(match_key(key.first, key.second))) {
+                    match_cache.emplace(key, *saved);
+                    ++match_hits;
+                }
+            }
+            if (!match_cache.contains(key)) {
+                ++match_misses;
                 uncached_keys.push_back(key);
                 match_pairs.emplace_back(&feature_cache.at(key.first), &feature_cache.at(key.second));
             }
@@ -2998,15 +3222,18 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             core::StageScope matching_stage("sfm.missing_view_match");
             matched_pairs = matcher->match_batch(match_pairs);
         }
-        for (std::size_t i = 0; i < uncached_keys.size(); ++i)
+        for (std::size_t i = 0; i < uncached_keys.size(); ++i) {
+            memo.matches.insert(match_key(uncached_keys[i].first, uncached_keys[i].second),
+                matched_pairs.at(i), matched_pairs.at(i).matches.capacity() * sizeof(features::FeatureMatch));
             match_cache.emplace(uncached_keys[i], std::move(matched_pairs.at(i)));
+        }
         core::Logger::instance().debug("missing view match reuse: pairs=", pair_keys.size(),
             " reused=", pair_keys.size() - uncached_keys.size(), " submitted=", uncached_keys.size());
         matched_pairs.clear();
         for (const auto& key : pair_keys) matched_pairs.push_back(match_cache.at(key));
         std::size_t matched_index = 0;
         {
-            core::StageScope geometry_stage("sfm.missing_view_geometry");
+            core::StageScope geometry_stage("sfm.missing_view_geometry", core::LogLevel::info, "cpu");
             for (Index a = 0; a < candidate; ++a) {
                 for (Index b = a + 1; b < candidate; ++b) {
                     ImagePair pair(a, b);
@@ -3017,6 +3244,16 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
                     const double angular = std::max(local.camera_of(first).pixel_error_to_angular(4),
                                                     local.camera_of(second).pixel_error_to_angular(4));
                     const auto& matched = matched_pairs.at(matched_index++);
+                    const auto key = geometry_key(neighbors[a], neighbors[b], true);
+                    if (const auto* saved = memo.geometry.find(key)) {
+                        ++geometry_hits;
+                        if (!saved->matches.empty()) {
+                            pair = *saved; pair.id1 = a; pair.id2 = b;
+                            local.pairs.push_back(std::move(pair));
+                        }
+                        continue;
+                    }
+                    ++geometry_misses;
                     for (const auto& m : matched.matches) {
                         const auto& x = first.features.keypoints[m.query];
                         const auto& y = second.features.keypoints[m.train];
@@ -3026,15 +3263,30 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
                         if (normal.norm() > 1e-10 && std::abs(normal.normalized().dot(v)) <= std::sin(angular))
                             pair.matches.push_back({m.query, m.train});
                     }
-                    if (pair.matches.size() >= 8) local.pairs.push_back(std::move(pair));
+                    if (pair.matches.size() < 8) pair.matches.clear();
+                    memo.geometry.insert(key, pair, pair.matches.capacity() * sizeof(FeatureMatch));
+                    if (!pair.matches.empty()) local.pairs.push_back(std::move(pair));
                 }
                 RawPairMatches boundary;
                 boundary.id1 = candidate; boundary.id2 = a;
                 boundary.matches = std::move(matched_pairs.at(matched_index++).matches);
                 std::vector<features::FeatureMatch> reversed;
                 for (auto m : boundary.matches) { std::swap(m.query, m.train); reversed.push_back(m); }
-                auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
-                if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+                const auto key = geometry_key(neighbors[a], target, false);
+                if (const auto* saved = memo.geometry.find(key)) {
+                    ++geometry_hits;
+                    if (!saved->matches.empty()) {
+                        auto pair = *saved; pair.id1 = a; pair.id2 = candidate;
+                        boundary_geometry.push_back(std::move(pair));
+                    }
+                } else {
+                    ++geometry_misses;
+                    auto verified = verify_pair_geometry(local, {a, candidate}, reversed, recovery.relative);
+                    const ImagePair empty(a, candidate);
+                    const auto& value = verified.pair ? *verified.pair : empty;
+                    memo.geometry.insert(key, value, value.matches.capacity() * sizeof(FeatureMatch));
+                    if (verified.pair) boundary_geometry.push_back(std::move(*verified.pair));
+                }
                 tentative.push_back(std::move(boundary));
             }
         }
@@ -3060,10 +3312,14 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             verified_boundary.push_back(std::move(boundary));
         }
         std::vector<Index> recovered;
+        StableResectionOptions validation;
+        validation.require_pose_improvement = require_pose_improvement;
+        validation.minimum_consensus_ratio = std::max(options.missing_view_minimum_consensus_ratio,
+            attempt == 0 ? 0.0 : 0.5);
         if (!verified_boundary.empty())
-            recovered = recover_stable_resections(local, stable, verified_boundary);
+            recovered = recover_stable_resections(local, stable, verified_boundary, validation);
         if (recovered.empty())
-            recovered = recover_stable_resections(local, stable, tentative);
+            recovered = recover_stable_resections(local, stable, tentative, validation);
         if (recovered.empty()) {
             // A small PnP consensus is only a search seed, never a registered
             // camera. Geometry-guided matching can resolve descriptor aliases;
@@ -3157,7 +3413,7 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
                     std::erase_if(pair.matches, [&](const auto& m) {
                         return independent_links.at({m.query, feature_tracks[pair.id2].at(m.train)}).size() < 2;
                     });
-                recovered = recover_stable_resections(local, stable, guided);
+                recovered = recover_stable_resections(local, stable, guided, validation);
             }
         }
         if (recovered.empty()) continue;
@@ -3218,8 +3474,13 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
             else *previous = std::move(pair);
         }
         ++recovered_count;
+        break;
     }
     if (recovered_count) rebuild_track_index(scene);
+    core::Logger::instance().debug("missing view cache: feature_hits=", feature_hits, " feature_misses=", feature_misses,
+        " match_hits=", match_hits, " match_misses=", match_misses,
+        " geometry_hits=", geometry_hits, " geometry_misses=", geometry_misses,
+        " retained_bytes=", memo.features.bytes() + memo.matches.bytes() + memo.geometry.bytes());
     // A blurred frame can have fewer strong corners than the final support
     // minimum. Retry only the still-missing views with low-contrast SIFT;
     // previously accepted geometry is not rebuilt or optimized.
@@ -3228,11 +3489,19 @@ unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options) {
         FrontEndOptions finer = options;
         finer.sift_contrast_threshold = 0.001;
         finer.match_ratio = std::max(options.match_ratio, options.progressive_rescue_match_ratio);
-        recovered_count += recover_missing_views(scene, finer);
+        recovered_count += recover_missing_views(scene, finer, target_ids, require_pose_improvement);
     }
     core::Logger::instance().info("missing view recovery: candidates=", missing.size(),
         " recovered=", recovered_count, " frozen_registered_poses=1 frozen_intrinsics=1 frozen_landmarks=1");
     return recovered_count;
+}
+
+unsigned recover_post_refinement_views(Scene& scene, const FrontEndOptions& options) {
+    if (scene.registered_count() == scene.images.size()) return 0;
+    core::StageScope stage("sfm.post_refinement_recovery", core::LogLevel::info, "mixed");
+    auto recovery = options;
+    recovery.missing_view_minimum_consensus_ratio = std::max(0.5, recovery.missing_view_minimum_consensus_ratio);
+    return recover_missing_views(scene, recovery);
 }
 
 unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
@@ -3244,7 +3513,9 @@ unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
     }
     unsigned recovered = 0;
     try {
-        recovered = recover_missing_views(scene, options);
+        auto initial_recovery = options;
+        initial_recovery.missing_view_retry_max_neighbors = 0;
+        recovered = recover_missing_views(scene, initial_recovery);
     } catch (...) {
         for (std::size_t i = 0; i < targets.size(); ++i) {
             scene.images[targets[i]].pose = original[i];
@@ -3264,6 +3535,94 @@ unsigned recover_alignment_views(Scene& scene, const FrontEndOptions& options) {
     if (repaired) filter_tracks(scene, 2.F, 1.F, 0.F, 0.F);
     core::Logger::instance().info("independent position repair: nominated=", targets.size(), " repaired=", repaired);
     return recovered;
+}
+
+std::vector<Index> select_weak_alignment_views(const Scene& scene) {
+    std::vector<unsigned> total(scene.images.size()), multi(scene.images.size());
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        for (unsigned o = 0; o < std::min<std::size_t>(track.num_inliers, track.observations.size()); ++o) {
+            const Index id = track.observations[o].image_id;
+            ++total.at(id);
+            multi[id] += track.num_inliers >= 3;
+        }
+    }
+    std::vector<bool> tied(scene.images.size(), false);
+    for (const auto& pair : scene.pairs) if (pair.zero_baseline) {
+        tied.at(pair.id1) = true; tied.at(pair.id2) = true;
+    }
+    std::vector<Index> targets;
+    for (Index i = 0; i < scene.images.size(); ++i)
+        if (scene.images[i].registered && !tied[i] && multi[i] < 30 && total[i] < 400)
+            targets.push_back(i);
+    std::sort(targets.begin(), targets.end(), [&](Index a, Index b) {
+        if (multi[a] != multi[b]) return multi[a] > multi[b];
+        if (total[a] != total[b]) return total[a] < total[b];
+        return a < b;
+    });
+    if (targets.size() > 8) targets.resize(8);
+    return targets;
+}
+
+unsigned refine_weak_alignment_views(Scene& scene, const FrontEndOptions& options) {
+    core::StageScope stage("sfm.weak_camera_refinement", core::LogLevel::info, "mixed");
+    const auto targets = select_weak_alignment_views(scene);
+    if (targets.empty()) return 0;
+    try {
+        // Recovery appends features/tracks and replaces certified boundary pairs.
+        // Work transactionally so failure at any point also restores that state.
+        Scene candidate = scene;
+        const auto old_track_count = candidate.tracks.size();
+        for (Index id : targets) candidate.images[id].registered = false;
+        auto recovery = options;
+        recovery.missing_view_minimum_consensus_ratio = std::max(
+            0.5, recovery.missing_view_minimum_consensus_ratio);
+        unsigned repaired = 0;
+        std::vector<bool> moved(scene.images.size(), false);
+        for (Index id : targets) {
+            core::Logger::instance().info("weak camera trial: image=", candidate.images[id].path.filename());
+            const unsigned accepted = recover_missing_views(candidate, recovery, {id}, true);
+            if (accepted) {
+                moved[id] = true;
+                ++repaired;
+            } else {
+                candidate.images[id].pose = scene.images[id].pose;
+                candidate.images[id].registered = true;
+            }
+        }
+        if (!repaired) return 0;
+        for (std::size_t t = 0; t < old_track_count; ++t) {
+            auto& track = candidate.tracks[t];
+            std::vector<Observation> kept;
+            unsigned inliers = 0;
+            for (std::size_t o = 0; o < track.observations.size(); ++o) {
+                const auto& obs = track.observations[o];
+                if (moved.at(obs.image_id)) continue;
+                kept.push_back(obs);
+                inliers += o < track.num_inliers;
+            }
+            track.observations = std::move(kept);
+            track.num_inliers = inliers >= 2 ? static_cast<std::uint8_t>(inliers) : 0;
+        }
+        rebuild_track_index(candidate);
+        const auto before = analyze_alignment_observability(scene);
+        const auto after = analyze_alignment_observability(candidate);
+        for (Index i = 0; i < scene.images.size(); ++i) {
+            const auto& old = scene.images[i]; const auto& updated = candidate.images[i];
+            if (old.registered != updated.registered ||
+                (!moved[i] && (old.pose.C != updated.pose.C || old.pose.R != updated.pose.R)) ||
+                (updated.registered && (!updated.pose.C.allFinite() || !updated.pose.R.allFinite())) ||
+                ((moved[i] || before.reliable[i]) && !after.reliable[i]))
+                throw std::runtime_error("weak camera repair failed final support/invariance checks");
+        }
+        scene = std::move(candidate);
+        core::Logger::instance().info("weak camera refinement accepted: nominated=", targets.size(),
+            " repaired=", repaired, " frozen_other_poses=1 frozen_intrinsics=1");
+        return repaired;
+    } catch (const std::exception& error) {
+        core::Logger::instance().warning("weak camera refinement rejected; retaining input map: ", error.what());
+        return 0;
+    }
 }
 
 }  // namespace photara::sfm

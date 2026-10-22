@@ -51,13 +51,17 @@ struct ViewPose {
     // to the image centre.
     float cx{-1.F};
     float cy{-1.F};
-    // OpenCV fisheye k1..k4 (p1/p2 of the SfM camera). Unused for pinhole.
+    // Brown k1,k2,p1,p2 for source pinhole photos; k1..k4 for fisheye.
     float k1{0.F};
     float k2{0.F};
     float k3{0.F};
     float k4{0.F};
     std::uint32_t width{};
     std::uint32_t height{};
+    // Preserve the source camera when an imported MVS working view is scaled
+    // or uses different ideal intrinsics. Zero dimensions mean use fx/fy/etc.
+    float src_fx{}, src_fy{}, src_cx{}, src_cy{};
+    std::uint32_t src_width{}, src_height{};
     float reprojection_p95{};
     std::size_t observations{};
     std::size_t triangulated_features{};

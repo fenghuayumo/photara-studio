@@ -24,6 +24,41 @@ in [SfM improvement notes](SFM_VALIDATION.md).
 
 ## 2. Data model
 
+### Performance diagnostics
+
+SfM stage completion logs include inclusive wall time (`elapsed_s`) and a
+`backend` field where the execution path is known. CPU-only retrieval,
+geometry verification, rotation estimation, track processing and triangulation
+are labelled `cpu`. Extraction and match/verify containers are labelled `mixed`:
+they can include decoding, cache I/O, GPU work, and CPU preparation/verification.
+The fused pair pipeline performs feature extraction inside the matching stage;
+its initial extraction container only prepares or restores the image scene.
+Feature-selection logs record requested and normalized extractor/matcher names,
+including automatic CUDA-to-Vulkan normalization. ONNX provider details remain
+in the inference runtime logs; a requested device is not proof of GPU execution.
+
+`sfm.bundle_solve` and `sfm.positioning_solve` report each CPU/CUDA/Vulkan attempt
+separately, including failed GPU attempts followed by CPU recovery. Their wall
+times include host preparation and transfers inside the solver call; they are
+not GPU kernel utilization measurements. Backend-selection records explain
+thresholds, pose-lock restrictions, unsupported positioning attempts, and GPU
+availability. Runtime failure messages retain the exception or rejection reason.
+
+Summarize one run's log (use file log level `debug` or `trace` to retain
+triangulation/filter timing and CUDA matcher transfer measurements):
+
+```powershell
+python scripts/summarize_sfm_profile.py path/to/run.log
+python scripts/summarize_sfm_profile.py path/to/run.log --json
+```
+
+The report aggregates repeated stage calls by backend, lists cache hits and
+fallback reasons, and includes existing CUDA matcher upload/compute/download
+event measurements when present. Pipelined geometry work is a sum across CPU
+workers and may exceed elapsed time. Parent/child stages and pipelined work
+overlap: do not sum report rows to estimate total runtime, CPU/GPU shares, or
+speedup. Cached stages represent restoration cost, not fresh computation.
+
 `sfm::Scene` is the single reconstruction-state container:
 
 ```text
@@ -60,12 +95,26 @@ Entry point: `sfm::run_frontend` in `src/sfm/frontend.cpp`, logged as stage
 | Backend | Description |
 |---|---|
 | `siftgpu` (default) | Native CUDA SIFT; `--sift-contrast` controls the peak threshold |
+| `vulkan_sift` | Vulkan implementation of the same SIFT pipeline; automatic fallback when CUDA is unavailable |
 | `sift` | Native CPU SIFT/RootSIFT (same pipeline as CUDA / Vulkan) |
 | `superpoint`, `disk`, `aliked` | ONNX extractors configured by `--extractor-model` |
 
 `--max-features` defaults to 27,000. Descriptors are compressed to `uint8` by
 default. The CUDA extractor uses a thread-affine coordinator; other extractors
 are cloned per worker when required.
+
+CUDA uses shared-memory Gaussian filtering and rolling/reused pyramid and
+gradient buffers to reduce device memory. Vulkan also uses rolling pyramid
+buffers and a descriptor reconstruction pass, with one reusable GPU workspace
+shared by extractor clones. Matching releases that workspace, shares its
+descriptor cache across clones and uses the frontend batch coordinator.
+Bounded idle buffer pools prevent extraction allocations persisting into BA.
+Keypoint compaction and scheduling
+differ from Vulkan, and cross-backend floating-point results need not be
+bit-identical. Earlier extraction timings predate the native CUDA replacement
+and do not establish which current backend is faster. See
+[Feature backends](FEATURES_BACKENDS.md#current-sift-implementation-and-parity)
+for current parity requirements, optimizations and benchmark commands.
 
 #### SfM valid-region masks
 

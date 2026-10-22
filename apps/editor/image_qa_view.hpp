@@ -63,7 +63,8 @@ public:
     void poll();
     void request_gt(
         int view_index, const std::filesystem::path& path,
-        bool use_mask = false, const std::filesystem::path& mask_dir = {});
+        bool use_mask = false, const std::filesystem::path& mask_dir = {},
+        const ViewPose* projection = nullptr, bool undistort_to_pinhole = false);
     void set_render(
         photara::io::RgbImage render, int view, std::uint64_t revision);
 
@@ -168,6 +169,7 @@ struct ImageQaDrawInput {
     bool has_model{};
     bool external_alignment{};
     bool use_metric_mask{};
+    bool undistort_to_pinhole{};
     std::filesystem::path mask_dir;
     const photara::sfm::AlignLiveFrame* live{};
     ImageQaSession* pair_session{};

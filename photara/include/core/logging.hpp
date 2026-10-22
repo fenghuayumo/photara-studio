@@ -221,9 +221,12 @@ private:
 
 class StageScope {
 public:
-    explicit StageScope(std::string name, const LogLevel level = LogLevel::info)
-        : name_(std::move(name)), level_(level), started_(Clock::now()) {
-        Logger::instance().log(level_, "stage started: ", name_);
+    explicit StageScope(std::string name, const LogLevel level = LogLevel::info,
+                        std::string backend = {})
+        : name_(std::move(name)), level_(level), backend_(std::move(backend)),
+          started_(Clock::now()) {
+        Logger::instance().log(level_, "stage started: ", name_,
+            backend_.empty() ? std::string{} : " backend=" + backend_);
     }
     ~StageScope() { finish(); }
     StageScope(const StageScope&) = delete;
@@ -236,6 +239,7 @@ public:
         Logger::instance().log(
             level_, "stage finished: ", name_, " elapsed_s=", std::fixed,
             std::setprecision(3), seconds,
+            backend_.empty() ? std::string{} : " backend=" + backend_,
             summary.empty() ? std::string{} : " " + std::string(summary));
     }
 
@@ -243,6 +247,7 @@ private:
     using Clock = std::chrono::steady_clock;
     std::string name_;
     LogLevel level_;
+    std::string backend_;
     Clock::time_point started_;
     bool finished_{false};
 };

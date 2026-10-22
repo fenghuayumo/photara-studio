@@ -60,7 +60,7 @@ struct TrainingOptions {
     std::filesystem::path checkpoint_path;
     std::filesystem::path checkpoint_control_file;
     bool resume_checkpoint{false};
-    unsigned checkpoint_interval_seconds{120};
+    unsigned checkpoint_interval_seconds{0};
     // Optional iteration cadence, primarily useful for reproducible tests.
     unsigned checkpoint_interval_iterations{0};
     // The orchestration, schedules and optimizer policy are shared. This

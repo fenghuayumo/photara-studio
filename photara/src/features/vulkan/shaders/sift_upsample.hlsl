@@ -3,10 +3,9 @@
 // UpsampleKernel<1>: 2x bilinear upsampling with the reference kernel's raw
 // linear addressing. Reads use the *source* row stride, so the last column of a
 // row blends with the first pixel of the next row, and reads past the end of
-// the image return zero (tex1Dfetch semantics). SiftGPU's own border reads are
-// undefined, which is why its keypoints there are not run-to-run reproducible;
-// zero is what its texture fetch returns and what its results match on
-// reproducible inputs.
+// the image return zero. The current native CUDA upsample_kernel uses the
+// same guarded linear reads; historical external SiftGPU border behavior
+// does not describe either current backend.
 struct PushConstants
 {
     uint src_width;

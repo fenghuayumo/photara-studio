@@ -4,6 +4,7 @@
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
 #include "splat/trainer.hpp"
+#include "studio_image_qa_test.hpp"
 #include "../src/splat/checkpoint.hpp"
 #include <filesystem>
 #include <cstdio>
@@ -16,8 +17,14 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 }
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 3) {
+            test_studio_image_qa_dataset(argv[1], argv[2]);
+            return 0;
+        }
+        if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
+        test_studio_image_qa_projection();
         editor::RunMonitor monitor;
         monitor.begin(editor::JobKind::train);
         require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
@@ -53,6 +60,16 @@ int main() {
                 "default alignment explicitly disables stage caching");
         require(command.find("--camera-warm-start") == std::string::npos,
                 "Studio leaves warm start policy internal instead of exposing tuning");
+        require(!settings.refine_weak_cameras && command.find("--refine-weak-cameras") == std::string::npos,
+                "weak-camera refinement stays opt-in for new Studio projects");
+        settings.refine_weak_cameras = true;
+        command = editor::build_align_command("photara.exe", settings, layout);
+        require(command.find("--refine-weak-cameras") != std::string::npos,
+                "Studio forwards the optional camera refinement to the product CLI");
+        command = editor::build_train_command("photara.exe", settings, layout, {});
+        require(command.find("--refine-weak-cameras") != std::string::npos,
+                "training-triggered alignment uses the same refinement policy");
+        settings.refine_weak_cameras = false;
         settings.reuse_cache = true;
         command = editor::build_align_command("photara.exe", settings, layout);
         require(command.find("--cache-dir \"") != std::string::npos,

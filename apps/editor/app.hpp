@@ -219,6 +219,7 @@ struct App {
     std::chrono::steady_clock::time_point qa_metrics_after{};
     std::uint64_t qa_camera_timeline{};
     bool qa_camera_valid{};
+    std::string qa_camera_key;
     ImageQaMode qa_camera_mode{ImageQaMode::photo};
     ImageQaMode qa_raster_mode{ImageQaMode::photo};
     int qa_raster_view{-1};

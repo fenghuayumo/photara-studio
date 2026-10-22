@@ -17,6 +17,9 @@ struct VocabularyConfig {
     std::size_t max_descriptors_per_image{2000};
     std::size_t max_training_descriptors{200000};
     unsigned sample_grid{3};
+    // Keep established primary vocabularies reproducible. Supplemental
+    // retrieval can spread the same training cap over the entire collection.
+    bool sample_all_images{false};
 };
 
 // Hierarchical k-means visual vocabulary (openMVS-style), native float L2.
@@ -73,6 +76,7 @@ private:
 std::vector<features::FeatureIndex> sample_descriptors_spatially(
     const features::FeatureSet& features,
     std::size_t maximum,
-    unsigned grid_size = 3);
+    unsigned grid_size = 3,
+    bool systematic = false);
 
 }  // namespace photara::sfm

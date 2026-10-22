@@ -231,6 +231,7 @@ const char* training_backend_flag(const ProjectSettings& settings) {
 const char* alignment_backend_flag(const ProjectSettings& settings) {
     if (settings.alignment_backend == 1) return "cpu";
     if (settings.alignment_backend == 2 && studio_ba_cuda()) return "cuda";
+    if (settings.alignment_backend == 3 && studio_ba_vulkan()) return "vulkan";
     return "automatic";
 }
 
@@ -244,6 +245,7 @@ void append_alignment_backends(
     std::ostringstream& command, const ProjectSettings& settings) {
     command << " --ba-backend " << alignment_backend_flag(settings)
             << " --positioning-backend " << alignment_backend_flag(settings);
+    if (settings.refine_weak_cameras) command << " --refine-weak-cameras";
 }
 
 void append_alignment_cache(

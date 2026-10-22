@@ -55,7 +55,7 @@ std::size_t colour_triangulated_tracks(Scene& scene) {
         pending.push_back(index);
     }
     if (pending.empty()) return 0;
-    core::StageScope stage("sfm.colour_tracks");
+    core::StageScope stage("sfm.colour_tracks", core::LogLevel::info, "cpu");
 
     std::vector<std::vector<std::pair<std::size_t, Index>>>
         observations_by_image(scene.images.size());

@@ -1,4 +1,5 @@
 #include "sfm/global_positioning.hpp"
+#include "sfm/reconstruct.hpp"
 #include "positioning_validation.hpp"
 #include "sfm/positioning_control.hpp"
 #include "core/logging.hpp"
@@ -515,6 +516,48 @@ std::vector<Index> select_tracks_for_positioning(
                 ++image_counts[image_id];
             });
     };
+
+    if (options.cross_branch_tracks_per_image && target >= 4) {
+        // Match the late weak-branch graph screen, without inherited points.
+        Scene graph; graph.images.resize(scene.images.size());
+        std::vector<float> strongest(scene.images.size(),0.F);
+        for (Index id=0;id<scene.images.size();++id) {
+            graph.images[id].id=id; graph.images[id].registered=scene.images[id].registered;
+        }
+        const auto eligible_pair=[&](const ImagePair& p) {
+            return p.active && p.relative_pose && !p.zero_baseline && p.id1<scene.images.size() &&
+                p.id2<scene.images.size() && scene.images[p.id1].registered && scene.images[p.id2].registered &&
+                std::isfinite(p.composite_weight());
+        };
+        for (const auto& p:scene.pairs) if (eligible_pair(p)) {
+            strongest[p.id1]=std::max(strongest[p.id1],p.composite_weight());
+            strongest[p.id2]=std::max(strongest[p.id2],p.composite_weight());
+        }
+        for (const auto& p:scene.pairs) if (eligible_pair(p) &&
+            p.composite_weight()>=std::max(3.F,0.01F*std::min(strongest[p.id1],strongest[p.id2]))) {
+            ImagePair edge(p.id1,p.id2); edge.relative_pose=p.relative_pose;
+            graph.pairs.push_back(std::move(edge));
+        }
+        const auto audit=analyze_alignment_observability(graph);
+        std::vector<unsigned> boundary_counts(scene.images.size());
+        unsigned candidates=0;
+        if (audit.reliable_views>=3) for (const auto& entry:ranked) {
+            if (selected.size()>=target/4) break;
+            const auto& track=scene.tracks[entry.track_id]; unsigned core=0; bool helps=false;
+            for (const auto& obs:track.observations) {
+                if (obs.image_id>=scene.images.size() || !scene.images[obs.image_id].registered) continue;
+                if (audit.reliable[obs.image_id]) ++core;
+                else helps=helps || boundary_counts[obs.image_id]<options.cross_branch_tracks_per_image;
+            }
+            if (core<2 || !helps) continue;
+            ++candidates; select(entry.track_id);
+            for (const auto& obs:track.observations)
+                if (obs.image_id<scene.images.size() && scene.images[obs.image_id].registered && !audit.reliable[obs.image_id])
+                    ++boundary_counts[obs.image_id];
+        }
+        core::Logger::instance().info("positioning boundary quota: core=",audit.reliable_views,
+            " selected=",selected.size()," candidates=",candidates," quota=",options.cross_branch_tracks_per_image);
+    }
 
     // Pass 1: cover as many image-grid cells as possible.
     for (const RankedTrack& entry : ranked) {
@@ -1177,6 +1220,7 @@ GlobalPositioningSummary refine_only_points_bearings(
     std::unique_ptr<ba::CudaBearingOptimizer> cuda_solver;
 #endif
     bool have_gpu_solver = false;
+    const char* selected_backend = "cpu";
     if (want_cuda) {
 #if !defined(PHOTARA_HAS_CUDA)
         if (explicit_cuda) {
@@ -1198,6 +1242,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 prepare_bearing();
                 cuda_solver = std::make_unique<ba::CudaBearingOptimizer>(gpu_problem);
                 have_gpu_solver = true;
+                selected_backend = "cuda";
                 core::Logger::instance().info(
                     "global positioning backend=cuda bearing_schur cameras=",
                     gpu_cameras.size(), " points=", gpu_tracks.size(),
@@ -1231,6 +1276,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 prepare_bearing();
                 vulkan_solver = std::make_unique<ba::VulkanBearingOptimizer>(gpu_problem);
                 have_gpu_solver = true;
+                selected_backend = "vulkan";
                 core::Logger::instance().info(
                     "global positioning backend=vulkan bearing_schur cameras=",
                     gpu_cameras.size(), " points=", gpu_tracks.size(),
@@ -1242,6 +1288,16 @@ GlobalPositioningSummary refine_only_points_bearings(
         }
 #endif
     }
+
+    core::Logger::instance().info(
+        "sfm backend selection: stage=positioning requested=",
+        automatic ? "automatic" : explicit_cuda ? "cuda" : explicit_vulkan ? "vulkan" : "cpu",
+        " selected=", selected_backend,
+        " reason=", have_gpu_solver ? "gpu_supported" :
+            options.backend == PositioningBackend::cpu ? "requested_cpu" :
+            observations < 50000 ? "below_observation_threshold" :
+            scene.registered_count() > 2000 ? "above_camera_limit" : "gpu_unavailable_or_initialization_failed",
+        " observations=", observations, " cameras=", scene.registered_count());
 
     core::Logger::instance().info(
         "global positioning attempt: only_points/bearing_schur",
@@ -1303,6 +1359,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 std::vector<double> weights;
                 weights.reserve(losses.size());
                 for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "vulkan");
                 const auto step = vulkan_solver->solve(
                     weights, static_cast<unsigned>(solver_options.max_num_iterations),
                     options.function_tolerance, solver_options.max_solver_time_in_seconds);
@@ -1326,6 +1383,7 @@ GlobalPositioningSummary refine_only_points_bearings(
                 std::vector<double> weights;
                 weights.reserve(losses.size());
                 for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cuda");
                 const auto step = cuda_solver->solve(
                     weights, static_cast<unsigned>(solver_options.max_num_iterations),
                     options.function_tolerance, solver_options.max_solver_time_in_seconds);
@@ -1344,6 +1402,7 @@ GlobalPositioningSummary refine_only_points_bearings(
         }
 #endif
         if (!solved_on_gpu) {
+            core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cpu");
             ceres::Solve(solver_options, &problem, &pass_summary);
             log_cpu_positioning_pass("only_points/bearing_schur", pass, solver_options, pass_summary);
         }
@@ -1484,6 +1543,13 @@ bool attempt_positioning(
     if (built.problem.NumResidualBlocks() == 0) return false;
 
     core::Logger::instance().info(
+        "sfm backend selection: stage=positioning requested=",
+        options.backend == PositioningBackend::automatic ? "automatic" :
+        options.backend == PositioningBackend::cuda ? "cuda" :
+        options.backend == PositioningBackend::vulkan ? "vulkan" : "cpu",
+        " selected=cpu reason=cpu_only_attempt attempt=", attempt.label);
+
+    core::Logger::instance().info(
         "global positioning attempt: ", attempt.label,
         " residuals=", built.problem.NumResidualBlocks(),
         " pairs=", built.valid_pairs,
@@ -1554,7 +1620,10 @@ bool attempt_positioning(
                 options.irls_inner_iterations, options.max_num_iterations)));
 
         ceres::Solver::Summary pass_summary;
-        ceres::Solve(solver_options, &built.problem, &pass_summary);
+        {
+            core::StageScope solve_stage("sfm.positioning_solve", core::LogLevel::info, "cpu");
+            ceres::Solve(solver_options, &built.problem, &pass_summary);
+        }
         log_cpu_positioning_pass(attempt.label, pass, solver_options, pass_summary);
         total_solve_seconds += pass_summary.total_time_in_seconds;
         result.iterations +=
@@ -2001,6 +2070,7 @@ GlobalPositioningSummary solve_global_positions(
 
     const std::vector<Index> selected_tracks =
         select_tracks_for_positioning(scene, options);
+    if (options.selection_callback) options.selection_callback(scene, selected_tracks);
     core::Logger::instance().info(
         "global positioning setup: images=", scene.registered_count(),
         " pairs=", scene.pairs.size(),

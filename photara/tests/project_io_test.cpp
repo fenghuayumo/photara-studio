@@ -28,6 +28,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.pop_back();  // v14 optional camera-refinement flag.
     bytes.resize(bytes.size() - sizeof(std::uint8_t) - 2 * sizeof(std::int32_t) -
         2 * sizeof(std::uint64_t) - 2 * sizeof(float));
     const std::uint32_t version = 12;
@@ -298,7 +299,20 @@ int main() {
     settings.speedy_pruning = true;
     settings.sh_degree = 2;
     settings.sfm_mode = 2;
+    expect(!settings.refine_weak_cameras, "weak-camera refinement defaults off");
+    settings.refine_weak_cameras = true;
     settings.max_features = 4096;
+    {
+        const auto encoded = encode_settings(settings, ascan_path);
+        expect(decode_settings(encoded, ascan_path).refine_weak_cameras,
+            "weak-camera refinement setting survives project save/load");
+        auto legacy = encoded;
+        const std::uint32_t version = 13;
+        std::memcpy(legacy.data(), &version, sizeof(version));
+        legacy.pop_back();
+        expect(!decode_settings(legacy, ascan_path).refine_weak_cameras,
+            "older projects load with optional weak-camera refinement disabled");
+    }
     settings.build_mesh = true;
     settings.mesh_quality = 2;
     settings.mesh_postprocess_quality = 0;

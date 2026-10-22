@@ -38,7 +38,7 @@ translation of the same algorithms the default path runs on CUDA. The default
 UBC descriptors). It does not link an external SiftGPU library. Matching stays
 on photara's CUDA mutual-ratio matcher (32x32 descriptor dot-product tiles,
 angular distance `acos(dot / 262144) < 0.7`, ratio test, mutual check).
-Parameters map one-to-one (`--max-features`, `--sift-contrast-threshold`,
+Parameters map one-to-one (`--max-features`, `--sift-contrast`,
 `--match-ratio`, `--no-mutual-check`).
 
 When CUDA is unavailable but a Vulkan compute device is available, the
@@ -51,65 +51,107 @@ accepted matches can differ only at `acos` rounding boundaries. On the pairs
 measured by `photara_vulkan_features_parity` it returns *identical* match sets
 to the native CUDA matcher.
 
-The Vulkan extractor reproduces the SiftGPU CUDA pipeline step for step: the
-same Gaussian pyramid (2x bilinear upsampling, truncated-width input rows,
-separably filtered levels), the same DoG extrema test with the partial-pivot
-sub-pixel solve, the same histogram-pyramid keypoint compaction, the same
-multi-orientation split and UBC/RootSIFT descriptors. On identical inputs the
-two backends return the same feature counts and the same keypoint positions
-(1 px / 2% scale agreement is 97-100% with a mean offset of ~0.0002 px; the
-`photara.features.vulkan` test asserts count parity plus 80%+ position
-agreement, and `photara_vulkan_features_parity` prints the full comparison).
+### Current SIFT implementation and parity
 
-End-to-end agreement was checked on a 72-frame 1080x1920 scan video
-(`photara --images ... --max-features 12000 --window 3 --export-colmap ...`).
-The default CUDA pair and `vulkan_sift` × `vulkan_mutual_ratio` both register
-72/72 images with 100% of the reconstructed points in front of their cameras,
-and after a similarity alignment their camera centres agree with the CUDA
-baseline to 0.007-0.062% of the trajectory extent with rotations within
-0.05 degrees (the residual is the usual SIFT feature jitter, not a systematic
-difference).
+The native CUDA engine (`src/features/sift_cuda.cu`) and Vulkan extractor
+(`src/features/vulkan/sift_vk.cpp` and its shaders) implement the same Gaussian
+pyramid, DoG extrema tests, partial-pivot sub-pixel solve, multi-orientation
+split, and UBC/RootSIFT descriptors. Default options agree, including
+`peak_threshold=0.005`, `edge_threshold=20`, `first_octave=-1`, three octave
+layers, two orientations, and RootSIFT enabled. Floating-point evaluation
+across CUDA and SPIR-V need not be bit-identical.
 
-Two Vulkan-side defects surfaced on that run and are fixed here:
+Keypoint collection differs: CUDA compacts detections with an atomic counter,
+downloads them, sorts by integer y/x coordinates on the CPU, and uploads the
+sorted list. Vulkan uses histogram-pyramid compaction. Both apply the same
+scale-level feature-budget selection. One API edge case remains different:
+Vulkan accepts `maximum_orientations=0` for upright descriptors, whereas the
+CUDA constructor rejects zero; the shared default of two is unaffected.
 
-- descriptor sets came from one 1024-set pool shared by every worker, so
-  parallel extraction, which records a few hundred dispatches per image,
-  exhausted it. Each recording session now owns growable pools that are reset
-  between submissions;
-- parallel extraction of 1080x1920 frames (one worker per thread, each holding
-  ~600 MB of pyramid buffers) failed with `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
-  Extractions now reserve their estimated bytes against a device-memory budget
-  before allocating, and the matcher's descriptor mirror grows on demand instead
-  of reserving its whole 768 MB budget per clone.
+The textured-image fixture in `tests/vulkan_features_test.cpp` currently
+requires equal feature counts and descriptor sizes, at least 99% indexed
+keypoint agreement within 0.01 pixels per coordinate and 2% relative scale,
+and mean descriptor cosine similarity of at least 0.999. It also requires
+two CUDA extractions of that fixture to reproduce keypoints and descriptors
+exactly. These are fixture-specific test requirements, not guarantees for
+every image or GPU. `photara_vulkan_features_parity` reports comparisons on
+synthetic inputs or an image directory.
 
-The CUDA path is deliberately left as it was: the baseline `siftgpu` ×
-`gpu_mutual_ratio` behaviour is the reference these numbers are compared
-against, and the measurements below show nothing on the CUDA side that the
-dataset justifies changing.
+Both current backends explicitly return zero for out-of-range linear reads
+in the 2x upsampling pass. Reports of undefined border reads and nondeterminism
+in the former external SiftGPU implementation do not describe the current
+native CUDA engine. Both retain input-width truncation to a multiple of four
+for ordinary images, so up to three trailing columns do not contribute.
 
-Performance on that dataset: extraction is 2x faster on Vulkan (1.16 s vs
-2.30 s) because whole images are extracted in parallel, while matching is much
-faster on CUDA (1.34 s vs 42.6 s for 1978 pairs) because the native matcher uses
-int8 tensor cores while the Vulkan shader evaluates byte dot products scalar.
-That dot product is the remaining gap for large feature counts; small feature
-counts are dominated by host round trips instead, where the two are within a
-factor of two (`photara_vulkan_features_parity` reports both). Everything else
-on the CUDA side is untouched: reverting the intermediate experiment reproduces
-the baseline frontend statistics exactly (features 880167, raw matches 291303,
-tracks 83917, 72/72 registered, reprojection 0.413002 px).
+### Memory optimizations and performance evidence
 
-Two caveats:
+The CUDA extractor uses shared-memory separable Gaussian filtering, reusable
+device allocations, two rolling Gaussian buffers and three rolling DoG buffers.
+For descriptor generation it rebuilds the pyramid rather than retaining all
+level gradients, and reuses inactive DoG buffers for gradient magnitude and
+orientation. This trades recomputation for lower peak device memory.
 
-- SiftGPU's upsampling pass indexes slightly past its own textures, so its
-  pyramid border reads undefined memory and its output is *not* run-to-run
-  reproducible: on one real photo pair `photara --images` reported 7877-8296
-  features and 317-489 raw matches across three runs, while the Vulkan backend
-  reported the same 8526 features / 616 matches / 594 inliers every time. The
-  Vulkan translation returns the zero that tex1Dfetch documents for those
-  reads, matches the CUDA result on reproducible inputs, and is deterministic.
-- SiftGPU truncates the input width to a multiple of four before building the
-  pyramid (`TruncateWidthCU`); the Vulkan backend does the same, so up to three
-  trailing columns never contribute.
+Optimization commit `f814881` records a Gingy extractor VRAM delta reduction
+from 1736 MiB to 1368 MiB, 65.5% below the original native implementation's
+3962 MiB. The commit records bit-identical keypoints and quantized descriptors,
+deterministic extraction on Gingy and ori_img, CUDA/Vulkan parity checks, and
+a full Gingy SfM validation. These are historical validation results for that
+commit and dataset, not a new benchmark of the current checkout.
+
+Vulkan now uses three rolling Gaussian and three rolling DoG buffers, one
+keypoint image and one gradient image. It downloads compact oriented keypoints
+and rebuilds Gaussian levels for descriptors, preserving the shader math and
+feature selection order. Extractor clones share a serialized, reusable GPU
+workspace; CPU image decoding can still run across workers. Matching releases
+that workspace and uses a shared descriptor cache across matcher clones.
+Idle device/staging buffer pools are bounded at 256/128 MiB and two buffers
+per size bucket. Host-visible allocations prefer non-device-local memory.
+Large feature allocations use 16 MiB size classes instead of power-of-two
+rounding. Clearing prepared matching state releases the descriptor mirror as
+well as scratch, so later extraction/BA phases do not retain an invalid cache.
+See the [memory budget follow-up](SFM_VULKAN_MEMORY_BUDGET.md) for validation.
+
+Current CUDA extraction still includes per-level host sorting, transfers and
+synchronization. The frontend uses a thread-affine CUDA coordinator; Vulkan
+uses the shared workspace and batches matching through the GPU coordinator.
+Single-image latency and multi-image throughput therefore need separate
+measurements. CUDA matcher's tensor-core acceleration concerns matching, not
+SIFT extraction.
+
+An earlier 72-frame scan experiment recorded extraction at 1.16 s on Vulkan
+and 2.30 s on the then-current CUDA path, with matching at 42.6 s and 1.34 s
+respectively for 1978 pairs. It predates the native CUDA replacement
+(`4db48d1`) and subsequent memory optimization. Those timings do not rank the
+current backends, and the old scalar-only Vulkan matcher description is no
+longer current.
+
+The [2026-10-21 indoor dataset comparison](SFM_CUDA_VULKAN_IPHONE_COMPARISON.md)
+records the full pipeline before the Vulkan memory changes on 739 images, with Blender paused
+and both configurations limited to four frontend workers. CUDA extraction took
+26.284 s versus 29.359 s on Vulkan; complete SfM took 343.746 s versus
+425.810 s. Vulkan scored better on the common held-out reference observations
+(mean 1.661 px versus 2.694 px). These are single-run, dataset-specific results;
+they do not isolate SIFT's contribution to the final quality difference.
+The [Vulkan memory optimization record](SFM_VULKAN_MEMORY_OPTIMIZATION.md)
+tracks the subsequent implementation and validation separately.
+The [matcher allocation follow-up](SFM_VULKAN_PERFORMANCE_OPTIMIZATION.md)
+records scratch reuse, cache growth/eviction checks and separate matcher versus
+full-dataset performance results.
+
+To measure the current checkout, build the tools and run, for example:
+
+```powershell
+photara_vulkan_features_parity IMAGE_DIRECTORY
+photara_cuda_sift_benchmark IMAGE_DIRECTORY 2 27000
+```
+
+The parity harness feeds both backends the same decoded pixels and reports
+extraction separately from matching. The CUDA benchmark checks repeated
+extraction and reports timing and device-memory usage. Keep image dimensions,
+feature budgets, hardware and build configuration consistent, and separately
+measure frontend worker scheduling for batch-throughput comparisons. Debug
+logs expose CUDA wait, transfer and CPU sorting times; trace logs add per-level
+timings. Documentation corrections alone do not rerun these benchmarks.
 
 ## SfM valid-region masks
 

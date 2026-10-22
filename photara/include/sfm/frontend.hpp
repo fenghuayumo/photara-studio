@@ -7,12 +7,15 @@
 #include "sfm/scene.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace photara::sfm {
 
 class AlignLivePreview;
+struct MissingViewRecoveryCache;
+std::shared_ptr<MissingViewRecoveryCache> make_missing_view_recovery_cache();
 
 struct FrontEndOptions {
     CameraModel camera_model{CameraModel::automatic};
@@ -67,9 +70,6 @@ struct FrontEndOptions {
     // preserves the fast path for well-connected views while recovering
     // difficult viewpoints without paying for an unconditional all-pairs run.
     bool progressive_pair_expansion{true};
-    // Experimental: extra graph connectivity has not yet demonstrated correct
-    // branch coordinates on Alameda. Keep disabled in the default pipeline.
-    bool structural_pair_expansion{false};
     unsigned progressive_min_verified_degree{4};
     float progressive_rescue_match_ratio{0.85F};
     unsigned progressive_rescue_min_inliers{20};
@@ -82,9 +82,20 @@ struct FrontEndOptions {
     // Re-detect only weak views at this larger budget. Existing descriptors
     // remain first so cached primary-match feature indices stay valid.
     unsigned progressive_rescue_max_features{54000};
+    // Post-refinement resection may add overlap neighbors of its original anchors.
+    // Zero disables the retry; earlier product recovery keeps its 16-view budget.
+    unsigned missing_view_retry_max_neighbors{24};
+    // Copies share bounded recovery work across targets and rounds.
+    // This internal context never stores final pose acceptance.
+    std::shared_ptr<MissingViewRecoveryCache> missing_view_cache{make_missing_view_recovery_cache()};
+    // Additional consensus floor, used by conservative post-refinement recovery.
+    double missing_view_minimum_consensus_ratio{0};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};
+    // Optional stage-level feature/pair CSVs for diagnosing cold frontend runs.
+    // Does not affect feature, correspondence or geometry selection.
+    std::filesystem::path diagnostics_directory;
     // Editor sidecar. Null when running from the CLI without --working-sfm.
     AlignLivePreview* live_preview{};
 };
@@ -112,7 +123,17 @@ FrontEndResult run_frontend(
 // Mix verified visual neighbors with temporal neighbors at a fixed total budget.
 std::vector<Index> select_missing_view_anchors(
     const Scene& scene, Index target, unsigned maximum_neighbors = 16);
-unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {});
+std::vector<Index> select_missing_view_support_anchors(
+    const Scene& scene, Index target, unsigned maximum_neighbors = 24);
+// A non-empty target list limits both normal and low-contrast attempts.
+unsigned recover_missing_views(Scene& scene, const FrontEndOptions& options = {},
+    const std::vector<Index>& target_ids = {}, bool require_pose_improvement = false);
+// Revisit missing views after pose refinement without moving existing geometry.
+// Requires at least half-consensus for both fitting and held-out observations.
+unsigned recover_post_refinement_views(Scene& scene, const FrontEndOptions& options = {});
+// Conservative registered-camera repair. Failure leaves the input scene intact.
+std::vector<Index> select_weak_alignment_views(const Scene& scene);
+unsigned refine_weak_alignment_views(Scene& scene, const FrontEndOptions& options = {});
 // Bounded, independently validated re-localization of weak scale-breaking leaves
 // together with missing views. Other registered poses and intrinsics stay fixed.
 std::vector<Index> select_weak_position_repairs(const Scene& scene);

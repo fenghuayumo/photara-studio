@@ -423,6 +423,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.camera_model = app.settings.camera_model;
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
+    settings.refine_weak_cameras = app.settings.refine_weak_cameras;
     settings.max_features = static_cast<unsigned>(
         std::max(0, app.settings.max_features));
     settings.scene_mode = app.settings.scene_mode;
@@ -516,6 +517,7 @@ void apply_project_settings(
     app.settings.camera_model = settings.camera_model;
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
+    app.settings.refine_weak_cameras = settings.refine_weak_cameras;
     app.settings.max_features = static_cast<int>(settings.max_features);
     app.settings.scene_mode = settings.scene_mode;
     app.settings.focus_region = settings.focus_region;
@@ -1171,8 +1173,8 @@ void load_editor_preferences(App& app) {
             const int choice = preference_choice(value, tokens, 2);
             if (choice >= 0) app.settings.training_backend = choice;
         } else if (key == "alignment") {
-            static const char* tokens[] = {"automatic", "cpu", "cuda"};
-            const int choice = preference_choice(value, tokens, 3);
+            static const char* tokens[] = {"automatic", "cpu", "cuda", "vulkan"};
+            const int choice = preference_choice(value, tokens, 4);
             if (choice >= 0) app.settings.alignment_backend = choice;
         } else if (key == "sam") {
             static const char* tokens[] = {"auto", "cuda", "vulkan"};
@@ -1200,7 +1202,8 @@ void store_editor_preferences(const App& app) {
     const char* training = app.settings.training_backend == 1 ? "vulkan" : "cuda";
     const char* alignment = app.settings.alignment_backend == 1
         ? "cpu"
-        : app.settings.alignment_backend == 2 ? "cuda" : "automatic";
+        : app.settings.alignment_backend == 2 ? "cuda"
+        : app.settings.alignment_backend == 3 ? "vulkan" : "automatic";
     const char* sam = app.settings.sam_backend == 1
         ? "cuda"
         : app.settings.sam_backend == 2 ? "vulkan" : "auto";
@@ -2325,7 +2328,7 @@ void poll_splat_export(App& app) {
         state.error.clear();
         set_message(app, "Exported splat assets: " + path_to_utf8(state.output), theme::success);
     } catch (const std::exception& error) {
-        state.error = error.what();
+        state.error = tr(error.what());
         set_message(app, state.error, theme::danger);
     }
     state.cancel.reset();
