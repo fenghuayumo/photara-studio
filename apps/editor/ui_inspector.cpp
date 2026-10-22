@@ -324,6 +324,202 @@ const char* inspector_description(const InspectorSection section) {
         default: return "Select a reconstruction step in the scene panel.";
     }
 }
+// Labels in the alignment form need more contrast than secondary captions.
+void alignment_label(const char* label) {
+    ImGui::TextColored(theme::text_muted, "%s", tr(label));
+}
+
+void alignment_method_combo(const char* id, std::string& value,
+    const char* const* labels, const char* const* tokens, const int count,
+    const int experimental_begin) {
+    int selected = -1;
+    for (int i = 0; i < count; ++i)
+        if (value == tokens[i]) selected = i;
+    std::string preview = selected >= 0 ? tr(labels[selected]) : value;
+    if (selected < 0 || selected >= experimental_begin)
+        preview += std::string(" · ") + tr("Unavailable");
+    ImGui::SetNextItemWidth(-1.F);
+    if (ImGui::BeginCombo(id, preview.c_str())) {
+        for (int i = 0; i < count; ++i) {
+            const bool available = i < experimental_begin;
+            std::string label = tr(labels[i]);
+            if (!available) label += std::string(" · ") + tr("Not ready");
+            ImGui::BeginDisabled(!available);
+            if (ImGui::Selectable(label.c_str(), selected == i)) value = tokens[i];
+            ImGui::EndDisabled();
+            if (!available && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 23.F);
+                ImGui::TextUnformatted(tr(
+                    "Experimental support is incomplete. This option is temporarily unavailable."));
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+            }
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void draw_alignment_configuration(App& app) {
+    auto& settings = app.settings;
+    alignment_label("Capture type");
+    const float half_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5F;
+    if (theme::toolbar_button(tr("Unordered photos"), {half_width, 30.F}, true,
+            settings.alignment_capture_type == 0))
+        settings.alignment_capture_type = 0;
+    ImGui::SameLine();
+    if (theme::toolbar_button(tr("Video sequence"), {half_width, 30.F}, true,
+            settings.alignment_capture_type == 1))
+        settings.alignment_capture_type = 1;
+    if (settings.alignment_capture_type == 1) {
+        if (ImGui::Button(tr("Import frames..."), {half_width, 26.F})) select_image_folder(app);
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Import video..."), {half_width, 26.F})) select_video_file(app);
+    } else if (ImGui::Button(tr("Import photos..."), {-1.F, 26.F})) {
+        select_image_folder(app);
+    }
+    if (settings.images_dir[0] != '\0') {
+        const auto source = path_from_utf8_field(settings.images_dir.data());
+        const auto filename = path_to_utf8(source.filename());
+        ImGui::TextWrapped("%s", filename.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", settings.images_dir.data());
+    } else {
+        alignment_label("No source selected");
+    }
+    ImGui::Spacing();
+    alignment_label("Alignment quality");
+    const char* qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
+    const int quality = std::clamp(settings.alignment_quality, 0, 2);
+    const int expected_features[] = {12'000, 27'000, 54'000};
+    const int expected_overlap[] = {3, 6, 10};
+    const bool customized = settings.max_features != expected_features[quality] ||
+        settings.sequential_overlap != expected_overlap[quality] ||
+        !settings.retrieval_augmentation || settings.refine_weak_cameras != (quality == 2);
+    std::string preview = qualities[quality];
+    if (customized) preview += std::string(" · ") + tr("Customized");
+    ImGui::SetNextItemWidth(-1.F);
+    if (ImGui::BeginCombo("##alignment_quality", preview.c_str())) {
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::Selectable(qualities[i], quality == i)) apply_alignment_quality_preset(settings, i);
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", tr("Quality sets the feature and matching budgets. Advanced settings allow overrides."));
+    ImGui::Spacing();
+    if (!ImGui::TreeNodeEx(tr("Advanced alignment settings"), ImGuiTreeNodeFlags_SpanAvailWidth)) return;
+
+    if (ImGui::CollapsingHeader(tr("Cameras and lenses"))) {
+        alignment_label("Camera sharing");
+        const char* sharing[] = {tr("Per folder"), tr("All images"), tr("Each image")};
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::Combo("##camera_sharing", &settings.camera_sharing, sharing, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Per folder groups images by folder and EXIF lens identity. All images shares intrinsics globally. Each image estimates its own intrinsics."));
+        alignment_label("Camera model");
+        const char* models[] = {tr("Auto"), tr("Pinhole"), tr("OpenCV Fisheye"), tr("Equirectangular 360")};
+        const int model_values[] = {2, 0, 1, 3};
+        int model = 0;
+        for (int i = 0; i < 4; ++i) if (settings.camera_model == model_values[i]) model = i;
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::Combo("##camera_model", &model, models, 4)) settings.camera_model = model_values[model];
+        theme::metric("Focal initialization", settings.initial_focal_pixels > 0.0 ? tr("Manual") : tr("Automatic"));
+        if (ImGui::TreeNodeEx(tr("Manual camera calibration"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            ImGui::TextWrapped("%s", tr("Leave focal length automatic unless you have camera calibration data."));
+            alignment_label("Initial focal length (pixels, 0 = automatic)");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputDouble("##initial_focal", &settings.initial_focal_pixels, 10.0, 100.0, "%.1f"))
+                settings.initial_focal_pixels = std::max(0.0, settings.initial_focal_pixels);
+            ImGui::BeginDisabled(settings.initial_focal_pixels <= 0.0);
+            ImGui::Checkbox(tr("Lock calibrated focal length"), &settings.trust_initial_focal);
+            ImGui::EndDisabled();
+            if (settings.initial_focal_pixels <= 0.0) settings.trust_initial_focal = false;
+            if (settings.initial_focal_pixels > 0.0 && ImGui::Button(tr("Use automatic focal length"))) {
+                settings.initial_focal_pixels = 0.0;
+                settings.trust_initial_focal = false;
+            }
+            ImGui::TreePop();
+        }
+    }
+    if (ImGui::CollapsingHeader(tr("Pairing and features"))) {
+        alignment_label("Image matching");
+        const char* strategies[] = {tr("Automatic"), tr("Sequential"), tr("Exhaustive")};
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::Combo("##matching_strategy", &settings.matching_strategy, strategies, 3);
+        if (alignment_uses_sequential_pairs(settings)) {
+            alignment_label("Sequential overlap");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderInt("##sequential_overlap", &settings.sequential_overlap, 1, 20);
+        }
+        if (settings.matching_strategy != 2) {
+            ImGui::Checkbox(tr("Add image retrieval pairs"), &settings.retrieval_augmentation);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Retrieval adds likely distant-view and loop-closure pairs."));
+            if (!settings.retrieval_augmentation && !alignment_uses_sequential_pairs(settings))
+                ImGui::TextWrapped("%s", tr("With retrieval disabled, unordered photos use exhaustive matching."));
+        }
+        ImGui::Spacing();
+        alignment_label("Feature extractor");
+        const bool supported_extractor = settings.feature_extractor == "siftgpu" ||
+            settings.feature_extractor == "vulkan_sift" || settings.feature_extractor == "sift";
+        const char* extractors[] = {"SIFT", "SuperPoint", "DISK", "ALIKED"};
+        const char* extractor_tokens[] = {"siftgpu", "superpoint", "disk", "aliked"};
+        std::string extractor_algorithm = supported_extractor ? "siftgpu" : settings.feature_extractor;
+        const auto previous_extractor = extractor_algorithm;
+        alignment_method_combo("##feature_extractor", extractor_algorithm, extractors, extractor_tokens, 4, 1);
+        if (extractor_algorithm != previous_extractor) settings.feature_extractor = extractor_algorithm;
+        alignment_label("Max features per image");
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::InputInt("##max_features", &settings.max_features, 1000, 5000))
+            settings.max_features = std::max(1, settings.max_features);
+        alignment_label("Matcher");
+        const bool supported_matcher = settings.feature_matcher == "gpu_mutual_ratio" ||
+            settings.feature_matcher == "vulkan_mutual_ratio" || settings.feature_matcher == "mutual_ratio";
+        const char* matchers[] = {"Brute force", "LightGlue", "Hybrid LightGlue"};
+        const char* matcher_tokens[] = {"gpu_mutual_ratio", "lightglue", "hybrid_lightglue"};
+        std::string matcher_algorithm = supported_matcher ? "gpu_mutual_ratio" : settings.feature_matcher;
+        const auto previous_matcher = matcher_algorithm;
+        alignment_method_combo("##feature_matcher", matcher_algorithm, matchers, matcher_tokens, 3, 1);
+        if (matcher_algorithm != previous_matcher) settings.feature_matcher = matcher_algorithm;
+        if (!supported_extractor || !supported_matcher) {
+            ImGui::TextWrapped("%s", tr("This project uses an unavailable experimental method. Select a SIFT method to continue."));
+            if (ImGui::Button(tr("Use SIFT defaults"), {-1.F, 0.F})) {
+                settings.feature_extractor = "siftgpu";
+                settings.feature_matcher = "gpu_mutual_ratio";
+            }
+        }
+#if defined(PHOTARA_HAS_SAM)
+        if (settings.sam_masks) {
+            ImGui::Spacing();
+            ImGui::BeginDisabled(has_external_dataset(app));
+            ImGui::Checkbox(tr("Use SAM3 masks for alignment"), &settings.sam_use_mask_for_sfm);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr("Off (recommended): align using the full image, including background features.\n"
+                    "On: ignore features outside the first-pass SAM3 masks.\n"
+                    "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
+                    "Applies to the next alignment. 3DGS training and mask refinement are unchanged."));
+            ImGui::EndDisabled();
+        }
+#endif
+    }
+    if (ImGui::CollapsingHeader(tr("Solver and cache"))) {
+        alignment_label("Solver type");
+        const char* solvers[] = {tr("Global"), tr("Hierarchical")};
+        int solver = settings.sfm_mode == 2 ? 1 : 0;
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::Combo("##sfm_mode", &solver, solvers, 2)) settings.sfm_mode = solver == 1 ? 2 : 0;
+        ImGui::Checkbox(tr("Refine weak cameras"), &settings.refine_weak_cameras);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Spend extra time refining weak registered cameras. Keeps the original pose when independent checks do not improve."));
+        ImGui::Checkbox(tr("Reuse cached alignment"), &settings.reuse_cache);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Reuse compatible alignment stages from the project cache.\n"
+                "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
+                "Off by default for new projects. Off recomputes alignment;\n"
+                "working cameras remain available for training and preview."));
+        draw_cache_folder_link(app);
+    }
+    ImGui::TreePop();
+}
 }  // namespace
 
 Action draw_inspector(App& app) {
@@ -406,6 +602,9 @@ Action draw_inspector(App& app) {
                     ImGui::SetTooltip("%s", located.c_str());
                 }
             }
+            if (ImGui::TreeNodeEx(
+                    tr("Video extraction settings"),
+                    ImGuiTreeNodeFlags_SpanAvailWidth)) {
             theme::caption("Target FPS");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputFloat("##video_fps", &app.settings.video_fps, 0.5F, 1.F, "%.2f");
@@ -454,6 +653,8 @@ Action draw_inspector(App& app) {
                         L"Select extracted frames folder",
                         app.settings.video_frames_dir);
                 }
+                ImGui::TreePop();
+            }
                 ImGui::TreePop();
             }
         }
@@ -614,81 +815,8 @@ Action draw_inspector(App& app) {
     if (section == InspectorSection::alignment) {
         ImGui::Spacing();
         ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
-        theme::caption("Solver");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* modes[] = {tr("Global"), tr("Hierarchical")};
-        // Keep the existing project value for Hierarchical (2).
-        int mode_choice = app.settings.sfm_mode == 2 ? 1 : 0;
-        if (ImGui::Combo("##sfm_mode", &mode_choice, modes, 2))
-            app.settings.sfm_mode = mode_choice == 1 ? 2 : 0;
-        theme::caption("Camera model");
-        ImGui::SetNextItemWidth(-1.F);
-        // Choice order is Auto / Pinhole / Fisheye / Panorama; the stored value
-        // mirrors photara::CameraModel (2 = automatic, 3 = equirectangular).
-        const char* camera_models[] = {
-            tr("Auto"), tr("Pinhole"), tr("OpenCV Fisheye"),
-            tr("Equirectangular 360")};
-        const int choice_to_model[] = {2, 0, 1, 3};
-        int camera_choice = 0;
-        for (int index = 0; index < 4; ++index)
-            if (choice_to_model[index] == app.settings.camera_model)
-                camera_choice = index;
-        if (ImGui::Combo("##camera_model", &camera_choice, camera_models, 4))
-            app.settings.camera_model = choice_to_model[camera_choice];
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Auto compares matched image geometry and EXIF lens hints.\n"
-                              "Ambiguous results use Pinhole. You can override the model.\n"
-                              "Equirectangular 360 aligns full-sphere panoramas natively:\n"
-                              "the model is only auto-detected for 2:1 image sizes.");
-        std::string result_model;
-        for (const auto& view : app.scene.views) {
-            if (!view.registered) continue;
-            if (result_model.empty()) result_model = view.camera_model;
-            else if (result_model != view.camera_model) { result_model = "Mixed"; break; }
-        }
-        theme::metric("Result camera", result_model.empty() ? "Pending alignment" : result_model.c_str());
-        theme::caption("Max features per image");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::InputInt("##max_features", &app.settings.max_features, 1000, 5000);
-#if defined(PHOTARA_HAS_SAM)
-        if (app.settings.sam_masks) {
-            ImGui::Spacing();
-            theme::caption(tr("Alignment masks"));
-            ImGui::BeginDisabled(has_external_dataset(app));
-            ImGui::Checkbox(
-                tr("Use SAM3 masks for alignment"),
-                &app.settings.sam_use_mask_for_sfm);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("%s", tr(
-                    "Off (recommended): align using the full image, including background features.\n"
-                    "On: ignore features outside the first-pass SAM3 masks.\n"
-                    "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
-                    "Applies to the next alignment. 3DGS training and mask refinement are unchanged."));
-            ImGui::EndDisabled();
-            ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
-            ImGui::TextWrapped("%s", tr(
-                has_external_dataset(app)
-                    ? "Imported cameras are used directly; alignment masks do not apply."
-                    : app.settings.sam_use_mask_for_sfm
-                        ? "Only masked regions contribute features. Small or incomplete masks may weaken alignment."
-                        : "Recommended: full-image features improve camera alignment. Masks remain enabled for training."));
-            ImGui::PopStyleColor();
-            ImGui::Spacing();
-        }
-#endif
-        ImGui::Checkbox(tr("Refine weak cameras"), &app.settings.refine_weak_cameras);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Spend extra time refining weak registered cameras. Keeps the original pose when independent checks do not improve."));
-        ImGui::Checkbox(tr("Reuse cached alignment"), &app.settings.reuse_cache);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "%s",
-                tr("Reuse compatible alignment stages from the project cache.\n"
-                   "Changed images, parameters, or algorithm versions invalidate affected stages.\n"
-                   "Off by default for new projects. Off recomputes alignment;\n"
-                   "working cameras remain available for training and preview."));
+        draw_alignment_configuration(app);
         ImGui::EndDisabled();
-        draw_cache_folder_link(app);
 
         if (theme::toolbar_button(
                 "Export SfM Alignment", {-1.F, 28.F},

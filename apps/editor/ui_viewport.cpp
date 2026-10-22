@@ -972,7 +972,8 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         draw, min, max, app.scene, app.camera, draw_options, hovered,
         app.photos.ids(), app.photos.size(),
         app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr,
-        &app.reconstruction_box);
+        &app.reconstruction_box,
+        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
 
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
@@ -1221,7 +1222,8 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     ensure_reconstruction_box(app);
     const SceneDrawStats overlay_stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, overlay, hovered,
-        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box);
+        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box,
+        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
 
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
@@ -1345,7 +1347,8 @@ splat_render::Camera preview_camera_from(const SplatPreviewCamera& preview) {
     camera.k4 = preview.k4;
     camera.width = preview.width;
     camera.height = preview.height;
-    camera.model = preview_projection(preview.model);
+    camera.model = preview.orthographic ? splat_render::k_camera_orthographic
+                                       : preview_projection(preview.model);
     return camera;
 }
 

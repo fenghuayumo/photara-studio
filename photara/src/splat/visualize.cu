@@ -131,6 +131,11 @@ __device__ bool project_overlay_pixel(
         return true;
     }
     if (z <= k_near) return false;
+    if (model == 4) {
+        u = fx * x + cx;
+        v = fy * y + cy;
+        return true;
+    }
     u = fx * x / z + cx;
     v = fy * y / z + cy;
     return true;
@@ -257,10 +262,11 @@ __global__ void visualize_rings_kernel(
 
     const float inv_z = 1.F / z;
     const float inv_z2 = inv_z * inv_z;
-    const float jx_x = fx * inv_z;
-    const float jx_z = -fx * x * inv_z2;
-    const float jy_y = fy * inv_z;
-    const float jy_z = -fy * y * inv_z2;
+    const bool orthographic = model == 4;
+    const float jx_x = fx * (orthographic ? 1.F : inv_z);
+    const float jx_z = orthographic ? 0.F : -fx * x * inv_z2;
+    const float jy_y = fy * (orthographic ? 1.F : inv_z);
+    const float jy_z = orthographic ? 0.F : -fy * y * inv_z2;
     const float p0x = jx_x * cax[0] + jx_z * cax[2];
     const float p0y = jy_y * cax[1] + jy_z * cax[2];
     const float p1x = jx_x * cay[0] + jx_z * cay[2];
@@ -402,7 +408,7 @@ tinytensor::Tensor render_debug_overlay(
             model.means.ptr<float>(), model.sh.ptr<float>(),
             view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
             camera.k3, camera.k4, camera.position[0], camera.position[1],
             camera.position[2], options.point_size_px);
     } else {
@@ -412,7 +418,7 @@ tinytensor::Tensor render_debug_overlay(
             model.sh.ptr<float>(),
             view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
             camera.k3, camera.k4, camera.position[0], camera.position[1],
             camera.position[2], options.scale_modifier, options.ring_scale);
     }

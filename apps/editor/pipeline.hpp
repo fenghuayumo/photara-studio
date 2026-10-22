@@ -257,6 +257,18 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // persisted project setting stay in sync).
     int camera_model = 2;
     int sfm_mode = 0;  // 0 global, 2 hierarchical
+    int alignment_quality = 1; // 0 Fast, 1 Medium, 2 High.
+    int alignment_capture_type = 0; // 0 unordered photos, 1 ordered/video frames.
+    int camera_sharing = 0; // 0 per-folder, 1 all images, 2 each image.
+    int matching_strategy = 0; // 0 automatic, 1 sequential, 2 exhaustive.
+    double initial_focal_pixels = 0.0;
+    bool trust_initial_focal = false;
+    int sequential_overlap = 6;
+    bool retrieval_augmentation = true;
+    std::string feature_extractor{"siftgpu"};
+    std::string feature_matcher{"gpu_mutual_ratio"};
+    std::array<char, 1024> extractor_model{};
+    std::array<char, 1024> lightglue_model{};
     // Recompute alignment by default; cache reuse is an explicit opt-in.
     // Saved projects retain their explicit choice.
     bool reuse_cache = false;
@@ -496,6 +508,31 @@ inline MeshQualityPreset mesh_quality_preset(const int quality) {
     if (quality == 2)
         return {2'000'000, 2'000'000, 15, 48, 16, 0.5F, 1, 4'000'000, "high"};
     return {1'000'000, 1'000'000, 10, 32, 10, 1.F, 4, 2'000'000, "default"};
+}
+
+inline bool alignment_uses_sequential_pairs(const ProjectSettings& settings) {
+    return settings.matching_strategy == 1 ||
+        (settings.matching_strategy == 0 && settings.alignment_capture_type == 1);
+}
+
+inline void apply_alignment_quality_preset(ProjectSettings& settings, const int quality) {
+    settings.alignment_quality = std::clamp(quality, 0, 2);
+    if (settings.alignment_quality == 0) {
+        settings.max_features = 12'000;
+        settings.sequential_overlap = 3;
+        settings.retrieval_augmentation = true;
+        settings.refine_weak_cameras = false;
+    } else if (settings.alignment_quality == 2) {
+        settings.max_features = 54'000;
+        settings.sequential_overlap = 10;
+        settings.retrieval_augmentation = true;
+        settings.refine_weak_cameras = true;
+    } else {
+        settings.max_features = 27'000;
+        settings.sequential_overlap = 6;
+        settings.retrieval_augmentation = true;
+        settings.refine_weak_cameras = false;
+    }
 }
 
 inline bool mesh_from_mvs(const ProjectSettings& settings) {

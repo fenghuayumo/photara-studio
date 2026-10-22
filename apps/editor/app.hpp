@@ -398,6 +398,7 @@ void new_project(App& app);
 void select_image_folder(App& app);
 void select_video_file(App& app);
 void select_project_folder(App& app);
+void open_project_from_path(App& app, const std::filesystem::path& path);
 void save_project(App& app);
 void request_project_save(App& app, bool exit_after_save);
 void poll_project_save(App& app);

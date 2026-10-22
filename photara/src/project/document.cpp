@@ -1,9 +1,11 @@
 #include "project/document.hpp"
 
 #include "io/format_version.hpp"
+#include "io/video_frames.hpp"
 #include "../io/binary_codec.hpp"
 
 #include <stdexcept>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <system_error>
@@ -153,6 +155,18 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.ai_normal_weight);
     writer.value(static_cast<std::int32_t>(settings.ai_prior_tokens));
     writer.value(static_cast<std::uint8_t>(settings.refine_weak_cameras));
+    writer.value(static_cast<std::int32_t>(settings.alignment_quality));
+    writer.value(static_cast<std::int32_t>(settings.camera_sharing));
+    writer.value(static_cast<std::int32_t>(settings.matching_strategy));
+    writer.value(settings.initial_focal_pixels);
+    writer.value(static_cast<std::uint8_t>(settings.trust_initial_focal));
+    writer.value(static_cast<std::uint64_t>(settings.sequential_overlap));
+    writer.value(static_cast<std::uint8_t>(settings.retrieval_augmentation));
+    writer.string(settings.feature_extractor);
+    writer.string(settings.feature_matcher);
+    writer.string(store_path(settings.extractor_model, base));
+    writer.string(store_path(settings.lightglue_model, base));
+    writer.value(static_cast<std::int32_t>(settings.alignment_capture_type));
     return writer.take();
 }
 
@@ -360,6 +374,38 @@ Settings decode_settings(
     }
     if (version >= 14)
         settings.refine_weak_cameras = reader.value<std::uint8_t>() != 0;
+    if (version >= 15) {
+        settings.alignment_quality = reader.value<std::int32_t>();
+        settings.camera_sharing = reader.value<std::int32_t>();
+        settings.matching_strategy = reader.value<std::int32_t>();
+        settings.initial_focal_pixels = reader.value<double>();
+        settings.trust_initial_focal = reader.value<std::uint8_t>() != 0;
+        settings.sequential_overlap = reader.value<std::uint64_t>();
+        settings.retrieval_augmentation = reader.value<std::uint8_t>() != 0;
+        settings.feature_extractor = reader.string();
+        settings.feature_matcher = reader.string();
+        settings.extractor_model = load_path(reader.string(), base);
+        settings.lightglue_model = load_path(reader.string(), base);
+        if (settings.alignment_quality < 0 || settings.alignment_quality > 2)
+            settings.alignment_quality = 1;
+        if (settings.camera_sharing < 0 || settings.camera_sharing > 2)
+            settings.camera_sharing = 0;
+        if (settings.matching_strategy < 0 || settings.matching_strategy > 2)
+            settings.matching_strategy = 0;
+        if (!std::isfinite(settings.initial_focal_pixels) ||
+            settings.initial_focal_pixels < 0.0)
+            settings.initial_focal_pixels = 0.0;
+        settings.sequential_overlap = std::clamp(
+            settings.sequential_overlap, std::size_t{1}, std::size_t{100});
+        if (settings.feature_extractor.empty()) settings.feature_extractor = "siftgpu";
+        if (settings.feature_matcher.empty()) settings.feature_matcher = "gpu_mutual_ratio";
+    }
+    if (version >= 16) {
+        settings.alignment_capture_type = reader.value<std::int32_t>() == 1 ? 1 : 0;
+    } else {
+        // Older projects inferred capture order from the input file type.
+        settings.alignment_capture_type = io::is_video_path(settings.image_directory) ? 1 : 0;
+    }
     settings.sanitize();
     return settings;
 }

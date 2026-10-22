@@ -152,11 +152,11 @@ void draw_view_settings(App& app) {
             app.preview_follow_view = false;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip(tr(
                 "Perspective — standard lens with field of view.\n"
                 "Orthographic — parallel view, no foreshortening.\n"
                 "Fisheye — OpenCV equidistant, same model as training.\n"
-                "Panorama — 360° × 180° spherical view.");
+                "Panorama — 360° × 180° spherical view."));
 
         if (app.camera.projection == EditorProjection::perspective ||
             app.camera.projection == EditorProjection::fisheye) {
@@ -180,8 +180,8 @@ void draw_view_settings(App& app) {
             ImGui::SliderFloat(
                 "##fisheye_k1", &app.camera.fisheye_k1, -0.2F, 0.4F, "%.3f");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "OpenCV fisheye k1. Zero is a pure equidistant lens.");
+                ImGui::SetTooltip(tr(
+                    "OpenCV fisheye k1. Zero is a pure equidistant lens."));
         }
         if (app.camera.projection == EditorProjection::orthographic) {
             theme::caption("View height");
@@ -190,9 +190,13 @@ void draw_view_settings(App& app) {
                 "##ortho_height", &app.camera.ortho_height, 0.05F, 0.01F,
                 1.0e5F, "%.3f");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
+                ImGui::SetTooltip(tr(
                     "World-space height visible in the viewport.\n"
-                    "Scroll the view to zoom.");
+                    "Scroll the view to zoom."));
+            ImGui::PushTextWrapPos(0.F);
+            ImGui::TextDisabled(tr(
+                "Parallel projection: objects keep the same size at every depth."));
+            ImGui::PopTextWrapPos();
         }
         if (app.camera.projection == EditorProjection::panorama)
             theme::caption("Full 360° × 180° spherical view around the camera.");

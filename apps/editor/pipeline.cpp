@@ -248,6 +248,36 @@ void append_alignment_backends(
     if (settings.refine_weak_cameras) command << " --refine-weak-cameras";
 }
 
+void append_frontend_flags(
+    std::ostringstream& command, const ProjectSettings& settings) {
+    const char* sharing = settings.camera_sharing == 1 ? "all"
+        : settings.camera_sharing == 2 ? "image" : "folder";
+    const int window = alignment_uses_sequential_pairs(settings)
+        ? std::clamp(settings.sequential_overlap, 1, 100) : 0;
+    const bool retrieval = settings.matching_strategy != 2 &&
+        settings.retrieval_augmentation;
+    // The project selects algorithms; the machine's alignment backend selects
+    // their implementations, including legacy projects with hardware tokens.
+    const std::string backend = alignment_backend_flag(settings);
+    std::string extractor = settings.feature_extractor;
+    std::string matcher = settings.feature_matcher;
+    if (extractor == "siftgpu" || extractor == "vulkan_sift" || extractor == "sift")
+        extractor = backend == "cpu" ? "sift" : backend == "vulkan" ? "vulkan_sift" : "siftgpu";
+    if (matcher == "gpu_mutual_ratio" || matcher == "vulkan_mutual_ratio" || matcher == "mutual_ratio")
+        matcher = backend == "cpu" ? "mutual_ratio" : backend == "vulkan" ? "vulkan_mutual_ratio" : "gpu_mutual_ratio";
+    command << " --camera-sharing " << sharing
+            << " --focal " << std::max(0.0, settings.initial_focal_pixels)
+            << " --trust-focal=" << (settings.trust_initial_focal ? "true" : "false")
+            << " --window " << window
+            << " --retrieval-augmentation=" << (retrieval ? "true" : "false")
+            << " --extractor " << extractor
+            << " --matcher " << matcher;
+    if (settings.extractor_model[0] != '\0')
+        command << " --extractor-model " << quote(settings.extractor_model.data());
+    if (settings.lightglue_model[0] != '\0')
+        command << " --lightglue-model " << quote(settings.lightglue_model.data());
+}
+
 void append_alignment_cache(
     std::ostringstream& command, const ProjectSettings& settings,
     const ProjectLayout& layout) {
@@ -1459,6 +1489,7 @@ std::string build_align_command(
             << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
+    append_frontend_flags(command, settings);
     append_alignment_cache(command, settings, layout);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, true);
@@ -1480,6 +1511,7 @@ std::string build_train_command(
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model)
             << " --max-features " << settings.max_features;
+    append_frontend_flags(command, settings);
     append_alignment_cache(command, settings, layout);
 
     if (settings.dataset_source[0] != '\0') {
@@ -1620,6 +1652,7 @@ std::string build_splat_mesh_command(
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model)
             << " --max-features " << settings.max_features;
+    append_frontend_flags(command, settings);
     append_alignment_cache(command, settings, layout);
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
@@ -1672,6 +1705,7 @@ std::string build_dense_command(
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
                 << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
+        append_frontend_flags(command, settings);
         append_alignment_cache(command, settings, layout);
     }
     command << " --capture-mode "
@@ -1720,6 +1754,7 @@ std::string build_texture_command(
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
                 << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
+        append_frontend_flags(command, settings);
         append_alignment_cache(command, settings, layout);
     }
     command << " --texture"
@@ -1752,6 +1787,7 @@ std::string build_export_sfm_command(
             << sfm_mode_flag(settings.sfm_mode)
             << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
+    append_frontend_flags(command, settings);
     append_alignment_cache(command, settings, layout);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
