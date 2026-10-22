@@ -234,6 +234,7 @@ private:
     bool stroke_moved_{};
     ImVec2 stroke_origin_{};
     Snapshot stroke_before_;
+    std::vector<std::uint8_t> stroke_intersection_hits_;
     std::vector<Snapshot> undo_;
     std::vector<Snapshot> redo_;
     ImVec2 toolbar_min_{};

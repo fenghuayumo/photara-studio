@@ -231,12 +231,13 @@ bool inside_polygon(const std::vector<ImVec2>& polygon, ImVec2 point) {
     return inside;
 }
 
-enum class SelectMode { replace, add, subtract };
+enum class SelectMode { replace, add, subtract, intersect };
 
 SelectMode select_mode() {
     const ImGuiIO& io = ImGui::GetIO();
     if (io.KeyAlt) return SelectMode::subtract;
     if (io.KeyShift) return SelectMode::add;
+    if (io.KeyCtrl) return SelectMode::intersect;
     return SelectMode::replace;
 }
 
@@ -244,6 +245,7 @@ ImU32 gesture_stroke() {
     const SelectMode mode = select_mode();
     if (mode == SelectMode::add) return theme::u32(theme::success);
     if (mode == SelectMode::subtract) return theme::u32(theme::danger);
+    if (mode == SelectMode::intersect) return theme::u32(theme::accent);
     return IM_COL32(236, 238, 242, 230);
 }
 
@@ -251,6 +253,7 @@ ImU32 gesture_fill() {
     const SelectMode mode = select_mode();
     if (mode == SelectMode::add) return theme::u32(theme::success, 0.18F);
     if (mode == SelectMode::subtract) return theme::u32(theme::danger, 0.18F);
+    if (mode == SelectMode::intersect) return theme::u32(theme::accent, 0.18F);
     return IM_COL32(236, 238, 242, 40);
 }
 
@@ -560,6 +563,7 @@ void SplatEdit::clear() {
     std::vector<float>{}.swap(filter_);
     std::vector<std::uint8_t>{}.swap(selected_);
     polygon_.clear();
+    stroke_intersection_hits_.clear();
     undo_.clear();
     redo_.clear();
     tool_ = Tool::none;
@@ -647,6 +651,7 @@ void SplatEdit::upload(App& app) {
 
 void SplatEdit::begin_stroke(const bool capture_positions) {
     if (stroking_) return;
+    stroke_intersection_hits_.clear();
     stroke_before_.selected = selected_;
     stroke_before_.xyz.clear();
     if (capture_positions) {
@@ -668,6 +673,7 @@ void SplatEdit::begin_stroke(const bool capture_positions) {
 
 void SplatEdit::end_stroke(App& app) {
     if (!stroking_) return;
+    stroke_intersection_hits_.clear();
     stroking_ = false;
     const bool selection_changed = stroke_before_.selected.size() == selected_.size() &&
                                    stroke_before_.selected != selected_;
@@ -920,6 +926,12 @@ void SplatEdit::select_at(
             best_depth = hit.depth;
         }
     }
+    if (mode == SelectMode::intersect) {
+        for (std::uint32_t index = 0; index < count_; ++index)
+            selected_[index] = selected_[index] && static_cast<int>(index) == best_index;
+        recount();
+        return;
+    }
     if (best_index < 0) return;
     std::uint8_t& bit = selected_[static_cast<std::size_t>(best_index)];
     if (mode == SelectMode::subtract) {
@@ -1021,6 +1033,18 @@ void SplatEdit::apply_region(
         hits.push_back(ScreenHit{index, hit.u, hit.v, hit.depth});
     }
     if (front_only_) keep_front_surface(hits);
+    if (op == SelectMode::intersect) {
+        // A brush gesture intersects with the union of all its dabs, using
+        // the original selection so later dabs can retain earlier misses.
+        if (stroke_intersection_hits_.size() != count_ || mode != 2)
+            stroke_intersection_hits_.assign(count_, 0);
+        for (const ScreenHit& hit : hits) stroke_intersection_hits_[hit.index] = 1;
+        const auto& before = stroke_before_.selected;
+        for (std::uint32_t index = 0; index < count_; ++index)
+            selected_[index] = before[index] && stroke_intersection_hits_[index];
+        recount();
+        return;
+    }
     for (const ScreenHit& hit : hits) {
         std::uint8_t& bit = selected_[hit.index];
         if (op == SelectMode::subtract) {
@@ -1429,6 +1453,7 @@ bool SplatEdit::copy_model(photara::splat::GaussianModel& model) const {
 
 void SplatEdit::abort_stroke(App& app) {
     if (!stroking_) return;
+    stroke_intersection_hits_.clear();
     if (stroke_before_.selected.size() == selected_.size()) {
         selected_ = stroke_before_.selected;
         recount();
@@ -1729,12 +1754,12 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
         std::snprintf(
             buffer, size, "%s  |  %s  |  %s  |  %s", tr("By ring"),
             tr(front_only_ ? "Front surface" : "All depths"), gesture,
-            tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+            tr("Shift add  |  Alt remove  |  Ctrl intersect  |  RMB orbit  |  Esc steps back"));
     } else {
         std::snprintf(
             buffer, size, "%s  |  %s  |  %s",
             tr(front_only_ ? "Front surface" : "All depths"), gesture,
-            tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+            tr("Shift add  |  Alt remove  |  Ctrl intersect  |  RMB orbit  |  Esc steps back"));
     }
     if (selected_count_ > 0) {
         const std::string gesture_line(buffer);
@@ -1872,7 +1897,12 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             {min.x + 7.F, min.y + 7.F}, {max.x - 7.F, max.y - 7.F}, icon_colour, 1.5F);
         if (hovered) {
             if (enabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            show_tip(item.tip, item.shortcut, item.detail);
+            if (item.action >= 3 && item.action <= 9 && item.action != 7 && item.action != 8) {
+                ImGui::SetTooltip("%s    %s\n%s\n%s", tr(item.tip), item.shortcut,
+                    tr(item.detail), tr("Shift add  |  Alt remove  |  Ctrl intersect  |  RMB orbit  |  Esc steps back"));
+            } else {
+                show_tip(item.tip, item.shortcut, item.detail);
+            }
         }
         if (!pressed || !enabled) continue;
         if (item.action == 0) undo(app);
