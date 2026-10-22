@@ -231,6 +231,7 @@ const char* training_backend_flag(const ProjectSettings& settings) {
 const char* alignment_backend_flag(const ProjectSettings& settings) {
     if (settings.alignment_backend == 1) return "cpu";
     if (settings.alignment_backend == 2 && studio_ba_cuda()) return "cuda";
+    if (settings.alignment_backend == 3 && studio_ba_vulkan()) return "vulkan";
     return "automatic";
 }
 

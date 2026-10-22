@@ -156,11 +156,12 @@ void draw_compute_page(App& app) {
     ImGui::Spacing();
     ImGui::Spacing();
     preference_heading("Photo alignment");
-    const char* alignment_labels[] = {"Automatic", "CPU", "CUDA"};
+    const char* alignment_labels[] = {"Automatic", "CPU", "CUDA", "Vulkan"};
     const bool alignment_enabled[] = {
-        !busy, !busy, !busy && studio_ba_cuda()};
+        !busy, !busy, !busy && studio_ba_cuda(),
+        !busy && studio_ba_vulkan()};
     if (choice_row(
-            "alignment", alignment_labels, 3, app.settings.alignment_backend,
+            "alignment", alignment_labels, 4, app.settings.alignment_backend,
             alignment_enabled))
         store_editor_preferences(app);
     theme::caption(
