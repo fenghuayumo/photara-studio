@@ -260,6 +260,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // Recompute alignment by default; cache reuse is an explicit opt-in.
     // Saved projects retain their explicit choice.
     bool reuse_cache = false;
+    bool refine_weak_cameras = false;
     // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
     // mesh/dense, preview sidecars). Empty keeps them next to the project
     // (<project folder>/<project name>.cache); a set folder collects every
@@ -272,7 +273,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int cache_retention_days = 0;
     // Machine-level compute policy. Stored in editor.prefs, never in .ascan.
     // training_backend: 0 cuda, 1 vulkan.
-    // alignment_backend: 0 automatic, 1 cpu, 2 cuda (positioning and BA).
+    // alignment_backend: 0 automatic, 1 cpu, 2 cuda, 3 vulkan (positioning and BA).
     // automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
     int training_backend = 0;
@@ -295,7 +296,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     bool focus_region = false;
     int iterations = 30'000;
     // Editor preference, independent of a project's numerical training settings.
-    int training_autosave_seconds = 120;
+    int training_autosave_seconds = 0;
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
     bool speedy_pruning = false;
@@ -428,6 +429,14 @@ inline bool studio_vulkan_training() {
 
 inline bool studio_ba_cuda() {
 #if defined(PHOTARA_STUDIO_BA_CUDA)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_ba_vulkan() {
+#if defined(PHOTARA_STUDIO_BA_VULKAN)
     return true;
 #else
     return false;

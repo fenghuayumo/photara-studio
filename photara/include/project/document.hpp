@@ -14,7 +14,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 13;
+inline constexpr std::uint32_t k_settings_version = 14;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -50,6 +50,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
     int sfm_mode = 0;  // 0 global, 2 hierarchical (1 is a legacy project value)
     bool reuse_cache = false;
+    bool refine_weak_cameras = false;
     unsigned max_features = 27'000;
     bool scene_mode = false;
     bool focus_region = false;

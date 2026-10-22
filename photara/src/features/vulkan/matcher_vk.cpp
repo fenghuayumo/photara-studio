@@ -75,13 +75,17 @@ public:
     // Grows the host-visible descriptor mirror so that `bytes` more descriptors
     // fit. Growth copies the used prefix, keeping every cached offset valid, and
     // happens before a batch is recorded, where the queue is idle. Allocating
-    // the whole budget up front would reserve hundreds of megabytes per matcher
-    // clone, and the SfM frontend creates one clone per worker thread.
+    // the whole budget up front would reserve hundreds of megabytes even for
+    // small scenes. All worker clones share this mirror and its device cache.
     void ensure_capacity(std::size_t bytes) {
         if (descriptors.valid() && used + bytes <= capacity) return;
         if (used + bytes > budget) {
             cache.clear();
             used = 0;
+            pending_prefix_upload = 0;
+            // Eviction invalidates offsets, not the allocation. Reuse the
+            // mirror instead of allocating another full-capacity copy.
+            if (descriptors.valid() && bytes <= capacity) return;
         }
         if (used + bytes > budget)
             throw std::invalid_argument(
@@ -89,6 +93,10 @@ public:
         std::size_t next = capacity != 0 ? capacity : initial_capacity;
         const std::size_t needed = used + bytes;
         while (next < needed) next = std::min<std::size_t>(budget, next * 2);
+        // Cache growth temporarily needs both descriptor allocations. Drop
+        // inactive partials first so their reuse does not increase that peak.
+        row_partials = {};
+        col_partials = {};
         BufferRef grown_staging = context->allocate(next, true);
         BufferRef grown_device = context->allocate(next, false);
         if (staging.valid() && used > 0) {
@@ -140,11 +148,17 @@ public:
     mutable std::size_t pending_prefix_upload{};
     mutable BufferRef staging;
     mutable BufferRef descriptors;
+    // Match partials can exceed the idle-pool cap. Keep one shared workspace
+    // through the matching phase instead of allocating it again every batch.
+    mutable BufferRef row_partials, col_partials, output, readback;
 };
 
 VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(
     VulkanMutualRatioMatcherOptions options)
     : impl_(std::make_shared<Impl>(std::move(options))) {}
+
+VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
 
 VulkanMutualRatioMatcher::~VulkanMutualRatioMatcher() = default;
 VulkanMutualRatioMatcher::VulkanMutualRatioMatcher(
@@ -159,7 +173,9 @@ bool VulkanMutualRatioMatcher::is_available() const noexcept {
 }
 
 std::unique_ptr<FeatureMatcher> VulkanMutualRatioMatcher::clone() const {
-    return std::make_unique<VulkanMutualRatioMatcher>(impl_->options);
+    // GPU dispatches already synchronize per batch. Share their bounded cache
+    // and mutex rather than allocating up to 768 MiB for every CPU worker.
+    return std::unique_ptr<FeatureMatcher>(new VulkanMutualRatioMatcher(impl_));
 }
 
 void VulkanMutualRatioMatcher::clear_prepared() {
@@ -167,6 +183,15 @@ void VulkanMutualRatioMatcher::clear_prepared() {
     impl_->cache.clear();
     impl_->used = 0;
     impl_->pending_prefix_upload = 0;
+    impl_->row_partials = {};
+    impl_->col_partials = {};
+    impl_->output = {};
+    impl_->readback = {};
+    // This is a phase boundary, not just a lookup-table reset. In particular,
+    // weak-view extraction and BA must not inherit an unused descriptor mirror.
+    impl_->descriptors = {};
+    impl_->staging = {};
+    impl_->capacity = 0;
 }
 
 MatchSet VulkanMutualRatioMatcher::match(
@@ -179,6 +204,9 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
     std::span<const Pair> pairs) const {
     std::vector<MatchSet> result(pairs.size());
     if (pairs.empty()) return result;
+    // Extraction and matching are separate frontend phases. Reclaim their
+    // shared scratch before growing the descriptor cache and match partials.
+    SiftVulkanExtractor::release_working_memory();
 
     Context& context = *impl_->context;
     const Context::TilePlan plan = context.descriptor_tile_plan();
@@ -237,12 +265,22 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
                                    ? call_bytes
                                    : batch_bytes);
 
-        BufferRef row_partials = context.allocate(row_size * 12, false);
-        BufferRef col_partials =
-            impl_->options.mutual_check ? context.allocate(col_size * 12, false)
-                                        : BufferRef{};
-        BufferRef output = context.allocate(outputs * 4 + 4, false);
-        BufferRef readback = context.allocate(outputs * 4 + 4, true, true);
+        const auto ensure = [&](BufferRef& buffer, VkDeviceSize bytes, bool host,
+                                bool cached = false) {
+            if (!buffer.valid() || buffer->size_bytes() < bytes) {
+                buffer = {};
+                buffer = context.allocate(bytes, host, cached);
+            }
+        };
+        ensure(impl_->row_partials, row_size * 12, false);
+        if (impl_->options.mutual_check)
+            ensure(impl_->col_partials, col_size * 12, false);
+        ensure(impl_->output, outputs * 4 + 4, false);
+        ensure(impl_->readback, outputs * 4 + 4, true, true);
+        const auto& row_partials = impl_->row_partials;
+        const auto& col_partials = impl_->col_partials;
+        const auto& output = impl_->output;
+        const auto& readback = impl_->readback;
 
         struct PairReservations {
             Impl::Reservation query;

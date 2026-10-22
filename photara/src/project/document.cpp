@@ -152,6 +152,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.ai_depth_weight);
     writer.value(settings.ai_normal_weight);
     writer.value(static_cast<std::int32_t>(settings.ai_prior_tokens));
+    writer.value(static_cast<std::uint8_t>(settings.refine_weak_cameras));
     return writer.take();
 }
 
@@ -357,6 +358,8 @@ Settings decode_settings(
             settings.ai_prior_tokens < 1 || settings.ai_prior_tokens > 10000)
             throw std::invalid_argument("Invalid AI prior project settings");
     }
+    if (version >= 14)
+        settings.refine_weak_cameras = reader.value<std::uint8_t>() != 0;
     settings.sanitize();
     return settings;
 }

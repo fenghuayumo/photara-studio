@@ -88,6 +88,51 @@ int main() {
         std::cerr << "release failed\n";
         return 7;
     }
+    // Missing detector responses must not force supplemental retrieval to use
+    // only the first detector levels. Preserve sparse-cell quotas and indices.
+    features::FeatureSet ordered;
+    ordered.image_width = ordered.image_height = 90;
+    ordered.keypoints.resize(10);
+    for (unsigned i = 0; i < 10; ++i) {
+        ordered.keypoints[i].x = i == 9 ? 75.F : 15.F;
+        ordered.keypoints[i].y = 15.F;
+        ordered.keypoints[i].response = 0.F;
+    }
+    const auto prefix = sfm::sample_descriptors_spatially(ordered, 4, 3);
+    const auto balanced = sfm::sample_descriptors_spatially(ordered, 4, 3, true);
+    if (prefix != std::vector<features::FeatureIndex>{0, 9, 1, 2} ||
+        balanced != std::vector<features::FeatureIndex>{0, 9, 3, 6} ||
+        sfm::sample_descriptors_spatially(ordered, 0, 3, true).size() != 0 ||
+        sfm::sample_descriptors_spatially(ordered, 20, 3, true).size() != 10) {
+        std::cerr << "detector-level sampling loses coverage or sparse cells\n";
+        return 9;
+    }
+
+    // A capped vocabulary must see later rooms, even when the sequence prefix
+    // alone contains enough descriptors to fill the entire training budget.
+    std::vector<features::FeatureSet> rooms(8);
+    for (std::size_t i = 0; i < rooms.size(); ++i) {
+        auto& room = rooms[i];
+        room.image_width = room.image_height = 90;
+        room.descriptor_dimension = 2;
+        room.keypoints.resize(9);
+        for (unsigned j = 0; j < 9; ++j) {
+            room.keypoints[j].x = room.keypoints[j].y = 45.F;
+            room.descriptors.insert(room.descriptors.end(),
+                i < 4 ? std::initializer_list<float>{1.F, 0.F} : std::initializer_list<float>{0.F, 1.F});
+        }
+    }
+    auto capped = config;
+    capped.depth = 1;
+    capped.max_training_descriptors = 8;
+    capped.sample_all_images = true;
+    sfm::VocabularyTree whole_scene;
+    whole_scene.train(rooms, capped, features::DescriptorMetric::l2_root);
+    if (whole_scene.quantize(std::span<const float>(rooms.front().descriptors.data(), 2)) ==
+        whole_scene.quantize(std::span<const float>(rooms.back().descriptors.data(), 2))) {
+        std::cerr << "capped vocabulary ignores later images\n";
+        return 8;
+    }
     std::cout << "vocabulary/memory tests passed words=" << vocabulary.word_count()
               << '\n';
     return 0;

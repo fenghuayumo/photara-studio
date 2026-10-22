@@ -58,7 +58,9 @@ def load(directory):
             q = np.array(v[1:5], dtype=float)
             R = Rotation.from_quat(q[[1, 2, 3, 0]]).as_matrix()
             t = np.array(v[5:8], dtype=float)
-            obs = np.fromstring(stream.readline(), sep=" ").reshape(-1, 3)
+            observation_line = stream.readline().strip()
+            obs = (np.fromstring(observation_line, sep=" ").reshape(-1, 3)
+                   if observation_line else np.empty((0, 3)))
             images[int(v[0])] = dict(name=Path(v[9]).name, R=R, t=t, C=-R.T@t,
                                      camera=cameras[int(v[8])], obs=obs)
     for line in (directory / "points3D.txt").read_text().splitlines():

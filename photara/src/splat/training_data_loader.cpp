@@ -963,20 +963,36 @@ TrainingView upload_training_view(
 
 namespace training_data {
 
-io::RgbImage prior_input_image(const mvs::MvsView& view, const TrainingOptions& options) {
+TrainingImage load_training_image(
+    const mvs::MvsView& view, const TrainingOptions& options) {
     auto image_options = options;
     image_options.lambda_d = image_options.lambda_n = 0.F;
     image_options.use_mvs_depth = image_options.use_mvs_normals = false;
     const auto host = load_host_training_view(view, image_options, 1.F);
-    io::RgbImage image{host.camera.width, host.camera.height, {}};
+    TrainingImage result;
+    result.camera = host.camera;
+    auto& image = result.rgb;
+    image.width = host.camera.width;
+    image.height = host.camera.height;
     image.pixels.resize(host.rgba.size()*3);
+    if (host.has_mask) {
+        result.mask.width = image.width;
+        result.mask.height = image.height;
+        result.mask.pixels.resize(host.rgba.size());
+    }
     for (std::size_t i = 0; i < host.rgba.size(); ++i) {
         const auto packed = std::bit_cast<std::uint32_t>(host.rgba[i]);
         image.pixels[3*i] = static_cast<std::uint8_t>(packed);
         image.pixels[3*i+1] = static_cast<std::uint8_t>(packed >> 8);
         image.pixels[3*i+2] = static_cast<std::uint8_t>(packed >> 16);
+        if (host.has_mask)
+            result.mask.pixels[i] = static_cast<std::uint8_t>(packed >> 24);
     }
-    return image;
+    return result;
+}
+
+io::RgbImage prior_input_image(const mvs::MvsView& view, const TrainingOptions& options) {
+    return load_training_image(view, options).rgb;
 }
 
 struct TrainingDataLoader::Impl {

@@ -98,7 +98,6 @@ struct ReconstructCli {
     photara::CameraModel camera_model{photara::CameraModel::automatic};
     std::string mode{"global"};
     bool trust_focal{false};
-    bool structural_pair_expansion{false};
     bool positioning_cuda{true};
     photara::sfm::PositioningBackend positioning_backend{
         photara::sfm::PositioningBackend::automatic};
@@ -131,6 +130,7 @@ struct ReconstructCli {
     bool mutual_check{true};
     double sift_contrast{0.005};
     std::filesystem::path cache_dir;
+    std::filesystem::path frontend_diagnostics_dir;
     std::string extractor{"siftgpu"};
     std::string matcher{"gpu_mutual_ratio"};
     std::string pipeline;  // empty / none | lightglue_end2end
@@ -171,7 +171,7 @@ struct ReconstructCli {
     std::filesystem::path splat_checkpoint;
     std::filesystem::path splat_checkpoint_control;
     bool splat_resume{false};
-    unsigned splat_checkpoint_seconds{120};
+    unsigned splat_checkpoint_seconds{0};
     unsigned splat_iterations{30'000};
     photara::splat::TrainingMode splat_mode{photara::splat::TrainingMode::standard};
     unsigned splat_log_interval{100};
@@ -668,8 +668,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("auto"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("export-colmap",
          "Also write the aligned scene as a COLMAP text model into this folder",
          cxxopts::value<std::string>()->default_value(""))
@@ -722,6 +720,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("sift-contrast", "SIFT contrast threshold",
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("frontend-diagnostics-dir", "Write per-image and per-pair frontend stage CSVs",
          cxxopts::value<std::string>()->default_value(""))
         ("ba-backend",
          "Bundle adjustment backend: automatic (default), cpu, cuda, or vulkan. "
@@ -1353,7 +1353,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.export_colmap_dir = result["export-colmap"].as<std::string>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
-    cli.structural_pair_expansion = result["sfm-structural-rescue"].as<bool>();
     if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
@@ -2116,6 +2115,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--mesh-tsdf-smooth-mu must be in [-1,0]");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
+    cli.frontend_diagnostics_dir = utf8_to_path(result["frontend-diagnostics-dir"].as<std::string>());
     if (!cache_text.empty() && cache_text != "-")
         cli.cache_dir = utf8_to_path(cache_text);
 
@@ -4765,7 +4765,6 @@ int main(int argc, char** argv) {
         photara::core::Logger::instance().info(
             "sfm_masking=", !config.frontend.mask_dir.empty(),
             " sam_use_mask_for_sfm=", cli.sam_use_mask_for_sfm);
-        config.frontend.structural_pair_expansion = cli.structural_pair_expansion;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;
         config.frontend.match_ratio = cli.match_ratio;
@@ -4791,6 +4790,7 @@ int main(int argc, char** argv) {
         // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
         config.frontend.augment_sequential_with_retrieval = cli.retrieval_augmentation;
         config.frontend.checkpoint.directory = cli.cache_dir;
+        config.frontend.diagnostics_directory = cli.frontend_diagnostics_dir;
         photara::sfm::AlignLivePreview live_preview;
         if (!cli.working_sfm.empty()) {
             auto live_path =

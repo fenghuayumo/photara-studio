@@ -22,9 +22,19 @@ std::vector<Index> recover_stable_resections(
 // parallax, fit and held-out support from >=3 anchor cameras, >=12 held-out
 // inliers and >=30 final observations. The ordinary overload keeps its stricter
 // per-depth three-view requirement. Only unregistered targets may enter here.
+struct StableResectionOptions {
+    // Additional floor for BOTH fitting and independent validation consensus.
+    // Zero preserves the ordinary recovery policy and its existing safeguards.
+    double minimum_consensus_ratio{0};
+    // Repair experiments may retain an existing pose unless held-out clipped
+    // squared error falls by at least 10% and 0.01 px^2 per observation,
+    // without losing held-out inliers.
+    bool require_pose_improvement{false};
+};
 std::vector<Index> recover_stable_resections(
     Scene& scene, const std::vector<std::uint8_t>& stable,
-    const std::vector<RawPairMatches>& tentative_matches);
+    const std::vector<RawPairMatches>& tentative_matches,
+    const StableResectionOptions& validation_options = {});
 // Screen connections relative to each view's strongest pair, recover weak
 // branches from independently validated anchors, and unregister unsupported
 // poses. Strong-component poses and camera intrinsics stay fixed.
@@ -43,6 +53,9 @@ struct SubmapRecoveryOptions {
     double minimum_inlier_ratio{0.8};
     double relative_alignment_error{0.01};
     float minimum_angle_degrees{1.F};
+    // Offline initializer receives only the cleared, internal-only submap.
+    // Empty preserves the production star initializer and all acceptance gates.
+    std::function<bool(Scene&)> independent_initializer;
     // Optional evidence export before alignment, including rejected submaps.
     std::function<void(const HierarchicalSubscene&)> independent_model_callback;
 };

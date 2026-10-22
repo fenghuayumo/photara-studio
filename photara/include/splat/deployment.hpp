@@ -27,6 +27,7 @@ struct CollisionOptions : ProcessingControl {
     float voxel_size{0.05F};
     float opacity{0.1F};
     unsigned max_voxels{16000000};
+    enum class MeshShape { smooth, faces } mesh_shape{MeshShape::smooth};
     enum class Fill { none, interior, ground } fill{Fill::none};
     // Collision data uses the model coordinate frame unless this is enabled.
     bool playcanvas_coordinates{true};
@@ -40,8 +41,10 @@ struct CollisionGrid {
     std::vector<std::uint8_t> solid; // x + nx * (y + ny * z)
 };
 CollisionGrid voxelize_gaussians(const GaussianModel &, const CollisionOptions & = {});
-// Exposed faces are shared at integer-grid corners and oriented outwards.
+// Legacy voxel-face mesh helper.
 mvs::Mesh collision_mesh(const CollisionGrid &);
+// Marching-cubes smooth mesh (the default export mode) or exact voxel faces.
+mvs::Mesh collision_mesh(const CollisionGrid &, CollisionOptions::MeshShape);
 void export_collision(const GaussianModel &, const std::filesystem::path &,
                       const CollisionOptions & = {});
 } // namespace photara::splat

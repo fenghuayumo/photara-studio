@@ -1,7 +1,7 @@
 # Native Gaussian deployment processing
 
-Studio's **Export Splat** dialog includes **LOD Streaming (Vulkan)** and
-**Collision Mesh (Vulkan)**. Both run native C++ code in a background job. There
+Studio's **Export Splat** dialog includes **LOD Streaming** and
+**Collision Mesh**. Both run native C++ code in a background job. There
 is no Node.js, subprocess, or splat-transform runtime dependency.
 
 Choose a new output folder. Browse selects its parent. Existing destinations
@@ -14,6 +14,27 @@ batches and export stages; shutdown requests cancellation too.
 `photara::splat::export_streamed_sog` writes the PlayCanvas version-1 streaming
 index (`lod-meta.json`) and one unbundled SOG directory per leaf and LOD.
 The native SOG encoder produces `meta.json` and lossless WebP textures.
+
+Scalar scale, DC, and SH codebooks use distribution-aware weighted 1D
+quantization, with an adaptive uniform/quantile histogram and bounded dynamic
+programming. Sorted codebooks use binary nearest-entry lookup rather than a
+256-entry scan per scalar. Small palettes retain every distinct scalar exactly
+when there are at most 256 values.
+
+Up to 65,536 Gaussians retain one SH vector per palette entry. Larger SH
+palettes use Vulkan hierarchical K-means: at most 16 sibling centers per
+assignment and eight Lloyd iterations per level. Assignment, membership
+histograms, prefix scans, scatter, and centroid updates run on the GPU; only
+the final occupied palette and labels are read back. Balanced batches of at
+most 262,144 Gaussians bound a degree-3 points buffer to 45 MiB and share the
+65,536-entry palette. There is no large CPU K-means fallback; Vulkan compute
+is required for these larger SH exports. The hierarchy trades global Lloyd
+reassignment for bounded work, so its palettes are not byte-identical to
+splat-transform's global K-means. SH degree 0 requires no vector clustering.
+The export owns a scoped Vulkan compute device, uploads each batch once, and
+releases its GPU resources before returning, including Python API calls.
+GPU selection honors `PHOTARA_VULKAN_DEVICE_UUID` and
+`TINYTENSOR_VULKAN_DEVICE`.
 
 The scene is partitioned by median splits on the longest bounding-box axis.
 Splitting stops when both the Gaussian-count and spatial-extent limits are met;
@@ -48,8 +69,11 @@ The outputs are:
 
 - `scene.voxel.json`: voxel bounds, resolution, and octree statistics;
 - `scene.voxel.bin`: little-endian Laine–Karras nodes and 4×4×4 leaf masks;
-- `scene.collision.glb`: triangles on exposed voxel faces, with shared corners
-  and outward winding.
+- `scene.collision.glb`: by default, the binary voxel field's Marching Cubes
+  surface at the 0.5 isovalue, matching splat-transform's default smooth mode.
+  The optional voxel-faces mode emits the exact exposed voxel faces instead.
+  Coplanar merging may produce a different triangle count from splat-transform,
+  but does not change the extracted surface.
 
 The default coordinate conversion rotates 180 degrees about Z (flips X and Y),
 matching the PlayCanvas splat import transform. Both collision outputs use this
@@ -59,9 +83,10 @@ Y up in the chosen output frame.
 
 Optional host fills close enclosed solid-object cavities by boundary flood fill,
 or fill below the first occupied voxel in each XZ column. Cavity fill is not the
-reference tool's room-navigation exterior-fill mode. Capsule carving, connected
-cluster filtering, and a smooth marching-cubes collision surface are not
-implemented in this version. Collision meshes use the voxel-faces mode.
+reference tool's room-navigation exterior-fill mode. Capsule carving and
+connected-cluster filtering are not implemented in this version. Smooth
+collision meshes are extracted from the same occupancy grid used for the voxel
+octree.
 
 The current compute workspace is a bounded dense grid (default 16 million
 voxels); the exported octree is sparse. Oversized grids or candidate lists fail

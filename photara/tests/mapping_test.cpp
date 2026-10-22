@@ -56,6 +56,54 @@ double rotation_error(const Mat3& measured, const Mat3& expected) {
     return Eigen::AngleAxisd(measured * expected.transpose()).angle();
 }
 
+void test_cycle_supported_weak_tracks() {
+    const auto fixture = [] {
+        Scene scene;
+        scene.images.resize(5);
+        for (Index id = 0; id < 5; ++id) {
+            scene.images[id].id = id;
+            scene.images[id].features.keypoints.resize(2);
+        }
+        const auto edge = [&](Index a, Index b, float weight) {
+            ImagePair pair(a, b);
+            pair.relative_pose = Pose3D::identity();
+            pair.weight_spatial = weight;
+            pair.matches.push_back({0, 0});
+            scene.pairs.push_back(pair);
+        };
+        edge(0, 1, 10.F); edge(2, 3, 10.F);
+        edge(0, 2, .1F); edge(1, 3, .1F); edge(0, 4, .1F);
+        return scene;
+    };
+    auto scene = fixture();
+    build_tracks(scene, 3.F);
+    expect(scene.tracks.size() == 2, "weight floor retains strong tracks");
+    scene = fixture();
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 1 && scene.tracks[0].observations.size() == 4,
+           "distinct image pairs close a feature-consistent weak cycle");
+    scene = fixture();
+    scene.pairs.erase(scene.pairs.begin() + 3);
+    scene.pairs[2].matches.push_back({0, 0});
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2, "duplicate matches do not certify a weak link");
+    scene = fixture();
+    scene.pairs[3].matches[0].train = 1;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2, "inconsistent features do not close a cycle");
+    scene = fixture();
+    scene.pairs[1].id1 = 0; scene.pairs[1].id2 = 2;
+    scene.pairs[1].matches[0] = {1, 0};
+    scene.pairs[3].id2 = 2;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.size() == 2,
+           "cycle support cannot merge different features from the same image");
+    scene = fixture();
+    for (auto& pair : scene.pairs) pair.weight_spatial = .1F;
+    build_tracks(scene, 3.F, true);
+    expect(scene.tracks.empty(), "weak-only cycles cannot bootstrap strong support");
+}
+
 void test_pair_cycle_weighting() {
     Scene scene;
     scene.images.resize(4);
@@ -718,6 +766,100 @@ void test_retrieval_inverted_index() {
     expect(contains(4, 5), "retrieval links third visual cluster");
 }
 
+void test_resection_candidate_failures() {
+    const auto fixture = [] {
+        Scene scene;
+        scene.thread_count = 1;
+        scene.cameras.push_back(cam());
+        scene.images.resize(5);
+        for (Index id = 0; id < 5; ++id) {
+            auto& image = scene.images[id];
+            image.id = id; image.camera_id = 0; image.registered = id < 3;
+            image.pose.C = Vec3(0.4*id,0.1*(id%2),0);
+        }
+        std::mt19937 rng(9721);
+        std::uniform_real_distribution<double> x(-1.5,1.5), y(-1,1), z(4,7);
+        for (Index t = 0; t < 200; ++t) {
+            Track track;
+            track.position = Vec3(x(rng),y(rng),z(rng));
+            for (Index id = 0; id < 3; ++id) {
+                const auto pixel = scene.cameras[0].project(scene.images[id].pose.transform_world_to_camera(track.position));
+                photara::features::Keypoint kp;
+                kp.x = static_cast<float>(pixel.x()); kp.y = static_cast<float>(pixel.y());
+                scene.images[id].features.keypoints.push_back(kp);
+                track.observations.push_back({id,t});
+            }
+            track.num_inliers = 3;
+            scene.tracks.push_back(track);
+        }
+        return scene;
+    };
+    const auto options = [] {
+        ResectionConfig config;
+        config.local_ba_every = 0;
+        config.full_ba_every = {0,0,0};
+        config.final_ba_additional_iterations = 0;
+        config.full_ba.maximum_iterations = 3;
+        config.full_ba.optimize_focal = false;
+        config.full_ba.optimize_aspect_ratio = false;
+        config.full_ba.optimize_distortion = false;
+        config.ransac.max_iterations = 500;
+        return config;
+    };
+    {
+        Scene source = fixture();
+        const auto truth = source.images[3].pose;
+        for (Index f = 0; f < 30; ++f) {
+            const auto pixel = source.cameras[0].project(truth.transform_world_to_camera(source.tracks[f].position));
+            photara::features::Keypoint kp;
+            kp.x = static_cast<float>(pixel.x()); kp.y = static_cast<float>(pixel.y());
+            source.images[3].features.keypoints.push_back(kp);
+        }
+        // Two anchors propose a contested landmark first; a third supplies
+        // the valid alternative for each feature. No direct target track IDs.
+        for (Index anchor = 0; anchor < 3; ++anchor) {
+            ImagePair pair(anchor,3);
+            for (Index f = 0; f < 30; ++f) pair.matches.push_back({anchor < 2 ? 0U : f,f});
+            source.pairs.push_back(pair);
+        }
+        auto legacy = source;
+        auto config = options();
+        config.preserve_conflict_alternatives = false;
+        register_images(legacy,config);
+        expect(!legacy.images[3].registered,"legacy conflict claims lose valid alternate landmark links");
+        config.preserve_conflict_alternatives = true;
+        register_images(source,config);
+        expect(source.images[3].registered && (source.images[3].pose.C-truth.C).norm() < 1e-3,
+            "conflicting landmark proposals cannot consume a feature needed by a correct pose");
+    }
+    {
+        Scene source = fixture();
+        const auto truth = source.images[4].pose;
+        for (Index t = 0; t < 200; ++t) {
+            photara::features::Keypoint bad;
+            bad.x = 320; bad.y = 240;
+            source.images[3].features.keypoints.push_back(bad);
+            source.tracks[t].observations.push_back({3,t});
+            if (t >= 30) continue;
+            const auto pixel = source.cameras[0].project(truth.transform_world_to_camera(source.tracks[t].position));
+            photara::features::Keypoint good;
+            good.x = static_cast<float>(pixel.x()); good.y = static_cast<float>(pixel.y());
+            source.images[4].features.keypoints.push_back(good);
+            source.tracks[t].observations.push_back({4,t});
+        }
+        auto legacy = source;
+        auto config = options();
+        config.retry_lower_support_candidates = false;
+        register_images(legacy,config);
+        expect(!legacy.images[4].registered,"failed high-count band reproduces starvation of valid weaker candidates");
+        config.retry_lower_support_candidates = true;
+        register_images(source,config);
+        expect(source.images[4].registered && (source.images[4].pose.C-truth.C).norm() < 1e-3,
+            "band exhaustion must try a geometrically valid lower-count camera");
+        expect(!source.images[3].registered,"fallback must still reject the unsupported high-count camera");
+    }
+}
+
 void test_local_ba_boundary_selection() {
     Scene scene;
     scene.cameras.assign(3, cam());
@@ -936,6 +1078,18 @@ void test_alignment_observability_reports_bridge_branch() {
            "alignment observability finds scale bridge");
     expect(audit.reliable_views == 4 && audit.unreliable_views == 3,
            "alignment observability retains largest rigid block");
+
+    Scene screened = scene;
+    Track unsupported;
+    unsupported.position = Vec3(0, 0, 4);
+    unsupported.observations = {{0, 0}, {4, 0}};
+    unsupported.num_inliers = 2;
+    screened.tracks.push_back(unsupported);
+    expect(prune_unobservable_registrations(screened) == 3 && screened.registered_count() == 4,
+           "final independent support rejects a floating block despite its local cycle");
+    expect(!screened.images[4].registered && screened.tracks.front().observations.size() == 1 &&
+           screened.tracks.front().num_inliers == 0,
+           "final independent support removes rejected observations and invalidates orphan depths");
 
     Track cross_track;
     cross_track.position = Vec3(0.0, 0.0, 4.0);
@@ -1382,8 +1536,10 @@ void test_missing_view_with_coincident_anchors() {
     recovery.extractor = "sift"; recovery.matcher = "mutual_ratio";
     recovery.sift_contrast_threshold = 0.001;
     recovery.max_features = recovery.progressive_rescue_max_features = 4000;
+    expect(recover_missing_views(scene, recovery, {0}) == 0 && !scene.images.back().registered,
+           "targeted recovery leaves unselected missing cameras untouched");
     unsigned recovered = 0;
-    try { recovered = recover_missing_views(scene,recovery); }
+    try { recovered = recover_missing_views(scene,recovery,{5}); }
     catch (const std::exception& error) { std::cerr << "coincident anchor recovery: " << error.what() << '\n'; }
     expect(recovered == 1 && scene.images.back().registered &&
            (scene.images.back().pose.C-centers[5]).norm() < 0.02,
@@ -1636,7 +1792,132 @@ void test_global_mapping_preserves_nonuniform_orbit(bool self_calibrate = false)
     }
 }
 
+void test_boundary_track_quota() {
+    Scene scene; scene.thread_count=1; auto camera=cam(); camera.id=0; scene.cameras.push_back(camera);
+    for (Index id=0;id<12;++id) {
+        Image image; image.id=id; image.camera_id=0; image.registered=true;
+        image.features.image_width=640; image.features.image_height=480;
+        image.features.keypoints.resize(21);
+        for (auto& kp:image.features.keypoints) { kp.x=320; kp.y=240; }
+        scene.images.push_back(image);
+    }
+    for (Index a=0;a<12;++a) for (Index b=a+1;b<12;++b) {
+        if ((a<8 && b>=8) && !(a==7 && b==8)) continue;
+        ImagePair pair(a,b); pair.relative_pose=Pose3D::identity(); pair.weight_spatial=1.F;
+        for (Index p=0;p<100;++p) pair.matches.push_back({0,0});
+        scene.pairs.push_back(pair);
+    }
+    for (Index t=0;t<21;++t) {
+        Track track;
+        if (t<8) for (Index id=0;id<8;++id) track.observations.push_back({id,t});
+        else if (t<16) for (Index id=8;id<12;++id) track.observations.push_back({id,t});
+        else if (t<20) for (Index id:{0u,1u,8u,9u}) track.observations.push_back({id,t});
+        else for (Index id:{0u,8u}) track.observations.push_back({id,t});
+        scene.tracks.push_back(track);
+    }
+    struct Selected {};
+    const auto selection=[&](unsigned quota) {
+        auto copy=scene; std::vector<Index> ids;
+        GlobalPositioningOptions options; options.max_tracks_for_positioning=8;
+        options.cross_branch_tracks_per_image=quota;
+        options.selection_callback=[&](const Scene&,const std::vector<Index>& selected) { ids=selected; throw Selected{}; };
+        try { solve_global_positions(copy,options); } catch (const Selected&) {}
+        return ids;
+    };
+    const auto old=selection(0), improved=selection(20);
+    expect(old.size()==8 && improved.size()==8,"boundary quota must preserve the hard budget");
+    expect(std::none_of(old.begin(),old.end(),[](Index id){return id>=16;}),"control must reproduce boundary starvation");
+    expect(std::count_if(improved.begin(),improved.end(),[](Index id){return id>=16 && id<20;})>=2,
+           "quota must preserve eligible core-to-branch tracks");
+    expect(std::find(improved.begin(),improved.end(),20)==improved.end(),"quota must not admit a two-view track");
+}
+
+void test_final_alignment_quality() {
+    Scene scene;
+    scene.cameras.push_back(cam());
+    for (Index i = 0; i < 4; ++i) {
+        Image image;
+        image.id = i;
+        image.camera_id = 0;
+        image.registered = true;
+        image.pose.C = Vec3(0.4 * i, 0, 0);
+        scene.images.push_back(std::move(image));
+    }
+    for (Index p = 0; p < 80; ++p) {
+        Track track;
+        track.position = Vec3((p % 10) * 0.12, (p / 10) * 0.1, 4 + (p % 7) * 0.15);
+        for (Index i = 0; i < 4; ++i) {
+            const Vec2 uv = scene.cameras[0].project(
+                scene.images[i].pose.transform_world_to_camera(track.position));
+            photara::features::Keypoint kp;
+            kp.x = static_cast<float>(uv.x());
+            kp.y = static_cast<float>(uv.y());
+            scene.images[i].features.keypoints.push_back(kp);
+            track.observations.push_back({i, p});
+        }
+        // Some native associations were excluded before the final quality pass.
+        track.num_inliers = p < 60 ? 2 : 0;
+        scene.tracks.push_back(std::move(track));
+    }
+    scene.images[2].pose.C.y() += 0.005;
+    rebuild_track_index(scene);
+    const auto camera = scene.cameras[0];
+    expect(refine_alignment_geometry(scene), "final quality accepts supported native refresh");
+    expect(scene.registered_count() == 4, "final quality preserves registration");
+    expect(scene.cameras[0].fx == camera.fx && scene.cameras[0].fy == camera.fy &&
+        scene.cameras[0].cx == camera.cx && scene.cameras[0].cy == camera.cy &&
+        scene.cameras[0].k1 == camera.k1 && scene.cameras[0].k2 == camera.k2 &&
+        scene.cameras[0].p1 == camera.p1 && scene.cameras[0].p2 == camera.p2,
+        "final quality fixes calibration");
+    expect(scene.tracks.back().num_inliers == 4,
+        "final quality recovers previously untriangulated associations");
+    expect(scene.image_tracks.size() == 4 && scene.image_tracks[0].size() == 80,
+        "final quality rebuilds track index");
+
+    Scene duplicates = scene;
+    duplicates.images[3].pose = duplicates.images[0].pose;
+    duplicates.images[3].features = duplicates.images[0].features;
+    ImagePair pair(0, 3);
+    pair.zero_baseline = true;
+    duplicates.pairs.push_back(pair);
+    const auto tied = duplicates.images[0].pose;
+    expect(refine_alignment_geometry(duplicates), "final quality supports duplicate images");
+    expect((duplicates.images[0].pose.R.array() == tied.R.array()).all() &&
+        (duplicates.images[3].pose.R.array() == tied.R.array()).all() &&
+        (duplicates.images[0].pose.C.array() == tied.C.array()).all() &&
+        (duplicates.images[3].pose.C.array() == tied.C.array()).all(),
+        "final quality preserves exact zero-baseline poses");
+
+    Scene degenerate = scene;
+    for (auto& image : degenerate.images) image.pose.C.setZero();
+    degenerate.tracks.back().has_color = true;
+    degenerate.tracks.back().color_r = 17;
+    const auto original = degenerate.tracks.back();
+    const auto original_index = degenerate.image_tracks;
+    expect(!refine_alignment_geometry(degenerate), "unusable final quality is rejected");
+    expect((degenerate.tracks.back().position.array() == original.position.array()).all() &&
+        degenerate.tracks.back().num_inliers == original.num_inliers &&
+        degenerate.tracks.back().observations.size() == original.observations.size() &&
+        degenerate.tracks.back().has_color == original.has_color &&
+        degenerate.tracks.back().color_r == original.color_r &&
+        degenerate.image_tracks.size() == original_index.size(),
+        "rejected final quality restores points, inliers, colors and track index");
+    expect(degenerate.registered_count() == 4 && degenerate.images[2].pose.C.isZero(),
+        "rejected final quality restores poses and registration");
+    bool same_index = true;
+    for (std::size_t i = 0; i < original_index.size(); ++i) {
+        same_index = same_index && degenerate.image_tracks[i].size() == original_index[i].size();
+        for (std::size_t j = 0; j < original_index[i].size() && same_index; ++j)
+            same_index = degenerate.image_tracks[i][j].track_id == original_index[i][j].track_id &&
+                degenerate.image_tracks[i][j].feature_id == original_index[i][j].feature_id;
+    }
+    expect(same_index, "rejected final quality restores every track index entry");
+}
+
 int main() {
+    test_cycle_supported_weak_tracks();
+    test_final_alignment_quality();
+    test_boundary_track_quota();
     {
         Scene layout;
         layout.images.resize(80);
@@ -1696,7 +1977,10 @@ int main() {
     {
         Scene neighbors;
         neighbors.images.resize(80);
-        for (auto& image : neighbors.images) image.registered = true;
+        for (Index i = 0; i < neighbors.images.size(); ++i) {
+            neighbors.images[i].registered = true;
+            neighbors.images[i].pose.C = Vec3(i, 0, 0);
+        }
         neighbors.images[40].registered = false;
         ImagePair revisit(2, 40);
         revisit.relative_pose = Pose3D::identity();
@@ -1719,7 +2003,88 @@ int main() {
         expect(std::find(anchors.begin(), anchors.end(), 3) == anchors.end() &&
                std::find(anchors.begin(), anchors.end(), 40) == anchors.end(),
                "recovery excludes unregistered anchors and its target");
+        ImagePair continuation(3, 4);
+        continuation.relative_pose = Pose3D::identity();
+        continuation.matches.resize(100);
+        neighbors.pairs.push_back(continuation);
+        const auto extended = select_missing_view_anchors(neighbors, 40);
+        expect(extended.size() == 16 && std::find(extended.begin(), extended.end(), 4) != extended.end(),
+               "missing-run graph bridges nominate distant registered anchors within the same budget");
+        expect(std::find(extended.begin(), extended.end(), 3) == extended.end(),
+               "a missing bridge never becomes a depth anchor");
+        const auto add_overlap = [&](Index a, Index b, unsigned matches) {
+            ImagePair pair(a, b);
+            pair.relative_pose = Pose3D::identity();
+            pair.matches.resize(matches);
+            neighbors.pairs.push_back(std::move(pair));
+        };
+        add_overlap(2, 70, 60);
+        add_overlap(4, 70, 60);
+        add_overlap(2, 71, 500);
+        add_overlap(2, 72, 29);
+        neighbors.images[73].registered = false;
+        add_overlap(2, 73, 100);
+        neighbors.images[74].pose.C = neighbors.images[2].pose.C;
+        add_overlap(2, 74, 500);
+        add_overlap(4, 74, 500);
+        const auto support = select_missing_view_support_anchors(neighbors, 40, 18);
+        expect(support.size() == 18 && std::equal(extended.begin(), extended.end(), support.begin()),
+               "support retry preserves every original anchor within a bounded extension");
+        expect(support[16] == 70 && support[17] == 71,
+               "support retry prefers multi-anchor overlap over a single large pair");
+        expect(std::find(support.begin(), support.end(), 72) == support.end() &&
+               std::find(support.begin(), support.end(), 73) == support.end() &&
+               std::find(support.begin(), support.end(), 74) == support.end(),
+               "support retry excludes weak edges, unregistered and coincident depth anchors");
+        expect(select_missing_view_support_anchors(neighbors, 40, 0).empty() &&
+               select_missing_view_support_anchors(neighbors, 100, 24).empty(),
+               "support retry handles disabled and invalid requests");
     }
+    {
+        Scene weak;
+        weak.images.resize(10);
+        for (Index i = 0; i < weak.images.size(); ++i) {
+            weak.images[i].id = i;
+            weak.images[i].registered = true;
+            weak.images[i].pose.C = Vec3(i, 0, 0);
+            weak.images[i].features.keypoints.resize(1);
+        }
+        weak.images[2].registered = false;
+        ImagePair duplicate(0, 1); duplicate.zero_baseline = true;
+        weak.pairs.push_back(std::move(duplicate));
+        const auto add_track = [&](std::initializer_list<Index> ids) {
+            Track track; track.position = Vec3(1, 1, 5);
+            for (Index id : ids) track.observations.push_back({id, 0});
+            track.num_inliers = static_cast<std::uint8_t>(ids.size());
+            weak.tracks.push_back(std::move(track));
+        };
+        for (unsigned i = 0; i < 30; ++i) add_track({3, 8, 9});
+        for (unsigned i = 0; i < 400; ++i) add_track({4, 7});
+        for (unsigned i = 0; i < 5; ++i) add_track({5, 8, 9});
+        expect(select_weak_alignment_views(weak) == std::vector<Index>{5, 6},
+            "native weak selection excludes duplicate, missing and sufficiently supported cameras");
+        const auto original_images = weak.images;
+        const auto original_tracks = weak.tracks;
+        FrontEndOptions invalid;
+        invalid.missing_view_minimum_consensus_ratio = 1.1;
+        expect(refine_weak_alignment_views(weak, invalid) == 0,
+            "a failed optional repair retains the input scene");
+        bool unchanged = weak.tracks.size() == original_tracks.size() && weak.pairs.size() == 1;
+        for (Index i = 0; i < weak.images.size(); ++i)
+            unchanged = unchanged && weak.images[i].registered == original_images[i].registered &&
+                weak.images[i].pose.C == original_images[i].pose.C &&
+                weak.images[i].pose.R == original_images[i].pose.R;
+        for (std::size_t i = 0; i < weak.tracks.size(); ++i)
+            unchanged = unchanged && weak.tracks[i].position == original_tracks[i].position &&
+                weak.tracks[i].num_inliers == original_tracks[i].num_inliers &&
+                weak.tracks[i].observations.size() == original_tracks[i].observations.size();
+        expect(unchanged, "failed repair restores registrations, poses, pair graph and tracks atomically");
+        Scene bounded; bounded.images.resize(20);
+        for (auto& image : bounded.images) image.registered = true;
+        expect(select_weak_alignment_views(bounded).size() == 8,
+            "optional camera repair has a bounded candidate budget");
+    }
+    test_resection_candidate_failures();
     test_global_mapping_preserves_nonuniform_orbit();
     test_global_mapping_preserves_nonuniform_orbit(true);
     test_positioning_budget_progress();
@@ -1852,6 +2217,27 @@ int main() {
             global.rms_reprojection_error_pixels >=
                 global.mean_reprojection_error_pixels,
         "global mapping reports reprojection statistics");
+
+    ReconstructionConfig product;
+    expect(!product.refine_weak_cameras, "product camera repair is opt-in");
+    product.frontend.trust_focal_pixels = true;
+    product.global_positioning = positioning;
+    product.resection = fallback;
+    std::vector<std::string> final_stages;
+    product.resection.diagnostic_callback = [&](const char* stage, const Scene&) {
+        if (std::string_view(stage) == "before_alignment_quality" ||
+            std::string_view(stage) == "before_weak_camera_refinement" ||
+            std::string_view(stage) == "final") final_stages.emplace_back(stage);
+    };
+    const auto completed = reconstruct_from_frontend(global_scene, product);
+    expect(completed.valid && final_stages == std::vector<std::string>{"before_alignment_quality", "final"},
+        "product mapping runs quality before final diagnostics and summary");
+    final_stages.clear();
+    product.refine_weak_cameras = true;
+    const auto refined_product = reconstruct_from_frontend(global_scene, product);
+    expect(refined_product.valid && final_stages == std::vector<std::string>{
+            "before_alignment_quality", "before_weak_camera_refinement", "final"},
+        "optional camera refinement runs after quality and before final diagnostics");
 
     if (failures == 0) {
         std::cout << "sfm mapping tests passed\n";

@@ -139,12 +139,23 @@ std::vector<ImageTrackRef> collect_pose_correspondences(
     used_tracks.reserve(ranked.size());
     std::vector<ImageTrackRef> result;
     result.reserve(ranked.size());
+    unsigned track_conflicts = 0;
     for (const RankedReference& entry : ranked) {
-        if (!used_features.insert(entry.reference.feature_id).second ||
-            !used_tracks.insert(entry.reference.track_id).second)
-            continue;
+        if (config.preserve_conflict_alternatives) {
+            if (used_features.contains(entry.reference.feature_id)) continue;
+            if (used_tracks.contains(entry.reference.track_id)) { ++track_conflicts; continue; }
+            used_features.insert(entry.reference.feature_id);
+            used_tracks.insert(entry.reference.track_id);
+        } else {
+            if (!used_features.insert(entry.reference.feature_id).second) continue;
+            if (!used_tracks.insert(entry.reference.track_id).second) { ++track_conflicts; continue; }
+        }
         result.push_back(entry.reference);
     }
+    core::Logger::instance().debug("resection correspondences: image=", image_id,
+        " name=",scene.images[image_id].path.filename()," proposals=",ranked.size(),
+        " selected=",result.size()," track_conflicts=",track_conflicts,
+        " preserve_alternatives=",config.preserve_conflict_alternatives);
     return result;
 }
 
@@ -238,7 +249,7 @@ std::vector<PoseCandidate> select_next_images(
     const Scene& scene,
     const RegisteredFeatureTracks& registered_tracks,
     const std::unordered_map<Index, unsigned>& unregistered,
-    const ResectionConfig& config) {
+    const ResectionConfig& config, bool include_lower_support = false) {
     std::vector<PoseCandidate> candidates;
     candidates.reserve(unregistered.size());
     for (const auto& [image_id, score] : unregistered) {
@@ -270,7 +281,7 @@ std::vector<PoseCandidate> select_next_images(
         static_cast<unsigned>(next.front().correspondences.size());
     const unsigned threshold = static_cast<unsigned>(
         config.ratio_correspondences * static_cast<float>(best));
-    next.erase(
+    if (!include_lower_support) next.erase(
         std::remove_if(
             next.begin(), next.end(),
             [&](const PoseCandidate& candidate) {
@@ -630,13 +641,14 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
     const unsigned wave_limit = std::max(1U, config.max_pose_wave);
     std::vector<Index> dirty_images;
+    bool include_lower_support = false;
 
     while (!unregistered.empty()) {
         const RegisteredFeatureTracks registered_tracks =
             build_registered_feature_tracks(scene);
         std::vector<PoseCandidate> next_candidates =
             select_next_images(
-                scene, registered_tracks, unregistered, config);
+                scene, registered_tracks, unregistered, config, include_lower_support);
         if (next_candidates.empty()) break;
 
         const unsigned start_count = registered_count;
@@ -773,7 +785,16 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
             dirty_images.clear();
         }
 
-        if (registered_count == start_count) break;
+        if (registered_count == start_count) {
+            core::Logger::instance().info("resection exhausted band: candidates=",next_candidates.size(),
+                " remaining=",unregistered.size()," include_lower_support=",include_lower_support);
+            if (config.retry_lower_support_candidates && !include_lower_support && config.ratio_correspondences > 0) {
+                include_lower_support = true;
+                continue;
+            }
+            break;
+        }
+        include_lower_support = false;
         if (config.checkpoint_callback &&
             registered_count - checkpointed_count >=
                 std::max(1U, config.checkpoint_interval)) {

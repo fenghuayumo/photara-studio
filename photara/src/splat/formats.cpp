@@ -2,6 +2,9 @@
 
 #include "formats_glb.hpp"
 #include "formats_usdc.hpp"
+#include "format_coordinates.hpp"
+#include "sog_quantization.hpp"
+#include "sog_vulkan.hpp"
 #include "splat/trainer.hpp"
 
 #include <webp/decode.h>
@@ -43,10 +46,7 @@ using boost::property_tree::ptree;
 constexpr float k_sh_c0 = 0.28209479177387814F;
 constexpr float k_spz_color_scale = 0.15F;
 constexpr float k_spz_sqrt_half = 0.7071067811865475244F;
-constexpr std::array<float, 24> k_rdf_to_rub_sh_signs{
-    -1.F, -1.F, 1.F, -1.F, 1.F, 1.F, -1.F, 1.F,
-    -1.F, 1.F, -1.F, -1.F, 1.F, -1.F, 1.F, -1.F,
-    1.F, -1.F, 1.F, 1.F, -1.F, 1.F, -1.F, 1.F};
+using detail::k_rdf_to_rub_sh_signs;
 
 [[nodiscard]] std::string lower(std::string value) {
     std::transform(
@@ -446,26 +446,12 @@ struct SogAssets {
 
 [[nodiscard]] std::uint8_t nearest_codebook(
     const std::vector<float>& codebook, const float value) {
-    const auto found = std::min_element(
-        codebook.begin(), codebook.end(),
-        [value](const float a, const float b) {
-            return std::abs(a - value) < std::abs(b - value);
-        });
-    return static_cast<std::uint8_t>(std::distance(codebook.begin(), found));
+    return detail::sog_nearest_codebook(codebook, value);
 }
 
 [[nodiscard]] std::vector<float> make_codebook(
     const std::vector<float>& values, const char* label) {
-    if (values.empty()) throw std::runtime_error(std::string("Empty SOG ") + label);
-    const auto [minimum, maximum] = std::minmax_element(values.begin(), values.end());
-    if (!std::isfinite(*minimum) || !std::isfinite(*maximum))
-        throw std::runtime_error(std::string("Non-finite SOG ") + label);
-    std::vector<float> codebook(256);
-    for (std::size_t i = 0; i < codebook.size(); ++i) {
-        const float t = static_cast<float>(i) / 255.F;
-        codebook[i] = *minimum + (*maximum - *minimum) * t;
-    }
-    return codebook;
+    return detail::sog_codebook(values, label);
 }
 
 [[nodiscard]] std::string json_float(const float value) {
@@ -1206,8 +1192,7 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         std::ceil(std::sqrt(static_cast<double>(count)))));
     const std::size_t height = (count + width - 1U) / width;
     const auto pixels = checked_product(width, height, "SOG image dimensions");
-    if (width > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-        height > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    if (width > WEBP_MAX_DIMENSION || height > WEBP_MAX_DIMENSION)
         throw std::runtime_error("SOG image dimensions exceed WebP limits");
     const auto to_log = [](const float value) {
         return std::copysign(std::log1p(std::abs(value)), value);
@@ -1302,30 +1287,45 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
                                static_cast<std::size_t>(channel)] =
                         sh[source] * k_rdf_to_rub_sh_signs[coefficient];
                 }
-        shn_codebook = make_codebook(encoded_ac, "shN codebook");
-        palette_count = std::min<std::size_t>(count, 65536U);
+        detail::SogPalette palette;
+        if (count <= 65536U) {
+            // An exact per-point palette needs no lossy vector clustering.
+            palette.centroids = std::move(encoded_ac);
+            palette.labels.resize(count);
+            for (std::size_t i = 0; i < count; ++i)
+                palette.labels[i] = static_cast<std::uint32_t>(i);
+        } else {
+#if defined(TINYTENSOR_HAS_VULKAN)
+            if (count > std::numeric_limits<unsigned>::max())
+                throw std::runtime_error("SOG Gaussian count exceeds Vulkan index range");
+            palette = detail::cluster_sog_vulkan(encoded_ac, static_cast<unsigned>(count),
+                                                  static_cast<unsigned>(ac_count * 3U));
+#else
+            throw std::runtime_error("Large SOG SH palettes require Vulkan compute support");
+#endif
+        }
+        std::vector<float>().swap(encoded_ac);
+        shn_codebook = make_codebook(palette.centroids, "shN codebook");
+        palette_count = palette.centroids.size() / (ac_count * 3U);
         const std::size_t palette_height = (palette_count + 63U) / 64U;
         shn_centroid_image.assign(
             checked_product(64U * ac_count, palette_height, "SOG shN palette") * 3U, 0);
         shn_label_image.assign(pixels * 4U, 0);
         for (std::size_t index = 0; index < count; ++index) {
-            const auto label = std::min<std::size_t>(
-                palette_count - 1U, index * palette_count / count);
+            const auto label = palette.labels[index];
             shn_label_image[index * 4U] = static_cast<std::uint8_t>(label & 0xffU);
             shn_label_image[index * 4U + 1U] = static_cast<std::uint8_t>(label >> 8U);
             shn_label_image[index * 4U + 3U] = 255U;
         }
         for (std::size_t label = 0; label < palette_count; ++label) {
-            const auto source_index = std::min<std::size_t>(
-                count - 1U, label * count / palette_count);
             for (std::size_t coefficient = 0; coefficient < ac_count; ++coefficient) {
                 const auto target =
                     ((label / 64U) * (64U * ac_count) +
                      (label % 64U) * ac_count + coefficient) * 3U;
                 for (int channel = 0; channel < 3; ++channel)
                     shn_centroid_image[target + static_cast<std::size_t>(channel)] =
-                        nearest_codebook(shn_codebook, encoded_ac[
-                            (source_index * ac_count + coefficient) * 3U +
+                        nearest_codebook(shn_codebook, palette.centroids[
+                            (label * ac_count + coefficient) * 3U +
                             static_cast<std::size_t>(channel)]);
             }
         }

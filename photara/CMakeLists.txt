@@ -320,7 +320,8 @@ if(PHOTARA_ENABLE_FEATURES)
         message(STATUS "Photara Vulkan feature backend: ON "
             "(dxc=${PHOTARA_FEATURES_DXC_EXECUTABLE})")
         add_executable(photara_vulkan_features_test tests/vulkan_features_test.cpp)
-        target_link_libraries(photara_vulkan_features_test PRIVATE Photara::Features)
+        target_link_libraries(photara_vulkan_features_test PRIVATE
+            Photara::Features photara_vk::photara_vk Vulkan::Vulkan)
         target_compile_features(photara_vulkan_features_test PRIVATE cxx_std_20)
         if(WIN32)
             add_custom_command(TARGET photara_vulkan_features_test POST_BUILD
@@ -455,10 +456,12 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/checkpoint.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/frontend.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/recovery_cache.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/camera_selection.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/camera_selection.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/submap_recovery.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/submap_recovery.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/resection_seeding.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/reconstruct.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/geometry.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/pair_weighting.cpp"
@@ -471,6 +474,8 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
+    list(APPEND PHOTARA_RECONSTRUCTION_CACHE_ID_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/resection_seeding.hpp")
     list(SORT PHOTARA_FRONTEND_CACHE_ID_FILES)
     list(SORT PHOTARA_RECONSTRUCTION_CACHE_ID_FILES)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -702,6 +707,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/geometry_vulkan.cpp
                 src/splat/pam_vulkan.cpp
                 src/splat/deployment_vulkan.cpp
+                src/splat/sog_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
@@ -718,6 +724,7 @@ if(PHOTARA_ENABLE_FEATURES)
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/deployment.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/sog_cluster.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_stats.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_noise.hlsl"
                     PROFILE cs_6_0
@@ -1045,6 +1052,10 @@ if(TARGET photara_features)
                 target_compile_definitions(photara_studio PRIVATE
                     PHOTARA_STUDIO_BA_CUDA=1)
             endif()
+            if(PHOTARA_HAS_VULKAN_BA)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_BA_VULKAN=1)
+            endif()
             if(TARGET splat_drender::vulkan)
                 target_compile_definitions(photara_studio PRIVATE
                     PHOTARA_STUDIO_VULKAN_TRAINING=1)
@@ -1140,6 +1151,15 @@ if(PHOTARA_BUILD_BENCHMARKS)
         endif()
         add_executable(photara_pair_verify src/tools/pair_verify.cpp)
         add_executable(photara_sfm_realign src/tools/sfm_realign.cpp)
+        add_executable(photara_sfm_refine src/tools/sfm_refine_reconstruction.cpp)
+        target_link_libraries(photara_sfm_refine PRIVATE Photara::SfM)
+        if(WIN32)
+            add_custom_command(TARGET photara_sfm_refine POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_sfm_refine>
+                    $<TARGET_FILE_DIR:photara_sfm_refine>
+                COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
         add_executable(photara_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
         add_executable(photara_sfm_reconstruction_benchmark src/tools/sfm_reconstruction_benchmark.cpp)
@@ -1150,6 +1170,10 @@ if(PHOTARA_BUILD_BENCHMARKS)
         target_link_libraries(photara_sfm_position_recovery_probe PRIVATE Photara::SfM)
         add_executable(photara_sfm_stable_resection_probe src/tools/sfm_stable_resection_probe.cpp)
         target_link_libraries(photara_sfm_stable_resection_probe PRIVATE Photara::SfM)
+        # Experimental Eigen/Ceres code must match the SfM/BA Eigen ABI.
+        if(MSVC AND PHOTARA_ENABLE_NATIVE_ARCH)
+            target_compile_options(photara_sfm_stable_resection_probe PRIVATE /arch:AVX2)
+        endif()
         if(WIN32)
             foreach(_sfm_tool photara_sfm_reconstruction_benchmark photara_sfm_position_diagnostics photara_sfm_position_recovery_probe photara_sfm_stable_resection_probe)
                 add_custom_command(TARGET ${_sfm_tool} POST_BUILD
@@ -1227,6 +1251,7 @@ if(PHOTARA_BUILD_BENCHMARKS)
         photara_cpu_sift_parity
         photara_pair_verify
         photara_sfm_realign
+        photara_sfm_refine
         photara_sfm_match_benchmark
         photara_sfm_positioning_benchmark
         photara_sfm_reconstruction_benchmark
@@ -1457,6 +1482,19 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
         endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
+        add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
+        target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.formats COMMAND photara_splat_formats_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.formats_vulkan COMMAND photara_splat_formats_test --vulkan)
+            set_tests_properties(photara.splat.formats_vulkan PROPERTIES TIMEOUT 180)
+        endif()
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_formats_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_formats_test>
+                    $<TARGET_FILE_DIR:photara_splat_formats_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_model_handoff_test tests/model_handoff_test.cpp)
         target_link_libraries(photara_model_handoff_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.model_handoff COMMAND photara_model_handoff_test)
@@ -1597,6 +1635,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_mapping_test tests/mapping_test.cpp)
         add_executable(photara_sfm_refine_probe ../experiments/sfm_refine_probe.cpp)
         target_link_libraries(photara_sfm_refine_probe PRIVATE Photara::SfM)
+        add_executable(photara_sfm_retrieval_audit src/tools/sfm_retrieval_audit.cpp)
+        target_link_libraries(photara_sfm_retrieval_audit PRIVATE Photara::SfM)
+        add_executable(photara_sfm_extend src/tools/sfm_extend_reconstruction.cpp)
+        target_link_libraries(photara_sfm_extend PRIVATE Photara::SfM)
         target_link_libraries(photara_mapping_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.mapping COMMAND photara_mapping_test)
         add_executable(photara_vocabulary_test tests/vocabulary_test.cpp)
@@ -1608,6 +1650,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_hierarchical_test tests/hierarchical_test.cpp)
         add_executable(photara_submap_recovery_test tests/submap_recovery_test.cpp)
         target_link_libraries(photara_submap_recovery_test PRIVATE Photara::SfM)
+        # Keep header-instantiated Eigen/Ceres allocation paths compatible.
+        if(MSVC AND PHOTARA_ENABLE_NATIVE_ARCH)
+            target_compile_options(photara_submap_recovery_test PRIVATE /arch:AVX2)
+        endif()
         add_test(NAME photara.sfm.submap_recovery COMMAND photara_submap_recovery_test)
         target_link_libraries(photara_hierarchical_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.hierarchical COMMAND photara_hierarchical_test)
@@ -1671,6 +1717,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_logging_test
         photara_splat_checkpoint_test
         photara_splat_test
+        photara_splat_formats_test
         photara_splat_usdc_test
         photara_splat_deployment_test
         photara_splat_merge_test
@@ -1685,6 +1732,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_equirect_dataset_check
         photara_mapping_test
         photara_sfm_refine_probe
+        photara_sfm_retrieval_audit
+        photara_sfm_extend
         photara_vocabulary_test
         photara_checkpoint_test
         photara_hierarchical_test

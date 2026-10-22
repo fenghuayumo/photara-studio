@@ -659,9 +659,6 @@ NB_MODULE(photara, module) {
             "progressive_pair_expansion",
             &sfm::FrontEndOptions::progressive_pair_expansion)
         .def_rw(
-            "structural_pair_expansion",
-            &sfm::FrontEndOptions::structural_pair_expansion)
-        .def_rw(
             "progressive_min_verified_degree",
             &sfm::FrontEndOptions::progressive_min_verified_degree)
         .def_rw(
@@ -685,6 +682,8 @@ NB_MODULE(photara, module) {
         .def_rw(
             "progressive_rescue_max_features",
             &sfm::FrontEndOptions::progressive_rescue_max_features)
+        .def_rw("missing_view_retry_max_neighbors", &sfm::FrontEndOptions::missing_view_retry_max_neighbors)
+        .def_rw("missing_view_minimum_consensus_ratio", &sfm::FrontEndOptions::missing_view_minimum_consensus_ratio)
         .def_rw(
             "compress_descriptors_u8",
             &sfm::FrontEndOptions::compress_descriptors_u8)
@@ -695,6 +694,7 @@ NB_MODULE(photara, module) {
         .def(nb::init<>())
         .def_rw("mode", &sfm::ReconstructionConfig::mode)
         .def_rw("frontend", &sfm::ReconstructionConfig::frontend)
+        .def_rw("refine_weak_cameras", &sfm::ReconstructionConfig::refine_weak_cameras)
         .def_rw("star", &sfm::ReconstructionConfig::star)
         .def_rw("resection", &sfm::ReconstructionConfig::resection)
         .def_rw("hierarchical", &sfm::ReconstructionConfig::hierarchical)
