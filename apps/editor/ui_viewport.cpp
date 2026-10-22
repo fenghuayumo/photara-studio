@@ -1347,7 +1347,8 @@ splat_render::Camera preview_camera_from(const SplatPreviewCamera& preview) {
     camera.k4 = preview.k4;
     camera.width = preview.width;
     camera.height = preview.height;
-    camera.model = preview_projection(preview.model);
+    camera.model = preview.orthographic ? splat_render::k_camera_orthographic
+                                       : preview_projection(preview.model);
     return camera;
 }
 

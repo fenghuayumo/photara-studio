@@ -23,6 +23,8 @@ struct Camera {
     std::uint32_t width{};
     std::uint32_t height{};
     CameraModel model{CameraModel::pinhole};
+    // Editor preview only: parallel rays; fx/fy are pixels per world unit.
+    bool orthographic{false};
     // OpenCV fisheye k1..k4. Unused for pinhole and equirectangular.
     float k1{0.F};
     float k2{0.F};

@@ -110,7 +110,7 @@ bool load_preview_camera_file(
 
 bool preview_camera_equivalent(const Camera& left, const Camera& right) {
     if (left.width != right.width || left.height != right.height ||
-        left.model != right.model)
+        left.model != right.model || left.orthographic != right.orthographic)
         return false;
     const auto close = [](const float a, const float b) {
         return std::abs(a - b) <=
@@ -141,7 +141,8 @@ constexpr float k_preview_interactive_budget = 5.F;
 [[nodiscard]] float preview_pose_shift_px(
     const Camera& left, const Camera& right,
     const std::array<float, 3>& reference) {
-    if (left.model != CameraModel::pinhole ||
+    if (left.orthographic || right.orthographic ||
+        left.model != CameraModel::pinhole ||
         right.model != CameraModel::pinhole)
         return std::numeric_limits<float>::infinity();
     const auto project = [&reference](
@@ -169,7 +170,7 @@ constexpr float k_preview_interactive_budget = 5.F;
 [[nodiscard]] bool preview_intrinsics_close(
     const Camera& left, const Camera& right) {
     if (left.width != right.width || left.height != right.height ||
-        left.model != right.model)
+        left.model != right.model || left.orthographic != right.orthographic)
         return false;
     const auto close = [](const float a, const float b) {
         return std::abs(a - b) <=
