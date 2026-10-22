@@ -52,6 +52,7 @@ enum class Icon {
     sphere_select,
     edit,
     sliders,
+    lasso,
 };
 
 enum class ButtonStyle { normal, primary, danger };

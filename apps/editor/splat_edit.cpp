@@ -28,6 +28,36 @@ constexpr float k_min_opacity = 1.F / 255.F;
 constexpr float k_click_px = 4.F;
 constexpr float k_close_px = 14.F;
 
+// Bound freehand work on large clouds without dropping the closing endpoint.
+void append_lasso_point(std::vector<ImVec2>& path, const ImVec2 point,
+                        const bool force = false) {
+    if (!path.empty()) {
+        const float dx = point.x - path.back().x;
+        const float dy = point.y - path.back().y;
+        if (dx * dx + dy * dy < (force ? 0.01F : 16.F)) return;
+    }
+    if (path.size() >= 1024) {
+        std::size_t kept = 1;
+        for (std::size_t i = 2; i < path.size(); i += 2) path[kept++] = path[i];
+        path.resize(kept);
+    }
+    path.push_back(point);
+}
+
+bool lasso_has_area(const std::vector<ImVec2>& path) {
+    if (path.size() < 3) return false;
+    // Absolute triangle areas also accept a self-crossing freehand loop.
+    double area = 0.;
+    for (std::size_t i = 2; i < path.size(); ++i) {
+        const double ax = path[i - 1].x - path.front().x;
+        const double ay = path[i - 1].y - path.front().y;
+        const double bx = path[i].x - path.front().x;
+        const double by = path[i].y - path.front().y;
+        area += std::abs(ax * by - ay * bx);
+    }
+    return area > 2. * k_click_px * k_click_px;
+}
+
 float activate_opacity(const float logit) {
     if (logit >= 0.F) {
         const float z = std::exp(-logit);
@@ -831,11 +861,21 @@ bool SplatEdit::ellipse_hits(
     }
     if (polygon == nullptr || polygon->size() < 3) return false;
     if (inside_polygon(*polygon, {ellipse.u, ellipse.v})) return true;
-    for (const ImVec2& point : *polygon)
-        if (ellipse_contains(ellipse, point.x, point.y)) return true;
-    return rim([&](const float x, const float y) {
-        return inside_polygon(*polygon, {x, y});
-    });
+    // Transform each edge into the ellipse's unit circle. This catches thin
+    // lasso regions crossing a ring between the old eight rim samples.
+    const float c = std::cos(ellipse.rotation), s = std::sin(ellipse.rotation);
+    const auto local = [&](const ImVec2 p) {
+        const float dx = p.x - ellipse.u, dy = p.y - ellipse.v;
+        return ImVec2{(c * dx + s * dy) / std::max(ellipse.rx, 1e-3F),
+                      (-s * dx + c * dy) / std::max(ellipse.ry, 1e-3F)};
+    };
+    ImVec2 previous = local(polygon->back());
+    for (const ImVec2 point : *polygon) {
+        const ImVec2 current = local(point);
+        if (dist2_segment({0.F, 0.F}, previous, current) <= 1.F) return true;
+        previous = current;
+    }
+    return false;
 }
 
 void SplatEdit::select_at(
@@ -909,6 +949,19 @@ void SplatEdit::apply_region(
         raster_poly.reserve(polygon_.size());
         for (const ImVec2& point : polygon_)
             raster_poly.push_back(view_to_raster(camera, view_min, view_max, point));
+        if (raster_poly.size() < 3) return;
+    }
+    float rect_min_x = std::min(ra.x, rb.x), rect_max_x = std::max(ra.x, rb.x);
+    float rect_min_y = std::min(ra.y, rb.y), rect_max_y = std::max(ra.y, rb.y);
+    if (mode == 3) {
+        rect_min_x = rect_max_x = raster_poly.front().x;
+        rect_min_y = rect_max_y = raster_poly.front().y;
+        for (const ImVec2 point : raster_poly) {
+            rect_min_x = std::min(rect_min_x, point.x);
+            rect_max_x = std::max(rect_max_x, point.x);
+            rect_min_y = std::min(rect_min_y, point.y);
+            rect_max_y = std::max(rect_max_y, point.y);
+        }
     }
     std::vector<ScreenHit> hits;
     hits.reserve(256);
@@ -918,16 +971,12 @@ void SplatEdit::apply_region(
         const RayHit hit = project_center(camera, center[0], center[1], center[2]);
         if (!hit.valid) continue;
         bool inside = false;
-        const float rect_min_x = std::min(ra.x, rb.x);
-        const float rect_max_x = std::max(ra.x, rb.x);
-        const float rect_min_y = std::min(ra.y, rb.y);
-        const float rect_max_y = std::max(ra.y, rb.y);
         const float circle_radius = mode == 1
             ? std::sqrt((rb.x - ra.x) * (rb.x - ra.x) + (rb.y - ra.y) * (rb.y - ra.y))
             : brush_radius_ * raster_scale;
         if (rings_hit_ && rings_ready()) {
             float clearance = 0.F;
-            if (mode == 0) {
+            if (mode == 0 || mode == 3) {
                 const float dx = hit.u < rect_min_x ? rect_min_x - hit.u
                     : hit.u > rect_max_x ? hit.u - rect_max_x : 0.F;
                 const float dy = hit.v < rect_min_y ? rect_min_y - hit.v
@@ -963,7 +1012,9 @@ void SplatEdit::apply_region(
             const float du = hit.u - rb.x;
             const float dv = hit.v - rb.y;
             inside = du * du + dv * dv <= circle_radius * circle_radius;
-        } else if (raster_poly.size() >= 3) {
+        } else if (raster_poly.size() >= 3 &&
+                   hit.u >= rect_min_x && hit.u <= rect_max_x &&
+                   hit.v >= rect_min_y && hit.v <= rect_max_y) {
             inside = inside_polygon(raster_poly, {hit.u, hit.v});
         }
         if (!inside) continue;
@@ -1397,6 +1448,7 @@ void SplatEdit::abort_stroke(App& app) {
     stroking_ = false;
     stroke_changed_ = false;
     stroke_moved_ = false;
+    if (tool_ == Tool::lasso) polygon_.clear();
 }
 
 void SplatEdit::set_tool(App& app, const Tool tool) {
@@ -1486,6 +1538,18 @@ void SplatEdit::finish_gesture(
             selected_count_ = 0;
         }
         apply_region(camera, view_min, view_max, 1, stroke_origin_, mouse);
+    } else if (tool_ == Tool::lasso) {
+        append_lasso_point(polygon_, {
+            std::clamp(mouse.x, view_min.x, view_max.x),
+            std::clamp(mouse.y, view_min.y, view_max.y)}, true);
+        if (lasso_has_area(polygon_)) {
+            if (select_mode() == SelectMode::replace) {
+                std::fill(selected_.begin(), selected_.end(), 0);
+                selected_count_ = 0;
+            }
+            apply_region(camera, view_min, view_max, 3, {}, {});
+        }
+        polygon_.clear();
     }
     end_stroke(app);
 }
@@ -1592,6 +1656,7 @@ void SplatEdit::handle_keys(App& app) {
     if (ImGui::IsKeyPressed(ImGuiKey_R, false)) toggle_tool(app, Tool::pick);
     else if (ImGui::IsKeyPressed(ImGuiKey_C, false)) toggle_tool(app, Tool::circle);
     else if (ImGui::IsKeyPressed(ImGuiKey_P, false)) toggle_tool(app, Tool::polygon);
+    else if (ImGui::IsKeyPressed(ImGuiKey_L, false)) toggle_tool(app, Tool::lasso);
     else if (ImGui::IsKeyPressed(ImGuiKey_B, false)) toggle_tool(app, Tool::brush);
     else if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) toggle_tool(app, Tool::box);
     else if (ImGui::IsKeyPressed(ImGuiKey_U, false)) toggle_tool(app, Tool::sphere);
@@ -1658,6 +1723,7 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
     const char* gesture = tr("Click or drag a box");
     if (tool_ == Tool::circle) gesture = tr("Drag a circle");
     else if (tool_ == Tool::polygon) gesture = tr("Click points, Enter closes");
+    else if (tool_ == Tool::lasso) gesture = tr("Drag a lasso, release to select");
     else if (tool_ == Tool::brush) gesture = tr("Paint across Gaussians");
     if (rings_hit_) {
         std::snprintf(
@@ -1706,6 +1772,9 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         {icons::Icon::polygon_select, "##splat_poly", "Polygon select",
          "Click to add corners. Close on the first point or press Enter. Backspace removes the last corner.",
          "P", 5, false},
+        {icons::Icon::lasso, "##splat_lasso", "Lasso select",
+         "Hold the left button to draw a freehand loop. Release to select. Shift adds, Alt removes, Esc cancels.",
+         "L", 9, false},
         {icons::Icon::brush, "##splat_brush", "Brush select",
          "Paint over Gaussians. [ ] or Alt+wheel changes the brush size.",
          "B", 6, false},
@@ -1754,7 +1823,8 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         toolbar_min_, toolbar_max_, IM_COL32(255, 255, 255, 18), 9.F);
 
     const Tool tools[] = {
-        Tool::pick, Tool::circle, Tool::polygon, Tool::brush, Tool::box, Tool::sphere};
+        Tool::pick, Tool::circle, Tool::polygon, Tool::brush, Tool::box, Tool::sphere,
+        Tool::lasso};
     float cursor_x = left + k_pad;
     for (int index = 0; index < static_cast<int>(std::size(items)); ++index) {
         const Item& item = items[index];
@@ -1773,7 +1843,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             : item.action == 1 ? !redo_.empty()
                                : true;
         const bool active = item.action == 2 ? tool_ == Tool::none
-            : item.action >= 3 && item.action <= 8
+            : item.action >= 3 && item.action <= 9
                 ? tool_ == tools[item.action - 3]
             : item.action == 20 ? front_only_
             : item.action == 21 ? !front_only_
@@ -1808,7 +1878,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         if (item.action == 0) undo(app);
         else if (item.action == 1) redo(app);
         else if (item.action == 2) set_tool(app, Tool::none);
-        else if (item.action >= 3 && item.action <= 8)
+        else if (item.action >= 3 && item.action <= 9)
             toggle_tool(app, tools[item.action - 3]);
         else if (item.action == 20) front_only_ = true;
         else if (item.action == 21) front_only_ = false;
@@ -1894,7 +1964,8 @@ void SplatEdit::draw_overlay(
                 font, font->FontSize, {mouse.x + 12.F, mouse.y + 8.F},
                 theme::u32(theme::text_bright), label);
     } else if (show_cursor &&
-               (tool_ == Tool::pick || tool_ == Tool::circle || tool_ == Tool::polygon)) {
+               (tool_ == Tool::pick || tool_ == Tool::circle ||
+                tool_ == Tool::polygon || tool_ == Tool::lasso)) {
         constexpr float k_gap = 4.F;
         constexpr float k_arm = 9.F;
         draw->AddLine({mouse.x - k_arm, mouse.y}, {mouse.x - k_gap, mouse.y}, stroke, 1.25F);
@@ -1917,6 +1988,16 @@ void SplatEdit::draw_overlay(
         draw->AddCircleFilled(stroke_origin_, radius, fill, 48);
         draw->AddCircle(stroke_origin_, radius, IM_COL32(0, 0, 0, 110), 48, 2.4F);
         draw->AddCircle(stroke_origin_, radius, stroke, 48, 1.25F);
+    }
+    if (tool_ == Tool::lasso && stroking_ && !polygon_.empty()) {
+        draw->AddPolyline(polygon_.data(), static_cast<int>(polygon_.size()),
+                          IM_COL32(0, 0, 0, 110), 0, 2.8F);
+        draw->AddPolyline(polygon_.data(), static_cast<int>(polygon_.size()), stroke, 0, 1.4F);
+        const ImVec2 tip{std::clamp(mouse.x, view_min.x, view_max.x),
+                         std::clamp(mouse.y, view_min.y, view_max.y)};
+        draw->AddLine(polygon_.back(), tip, stroke, 1.4F);
+        draw->AddLine(tip, polygon_.front(), stroke, 0.75F);
+        draw->AddCircleFilled(polygon_.front(), 3.F, stroke);
     }
     if (tool_ == Tool::polygon && !polygon_.empty()) {
         const float dx = mouse.x - polygon_.front().x;
@@ -1998,6 +2079,10 @@ void SplatEdit::handle_pointer(
 
     if (hot && click && !stroking_) {
         begin_stroke(tool_ == Tool::move);
+        if (tool_ == Tool::lasso) {
+            polygon_.clear();
+            append_lasso_point(polygon_, mouse);
+        }
         if (tool_ == Tool::brush && select_mode() == SelectMode::replace) {
             std::fill(selected_.begin(), selected_.end(), 0);
             selected_count_ = 0;
@@ -2005,6 +2090,17 @@ void SplatEdit::handle_pointer(
         }
     }
     if (!stroking_) return;
+
+    if (tool_ == Tool::lasso) {
+        if ((!down && !release) || ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+            ImGui::IsMouseDown(ImGuiMouseButton_Middle) || io.MouseWheel != 0.F) {
+            abort_stroke(app);
+            return;
+        }
+        if (down) append_lasso_point(polygon_, {
+            std::clamp(mouse.x, view_min.x, view_max.x),
+            std::clamp(mouse.y, view_min.y, view_max.y)});
+    }
 
     if (tool_ == Tool::brush && (down || release)) {
         const ImVec2 raster = view_to_raster(camera, view_min, view_max, mouse);

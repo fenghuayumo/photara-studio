@@ -20,7 +20,7 @@ struct App;
 // matches the inspector projection ids used by the Vulkan preview.
 class SplatEdit {
 public:
-    enum class Tool { none, pick, move, circle, polygon, brush, box, sphere };
+    enum class Tool { none, pick, move, circle, polygon, brush, box, sphere, lasso };
 
     // Host arrays copied at load. Pointers are only read during sync.
     struct Host {

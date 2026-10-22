@@ -606,6 +606,19 @@ void draw(
                 {verts[1].x + handle, verts[1].y + handle}, colour, 1.F);
             break;
         }
+        case Icon::lasso: {
+            const ImVec2 loop[] = {
+                point(min, max, 0.24F, 0.63F), point(min, max, 0.12F, 0.44F),
+                point(min, max, 0.19F, 0.24F), point(min, max, 0.43F, 0.14F),
+                point(min, max, 0.72F, 0.19F), point(min, max, 0.86F, 0.38F),
+                point(min, max, 0.78F, 0.58F), point(min, max, 0.52F, 0.69F),
+                point(min, max, 0.24F, 0.63F)};
+            draw_list->AddPolyline(loop, 9, colour, 0, thickness);
+            draw_list->AddEllipse(point(min, max, 0.29F, 0.68F),
+                {extent * 0.09F, extent * 0.08F}, colour, 0.F, 12, thickness);
+            line(draw_list, min, max, 0.34F, 0.73F, 0.43F, 0.88F, colour, thickness);
+            break;
+        }
         case Icon::brush: {
             const ImVec2 back = point(min, max, 0.28F, 0.74F);
             const ImVec2 neck = point(min, max, 0.58F, 0.36F);
