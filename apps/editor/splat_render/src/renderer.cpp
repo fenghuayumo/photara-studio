@@ -758,7 +758,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
                     const DisplayOptions& display) {
     target = {};
     if (!ensure_device()) return false;
-    static_assert(sizeof(FrameData) == 144);
+    static_assert(sizeof(FrameData) == 160);
     static_assert(offsetof(FrameData, sh_degree) == 128);
     const std::uint32_t width = std::max(1U, camera.width);
     const std::uint32_t height = std::max(1U, camera.height);
@@ -785,6 +785,9 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     frame.count = count_;
     frame.bases = sh_bases_;
     frame.reserved = static_cast<std::uint32_t>(shading);
+    frame.selection_depth[0] = display.selection_depth_enabled ? 1.F : 0.F;
+    frame.selection_depth[1] = display.selection_depth_near;
+    frame.selection_depth[2] = display.selection_depth_far;
     if (cache_valid_ && display_ >= 0 && cached_generation_ == generation_ &&
         frames_[display_].width == width && frames_[display_].height == height &&
         std::memcmp(&cached_, &frame, sizeof(frame)) == 0 &&
@@ -1001,6 +1004,9 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         const bool geometry = frame.reserved == static_cast<std::uint32_t>(Shading::depth) ||
                               frame.reserved == static_cast<std::uint32_t>(Shading::normal);
         settings.need_depth = geometry;
+        settings.preview_selection_depth = display_options_.selection_depth_enabled;
+        settings.preview_selection_near = display_options_.selection_depth_near;
+        settings.preview_selection_far = display_options_.selection_depth_far;
         try {
             if (geometry) {
                 // Use the same median-depth and alpha-normalized footprint

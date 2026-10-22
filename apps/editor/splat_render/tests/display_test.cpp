@@ -45,6 +45,18 @@ int main() {
         };
         draw(splat_render::Shading::gaussian);
         const auto color = center();
+        for (const auto shading : {splat_render::Shading::gaussian, splat_render::Shading::rings}) {
+            options.selection_depth_enabled = false; draw(shading);
+            const auto original = center();
+            options.selection_depth_enabled = true;
+            options.selection_depth_near = 4.F; options.selection_depth_far = 5.F;
+            draw(shading); const auto dimmed = center();
+            require(dimmed[0] < original[0] * .7F, "Out-of-range Gaussian must darken in RGB and rings");
+            options.selection_depth_near = 2.F; options.selection_depth_far = 4.F;
+            draw(shading); require(center() == original, "In-range Gaussian must retain its original colour");
+            options.selection_depth_enabled = false;
+            draw(shading); require(center() == original, "Disabling depth cue must restore colour without model changes");
+        }
         draw(splat_render::Shading::depth);
         const auto depth = center();
         require(color != depth, "depth must differ from RGB");

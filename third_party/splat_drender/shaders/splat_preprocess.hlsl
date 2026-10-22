@@ -141,6 +141,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         rgb = float3(color_src[3 * index], color_src[3 * index + 1], color_src[3 * index + 2]);
     }
 
+    float selection_depth = mode == kModeEquirect ? length(t) : t.z;
+    if (camera[19] > .5f && (selection_depth < camera[20] || selection_depth > camera[21]))
+        rgb *= .18f;
     float depth = sqrt(dot(t, t));
     uint depth_key = asuint(depth);
     uint gaussian_slots = geometry ? 7u : 5u;

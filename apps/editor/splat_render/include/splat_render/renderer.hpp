@@ -32,6 +32,9 @@ struct DisplayOptions {
     bool world_normals{true};
     float depth_near{0.1F};
     float depth_far{10.F};
+    bool selection_depth_enabled{};
+    float selection_depth_near{};
+    float selection_depth_far{100.F};
     bool operator==(const DisplayOptions&) const = default;
 };
 
@@ -137,6 +140,7 @@ private:
         std::uint32_t count{};
         std::uint32_t bases{};
         std::uint32_t reserved{};  // Shading: 0 gaussian, 1 rings
+        float selection_depth[4]{};
     };
 
     bool ensure_runtime();

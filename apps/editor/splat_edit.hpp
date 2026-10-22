@@ -67,6 +67,11 @@ public:
         return count_ > 0 && tool_ != Tool::none;
     }
     [[nodiscard]] bool front_only() const noexcept { return front_only_; }
+    // Camera-space Z in scene units; panoramas use distance from the camera.
+    void set_selection_depth_range(bool enabled, float near_depth, float far_depth);
+    bool fit_selection_depth_range(const splat_render::Camera& camera, bool selected_only);
+    bool handle_depth_shortcuts(const splat_render::Camera& camera, bool pointer_in_view);
+    void apply_depth_preview(splat_render::DisplayOptions& display) const;
     [[nodiscard]] bool gesture_active() const noexcept {
         return stroking_ || !polygon_.empty() || volume_drag_ >= 0;
     }
@@ -79,7 +84,8 @@ public:
     void write_status(char* buffer, std::size_t size) const;
 
     // Draws the pill and handles its buttons. True while the pointer is over it.
-    bool draw_toolbar(App& app, ImVec2 view_min, ImVec2 view_max);
+    bool draw_toolbar(App& app, ImVec2 view_min, ImVec2 view_max,
+                      const splat_render::Camera& camera);
     void draw_overlay(
         ImDrawList* draw, ImVec2 view_min, ImVec2 view_max,
         const splat_render::Camera& camera) const;
@@ -207,6 +213,12 @@ private:
     Tool tool_{Tool::none};
     // True: only the front surface in each screen cell. False: every layer.
     bool front_only_{true};
+    bool depth_range_enabled_{};
+    bool depth_range_initialized_{};
+    float selection_depth_near_{};
+    float selection_depth_far_{100.F};
+    double depth_readout_until_{};
+    [[nodiscard]] bool accepts_depth(float depth) const noexcept;
     // Hit the projected covariance ellipse instead of the centre.
     bool rings_hit_{};
     // Contour in projected sigmas. 2*sqrt(2) is SuperSplat's exp(-4) edge.

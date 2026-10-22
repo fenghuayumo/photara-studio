@@ -71,6 +71,11 @@ struct SplatSettings {
     // attachments and backward snapshots.
     bool preview_rings = false;
     float preview_ring_scale = 2.828427F;
+    // Editor-only colour cue. Centres outside this range are darkened without
+    // changing opacity, geometry, model attributes, or exported output.
+    bool preview_selection_depth = false;
+    float preview_selection_near = 0.F;
+    float preview_selection_far = 100.F;
     float point_depth_bracket = 0.0F;
     float point_depth_tolerance = 0.0F;
 };
