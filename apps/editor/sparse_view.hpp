@@ -203,6 +203,7 @@ MeshLoad load_preview_textured_mesh(std::filesystem::path stem);
 MeshLoad prepare_mesh_preview(MeshLoad loaded, bool fit_box);
 
 enum class EditorProjection { perspective, orthographic, fisheye, panorama };
+enum class OrthographicView { front, back, left, right, top, bottom };
 
 struct OrbitCamera {
     float yaw{0.785398F};
@@ -284,6 +285,7 @@ void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose);
 
 // Switches the editor camera projection while keeping the look-at scale.
 void set_editor_projection(OrbitCamera& camera, EditorProjection projection);
+void set_orthographic_view(OrbitCamera& camera, OrthographicView view);
 
 [[nodiscard]] const char* editor_projection_name(EditorProjection projection);
 

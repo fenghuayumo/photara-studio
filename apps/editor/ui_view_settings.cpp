@@ -1,6 +1,7 @@
 #include "ui.hpp"
 #include "i18n.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -157,6 +158,44 @@ void draw_view_settings(App& app) {
                 "Orthographic — parallel view, no foreshortening.\n"
                 "Fisheye — OpenCV equidistant, same model as training.\n"
                 "Panorama — 360° × 180° spherical view."));
+
+        theme::caption("Standard view");
+        constexpr const char* view_labels[] = {
+            "Front", "Back", "Left", "Right", "Top", "Bottom"};
+        constexpr OrthographicView views[] = {
+            OrthographicView::front, OrthographicView::back,
+            OrthographicView::left, OrthographicView::right,
+            OrthographicView::top, OrthographicView::bottom};
+        constexpr float half_pi = 1.57079632679F;
+        constexpr float pi = 3.14159265359F;
+        constexpr float view_yaws[] = {0.F, pi, -half_pi, half_pi, pi, pi};
+        constexpr float view_pitches[] = {0.F, 0.F, 0.F, 0.F, -half_pi, half_pi};
+        int active_view = -1;
+        for (int index = 0; index < 6; ++index) {
+            if (app.camera.projection == EditorProjection::orthographic &&
+                std::abs(std::remainder(
+                    app.camera.yaw - view_yaws[index], 2.F * pi)) < 1e-3F &&
+                std::abs(app.camera.pitch - view_pitches[index]) < 1e-3F) {
+                active_view = index;
+                break;
+            }
+        }
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::BeginCombo(
+                "##standard_view",
+                active_view >= 0 ? tr(view_labels[active_view]) : tr("Free view"))) {
+            for (int index = 0; index < 6; ++index) {
+                const bool selected = index == active_view;
+                if (ImGui::Selectable(tr(view_labels[index]), selected)) {
+                    set_orthographic_view(app.camera, views[index]);
+                    app.preview_follow_view = false;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(tr("Switch to an axis-aligned orthographic view."));
 
         if (app.camera.projection == EditorProjection::perspective ||
             app.camera.projection == EditorProjection::fisheye) {

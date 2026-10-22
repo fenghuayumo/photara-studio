@@ -36,9 +36,11 @@ void orient_camera(OrbitCamera& camera, const Vec3 offset) {
     if (length < 1e-6F) return;
     const Vec3 direction{
         offset.x / length, offset.y / length, offset.z / length};
-    camera.pitch = std::clamp(
-        std::asin(-direction.y), -k_pi * 0.487F, k_pi * 0.487F);
-    camera.yaw = std::atan2(direction.x, direction.z);
+    camera.pitch = std::asin(std::clamp(-direction.y, -1.F, 1.F));
+    camera.yaw = std::hypot(direction.x, direction.z) < 1e-5F
+        ? k_pi
+        : std::atan2(direction.x, direction.z);
+    set_editor_projection(camera, EditorProjection::orthographic);
 }
 
 bool draw_axes_gizmo(
