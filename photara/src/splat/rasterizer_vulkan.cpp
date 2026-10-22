@@ -51,7 +51,7 @@ splat_drender::vulkan::SplatCamera camera_view(const Camera& camera) {
     result.fy = camera.fy;
     result.cx = camera.cx;
     result.cy = camera.cy;
-    result.mode = static_cast<std::uint32_t>(camera.model);
+    result.mode = camera.orthographic ? 4u : static_cast<std::uint32_t>(camera.model);
     result.k1 = camera.k1;
     result.k2 = camera.k2;
     result.k3 = camera.k3;

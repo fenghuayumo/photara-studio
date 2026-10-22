@@ -96,6 +96,7 @@ struct ReconstructCli {
     std::filesystem::path images_dir;
     double focal_pixels{};
     photara::CameraModel camera_model{photara::CameraModel::automatic};
+    int camera_sharing{0};
     std::string mode{"global"};
     bool trust_focal{false};
     bool positioning_cuda{true};
@@ -668,6 +669,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("auto"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("camera-sharing", "Camera intrinsics grouping: folder | all | image",
+         cxxopts::value<std::string>()->default_value("folder"))
         ("export-colmap",
          "Also write the aligned scene as a COLMAP text model into this folder",
          cxxopts::value<std::string>()->default_value(""))
@@ -707,10 +710,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Write OpenMVS Interface after SfM. Optional path; default is "
          "<output-stem>.mvs. .ply output does not write .mvs unless this is set.",
          cxxopts::value<std::string>()->implicit_value(""))
-        ("window", "Sequential neighbor window (0 uses automatic pair selection)",
+        ("window", "Sequential neighbor window (0: retrieval when enabled, otherwise all pairs)",
          cxxopts::value<std::size_t>()->default_value(
              std::to_string(photara::sfm::FrontEndOptions{}.neighbor_window)))
-        ("retrieval-augmentation", "Augment sequential pairs with image retrieval",
+        ("retrieval-augmentation", "Enable image retrieval pairs (false disables retrieval, including weak-view expansion)",
          cxxopts::value<bool>()->default_value(
              photara::sfm::FrontEndOptions{}.augment_sequential_with_retrieval ? "true" : "false"))
         ("match-ratio", "Lowe ratio test threshold",
@@ -1353,6 +1356,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.export_colmap_dir = result["export-colmap"].as<std::string>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
+    const std::string camera_sharing = result["camera-sharing"].as<std::string>();
+    if (camera_sharing == "folder") cli.camera_sharing = 0;
+    else if (camera_sharing == "all") cli.camera_sharing = 1;
+    else if (camera_sharing == "image") cli.camera_sharing = 2;
+    else throw std::invalid_argument(
+        "--camera-sharing must be folder, all, or image");
     if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
@@ -2549,6 +2558,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.name = cli.output.stem().string();
     settings.image_directory =
         cli.video_source.empty() ? cli.images_dir : cli.video_source;
+    settings.alignment_capture_type =
+        photara::io::is_video_path(settings.image_directory) ? 1 : 0;
     settings.dataset_source = cli.splat_dataset;
     settings.dataset_format = "auto";
     settings.dataset_initial_cloud = cli.dense_ply;
@@ -4755,6 +4766,7 @@ int main(int argc, char** argv) {
         else if (cli.mode == "hierarchical")
             config.mode = photara::sfm::ReconstructionMode::hierarchical;
         config.frontend.camera_model = cli.camera_model;
+        config.frontend.camera_sharing = cli.camera_sharing;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;
         // Keep coarse SAM masks for downstream processing while retaining all

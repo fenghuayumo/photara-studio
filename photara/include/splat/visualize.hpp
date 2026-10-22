@@ -178,7 +178,7 @@ inline bool write_preview_camera_sidecar(
            << camera.position[2] << '\n'
            << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' '
            << camera.cy << ' ' << camera.width << ' ' << camera.height << ' '
-           << camera_model_token(camera.model) << ' ' << camera.k1 << ' '
+           << (camera.orthographic ? "orthographic" : camera_model_token(camera.model)) << ' ' << camera.k1 << ' '
            << camera.k2 << ' ' << camera.k3 << ' ' << camera.k4 << '\n';
     if (vis_mode != nullptr && vis_mode[0] != '\0')
         output << vis_mode << ' ' << point_size_px << ' ' << ring_scale << '\n';
@@ -208,6 +208,7 @@ inline bool load_preview_camera_sidecar(
     camera.width = std::min(width, k_max_preview_extent);
     camera.height = std::min(height, k_max_preview_extent);
     camera.model = CameraModel::pinhole;
+    camera.orthographic = false;
     camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
 
     const auto apply_vis = [&](const std::string& mode_text,
@@ -224,10 +225,11 @@ inline bool load_preview_camera_sidecar(
     std::string token;
     if (input >> token) {
         CameraModel model = CameraModel::pinhole;
-        if (parse_camera_model_token(token, model)) {
+        if (token == "orthographic" || parse_camera_model_token(token, model)) {
             float k1 = 0.F, k2 = 0.F, k3 = 0.F, k4 = 0.F;
             if (!(input >> k1 >> k2 >> k3 >> k4)) return false;
             camera.model = model;
+            camera.orthographic = token == "orthographic";
             camera.k1 = k1;
             camera.k2 = k2;
             camera.k3 = k3;

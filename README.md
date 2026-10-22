@@ -191,6 +191,7 @@ ctest --test-dir build -C Release --output-on-failure
 | Option | Default | Purpose |
 |---|---:|---|
 | `PHOTARA_BUILD_STUDIO` | `ON` | Build the Vulkan/Dear ImGui desktop editor |
+| `PHOTARA_ENABLE_AGENT_CONTROL` | `ON` | Build the Studio control server and `photara-ctl` client |
 | `PHOTARA_BUILD_TESTS` | `OFF` | Configure correctness and regression tests |
 | `PHOTARA_BUILD_BENCHMARKS` | `OFF` | Configure auxiliary tools and benchmarks |
 | `PHOTARA_BUILD_PYTHON` | `OFF` | Build the nanobind Python module (`import photara`) |
@@ -233,6 +234,36 @@ cmake -S . -B build `
   -DPHOTARA_FETCH_ONNX=OFF `
   -DPHOTARA_ONNXRUNTIME_ROOT="D:/sdk/onnxruntime-win-x64-gpu-1.20.1"
 ```
+
+## Agent control (experimental)
+
+Photara Studio can expose a local semantic control API for coding agents such
+as Codex, Claude Code, DeepSeek-based clients, and zcode. The feature is off
+unless Studio is started explicitly with `--enable-agent-control`.
+
+The build also produces `photara-ctl`, a small console client that discovers
+the running Studio process. It is written beside `photara_studio.exe`; add that
+folder to `PATH` or invoke it by full path:
+
+```powershell
+photara_studio.exe --enable-agent-control
+photara-ctl doctor
+photara-ctl state --json
+photara-ctl schema --json
+photara-ctl params set iterations=30000 strategy=adc_igs
+photara-ctl job start train --json
+photara-ctl job wait --timeout 30 --json
+photara-ctl capture --out D:/data/agent/view.png
+```
+
+The control endpoint binds only to `127.0.0.1`, uses a per-session bearer token
+stored in the discovery file under `%APPDATA%\Photara\control`, and is disabled
+by default. See [`docs/AGENT_CONTROL.md`](docs/AGENT_CONTROL.md) for the
+protocol, client integration paths, and security model.
+
+Ready-to-copy Codex and Claude Code instructions are in
+[`tools/photara_agent/`](tools/photara_agent/). Any other client that can run
+terminal commands can use the same `photara-ctl` commands.
 
 ## Command-line usage
 

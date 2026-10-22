@@ -70,6 +70,25 @@ struct ViewPose {
     std::vector<ImageFeature> features;
 };
 
+// Local camera coordinates: curved surfaces have unit radius, pinhole image
+// planes have z=1. UVs retain the source photograph's projection and seam.
+struct CameraMarkerVertex {
+    Vec3 position;
+    Vec2 uv;
+};
+
+struct CameraMarkerGeometry {
+    std::vector<CameraMarkerVertex> vertices;
+    std::vector<std::array<std::uint32_t, 3>> triangles;
+    std::vector<std::array<std::uint32_t, 2>> lines;
+    std::vector<std::uint32_t> rays;
+};
+
+CameraMarkerGeometry make_camera_marker_geometry(const ViewPose& pose, bool detailed = false);
+// Positive ray parameter at the actual calibrated surface; infinity on a miss.
+float camera_marker_hit_distance(
+    const ViewPose& pose, float size, Vec3 origin, Vec3 direction);
+
 struct GaussianPrimitive {
     Vec3 scale;
     // Scalar-first quaternion matching splat::GaussianModel::quaternions.
@@ -350,7 +369,9 @@ public:
         const OrbitCamera& camera, const ViewOptions& options,
         bool hovered, const ImTextureID* view_photos = nullptr,
         std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr,
-        const ReconstructionBox* region = nullptr);
+        const ReconstructionBox* region = nullptr, int selected_view = -1);
+
+    [[nodiscard]] int hovered_view() const { return hovered_view_; }
 
 private:
     struct Projected {
@@ -369,6 +390,15 @@ private:
     std::vector<Projected> scratch_;
     std::vector<std::uint32_t> colour_scratch_;
     std::vector<MeshTri> mesh_scratch_;
+    struct MarkerCache {
+        std::array<std::uint32_t, 17> calibration{};
+        bool valid{};
+        bool detailed_ready{};
+        CameraMarkerGeometry coarse;
+        CameraMarkerGeometry detailed;
+    };
+    std::vector<MarkerCache> marker_cache_;
+    int hovered_view_{-1};
 };
 
 }  // namespace editor

@@ -421,6 +421,19 @@ photara::project::Settings collect_project_settings(const App& app) {
             : app.settings.splat_format == 4 ? "glb"
             : app.settings.splat_format == 5 ? "usdc" : "auto";
     settings.camera_model = app.settings.camera_model;
+    settings.alignment_quality = app.settings.alignment_quality;
+    settings.alignment_capture_type = app.settings.alignment_capture_type;
+    settings.camera_sharing = app.settings.camera_sharing;
+    settings.matching_strategy = app.settings.matching_strategy;
+    settings.initial_focal_pixels = app.settings.initial_focal_pixels;
+    settings.trust_initial_focal = app.settings.trust_initial_focal;
+    settings.sequential_overlap = static_cast<std::size_t>(
+        std::max(1, app.settings.sequential_overlap));
+    settings.retrieval_augmentation = app.settings.retrieval_augmentation;
+    settings.feature_extractor = app.settings.feature_extractor;
+    settings.feature_matcher = app.settings.feature_matcher;
+    settings.extractor_model = path_from_utf8_field(app.settings.extractor_model.data());
+    settings.lightglue_model = path_from_utf8_field(app.settings.lightglue_model.data());
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
     settings.refine_weak_cameras = app.settings.refine_weak_cameras;
@@ -515,6 +528,18 @@ void apply_project_settings(
     else
         app.settings.splat_format = 0;
     app.settings.camera_model = settings.camera_model;
+    app.settings.alignment_quality = settings.alignment_quality;
+    app.settings.alignment_capture_type = settings.alignment_capture_type;
+    app.settings.camera_sharing = settings.camera_sharing;
+    app.settings.matching_strategy = settings.matching_strategy;
+    app.settings.initial_focal_pixels = settings.initial_focal_pixels;
+    app.settings.trust_initial_focal = settings.trust_initial_focal;
+    app.settings.sequential_overlap = static_cast<int>(settings.sequential_overlap);
+    app.settings.retrieval_augmentation = settings.retrieval_augmentation;
+    app.settings.feature_extractor = settings.feature_extractor;
+    app.settings.feature_matcher = settings.feature_matcher;
+    store_path_field(app.settings.extractor_model, settings.extractor_model);
+    store_path_field(app.settings.lightglue_model, settings.lightglue_model);
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
     app.settings.refine_weak_cameras = settings.refine_weak_cameras;
@@ -1091,6 +1116,7 @@ void change_image_source(App& app, const std::filesystem::path& path) {
     if (app.job.running() || app.loading_scene) return;
     if (defer_project_transition(app, [&app, path] { change_image_source(app, path); })) return;
     store_utf8_path_field(app.settings.images_dir, path);
+    if (photara::io::is_video_path(path)) app.settings.alignment_capture_type = 1;
     app.settings.dataset_source.fill('\0');
     app.settings.dataset_initial_cloud.fill('\0');
     app.settings.video_frames_dir.fill('\0');
@@ -1274,6 +1300,7 @@ void cleanup_cache_session(const App& app) {
 }
 
 void apply_video_selection(App& app) {
+    app.settings.alignment_capture_type = 1;
     clear_loaded_result(app);
     app.settings.dataset_source.fill('\0');
     app.settings.dataset_initial_cloud.fill('\0');
@@ -2664,6 +2691,16 @@ std::array<float, 16> mesh_world_to_clip(
     const float fx_term = 2.F * camera.fx / width;
     const float fy_term = 2.F * camera.fy / height;
     std::array<float, 16> clip{};
+    if (camera.orthographic) {
+        clip = {
+            fx_term * r00, fx_term * r01, fx_term * r02, fx_term * tx + x_offset,
+            fy_term * r10, fy_term * r11, fy_term * r12, fy_term * ty + y_offset,
+            2.F * r20 / (far_z - near_z), 2.F * r21 / (far_z - near_z),
+            2.F * r22 / (far_z - near_z),
+            2.F * (tz - near_z) / (far_z - near_z) - 1.F,
+            0.F, 0.F, 0.F, 1.F};
+        return clip;
+    }
     clip[0 * 4 + 0] = fx_term * r00 + x_offset * r20;
     clip[0 * 4 + 1] = fx_term * r01 + x_offset * r21;
     clip[0 * 4 + 2] = fx_term * r02 + x_offset * r22;
@@ -3268,6 +3305,11 @@ void poll_camera_photos(App& app) {
         sampled_view_indices(app.scene, markers);
         for (const std::size_t index : markers)
             app.photos.request(index, app.scene.views[index].image_path);
+        const int hovered = app.renderer.hovered_view();
+        if (hovered >= 0 && static_cast<std::size_t>(hovered) < app.scene.views.size())
+            app.photos.request(static_cast<std::size_t>(hovered), app.scene.views[hovered].image_path);
+        if (app.preview_follow_view && app.preview_view < app.scene.views.size())
+            app.photos.request(app.preview_view, app.scene.views[app.preview_view].image_path);
     }
     app.photos.poll();
 }

@@ -16,6 +16,8 @@ option(PHOTARA_BUILD_BENCHMARKS
     "Build extra CLI tools and performance benchmarks" OFF)
 option(PHOTARA_BUILD_TESTS "Build correctness tests" OFF)
 option(PHOTARA_BUILD_STUDIO "Build Photara Studio (Vulkan + Dear ImGui reconstruction editor)" ON)
+option(PHOTARA_ENABLE_AGENT_CONTROL
+    "Build the Photara Studio agent control server and photara-ctl client" ON)
 
 # Keep extra tools/tests out of ALL_BUILD and Visual Studio "Build Solution".
 # Build them explicitly, e.g. cmake --build build --target photara_splat_test.
