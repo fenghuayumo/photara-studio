@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -246,6 +247,21 @@ bool keep_halfspace(const float num, const float den, float& t0, float& t1) {
 void draw_segment(
     ImDrawList* draw, const ViewFrame& frame, const Vec3 a, const Vec3 b,
     const ImU32 colour, const float thickness = 1.F) {
+    if (frame.projection == EditorProjection::fisheye ||
+        frame.projection == EditorProjection::panorama) {
+        // Curved viewport projections need subdivision; never connect across
+        // the panorama seam with a screen-wide line.
+        for (int i = 0; i < 8; ++i) {
+            ImVec2 p, q;
+            float dp{}, dq{};
+            if (project(frame, a + (b - a) * (i / 8.F), p, dp) &&
+                project(frame, a + (b - a) * ((i + 1) / 8.F), q, dq) &&
+                (frame.projection != EditorProjection::panorama ||
+                 std::abs(p.x - q.x) <= frame.width * 0.5F))
+                draw->AddLine(p, q, colour, thickness);
+        }
+        return;
+    }
     const Vec3 rel_a = a - frame.eye;
     const Vec3 rel_b = b - frame.eye;
     const float ax = dot(rel_a, frame.right);
@@ -297,25 +313,52 @@ void draw_segment(
     draw->AddLine(screen_a, screen_b, colour, thickness);
 }
 
+Vec3 marker_to_world(const ViewPose& pose, const Vec3 local, const float size) {
+    const auto& r = pose.rotation;
+    return {pose.centre.x + size * (r[0] * local.x + r[3] * local.y + r[6] * local.z),
+            pose.centre.y + size * (r[1] * local.x + r[4] * local.y + r[7] * local.z),
+            pose.centre.z + size * (r[2] * local.x + r[5] * local.y + r[8] * local.z)};
+}
+
+struct MarkerIntrinsics {
+    float fx, fy, cx, cy;
+    std::uint32_t width, height;
+};
+
+MarkerIntrinsics marker_intrinsics(const ViewPose& pose) {
+    if (pose.src_width && pose.src_height)
+        return {pose.src_fx, pose.src_fy, pose.src_cx, pose.src_cy, pose.src_width, pose.src_height};
+    return {pose.fx, pose.fy, pose.cx >= 0 ? pose.cx : pose.width * 0.5F,
+            pose.cy >= 0 ? pose.cy : pose.height * 0.5F, pose.width, pose.height};
+}
+
+std::array<std::uint32_t, 17> marker_calibration(const ViewPose& pose) {
+    return {static_cast<std::uint32_t>(pose.model), pose.width, pose.height,
+        std::bit_cast<std::uint32_t>(pose.fx), std::bit_cast<std::uint32_t>(pose.fy),
+        std::bit_cast<std::uint32_t>(pose.cx), std::bit_cast<std::uint32_t>(pose.cy),
+        std::bit_cast<std::uint32_t>(pose.k1), std::bit_cast<std::uint32_t>(pose.k2),
+        std::bit_cast<std::uint32_t>(pose.k3), std::bit_cast<std::uint32_t>(pose.k4),
+        pose.src_width, pose.src_height,
+        std::bit_cast<std::uint32_t>(pose.src_fx), std::bit_cast<std::uint32_t>(pose.src_fy),
+        std::bit_cast<std::uint32_t>(pose.src_cx), std::bit_cast<std::uint32_t>(pose.src_cy)};
+}
+
 void image_plane_corners(
     const ViewPose& pose, const float length, Vec3 corners[4]) {
-    const auto& r = pose.rotation;
-    const auto to_world = [&](const float x, const float y, const float z) {
-        return Vec3{
-            pose.centre.x + r[0] * x + r[3] * y + r[6] * z,
-            pose.centre.y + r[1] * x + r[4] * y + r[7] * z,
-            pose.centre.z + r[2] * x + r[5] * y + r[8] * z};
-    };
     const float half_x = pose.fx > 1e-3F && pose.width > 0
         ? length * (pose.width * 0.5F) / pose.fx
         : length * 0.5F;
     const float half_y = pose.fy > 1e-3F && pose.height > 0
         ? length * (pose.height * 0.5F) / pose.fy
         : length * 0.35F;
-    corners[0] = to_world(-half_x, -half_y, length);
-    corners[1] = to_world(half_x, -half_y, length);
-    corners[2] = to_world(half_x, half_y, length);
-    corners[3] = to_world(-half_x, half_y, length);
+    const float offset_x = pose.cx >= 0.F && pose.fx > 1e-3F
+        ? length * (pose.width * 0.5F - pose.cx) / pose.fx : 0.F;
+    const float offset_y = pose.cy >= 0.F && pose.fy > 1e-3F
+        ? length * (pose.height * 0.5F - pose.cy) / pose.fy : 0.F;
+    corners[0] = marker_to_world(pose, {-half_x + offset_x, -half_y + offset_y, length}, 1.F);
+    corners[1] = marker_to_world(pose, {half_x + offset_x, -half_y + offset_y, length}, 1.F);
+    corners[2] = marker_to_world(pose, {half_x + offset_x, half_y + offset_y, length}, 1.F);
+    corners[3] = marker_to_world(pose, {-half_x + offset_x, half_y + offset_y, length}, 1.F);
 }
 
 bool point_in_convex_quad(const ImVec2 point, const ImVec2 quad[4]) {
@@ -356,6 +399,79 @@ float view_pick_score(
     if (plane_visible && point_in_convex_quad(mouse, corner_screen))
         score = std::min(score, 4.F);
     return score;
+}
+
+void draw_curved_camera_marker(
+    ImDrawList* draw, const ViewFrame& frame, const ViewPose& pose, const float size,
+    const CameraMarkerGeometry& mesh, const ImTextureID photo, const ImU32 colour,
+    const bool active, const bool hovered) {
+    struct Vertex { ImVec2 pixel; float depth{}; bool visible{}; };
+    std::vector<Vertex> projected;
+    // Only focused markers need photo tessellation; the default view draws
+    // the cached sparse wire grid and leaves the scene unobscured.
+    if (active) {
+        projected.resize(mesh.vertices.size());
+        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+            auto& v = projected[i];
+            v.visible = project(frame, marker_to_world(pose, mesh.vertices[i].position, size), v.pixel, v.depth);
+        }
+        struct Face { std::array<std::uint32_t,3> ids; float depth; };
+        std::vector<Face> faces;
+        faces.reserve(mesh.triangles.size());
+        for (const auto& ids : mesh.triangles) {
+            const auto& a = projected[ids[0]]; const auto& b = projected[ids[1]]; const auto& c = projected[ids[2]];
+            if (!a.visible || !b.visible || !c.visible) continue;
+            if (frame.projection == EditorProjection::panorama &&
+                std::max({a.pixel.x,b.pixel.x,c.pixel.x}) - std::min({a.pixel.x,b.pixel.x,c.pixel.x}) > frame.width*0.5F)
+                continue;
+            faces.push_back({ids,(a.depth+b.depth+c.depth)/3.F});
+        }
+        std::sort(faces.begin(), faces.end(), [](const Face& a, const Face& b) { return a.depth > b.depth; });
+        if (photo) draw->PushTextureID(photo);
+        const bool inside = dot(frame.eye-pose.centre, frame.eye-pose.centre) < size*size;
+        for (const auto& face : faces) {
+            const auto& ids = face.ids;
+            const Vec3 normal = (mesh.vertices[ids[0]].position + mesh.vertices[ids[1]].position +
+                                 mesh.vertices[ids[2]].position) * (1.F/3.F);
+            const Vec3 world = marker_to_world(pose, normal, size);
+            const bool front = inside || dot(world-pose.centre, frame.eye-world) >= 0;
+            const ImU32 tint = photo ? IM_COL32(255,255,255,front ? (hovered ? 215 : 180) : 36)
+                : ((colour & ~IM_COL32_A_MASK) | IM_COL32(0,0,0,front ? 14 : 5));
+            if (photo) {
+                draw->PrimReserve(3,3);
+                for (const auto id : ids) {
+                    const auto uv = mesh.vertices[id].uv;
+                    draw->PrimVtx(projected[id].pixel,{uv.x,uv.y},tint);
+                }
+            } else {
+                draw->AddTriangleFilled(projected[ids[0]].pixel, projected[ids[1]].pixel,
+                                        projected[ids[2]].pixel, tint);
+            }
+        }
+        if (photo) draw->PopTextureID();
+    }
+    const float thickness = active ? 1.25F : 0.7F;
+    for (const auto& line : mesh.lines)
+        draw_segment(draw,frame,marker_to_world(pose,mesh.vertices[line[0]].position,size),
+                     marker_to_world(pose,mesh.vertices[line[1]].position,size),colour,thickness);
+    for (const auto id : mesh.rays)
+        draw_segment(draw,frame,pose.centre,marker_to_world(pose,mesh.vertices[id].position,size),colour,thickness);
+    // A panorama has no forward frustum. This arrow identifies its zero-yaw
+    // direction; the separate up axis makes capture orientation unambiguous.
+    const auto world = [&](Vec3 p) { return marker_to_world(pose,p,size); };
+    draw_segment(draw,frame,pose.centre,world({0,0,1.35F}),colour,thickness);
+    draw_segment(draw,frame,world({-.12F,0,1.12F}),world({0,0,1.35F}),colour,thickness);
+    draw_segment(draw,frame,world({.12F,0,1.12F}),world({0,0,1.35F}),colour,thickness);
+    ImVec2 centre;
+    float depth{};
+    if (project(frame,pose.centre,centre,depth)) {
+        draw->AddCircleFilled(centre,active ? 3.5F : 1.5F,colour);
+        if (active) {
+            draw_segment(draw,frame,pose.centre,world({0,-1.25F,0}),colour,thickness);
+            draw->AddText({centre.x+7.F,centre.y-16.F},colour,
+                pose.model == photara::CameraModel::equirectangular ? "360" : "Fisheye");
+        }
+    }
 }
 
 float snap_grid_cell(const float desired) {
@@ -1997,6 +2113,151 @@ void attach_view_image_paths(
     }
 }
 
+CameraMarkerGeometry make_camera_marker_geometry(const ViewPose& pose, const bool detailed) {
+    CameraMarkerGeometry mesh;
+    constexpr std::uint32_t invalid = ~std::uint32_t{0};
+    const auto triangle = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+        if (a == invalid || b == invalid || c == invalid) return;
+        const Vec3 area = cross(mesh.vertices[b].position - mesh.vertices[a].position,
+                                mesh.vertices[c].position - mesh.vertices[a].position);
+        if (dot(area, area) > 1e-14F) mesh.triangles.push_back({a, b, c});
+    };
+    const auto line = [&](std::uint32_t a, std::uint32_t b) {
+        if (a == invalid || b == invalid) return;
+        const Vec3 delta = mesh.vertices[a].position - mesh.vertices[b].position;
+        if (dot(delta, delta) > 1e-12F) mesh.lines.push_back({a, b});
+    };
+    if (pose.model == photara::CameraModel::equirectangular) {
+        const unsigned columns = detailed ? 64 : 16, rows = detailed ? 32 : 8;
+        for (unsigned y = 0; y <= rows; ++y) for (unsigned x = 0; x <= columns; ++x) {
+            const float u = float(x) / columns, v = float(y) / rows;
+            const auto ray = photara::unproject_equirectangular_camera(u * 2., v, 2, 1);
+            mesh.vertices.push_back({{float(ray.x), float(ray.y), float(ray.z)}, {u, v}});
+        }
+        const auto at = [&](unsigned x, unsigned y) { return y * (columns + 1) + x; };
+        for (unsigned y = 0; y < rows; ++y) for (unsigned x = 0; x < columns; ++x) {
+            triangle(at(x,y), at(x+1,y), at(x+1,y+1));
+            triangle(at(x,y), at(x+1,y+1), at(x,y+1));
+            if (x % (columns / (detailed ? 8 : 4)) == 0) line(at(x,y), at(x,y+1));
+            if (y != 0 && y % (rows / 4) == 0) line(at(x,y), at(x+1,y));
+        }
+        return mesh;
+    }
+    if (pose.model != photara::CameraModel::opencv_fisheye) {
+        auto local = pose;
+        local.centre = {};
+        local.rotation = {1,0,0,0,1,0,0,0,1};
+        Vec3 corners[4];
+        image_plane_corners(local, 1.F, corners);
+        const Vec2 uv[] = {{0,0},{1,0},{1,1},{0,1}};
+        for (unsigned i = 0; i < 4; ++i) {
+            mesh.vertices.push_back({corners[i], uv[i]});
+            mesh.lines.push_back({i, (i+1)%4});
+            mesh.rays.push_back(i);
+        }
+        triangle(0,1,2); triangle(0,2,3);
+        return mesh;
+    }
+
+    const auto k = marker_intrinsics(pose);
+    if (!k.width || !k.height || !std::isfinite(k.fx) || !std::isfinite(k.fy) ||
+        !(k.fx > 1e-3F) || !(k.fy > 1e-3F)) return mesh;
+    // Polar sampling clips the rectangular sensor against the calibrated
+    // forward hemisphere, including circular fisheyes whose corners are invalid.
+    const double theta = 0.5 * photara::k_pi - 1e-4, t2 = theta * theta;
+    const double radius = theta * (1 + t2 * (pose.k1 + t2 * (pose.k2 + t2 * (pose.k3 + t2 * pose.k4))));
+    if (!(radius > 0) || !std::isfinite(radius)) return mesh;
+    const double xmin = -k.cx / k.fx, xmax = (k.width - double(k.cx)) / k.fx;
+    const double ymin = -k.cy / k.fy, ymax = (k.height - double(k.cy)) / k.fy;
+    const unsigned segments = detailed ? 64 : 16, rings = detailed ? 12 : 4;
+    std::vector<double> angles;
+    for (unsigned i = 0; i < segments; ++i) angles.push_back(2 * photara::k_pi * i / segments);
+    for (double x : {xmin, xmax}) for (double y : {ymin, ymax}) {
+        double angle = std::atan2(y, x);
+        if (angle < 0) angle += 2 * photara::k_pi;
+        angles.push_back(angle);
+    }
+    std::sort(angles.begin(), angles.end());
+    angles.erase(std::unique(angles.begin(), angles.end(),
+        [](double a, double b) { return std::abs(a-b) < 1e-8; }), angles.end());
+    const unsigned columns = static_cast<unsigned>(angles.size());
+    std::vector<std::uint32_t> grid(columns * (rings + 1), invalid);
+    const auto at = [&](unsigned x, unsigned y) { return grid[(x % columns) * (rings + 1) + y]; };
+    for (unsigned x = 0; x < columns; ++x) {
+        const double dx = std::cos(angles[x]), dy = std::sin(angles[x]);
+        double lo = 0, hi = radius;
+        const auto clip = [&](double d, double mn, double mx) {
+            if (std::abs(d) < 1e-12) return mn <= 0 && mx >= 0;
+            const double a = mn/d, b = mx/d;
+            lo = std::max(lo, std::min(a,b)); hi = std::min(hi, std::max(a,b));
+            return lo < hi;
+        };
+        if (!clip(dx, xmin, xmax) || !clip(dy, ymin, ymax)) continue;
+        for (unsigned y = 0; y <= rings; ++y) {
+            const double r = lo + (hi-lo)*y/rings;
+            const double u = std::clamp(k.cx + k.fx*r*dx, 0., double(k.width));
+            const double v = std::clamp(k.cy + k.fy*r*dy, 0., double(k.height));
+            const auto ray = photara::unproject_fisheye_camera(u, v,
+                k.fx,k.fy,k.cx,k.cy,pose.k1,pose.k2,pose.k3,pose.k4);
+            if (!ray.valid || !std::isfinite(ray.x) || !std::isfinite(ray.y) || !std::isfinite(ray.z)) continue;
+            grid[x*(rings+1)+y] = static_cast<std::uint32_t>(mesh.vertices.size());
+            mesh.vertices.push_back({{float(ray.x),float(ray.y),float(ray.z)},
+                                     {float(u/k.width),float(v/k.height)}});
+        }
+        if (x % std::max(1U, columns / 4) == 0 && at(x,rings) != invalid)
+            mesh.rays.push_back(at(x,rings));
+    }
+    for (unsigned x = 0; x < columns; ++x) {
+        line(at(x,rings), at(x+1,rings));
+        line(at(x,0), at(x+1,0));
+        for (unsigned y = 0; y < rings; ++y) {
+            triangle(at(x,y),at(x+1,y),at(x+1,y+1));
+            triangle(at(x,y),at(x+1,y+1),at(x,y+1));
+            if (x % std::max(1U, columns/8) == 0) line(at(x,y), at(x,y+1));
+            if (y == rings/2) line(at(x,y), at(x+1,y));
+        }
+    }
+    return mesh;
+}
+
+float camera_marker_hit_distance(
+    const ViewPose& pose, const float size, const Vec3 origin, const Vec3 direction) {
+    const float miss = std::numeric_limits<float>::infinity();
+    if (!(size > 0.F)) return miss;
+    const auto& r = pose.rotation;
+    const auto local = [&](Vec3 v) {
+        return Vec3{r[0]*v.x+r[1]*v.y+r[2]*v.z,
+                    r[3]*v.x+r[4]*v.y+r[5]*v.z,
+                    r[6]*v.x+r[7]*v.y+r[8]*v.z};
+    };
+    const Vec3 o = local(origin - pose.centre), d = local(direction);
+    const auto k = marker_intrinsics(pose);
+    const auto in_sensor = [&](double u, double v) {
+        return std::isfinite(u) && std::isfinite(v) && u >= 0 && u <= k.width && v >= 0 && v <= k.height;
+    };
+    if (pose.model != photara::CameraModel::opencv_fisheye &&
+        pose.model != photara::CameraModel::equirectangular) {
+        if (std::abs(d.z) < 1e-8F) return miss;
+        const float t = (size-o.z)/d.z;
+        const Vec3 p = o+d*t;
+        return t > 0 && in_sensor(k.fx*p.x/size+k.cx, k.fy*p.y/size+k.cy) ? t : miss;
+    }
+    const float a = dot(d,d), b = dot(o,d), c = dot(o,o)-size*size;
+    if (!(a > 0)) return miss;
+    const float discriminant = b*b-a*c;
+    if (!(discriminant >= 0)) return miss;
+    const float root = std::sqrt(discriminant);
+    for (float t : {(-b-root)/a, (-b+root)/a}) {
+        if (!(t > 0)) continue;
+        if (pose.model == photara::CameraModel::equirectangular) return t;
+        const Vec3 p = o+d*t;
+        const auto uv = photara::project_fisheye_camera(p.x,p.y,p.z,
+            k.fx,k.fy,k.cx,k.cy,pose.k1,pose.k2,pose.k3,pose.k4);
+        if (uv.valid && in_sensor(uv.u,uv.v)) return t;
+    }
+    return miss;
+}
+
 void sampled_view_indices(
     const SparseScene& scene, std::vector<std::size_t>& indices,
     const std::size_t max_markers) {
@@ -2337,7 +2598,7 @@ SceneDrawStats SceneRenderer::draw(
     const SparseScene& scene, const OrbitCamera& camera,
     const ViewOptions& options, const bool hovered,
     const ImTextureID* view_photos, const std::size_t view_photo_count,
-    const PreviewMesh* mesh, const ReconstructionBox* region) {
+    const PreviewMesh* mesh, const ReconstructionBox* region, const int selected_view) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
@@ -2518,9 +2779,29 @@ SceneDrawStats SceneRenderer::draw(
         std::vector<std::size_t> markers;
         sampled_view_indices(scene, markers);
 
-        // A compact frustum plus the capture photo on the far plane. Dense
-        // rings only draw a uniform subset so the cloud stays readable.
+        // Sample sparse markers; only the focused cameras expand into photo
+        // surfaces. Curved geometry is cached by calibration, in local space.
         const float length = std::max(1e-4F, scene.radius * options.view_scale);
+        const auto geometry = [&](const ViewPose& pose, const bool detailed) -> const CameraMarkerGeometry& {
+            const auto key = marker_calibration(pose);
+            auto found = std::find_if(marker_cache_.begin(), marker_cache_.end(),
+                [&](const MarkerCache& c) { return c.calibration == key; });
+            if (found == marker_cache_.end()) {
+                if (marker_cache_.size() >= 64) marker_cache_.erase(marker_cache_.begin());
+                marker_cache_.emplace_back();
+                found = marker_cache_.end()-1;
+                found->calibration = key;
+            }
+            if (!found->valid) {
+                found->coarse = make_camera_marker_geometry(pose,false);
+                found->valid = true;
+            }
+            if (detailed && !found->detailed_ready) {
+                found->detailed = make_camera_marker_geometry(pose,true);
+                found->detailed_ready = true;
+            }
+            return detailed ? found->detailed : found->coarse;
+        };
 
         std::vector<char> drawn(scene.views.size(), 0);
         for (const std::size_t index : markers) {
@@ -2532,19 +2813,32 @@ SceneDrawStats SceneRenderer::draw(
         // camera remains hittable at its apex so a trajectory vertex can be
         // chosen even when that frustum is not in the drawn subset.
         if (hovered) {
+            Vec3 ray_origin, ray_direction;
+            const bool have_ray = camera_world_ray(camera,min,max,mouse,ray_origin,ray_direction);
+            float best_hit = std::numeric_limits<float>::infinity();
             for (std::size_t index = 0; index < scene.views.size(); ++index) {
                 const ViewPose& pose = scene.views[index];
                 if (!pose.registered) continue;
                 Vec3 corners[4];
                 image_plane_corners(pose, length, corners);
-                const float score = view_pick_score(
-                    frame, pose.centre, corners, mouse,
-                    drawn[index] != 0);
-                if (score < best_distance) {
+                const bool curved = photara::uses_native_splat_projection(pose.model);
+                float score = view_pick_score(frame,pose.centre,corners,mouse,drawn[index] && !curved);
+                float hit = std::numeric_limits<float>::infinity();
+                if (curved && have_ray && (drawn[index] || static_cast<int>(index) == selected_view)) {
+                    hit = camera_marker_hit_distance(pose,length,ray_origin,ray_direction);
+                    if (std::isfinite(hit)) score = std::min(score,4.F);
+                }
+                if (score < best_distance || (score == best_distance && hit < best_hit)) {
                     best_distance = score;
+                    best_hit = hit;
                     stats.hovered_view = static_cast<int>(index);
                 }
             }
+        }
+        if (selected_view >= 0 && static_cast<std::size_t>(selected_view) < scene.views.size() &&
+            scene.views[selected_view].registered && drawn[selected_view] == 0) {
+            markers.push_back(static_cast<std::size_t>(selected_view));
+            drawn[selected_view] = 1;
         }
         if (stats.hovered_view >= 0) {
             const auto hovered_index =
@@ -2555,6 +2849,16 @@ SceneDrawStats SceneRenderer::draw(
 
         for (const std::size_t index : markers) {
             const ViewPose& pose = scene.views[index];
+            const bool is_hovered = stats.hovered_view == static_cast<int>(index);
+            const bool active = is_hovered || selected_view == static_cast<int>(index);
+            if (photara::uses_native_splat_projection(pose.model)) {
+                const ImTextureID photo = active && options.show_camera_photos && view_photos && index < view_photo_count
+                    ? view_photos[index] : ImTextureID{};
+                draw_curved_camera_marker(draw,frame,pose,length,geometry(pose,active),photo,
+                    theme::u32(is_hovered ? theme::warning : theme::accent,active ? .9F : .26F),active,is_hovered);
+                ++stats.drawn_views;
+                continue;
+            }
             Vec3 corners[4];
             image_plane_corners(pose, length, corners);
             const Vec3 apex = pose.centre;
@@ -2563,8 +2867,6 @@ SceneDrawStats SceneRenderer::draw(
             float apex_depth{};
             const bool apex_visible =
                 project(frame, apex, apex_screen, apex_depth);
-            const bool is_hovered =
-                stats.hovered_view == static_cast<int>(index);
 
             ImVec2 corner_screen[4];
             bool plane_visible = true;
@@ -2576,10 +2878,10 @@ SceneDrawStats SceneRenderer::draw(
 
             const ImU32 body = theme::u32(
                 is_hovered ? theme::warning : theme::accent,
-                is_hovered ? 0.98F : 0.24F);
+                active ? 0.98F : 0.24F);
             if (plane_visible) {
                 ImTextureID photo{};
-                if (options.show_camera_photos && view_photos != nullptr &&
+                if (active && options.show_camera_photos && view_photos != nullptr &&
                     index < view_photo_count)
                     photo = view_photos[index];
                 if (photo) {
@@ -2611,7 +2913,7 @@ SceneDrawStats SceneRenderer::draw(
                             is_hovered ? 0.10F : 0.025F));
                 }
             }
-            const float line_width = is_hovered ? 1.6F : 0.75F;
+            const float line_width = active ? 1.6F : 0.75F;
             for (const Vec3& corner : corners)
                 draw_segment(draw, frame, apex, corner, body, line_width);
             for (int i = 0; i < 4; ++i)
@@ -2620,7 +2922,7 @@ SceneDrawStats SceneRenderer::draw(
                     line_width);
             // Only the hovered camera needs an up marker; repeating it for
             // every frame is the main source of the former fence-like look.
-            if (is_hovered) {
+            if (active) {
                 const Vec3 top_mid = (corners[0] + corners[1]) * 0.5F;
                 const Vec3 plane_mid =
                     (corners[0] + corners[1] + corners[2] + corners[3]) *
@@ -2667,6 +2969,7 @@ SceneDrawStats SceneRenderer::draw(
     }
 
     draw->PopClipRect();
+    hovered_view_ = stats.hovered_view;
     return stats;
 }
 

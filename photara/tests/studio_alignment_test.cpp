@@ -16,6 +16,84 @@ namespace {
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
+void test_camera_markers() {
+    editor::ViewPose pose;
+    pose.width=640; pose.height=480; pose.fx=pose.fy=300; pose.cx=320; pose.cy=240;
+    const auto pinhole=editor::make_camera_marker_geometry(pose);
+    require(pinhole.vertices.size()==4 && pinhole.triangles.size()==2, "pinhole marker retains its plane");
+    require(std::abs(editor::camera_marker_hit_distance(pose,1,{0,0,-3},{0,0,1})-4)<1e-5F,
+        "pinhole marker picking hits its image plane");
+    pose.model=photara::CameraModel::opencv_fisheye;
+    const auto fish=editor::make_camera_marker_geometry(pose,true);
+    require(fish.vertices.size()>100 && !fish.triangles.empty() && !fish.rays.empty(), "fisheye marker has a curved sensor surface");
+    for(const auto& v:fish.vertices) {
+        const auto& p=v.position;
+        require(std::abs(p.x*p.x+p.y*p.y+p.z*p.z-1)<1e-5F && p.z>0, "fisheye vertices stay on the calibrated forward unit sphere");
+        const auto uv=photara::project_fisheye_camera(p.x,p.y,p.z,300,300,320,240,0,0,0,0);
+        require(uv.valid && std::abs(uv.u-v.uv.x*640)<.01 && std::abs(uv.v-v.uv.y*480)<.01,
+            "fisheye texture coordinates match calibration");
+    }
+    require(std::abs(editor::camera_marker_hit_distance(pose,1,{0,0,3},{0,0,-1})-2)<1e-5F,
+        "fisheye picking hits the front spherical cap");
+    require(!std::isfinite(editor::camera_marker_hit_distance(pose,1,{3,0,0},{-1,0,0})),
+        "fisheye picking rejects rays outside the captured sensor");
+    pose.k1=.1F;
+    const auto distorted=editor::make_camera_marker_geometry(pose,true);
+    require(std::abs(distorted.vertices.back().position.z-fish.vertices.back().position.z)>1e-4F,
+        "fisheye distortion changes marker coverage");
+    pose.fx=pose.fy=100; pose.k1=0;
+    const auto circular=editor::make_camera_marker_geometry(pose,true);
+    require(!circular.triangles.empty(), "invalid fisheye corners retain the visible circular sensor coverage");
+    pose.model=photara::CameraModel::equirectangular;
+    const auto pano=editor::make_camera_marker_geometry(pose,true);
+    bool back=false,top=false,bottom=false;
+    for(const auto& v:pano.vertices) {
+        const auto p=v.position;
+        require(std::abs(p.x*p.x+p.y*p.y+p.z*p.z-1)<1e-5F,"panorama marker is a complete unit sphere");
+        back|=p.z<-.99F; top|=p.y<-.99F; bottom|=p.y>.99F;
+    }
+    require(back&&top&&bottom&&pano.rays.empty(),"panorama covers rear and poles without a fake forward frustum");
+    for(const auto& face:pano.triangles) {
+        float lo=1,hi=0;
+        for(auto id:face) {lo=std::min(lo,pano.vertices[id].uv.x);hi=std::max(hi,pano.vertices[id].uv.x);}
+        require(hi-lo<.1F,"panorama texture triangles do not cross the UV seam");
+    }
+    require(std::abs(editor::camera_marker_hit_distance(pose,1,{0,0,0},{0,0,-1})-1)<1e-5F,
+        "panorama can be picked from inside its shell");
+    // Exercise the actual ImGui draw path, including textured triangle indices,
+    // without a native window or GPU context.
+    ImGui::CreateContext();
+    auto& io=ImGui::GetIO();
+    io.IniFilename=nullptr; io.DisplaySize={640,480}; io.DeltaTime=1.F/60;
+    unsigned char* pixels; int width,height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels,&width,&height);
+    editor::SceneRenderer renderer;
+    editor::SparseScene scene;
+    pose.registered=true; scene.views={pose}; scene.radius=1;
+    editor::OrbitCamera orbit; orbit.distance=3;
+    editor::ViewOptions options;
+    options.show_cloud=options.show_grid=options.show_axes=options.show_region=false;
+    options.view_scale=.5F;
+    const ImTextureID photo=static_cast<ImTextureID>(123);
+    for(auto model:{photara::CameraModel::pinhole,photara::CameraModel::opencv_fisheye,photara::CameraModel::equirectangular}) {
+        scene.views[0].model=model;
+        for(auto projection:{editor::EditorProjection::perspective,editor::EditorProjection::panorama}) {
+            orbit.projection=projection;
+            ImGui::NewFrame();
+            auto* draw=ImGui::GetBackgroundDrawList();
+            const auto stats=renderer.draw(draw,{0,0},{640,480},scene,orbit,options,false,&photo,1,nullptr,nullptr,0);
+            require(stats.drawn_views==1,"focused camera marker is rendered");
+            bool textured=false;
+            for(const auto& command:draw->CmdBuffer) textured|=command.TextureId==photo&&command.ElemCount>0;
+            require(textured,"focused camera photo is rendered on its projection surface");
+            for(const auto& vertex:draw->VtxBuffer)
+                require(std::isfinite(vertex.pos.x)&&std::isfinite(vertex.pos.y)&&std::isfinite(vertex.uv.x)&&std::isfinite(vertex.uv.y),
+                    "camera surface drawing emits finite positions and UVs");
+            ImGui::Render();
+        }
+    }
+    ImGui::DestroyContext();
+}
 }
 int main(int argc, char** argv) {
     try {
@@ -25,6 +103,7 @@ int main(int argc, char** argv) {
         }
         if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
         test_studio_image_qa_projection();
+        test_camera_markers();
         editor::RunMonitor monitor;
         monitor.begin(editor::JobKind::train);
         require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
