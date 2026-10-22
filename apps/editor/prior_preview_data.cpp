@@ -172,7 +172,8 @@ PriorPreviewData load_prior_preview(const std::filesystem::path& file) {
     for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
         const auto sx=std::min(camera.width-1,static_cast<unsigned>((x+.5)*camera.width/width));
         const auto sy=std::min(camera.height-1,static_cast<unsigned>((y+.5)*camera.height/height));
-        const auto src=static_cast<std::size_t>(sy)*camera.width+sx, dst=3ull*(y*width+x);
+        const auto src=static_cast<std::size_t>(sy)*camera.width+sx;
+        const auto dst=3ull*(y*width+x);
         if(!prior.normals.empty()) {
             auto* rgb=result.normal.pixels.data()+dst;
             const float nx=prior.normals[src],ny=prior.normals[count+src],nz=prior.normals[2*count+src];

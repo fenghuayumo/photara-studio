@@ -238,7 +238,8 @@ void fill_grid(CollisionGrid &g, const CollisionOptions &o) {
     }
 }
 void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
-    std::map<std::array<unsigned, 3>, std::uint64_t> blocks;
+    using BlockMap = std::map<std::array<unsigned, 3>, std::uint64_t>;
+    BlockMap blocks;
     for (unsigned z = 0; z < g.dimensions[2]; ++z)
         for (unsigned y = 0; y < g.dimensions[1]; ++y)
             for (unsigned x = 0; x < g.dimensions[0]; ++x)
@@ -252,7 +253,7 @@ void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
     struct Region {
         std::array<unsigned, 3> at;
         unsigned size;
-        std::vector<decltype(blocks)::const_iterator> blocks;
+        std::vector<BlockMap::const_iterator> blocks;
     };
     std::vector<Region> queue;
     if (!blocks.empty()) {
