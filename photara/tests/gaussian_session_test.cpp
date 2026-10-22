@@ -4,6 +4,7 @@
 #include "splat/trainer.hpp"
 #include "splat/formats.hpp"
 #include "project/document.hpp"
+#include "studio_lasso_test.hpp"
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -206,6 +207,16 @@ void test_inspector_workflow() {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--lasso-only") {
+        try {
+            test_studio_lasso();
+            std::cout << "Lasso gesture checks passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc > 1 && std::string(argv[1]) == "--inspector-only") {
         try {
             test_inspector_workflow();
