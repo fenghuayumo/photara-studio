@@ -23,6 +23,9 @@ struct FrontEndOptions {
     // A supplied focal is normally an initialization, not a calibration.
     // Set true only for externally calibrated/locked intrinsics.
     bool trust_focal_pixels{false};
+    // 0 = group late by source folder and EXIF lens identity, 1 = all images,
+    // 2 = one independent intrinsic group per image.
+    int camera_sharing{0};
     std::size_t neighbor_window{3};  // 0 => exhaustive for small sets, else sequential window
     unsigned thread_count{0};
     // Optional valid-region masks matched by image filename/stem. Zero pixels

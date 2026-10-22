@@ -306,6 +306,7 @@ FrontEndStageKeys make_stage_keys(
     FingerprintBuilder matches;
     matches.append_string("matches");
     matches.append_string("zero-baseline-identity-v1");
+    matches.append_string("retrieval-explicit-opt-in-v2");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
@@ -349,6 +350,7 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
     geometry.append(static_cast<std::uint32_t>(options.camera_model));
+    geometry.append(options.camera_sharing);
     geometry.append_string("validated-camera-calibration-v2");
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
@@ -382,20 +384,21 @@ FrontEndStageKeys make_stage_keys(
 
 void initialize_cameras(
     Scene& scene, const double focal_pixels, const bool trust_focal_pixels,
-    const CameraModel requested_model) {
+    const CameraModel requested_model, const int camera_sharing) {
     const CameraModel model = requested_model == CameraModel::automatic
         ? CameraModel::pinhole : requested_model;
     scene.cameras.clear();
     scene.cameras.reserve(scene.images.size());
+    std::vector<std::string> camera_group_identity;
+    camera_group_identity.reserve(scene.images.size());
     std::vector<double> exif_focals;
     exif_focals.reserve(scene.images.size());
     for (Index i = 0; i < scene.images.size(); ++i) {
         Image& image = scene.images[i];
-        // Capture EXIF identity for late grouped refinement, but keep the
-        // view graph on the legacy shared group. Early hard grouping can turn
-        // sparse zoom-transition edges into disconnected registration
-        // components; the late split gets independent focal/distortion once a
-        // connected layout has already been established.
+        // Retain EXIF identity for the post-registration focal/lens split.
+        // The selected sharing mode controls the initial working groups below:
+        // folder grouping remains shared through registration, while all/image
+        // modes explicitly override the default grouping behavior.
         image.camera_identity = trust_focal_pixels
             ? std::string{}
             : io::load_camera_identity(
@@ -404,6 +407,14 @@ void initialize_cameras(
                   image.features.image_width,
                   image.features.image_height,
                   &image.exif_focal_px);
+        if (camera_sharing == 1) {
+            image.camera_identity.clear();
+        } else if (camera_sharing == 0) {
+            image.camera_identity = image.path.parent_path().generic_string() +
+                "|" + image.camera_identity;
+        } else if (camera_sharing == 2) {
+            image.camera_identity = "image-" + std::to_string(i);
+        }
         if (image.exif_focal_px > 0.0)
             exif_focals.push_back(image.exif_focal_px);
     }
@@ -421,6 +432,9 @@ void initialize_cameras(
             " images=", exif_focals.size(), '/', scene.images.size());
     }
     for (Index i = 0; i < scene.images.size(); ++i) {
+        const std::string camera_group_key = camera_sharing == 0
+            ? scene.images[i].path.parent_path().generic_string()
+            : scene.images[i].camera_identity;
         const auto& features = scene.images[i].features;
         PinholeCamera camera;
         camera.model = model;
@@ -434,14 +448,19 @@ void initialize_cameras(
             const auto existing = std::find_if(
                 scene.cameras.begin(), scene.cameras.end(),
                 [&](const PinholeCamera& candidate) {
+                    const auto candidate_index = static_cast<std::size_t>(
+                        &candidate - scene.cameras.data());
                     return candidate.is_equirectangular() &&
                            candidate.width == camera.width &&
-                           candidate.height == camera.height;
+                           candidate.height == camera.height &&
+                           camera_group_identity[candidate_index] ==
+                               camera_group_key;
                 });
             if (existing == scene.cameras.end()) {
                 camera.id = static_cast<Index>(scene.cameras.size());
                 scene.images[i].camera_id = camera.id;
                 scene.cameras.push_back(camera);
+                camera_group_identity.push_back(camera_group_key);
             } else {
                 scene.images[i].camera_id =
                     static_cast<Index>(existing - scene.cameras.begin());
@@ -465,7 +484,12 @@ void initialize_cameras(
         const auto existing = std::find_if(
             scene.cameras.begin(), scene.cameras.end(),
             [&](const PinholeCamera& candidate) {
-                return candidate.focal_prior == camera.focal_prior &&
+                const auto candidate_index = static_cast<std::size_t>(
+                    &candidate - scene.cameras.data());
+                return (camera_sharing == 1 ||
+                        camera_group_identity[candidate_index] ==
+                            camera_group_key) &&
+                       candidate.focal_prior == camera.focal_prior &&
                        candidate.width == camera.width &&
                        candidate.height == camera.height &&
                        std::abs(candidate.fx - camera.fx) < 1e-9 &&
@@ -475,6 +499,7 @@ void initialize_cameras(
             camera.id = static_cast<Index>(scene.cameras.size());
             scene.images[i].camera_id = camera.id;
             scene.cameras.push_back(camera);
+            camera_group_identity.push_back(camera_group_key);
         } else {
             scene.images[i].camera_id =
                 static_cast<Index>(existing - scene.cameras.begin());
@@ -1603,14 +1628,16 @@ std::vector<PairCandidate> build_pair_list(
     return pairs;
 }
 
+bool use_retrieval_candidates(
+    const FrontEndOptions& options, const std::size_t image_count) {
+    return options.augment_sequential_with_retrieval &&
+        options.retrieval.top_k > 0 &&
+        image_count >= options.retrieval_min_images;
+}
+
 std::vector<PairCandidate> build_pair_candidates(
     const Scene& scene, const FrontEndOptions& options) {
-    const bool use_retrieval =
-        options.retrieval.top_k > 0 &&
-        scene.images.size() >= options.retrieval_min_images &&
-        (options.neighbor_window == 0 ||
-         options.augment_sequential_with_retrieval);
-    if (!use_retrieval)
+    if (!use_retrieval_candidates(options, scene.images.size()))
         return build_pair_list(scene.images.size(), options.neighbor_window);
 
     std::vector<PairCandidate> pairs;
@@ -1947,7 +1974,8 @@ void match_and_verify_lightglue(
     // Cameras must exist before geometry verify (uses scene.cameras[camera_id]).
     // Image sizes are only known after phase-1 LightGlue merges.
     initialize_cameras(
-        scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
+        scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model,
+        options.camera_sharing);
 
     // Phase 2: sequential geometry verify. Parallel submit previously crashed
     // (0xC0000005) under LightGlue; keep this path simple and robust.
@@ -2077,10 +2105,7 @@ FrontEndResult run_frontend(
         core::StageScope match_stage("sfm.match_and_verify", core::LogLevel::info, "mixed");
         const auto match_started = std::chrono::steady_clock::now();
         const bool use_retrieval =
-            runtime_options.retrieval.top_k > 0 &&
-            image_paths.size() >= runtime_options.retrieval_min_images &&
-            (runtime_options.neighbor_window == 0 ||
-             runtime_options.augment_sequential_with_retrieval);
+            use_retrieval_candidates(runtime_options, image_paths.size());
         std::vector<PairCandidate> candidates;
         if (use_retrieval) {
             // Same pair proposal as the default SiftGPU frontend: sequential
@@ -2146,7 +2171,8 @@ FrontEndResult run_frontend(
                 scene.pairs.push_back(std::move(pair));
             }
             initialize_cameras(
-                scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
+                scene, options.focal_pixels, options.trust_focal_pixels,
+                options.camera_model, options.camera_sharing);
             verify_image_snapshot(image_paths, image_fingerprint);
             checkpoints.save_scene(
                 CheckpointStage::features, stage_keys.features, scene);
@@ -2154,7 +2180,8 @@ FrontEndResult run_frontend(
         } else {
             core::Logger::instance().info("checkpoint hit: matches");
             initialize_cameras(
-                scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
+                scene, options.focal_pixels, options.trust_focal_pixels,
+                options.camera_model, options.camera_sharing);
             std::vector<ImagePair> pairs(candidates.size());
             core::ProgressReporter geometry_progress(
                 "verify pair geometry", candidates.size());
@@ -2286,7 +2313,8 @@ FrontEndResult run_frontend(
             runtime_options.live_preview->flush();
 
         initialize_cameras(
-            scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
+            scene, options.focal_pixels, options.trust_focal_pixels,
+            options.camera_model, options.camera_sharing);
         // Keep the scene in compact form from this point onward. Retrieval and
         // SiftGPU matching consume uint8 descriptors without permanently
         // expanding the full dataset back to float32.
@@ -2298,7 +2326,8 @@ FrontEndResult run_frontend(
     } else {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         initialize_cameras(
-            scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
+            scene, options.focal_pixels, options.trust_focal_pixels,
+            options.camera_model, options.camera_sharing);
         core::Logger::instance().info("checkpoint hit: features");
         if (runtime_options.live_preview != nullptr && !scene.images.empty()) {
             const std::size_t last = scene.images.size() - 1;
@@ -2762,7 +2791,8 @@ FrontEndResult run_frontend(
                     propose(image_id, other);
             }
 
-            if (runtime_options.progressive_rescue_retrieval_top_k > 0 &&
+            if (runtime_options.augment_sequential_with_retrieval &&
+                runtime_options.progressive_rescue_retrieval_top_k > 0 &&
                 scene.images.size() >= runtime_options.retrieval_min_images) {
                 RetrievalOptions rescue_retrieval = runtime_options.retrieval;
                 rescue_retrieval.top_k =

@@ -139,6 +139,67 @@ int main(int argc, char** argv) {
                 "default alignment explicitly disables stage caching");
         require(command.find("--camera-warm-start") == std::string::npos,
                 "Studio leaves warm start policy internal instead of exposing tuning");
+        {
+            auto backend_settings = settings;
+            // Legacy projects may have saved a particular hardware variant.
+            backend_settings.feature_extractor = "vulkan_sift";
+            backend_settings.feature_matcher = "vulkan_mutual_ratio";
+            const auto check_backend = [&](int backend, const char* extractor, const char* matcher) {
+                backend_settings.alignment_backend = backend;
+                for (const auto& cmd : {
+                        editor::build_align_command("photara.exe", backend_settings, layout),
+                        editor::build_train_command("photara.exe", backend_settings, layout, {})}) {
+                    require(cmd.find(std::string(" --extractor ") + extractor + " ") != std::string::npos &&
+                            cmd.find(std::string(" --matcher ") + matcher + " ") != std::string::npos,
+                            "SIFT and brute force implementations follow the alignment backend");
+                }
+            };
+            check_backend(1, "sift", "mutual_ratio");
+            check_backend(0, "siftgpu", "gpu_mutual_ratio");
+            if (editor::studio_ba_cuda()) check_backend(2, "siftgpu", "gpu_mutual_ratio");
+            if (editor::studio_ba_vulkan()) check_backend(3, "vulkan_sift", "vulkan_mutual_ratio");
+        }
+        {
+            auto matching_settings = settings;
+            const auto check_pairing = [&](int strategy, bool retrieval,
+                                            int window, bool expected_retrieval) {
+                matching_settings.matching_strategy = strategy;
+                matching_settings.retrieval_augmentation = retrieval;
+                const auto align = editor::build_align_command(
+                    "photara.exe", matching_settings, layout);
+                const auto train = editor::build_train_command(
+                    "photara.exe", matching_settings, layout, {});
+                const auto window_flag = " --window " + std::to_string(window) + " ";
+                const auto retrieval_flag = std::string(" --retrieval-augmentation=") +
+                    (expected_retrieval ? "true" : "false");
+                require(align.find(window_flag) != std::string::npos &&
+                        align.find(retrieval_flag) != std::string::npos &&
+                        train.find(window_flag) != std::string::npos &&
+                        train.find(retrieval_flag) != std::string::npos,
+                        "Studio align and train preserve the selected pairing policy");
+            };
+            matching_settings.sequential_overlap = 10;
+            check_pairing(0, true, 0, true); // Unordered photos: automatic retrieval.
+            check_pairing(0, false, 0, false); // Explicitly disabled: all pairs.
+            check_pairing(1, false, 10, false);
+            check_pairing(1, true, 10, true);
+            check_pairing(2, true, 0, false); // Exhaustive overrides the checkbox.
+            std::snprintf(matching_settings.images_dir.data(),
+                          matching_settings.images_dir.size(), "capture.mp4");
+            matching_settings.alignment_capture_type = 1;
+            check_pairing(0, true, 10, true); // Video: temporal pairs plus retrieval.
+            check_pairing(0, false, 10, false);
+            check_pairing(2, true, 0, false);
+            std::snprintf(matching_settings.images_dir.data(),
+                          matching_settings.images_dir.size(), "extracted_frames");
+            matching_settings.alignment_capture_type = 1;
+            check_pairing(0, true, 10, true); // A frame folder can retain sequence ordering.
+            matching_settings.alignment_capture_type = 0;
+            check_pairing(0, true, 0, true); // Same folder can be treated as unordered photos.
+            editor::apply_alignment_quality_preset(matching_settings, 0);
+            require(matching_settings.retrieval_augmentation,
+                    "Fast quality preserves automatic retrieval for unordered photos");
+        }
         require(!settings.refine_weak_cameras && command.find("--refine-weak-cameras") == std::string::npos,
                 "weak-camera refinement stays opt-in for new Studio projects");
         settings.refine_weak_cameras = true;
