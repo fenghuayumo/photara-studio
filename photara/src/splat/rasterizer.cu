@@ -160,6 +160,7 @@ std::function<char*(std::size_t)> resize_buffer(tinytensor::Tensor& buffer, cons
 }
 
 splat_drender::CameraMode camera_mode_of(const Camera& camera) {
+    if (camera.orthographic) return splat_drender::CameraMode::orthographic;
     switch (camera.model) {
         case CameraModel::opencv_fisheye:
             return splat_drender::CameraMode::opencv_fisheye;

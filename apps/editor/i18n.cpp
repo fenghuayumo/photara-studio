@@ -1632,6 +1632,10 @@ constexpr Entry k_entries[] = {
      "OpenCV 魚眼 k1。0 は純粋な等距離レンズ。",
      "OpenCV 어안 k1. 0은 순수 등거리 렌즈입니다."},
     {"View height", "视图高度", "表示高さ", "보기 높이"},
+    {"Parallel projection: objects keep the same size at every depth.",
+     "平行投影：物体不会因距离远近而改变大小。",
+     "平行投影：物体の大きさは距離によって変わりません。",
+     "평행 투영: 물체 크기가 거리에 따라 달라지지 않습니다."},
     {"World-space height visible in the viewport.\n"
      "Scroll the view to zoom.",
      "视口中可见的世界空间高度。\n滚动视图进行缩放。",

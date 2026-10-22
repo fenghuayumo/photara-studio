@@ -2691,6 +2691,16 @@ std::array<float, 16> mesh_world_to_clip(
     const float fx_term = 2.F * camera.fx / width;
     const float fy_term = 2.F * camera.fy / height;
     std::array<float, 16> clip{};
+    if (camera.orthographic) {
+        clip = {
+            fx_term * r00, fx_term * r01, fx_term * r02, fx_term * tx + x_offset,
+            fy_term * r10, fy_term * r11, fy_term * r12, fy_term * ty + y_offset,
+            2.F * r20 / (far_z - near_z), 2.F * r21 / (far_z - near_z),
+            2.F * r22 / (far_z - near_z),
+            2.F * (tz - near_z) / (far_z - near_z) - 1.F,
+            0.F, 0.F, 0.F, 1.F};
+        return clip;
+    }
     clip[0 * 4 + 0] = fx_term * r00 + x_offset * r20;
     clip[0 * 4 + 1] = fx_term * r01 + x_offset * r21;
     clip[0 * 4 + 2] = fx_term * r02 + x_offset * r22;

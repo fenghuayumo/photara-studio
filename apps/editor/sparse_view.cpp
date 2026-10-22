@@ -122,7 +122,7 @@ void orbit_intrinsics(
     }
     if (camera.projection == EditorProjection::orthographic) {
         const float view_h = std::max(1e-4F, camera.ortho_height);
-        fy = h * std::max(1e-4F, camera.distance) / view_h;
+        fy = h / view_h;
         fx = fy;
         return;
     }
@@ -3051,6 +3051,7 @@ SplatPreviewCamera make_preview_camera(
         r02, r12, r22, 0.F,
         tx, ty, tz, 1.F};
     preview.position = {eye.x, eye.y, eye.z};
+    preview.orthographic = camera.projection == EditorProjection::orthographic;
     preview.width = std::max<std::uint32_t>(1, width);
     preview.height = std::max<std::uint32_t>(1, height);
     orbit_intrinsics(

@@ -131,7 +131,13 @@ SD_D2 inline bool project_splat(
     float u = 0.f, v = 0.f;
     Mat3 J{};
     float x_mul = 1.f, y_mul = 1.f;
-    if (is_pinhole(K.mode)) {
+    if (is_orthographic(K.mode)) {
+        if (!(t.z > 0.2f)) return false;
+        u = t.x;
+        v = t.y;
+        J.m[0][0] = K.fx;
+        J.m[1][1] = K.fy;
+    } else if (is_pinhole(K.mode)) {
         const float tan_fovx = float(width) / (2.f * K.fx);
         const float tan_fovy = float(height) / (2.f * K.fy);
         const float limx = 1.3f * tan_fovx, limy = 1.3f * tan_fovy;

@@ -22,6 +22,7 @@ enum class CameraMode : int {
     pinhole = 0,
     opencv_fisheye = 1,
     equirectangular = 3,
+    orthographic = 4, // Preview only; fx/fy are pixels per world unit.
 };
 
 struct CameraIntrinsics {
@@ -33,7 +34,8 @@ struct CameraIntrinsics {
 
 SD_HD inline bool is_equirect(CameraMode m) { return m == CameraMode::equirectangular; }
 SD_HD inline bool is_fisheye(CameraMode m) { return m == CameraMode::opencv_fisheye; }
-SD_HD inline bool is_pinhole(CameraMode m) { return !is_fisheye(m) && !is_equirect(m); }
+SD_HD inline bool is_orthographic(CameraMode m) { return m == CameraMode::orthographic; }
+SD_HD inline bool is_pinhole(CameraMode m) { return m == CameraMode::pinhole; }
 
 // Horizontal wrap-around used by equirectangular images: map dx into
 // [-w/2, w/2) so instances on either seam edge hit the correct pixels.
@@ -150,6 +152,16 @@ SD_HD inline Projection project_equirect(float3 t, int width, int height) {
 }
 
 SD_HD inline Projection project(float3 t, const CameraIntrinsics& K, int width, int height) {
+    if (is_orthographic(K.mode)) {
+        Projection p;
+        if (!(t.z > 0.2f)) return p;
+        p.pixel_x = K.fx * t.x + K.cx;
+        p.pixel_y = K.fy * t.y + K.cy;
+        p.J.du[0] = K.fx;
+        p.J.dv[1] = K.fy;
+        p.valid = isfinite(p.pixel_x) && isfinite(p.pixel_y);
+        return p;
+    }
     if (is_fisheye(K.mode)) return project_fisheye(t, K);
     if (is_equirect(K.mode)) return project_equirect(t, width, height);
     return project_pinhole(t, K);
@@ -166,6 +178,7 @@ SD_HD inline bool camera_visible(float3 t, CameraMode m) {
 // Unit ray through a pixel; .z converts a ray-length depth to camera Z.
 // Device-only (uses rnorm3df and the inverse fisheye solve).
 SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K) {
+    if (is_orthographic(K.mode)) return make_float3(0.f, 0.f, 1.f);
     const float x = (px - K.cx) / K.fx;
     const float y = (py - K.cy) / K.fy;
     if (is_equirect(K.mode)) {
