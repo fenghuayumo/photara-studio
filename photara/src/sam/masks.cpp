@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -520,6 +521,7 @@ GenerateResult generate_masks(const GenerateOptions& options) {
     GenerateResult result;
     std::size_t completed = 0;
     for (const auto& image_path : options.images) {
+        const auto frame_started = std::chrono::steady_clock::now();
         if (options.cancel &&
             options.cancel->load(std::memory_order_relaxed))
             throw std::runtime_error("cancelled");
@@ -561,10 +563,15 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         const GeometryGuide* guide =
             guide_it == geometry_guides.end() ? nullptr : &guide_it->second;
         if (guide) ++result.geometry_guided;
+        const auto image_prepared = std::chrono::steady_clock::now();
+        if (!sam3_encode_image(*state, *model, frame))
+            throw std::runtime_error(
+                "SAM 3 failed to encode " + image_path.filename().string());
+        const auto image_encoded = std::chrono::steady_clock::now();
         if (options.video) {
             for (sam3_tracker_ptr& tracker : trackers) {
                 const sam3_result tracked =
-                    sam3_track_frame(*tracker, *state, *model, frame);
+                    sam3_track_encoded_frame(*tracker, *state, *model);
                 if (guide) {
                     const auto chosen = select_detection(tracked, *guide, options);
                     if (chosen)
@@ -578,9 +585,6 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                     paint_result(selected, width, height, tracked, true);
                 }
             }
-        } else if (!sam3_encode_image(*state, *model, frame)) {
-            throw std::runtime_error(
-                "SAM 3 failed to encode " + image_path.filename().string());
         } else {
             for (const std::string& phrase : positive) {
                 sam3_pcs_params prompt;
@@ -646,6 +650,7 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         }
 
         const int output_width = static_cast<int>(file_size.width);
+        const auto inference_finished = std::chrono::steady_clock::now();
         const int output_height = static_cast<int>(file_size.height);
         io::GrayImage gray;
         gray.width = file_size.width;
@@ -675,6 +680,17 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         core::Logger::instance().info(
             "capture_frame kind=mask ready=1 completed=", completed,
             " total=", options.images.size(), " image=", std::quoted(image_utf8));
+        const auto saved = std::chrono::steady_clock::now();
+        const auto milliseconds = [](const auto begin, const auto end) {
+            return std::chrono::duration<double, std::milli>(end - begin).count();
+        };
+        core::Logger::instance().info(
+            "sam_frame_timing backend=", sam3_model_backend_name(*model),
+            " prepare_ms=", milliseconds(frame_started, image_prepared),
+            " encode_ms=", milliseconds(image_prepared, image_encoded),
+            " segment_ms=", milliseconds(image_encoded, inference_finished),
+            " save_ms=", milliseconds(inference_finished, saved),
+            " total_ms=", milliseconds(frame_started, saved));
         progress.advance();
         if (options.progress)
             options.progress(completed, options.images.size());
