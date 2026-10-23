@@ -299,7 +299,13 @@ struct Server::Impl {
                 if (!running.load()) break;
                 continue;
             }
-            handle_client(client);
+            try {
+                handle_client(client);
+            } catch (const std::exception& error) {
+                send_failure(client, 400, "INVALID_REQUEST", error.what());
+            } catch (...) {
+                send_failure(client, 500, "INTERNAL", "Unknown request failure");
+            }
             close_socket(client);
         }
     }
@@ -440,6 +446,10 @@ struct Server::Impl {
         }
         const std::string control_method =
             request["method"].get<std::string>();
+        if (request.contains("session_id") && request["session_id"] != session_id) {
+            send_failure(client, 400, "SESSION_CHANGED", "Reconnect to the current Studio session");
+            return;
+        }
         const json params =
             request.contains("params") && request["params"].is_object()
                 ? request["params"] : json::object();
@@ -450,13 +460,13 @@ struct Server::Impl {
         const std::string request_id =
             request.value("request_id", std::string{});
 
-        std::future<json> future =
+        std::shared_future<json> future =
             bus->submit(control_method, params, client_name, request_id);
         if (future.wait_for(std::chrono::seconds(5)) !=
             std::future_status::ready) {
             send_failure(
                 client, 504, "TIMEOUT",
-                "Studio did not process the command in time");
+                "Command outcome is unknown. Retry with the same client, request_id and arguments to retrieve its result");
             return;
         }
         json result;

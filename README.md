@@ -253,6 +253,10 @@ photara-ctl schema --json
 photara-ctl params set iterations=30000 strategy=adc_igs
 photara-ctl job start train --json
 photara-ctl job wait --timeout 30 --json
+photara-ctl job wait --op op_1 --timeout 30 --json
+photara-ctl view set yaw=1 pitch=0.3 distance=6 target=[0,0,0]
+photara-ctl project save D:/data/project/result.ascan
+photara-ctl export model --out D:/data/project/result.ply --format ply
 photara-ctl capture --out D:/data/agent/view.png
 ```
 

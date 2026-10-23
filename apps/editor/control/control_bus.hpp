@@ -8,6 +8,7 @@
 #include <deque>
 #include <future>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -31,7 +32,7 @@ public:
 
     // Thread-safe. The command is executed on the Studio main thread during
     // pump_main_thread() or pump_post_present().
-    std::future<json> submit(
+    std::shared_future<json> submit(
         std::string method, json params, std::string client,
         std::string request_id = {});
 
@@ -55,10 +56,12 @@ public:
     // Begins a job operation and returns its public id. Main thread only.
     std::string begin_operation(
         const std::string& stage, const std::string& client);
+    void mark_operation_cancelled() { operation_cancelled_ = true; }
 
     void push_event(std::string type, json data);
     [[nodiscard]] json events_since(std::uint64_t since) const;
     [[nodiscard]] json recent_events(std::size_t limit) const;
+    [[nodiscard]] json operation_status(const App& app, const std::string& id);
 
 private:
     struct Pending {
@@ -67,6 +70,7 @@ private:
         std::string client;
         std::string request_id;
         std::shared_ptr<std::promise<json>> promise;
+        std::chrono::steady_clock::time_point deadline;
     };
     struct EventRecord {
         std::uint64_t id{};
@@ -76,6 +80,7 @@ private:
     };
 
     static void resolve(Pending& pending, json value);
+    json execute_pending(App& app, Pending& pending);
     static bool should_defer(const Pending& pending);
     void sync_revision(const App& app);
     void finish_operation_if_done(const App& app);
@@ -84,6 +89,12 @@ private:
     std::deque<Pending> main_queue_;
     std::deque<Pending> post_present_queue_;
     bool stopping_{};
+    struct RequestRecord {
+        std::string signature;
+        std::shared_future<json> result;
+    };
+    std::map<std::string, RequestRecord> requests_;
+    std::deque<std::string> request_order_;
 
     mutable std::mutex event_mutex_;
     std::deque<EventRecord> events_;
@@ -94,8 +105,11 @@ private:
     std::string active_operation_;
     std::string active_client_;
     std::string active_stage_;
+    bool operation_cancelled_{};
     std::uint64_t next_operation_id_{1};
     std::string last_state_key_;
+    std::map<std::string, json> completed_operations_;
+    std::deque<std::string> completed_order_;
     std::chrono::steady_clock::time_point last_state_event_{};
 };
 

@@ -4,9 +4,38 @@
 > 目标版本：0.6.x 之后
 > 目标：让外部或内置 AI agent 以可验证、可撤销、可审计的方式驱动当前运行的 Photara Studio。
 
-> 实现进度：`agent_dev` 分支已落地 Phase 0/MVP——Studio 本地控制服务、
+> 实现进度：当前源码已落地 Phase 0/MVP——Studio 本地控制服务、
 > `photara-ctl`、状态快照、参数修改、任务启动/暂停/恢复/停止、日志读取和
 > splat/training 预览截图。MCP bridge、recipe、编辑和多客户端租约仍按本文档后续实现。
+
+### 当前增量实现（2026-10-23）
+
+- 参数 patch 与视角 patch 整批校验后提交，失败不会部分修改。
+- `job status/wait --op OP` 查询指定任务，内存保留最近 128 个已结束任务。
+  终态为 succeeded、failed、cancelled；重启后历史不保留。
+- CLI 等待成功返回 0，失败/取消返回 2，连接失败返回 3，用法错误返回 4，等待超时返回 5。
+- 请求可携带 `request_id`，按 client 和请求 ID 去重，参数不一致返回 CONFLICT。
+  去重缓存最多 1024 条，仅限当前 Studio 会话。CLI 写命令自动生成 ID；
+  使用 `--request-id ID` 可跨 CLI 调用重试。HTTP 超时只表示结果未知；
+  应使用同一实例、client、ID 和参数重试，不能换 ID 盲目重发。
+- 排队超过 5 秒未开始的命令返回 EXPIRED；已开始执行的命令可能在 HTTP 超时后完成。
+- `project save [path] [--overwrite]` 保存或另存 .ascan；当前仅支持空闲时保存。
+- `view set yaw=1 pitch=0.3 distance=6 target=[0,0,0]` 修改相机；
+  支持 fov_degrees、ortho_height、projection、mode、channel、workspace。
+  yaw/pitch 单位为弧度；projection 使用 perspective/orthographic/fisheye/panorama。
+- `export model --out PATH --format ply --sh-degree 3` 支持 ply/sog/spz/glb。
+  保存/导出要求绝对路径，位于项目、缓存、临时目录或 PHOTARA_CONTROL_ALLOWED_ROOTS。
+  显式指定的已存在文件默认拒绝覆盖，需 --overwrite；不指定路径保存当前项目则更新原文件。
+
+验证入口：`photara.studio.control`、`photara.studio.control_cli` CTest。
+真实 Studio 验证：
+
+```powershell
+python scripts/agent_control_smoke.py --studio build/photara/Release/photara_studio.exe --ctl build/photara/Release/photara-ctl.exe
+# 加 --images IMAGE_DIRECTORY 可验证 align/train/capture/save/export 全流程。
+```
+
+以上为实际实现范围，本文后续章节仍包含尚未实现的目标设计。
 
 ## 1. 结论
 

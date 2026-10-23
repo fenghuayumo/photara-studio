@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -49,10 +50,10 @@ bool path_within(
     if (root.empty()) return false;
     std::error_code error;
     const auto absolute_candidate =
-        std::filesystem::absolute(candidate, error).lexically_normal();
+        std::filesystem::weakly_canonical(candidate, error);
     if (error) return false;
     const auto absolute_root =
-        std::filesystem::absolute(root, error).lexically_normal();
+        std::filesystem::weakly_canonical(root, error);
     if (error) return false;
     const auto relative = absolute_candidate.lexically_relative(absolute_root);
     if (relative.empty()) return false;
@@ -109,6 +110,26 @@ json job_failure(const App& app, const std::string& stage) {
         {{"stage", stage}, {"suggested_action", "studio.get_state"}});
 }
 
+json output_path(const App& app, const json& params,
+                 const std::string& extension, std::filesystem::path& path) {
+    std::string text;
+    const json required = require_string(params, "path", text);
+    if (!ok(required)) return required;
+    path = path_from_utf8_field(text.c_str());
+    if (path.extension().empty()) path.replace_extension(extension);
+    if (lower_extension(path) != extension)
+        return failure("INVALID_REQUEST", "Output extension must be " + extension);
+    if (!allowed_capture_path(app, path))
+        return failure("PERMISSION_DENIED", "Output must be an absolute path under the project, cache, temp or PHOTARA_CONTROL_ALLOWED_ROOTS");
+    std::error_code error;
+    if (std::filesystem::exists(path, error) && !params.value("overwrite", false))
+        return failure("ALREADY_EXISTS", "Output exists; specify overwrite=true to replace it");
+    if (error) return failure("INTERNAL", error.message());
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return failure("INTERNAL", error.message());
+    return success();
+}
+
 }  // namespace
 
 json execute_command(
@@ -130,7 +151,7 @@ json execute_command(
     if (method == "studio.params.patch")
         return apply_parameter_patch(app, params.value("patch", json::object()));
     if (method == "studio.job.status")
-        return success({{"job", snapshot_job(app, bus)}});
+        return bus.operation_status(app, params.value("op_id", std::string{}));
     if (method == "studio.inspect.logs") {
         const auto limit = static_cast<std::size_t>(
             std::clamp(params.value("limit", 200), 1, 2000));
@@ -158,6 +179,118 @@ json execute_command(
             {"lines", std::move(output)},
             {"generation", app.log.generation()},
         });
+    }
+    if (method == "studio.project.save") {
+        if (app.job.running() || app.pending_train_prepare.valid() || app.loading_scene ||
+            app.saving_training || app.splat_export.job.valid())
+            return failure("BUSY", "Finish the active task before saving through the control API");
+        json options = params;
+        if (!options.contains("path")) {
+            if (app.layout.project_file.empty())
+                return failure("INVALID_REQUEST", "A path is required for the first save");
+            options["path"] = path_to_utf8(app.layout.project_file);
+            options["overwrite"] = true;
+        }
+        std::filesystem::path path;
+        const json checked = output_path(app, options, ".ascan", path);
+        if (!ok(checked)) return checked;
+        if (photara::splat::training_checkpoint_in_use(path))
+            return failure("BUSY", "The destination is being trained in another process");
+        ensure_task_cache(app);
+        refresh_artifacts(app);
+        if (!save_project_to_path(app, path)) return failure("INTERNAL", app.message);
+        set_message(app, "Project saved", theme::success);
+        return success({{"path", path_to_utf8(path)}, {"completed", true}});
+    }
+    if (method == "studio.export.model") {
+        if (app.job.running() || app.pending_train_prepare.valid() || app.loading_scene ||
+            app.splat_export.job.valid()) return failure("BUSY", "An active task prevents export");
+        if (!can_export_model(app)) return failure("PRECONDITION_FAILED", "No splat model to export");
+        const std::string format = params.value("format", std::string("ply"));
+        const std::vector<std::string> formats{"ply", "sog", "spz", "glb"};
+        const auto selected = std::find(formats.begin(), formats.end(), format);
+        if (selected == formats.end())
+            return failure("UNSUPPORTED", "Supported formats: ply, sog, spz, glb");
+        const json degree = params.value("sh_degree", json(3));
+        if (!degree.is_number_integer() || degree.get<int>() < 0 || degree.get<int>() > 3)
+            return failure("INVALID_REQUEST", "sh_degree must be an integer in [0, 3]");
+        std::filesystem::path path;
+        const json checked = output_path(app, params, "." + format, path);
+        if (!ok(checked)) return checked;
+        app.splat_export.format = static_cast<int>(selected - formats.begin());
+        app.splat_export.sh_degree = degree.get<int>();
+        if (!export_trained_model_to_path(app, path)) return failure("INTERNAL", app.message);
+        return success({{"path", path_to_utf8(path)}, {"format", format}, {"completed", true}});
+    }
+    if (method == "studio.view.patch") {
+        if (app.loading_scene) return failure("BUSY", "Scene is loading");
+        const json patch = params.value("patch", json::object());
+        if (!patch.is_object()) return failure("INVALID_REQUEST", "patch must be an object");
+        auto camera = app.camera;
+        auto mode = app.view_mode;
+        auto channel = app.display_channel;
+        auto workspace = app.workspace;
+        const auto choice = [](const json& value, const std::vector<std::string>& names) {
+            if (!value.is_string()) return -1;
+            const auto found = std::find(names.begin(), names.end(), value.get<std::string>());
+            return found == names.end() ? -1 : static_cast<int>(found - names.begin());
+        };
+        for (auto it = patch.begin(); it != patch.end(); ++it) {
+            const auto& key = it.key();
+            const auto& value = it.value();
+            if (key == "mode" || key == "channel" || key == "workspace" || key == "projection") {
+                int index = -1;
+                if (key == "mode") {
+                    index = choice(value, {"points", "splat", "rings", "mesh"});
+                    if (index >= 0) mode = static_cast<VisualizationMode>(index);
+                } else if (key == "channel") {
+                    index = choice(value, {"color", "depth", "normal"});
+                    if (index >= 0) channel = static_cast<DisplayChannel>(index);
+                } else if (key == "workspace") {
+                    index = choice(value, {"scene_3d", "image_2d"});
+                    if (index >= 0) workspace = static_cast<ViewportWorkspace>(index);
+                } else {
+                    index = choice(value, {"perspective", "orthographic", "fisheye", "panorama"});
+                    if (index >= 0) camera.projection = static_cast<EditorProjection>(index);
+                }
+                if (index < 0) return failure("INVALID_REQUEST", "Invalid view value: " + key);
+            } else if (key == "target") {
+                if (!value.is_array() || value.size() != 3)
+                    return failure("INVALID_REQUEST", "target must contain three finite coordinates");
+                float coordinates[3];
+                for (int i = 0; i < 3; ++i) {
+                    if (!value[i].is_number() || !std::isfinite(value[i].get<double>()) ||
+                        std::abs(value[i].get<double>()) > 1e12)
+                        return failure("INVALID_REQUEST", "Invalid target coordinate");
+                    coordinates[i] = value[i].get<float>();
+                }
+                camera.target = {coordinates[0], coordinates[1], coordinates[2]};
+            } else {
+                if (key != "yaw" && key != "pitch" && key != "distance" &&
+                    key != "fov_degrees" && key != "ortho_height")
+                    return failure("INVALID_REQUEST", "Unknown view field: " + key);
+                if (!value.is_number() || !std::isfinite(value.get<double>()))
+                    return failure("INVALID_REQUEST", "View value must be finite: " + key);
+                const double number = value.get<double>();
+                const double min = key == "pitch" ? -1.5707 : key == "yaw" ? -1e6 :
+                    key == "fov_degrees" ? 1.0 : 1e-5;
+                const double max = key == "pitch" ? 1.5707 : key == "fov_degrees" ? 179.0 : 1e6;
+                if (number < min || number > max)
+                    return failure("INVALID_REQUEST", "View value out of range: " + key);
+                const float n = static_cast<float>(number);
+                if (key == "yaw") camera.yaw = n;
+                else if (key == "pitch") camera.pitch = n;
+                else if (key == "distance") camera.distance = n;
+                else if (key == "fov_degrees") camera.fov_degrees = n;
+                else camera.ortho_height = n;
+            }
+        }
+        set_viewport_workspace(app, workspace);
+        app.camera = camera;
+        app.view_mode = mode;
+        app.display_channel = channel;
+        publish_preview_vis(app);
+        return success({{"view", snapshot_state(app, bus)["view"]}});
     }
     if (method == "studio.job.start") {
         if (app.job.running() || app.pending_train_prepare.valid())
@@ -250,6 +383,7 @@ json execute_command(
             if (!app.job.running())
                 return failure("PRECONDITION_FAILED", "No job is running");
             // pump_post_present() calls this after the draw list is submitted.
+            bus.mark_operation_cancelled();
             app.job.stop();
             if (app.job.consume_completion())
                 editor::on_job_finished(app);

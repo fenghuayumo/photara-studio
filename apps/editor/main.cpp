@@ -602,8 +602,8 @@ int main(const int argc, char** argv) {
     }
 
 #if defined(PHOTARA_CONTROL_ENABLED)
-    control_server.stop();
     control_bus.stop();
+    control_server.stop();
 #endif
 
     if (app.job.running()) app.job.stop();
