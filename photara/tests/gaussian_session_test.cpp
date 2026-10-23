@@ -124,6 +124,17 @@ int test_gpu_session(const std::filesystem::path& folder,
         editor::export_trained_model(restored);
         require(photara::splat::load_gaussians(exported, tinytensor::Device::CPU).means.to_vector()[0] == 17.F,
                 "embedded model export copied a stale working file");
+        require(editor::ensure_splat_renderer(restored), "edited close GPU preview");
+        restored.splat_edit.replace_from_model(restored, model(23.F), false);
+        require(restored.splat_edit.dirty(), "close fixture has no edits");
+        editor::export_trained_model(restored);
+        require(restored.splat_edit.dirty(), "export should preserve the editing session");
+        test_delete_open_row(restored);
+        require(restored.gaussian_models.empty() && !restored.composed_model &&
+                !restored.final_splat_ready && !restored.splat_edit.dirty() &&
+                restored.settings.splat_model_source[0] == '\0',
+                "closing edited model left preview or edit state behind");
+        require(std::filesystem::exists(exported), "closing model deleted exported file");
     }
     editor::gpu::destroy_context();
     glfwTerminate();
@@ -276,7 +287,25 @@ int main(int argc, char** argv) {
             const int result = test_gpu_session(folder, restored.gaussian_models);
             if (result != 0) { std::filesystem::remove_all(folder); return result; }
         }
+        // Exercise the same edited multi-source state that used to disable X.
+        const float means[]{0.F, 0.F, 0.F};
+        const float scales[]{-1.F, -1.F, -1.F};
+        const float quats[]{1.F, 0.F, 0.F, 0.F};
+        const float opacity[]{1.F};
+        const float sh[]{0.F, 0.F, 0.F};
+        editor::SplatEdit::Host host;
+        host.means = means; host.log_scales = scales;
+        host.quaternions = quats; host.opacity_logits = opacity;
+        host.sh = sh; host.count = 1;
+        restored.splat_edit.sync("edited-close-test", host);
+        restored.splat_edit.replace_from_model(restored, model(23.F), false);
+        require(restored.splat_edit.dirty(), "multi-source close fixture has no edits");
         test_delete_open_row(restored);
+        require(!restored.splat_edit.dirty(), "removal left stale composition edits");
+        test_delete_open_row(restored);
+        require(restored.gaussian_models.empty() && !restored.composed_model &&
+                restored.view_mode == editor::VisualizationMode::points,
+                "last model removal did not clear the viewport");
         editor::App hidden;
         editor::store_path_field(hidden.settings.project_dir, project);
         editor::apply_opened_project(hidden); wait_load(hidden);

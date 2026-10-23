@@ -101,7 +101,9 @@ void draw_gaussian_models_panel(App& app) {
         ImGui::SetCursorPosX(
             ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
             remove_width);
-        ImGui::BeginDisabled(merge_busy || edits_locked);
+        // Explicit removal closes the edited preview and rebuilds the
+        // remaining sources, even when the composition has been edited.
+        ImGui::BeginDisabled(merge_busy);
         if (ImGui::Button("X##remove_gaussian_model")) {
             remove_gaussian_model(app, index);
             // The entry was erased from the vector; stop touching it.
