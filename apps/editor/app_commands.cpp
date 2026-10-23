@@ -461,6 +461,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sam_negative_text = app.settings.sam_negative_text.data();
     settings.sam_keep_prompted = app.settings.sam_keep_prompted;
     settings.sam_video = app.settings.sam_video;
+    settings.sam_sfm_guided = app.settings.sam_sfm_guided;
     settings.sam_max_size = app.settings.sam_max_size;
     settings.sam_threshold = app.settings.sam_threshold;
     settings.sam_guided_threshold = app.settings.sam_guided_threshold;
@@ -581,6 +582,7 @@ void apply_project_settings(
     store_text(app.settings.sam_negative_text, settings.sam_negative_text);
     app.settings.sam_keep_prompted = settings.sam_keep_prompted;
     app.settings.sam_video = settings.sam_video;
+    app.settings.sam_sfm_guided = settings.sam_sfm_guided;
     app.settings.sam_max_size = std::max(0, settings.sam_max_size);
     app.settings.sam_threshold = settings.sam_threshold;
     app.settings.sam_guided_threshold = settings.sam_guided_threshold;

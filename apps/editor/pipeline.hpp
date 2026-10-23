@@ -351,6 +351,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     std::array<char, 512> sam_negative_text{};
     bool sam_keep_prompted = true;
     bool sam_video = true;
+    bool sam_sfm_guided = false;
     int sam_max_size = 0;
     float sam_threshold = 0.5F;
     float sam_guided_threshold = 0.2F;
