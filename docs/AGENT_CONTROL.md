@@ -37,6 +37,18 @@ python scripts/agent_control_smoke.py --studio build/photara/Release/photara_stu
 
 以上为实际实现范围，本文后续章节仍包含尚未实现的目标设计。
 
+### 后续增量
+
+控制 API 已增加 `studio.edit.apply`（选择全部、清空/反选、删除选区、撤销、重做）、
+`studio.export.mesh`（PLY/OBJ 几何、GLB 可选纹理）和 `studio.inspect.quality`。
+编辑要求已加载 splat viewport，复用 UI 的撤销栈；繁忙或手势进行中拒绝执行。
+带纹理 OBJ 的多文件导出暂保留在 UI。
+
+可选 stdio MCP bridge 和 align/train recipe 位于 `tools/photara_mcp/`，
+安装、启动及限制见该目录 README.md。Recipe 由客户端重复 advance 推进，
+会话/项目变化时停止；质量指标缺失或不达标时返回 needs_review。
+目前不提供后台 recipe 持久化、多客户端租约或感知质量评分。
+
 ## 1. 结论
 
 推荐路线是：

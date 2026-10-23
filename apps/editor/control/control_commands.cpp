@@ -202,6 +202,73 @@ json execute_command(
         set_message(app, "Project saved", theme::success);
         return success({{"path", path_to_utf8(path)}, {"completed", true}});
     }
+    if (method == "studio.edit.apply") {
+        if (app.job.running() || app.pending_train_prepare.valid() || app.loading_scene ||
+            app.pending_splat_model.valid() || app.splat_export.job.valid() || app.splat_edit.gesture_active())
+            return failure("BUSY", "Finish the active task or gesture before editing");
+        if (!app.has_model || !app.splat_renderer)
+            return failure("PRECONDITION_FAILED", "Load the splat model in the viewport before editing");
+        const std::string action = params.value("action", std::string{});
+        auto& edit = app.splat_edit;
+        if (action == "select_all") edit.select_all();
+        else if (action == "clear_selection") edit.clear_selection();
+        else if (action == "invert_selection") edit.invert_selection();
+        else if (action == "delete_selected") {
+            if (!edit.selected_count()) return failure("PRECONDITION_FAILED", "No Gaussians selected");
+            edit.delete_selected(app);
+        } else if (action == "undo") {
+            if (!edit.can_undo()) return failure("PRECONDITION_FAILED", "Undo history is empty");
+            edit.undo_edit(app);
+        } else if (action == "redo") {
+            if (!edit.can_redo()) return failure("PRECONDITION_FAILED", "Redo history is empty");
+            edit.redo_edit(app);
+        } else return failure("INVALID_REQUEST", "Unknown edit action");
+        return success({{"gaussians", edit.gaussian_count()}, {"selected", edit.selected_count()},
+            {"can_undo", edit.can_undo()}, {"can_redo", edit.can_redo()}});
+    }
+    if (method == "studio.export.mesh") {
+        if (app.job.running() || app.pending_train_prepare.valid() || app.loading_scene)
+            return failure("BUSY", "An active task prevents export");
+        if (!can_export_mesh_file(app)) return failure("PRECONDITION_FAILED", "No mesh to export");
+        const std::string format = params.value("format", std::string("ply"));
+        const std::vector<std::string> formats{"ply", "obj", "glb"};
+        const auto selected = std::find(formats.begin(), formats.end(), format);
+        if (selected == formats.end()) return failure("INVALID_REQUEST", "Mesh formats: ply, obj, glb");
+        const bool textured = params.value("include_texture", false);
+        if (textured && (format == "ply" || !can_export_textured_mesh(app)))
+            return failure("PRECONDITION_FAILED", "Textured export requires a textured mesh and OBJ/GLB");
+        std::filesystem::path path;
+        const json checked = output_path(app, params, "." + format, path);
+        if (!ok(checked)) return checked;
+        // OBJ creates sidecars; only expose single-file textured GLB initially.
+        if (textured && format == "obj")
+            return failure("UNSUPPORTED", "Use GLB for textured control export");
+        app.mesh_export.format = static_cast<int>(selected - formats.begin());
+        app.mesh_export.include_texture = textured;
+        if (!export_mesh_to_path(app, path)) return failure("INTERNAL", app.message);
+        return success({{"path", path_to_utf8(path)}, {"completed", true}});
+    }
+    if (method == "studio.inspect.quality") {
+        const double min_ratio = params.value("min_registered_ratio", 0.8);
+        const double max_error = params.value("max_mean_reprojection", 2.0);
+        const double max_loss = params.value("max_training_loss", 0.1);
+        if (!std::isfinite(min_ratio) || min_ratio < 0 || min_ratio > 1 ||
+            !std::isfinite(max_error) || max_error <= 0 || !std::isfinite(max_loss) || max_loss <= 0)
+            return failure("INVALID_REQUEST", "Invalid quality thresholds");
+        const auto& training = app.monitor.training();
+        const bool alignment_known = app.scene.total_views > 0 && !app.loading_scene;
+        const double ratio = alignment_known ? static_cast<double>(app.scene.registered_views) / app.scene.total_views : 0;
+        const bool training_known = training.valid && std::isfinite(training.loss);
+        json checks = json::array();
+        checks.push_back({{"name", "registered_ratio"}, {"status", !alignment_known ? "unknown" : ratio >= min_ratio ? "passed" : "failed"},
+            {"value", alignment_known ? json(ratio) : json(nullptr)}, {"minimum", min_ratio}});
+        checks.push_back({{"name", "mean_reprojection"}, {"status", !alignment_known || !std::isfinite(app.scene.mean_reprojection) ? "unknown" : app.scene.mean_reprojection <= max_error ? "passed" : "failed"},
+            {"value", alignment_known ? json(app.scene.mean_reprojection) : json(nullptr)}, {"maximum", max_error}});
+        checks.push_back({{"name", "training_loss"}, {"status", !training_known ? "unknown" : training.loss <= max_loss ? "passed" : "failed"},
+            {"value", training_known ? json(training.loss) : json(nullptr)}, {"maximum", max_loss}});
+        return success({{"checks", checks}, {"scope", "loaded_scene_and_latest_monitor"},
+            {"note", "Unknown metrics are not a pass; training loss is not a perceptual quality score"}});
+    }
     if (method == "studio.export.model") {
         if (app.job.running() || app.pending_train_prepare.valid() || app.loading_scene ||
             app.splat_export.job.valid()) return failure("BUSY", "An active task prevents export");

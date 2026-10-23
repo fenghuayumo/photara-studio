@@ -1371,6 +1371,7 @@ void SplatEdit::apply_replace(const Snapshot& snap) {
 }
 
 void SplatEdit::undo_edit(App& app) { undo(app); }
+void SplatEdit::redo_edit(App& app) { redo(app); }
 
 void SplatEdit::replace_from_model(
     App& app, const photara::splat::GaussianModel& model,
