@@ -302,13 +302,26 @@ void append_sam_flags(
     if (settings.sam_negative_text[0] != '\0')
         command << " --sam-neg-text "
                 << quote_text(settings.sam_negative_text.data());
+    // Mask-editor output (batch generation or manual saves) marks the mask
+    // directory as ready. Alignment then reuses it instead of throwing the
+    // edits away by regenerating from the current prompt.
+    const bool actual_refresh =
+        refresh && !masks_complete_for_alignment(settings);
     command << " --sam-keep-prompted="
             << (settings.sam_keep_prompted ? "true" : "false")
             << " --sam-video=" << (settings.sam_video ? "true" : "false")
             << " --sam-max-size " << std::max(0, settings.sam_max_size)
+            << " --sam-threshold " << settings.sam_threshold
+            << " --sam-guided-threshold " << settings.sam_guided_threshold
+            << " --sam-nms " << settings.sam_nms
+            << " --sam-min-area " << settings.sam_min_area
+            << " --sam-max-area " << settings.sam_max_area
+            << " --sam-close-kernel " << settings.sam_close_kernel
+            << " --sam-fill-holes="
+            << (settings.sam_fill_holes ? "true" : "false")
             << " --sam-use-mask-for-sfm="
             << (settings.sam_use_mask_for_sfm ? "true" : "false")
-            << " --sam-refresh=" << (refresh ? "true" : "false");
+            << " --sam-refresh=" << (actual_refresh ? "true" : "false");
 }
 
 void append_gui_flags(
@@ -351,6 +364,9 @@ void append_video_extract_flags(
             << " --video-rotate " << settings.video_rotate
             << " --video-frames-dir "
             << quote(reconstruction_images_dir(settings));
+    if (!settings.video_segments.empty())
+        command << " --video-segments "
+                << quote_text(settings.video_segments.c_str());
 }
 
 std::string lower_extension(const std::filesystem::path& path) {
@@ -1474,6 +1490,53 @@ std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings)
     if (settings.video_frames_dir[0] != '\0')
         return path_from_utf8_field(settings.video_frames_dir.data());
     return photara::io::default_video_frames_dir(source);
+}
+
+const char* sam_backend_name(const ProjectSettings& settings) {
+    if (settings.sam_backend == 1 && studio_sam_cuda()) return "cuda";
+    if (settings.sam_backend == 2 && studio_sam_vulkan()) return "vulkan";
+    return "auto";
+}
+
+std::filesystem::path masks_directory(const ProjectSettings& settings) {
+    const auto images = reconstruction_images_dir(settings);
+    if (images.empty()) return {};
+    return images.parent_path() / "masks";
+}
+
+bool masks_complete_for_alignment(const ProjectSettings& settings) {
+    const auto images = reconstruction_images_dir(settings);
+    const auto masks = masks_directory(settings);
+    if (images.empty() || masks.empty()) return false;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(
+            masks / k_mask_ready_marker, error))
+        return false;
+    if (!std::filesystem::is_directory(images, error)) return false;
+    const auto is_still = [](const std::filesystem::path& path) {
+        std::string extension = path.extension().string();
+        std::transform(
+            extension.begin(), extension.end(), extension.begin(),
+            [](const unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+        return extension == ".jpg" || extension == ".jpeg" ||
+               extension == ".png" || extension == ".tif" ||
+               extension == ".tiff" || extension == ".bmp";
+    };
+    bool any = false;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(images, error)) {
+        if (error) return false;
+        std::error_code file_error;
+        if (!entry.is_regular_file(file_error) || !is_still(entry.path()))
+            continue;
+        any = true;
+        auto mask = masks / entry.path().stem();
+        mask += ".png";
+        if (!std::filesystem::is_regular_file(mask, error)) return false;
+    }
+    return any;
 }
 
 std::string build_align_command(

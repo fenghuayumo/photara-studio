@@ -536,6 +536,7 @@ void print_usage() {
         "  photara-ctl capture --out PATH [--max-long-edge N]\n"
         "  photara-ctl project open <path>\n"
         "  photara-ctl project set-source <path>\n"
+        "  photara-ctl window open <video|mask>\n"
         "  photara-ctl events [--since ID]\n"
         "  photara-ctl watch\n\n"
         "Global options:\n"
@@ -746,6 +747,17 @@ int main(const int argc, char** argv) {
             json{{"path", path}, {"max_long_edge", max_long_edge}});
         if (options.json_output) print_json(result, true);
         else std::cout << "Captured " << result.value("path", "") << '\n';
+    } else if (command == "window") {
+        if (options.args.size() < 3 || options.args[1] != "open") {
+            print_usage();
+            return k_exit_usage;
+        }
+        const json result = call(
+            "studio.window.open", json{{"window", options.args[2]}});
+        if (options.json_output) print_json(result, true);
+        else
+            std::cout << "Opened " << result.value("window", "")
+                      << " window\n";
     } else if (command == "project") {
         if (options.args.size() < 3) {
             print_usage();

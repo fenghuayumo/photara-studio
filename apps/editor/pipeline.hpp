@@ -303,6 +303,10 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int video_quality = 95;
     float video_scale = 1.0F;
     int video_rotate = 0;
+    // Capture ranges in source time, `start:end;start:end` with `-` as the
+    // open end. Empty keeps the whole video. The video window edits this
+    // string; the same value goes to the extractor and its manifest.
+    std::string video_segments;
 
     bool scene_mode = false;
     bool focus_region = false;
@@ -329,6 +333,13 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     bool sam_keep_prompted = true;
     bool sam_video = true;
     int sam_max_size = 0;
+    float sam_threshold = 0.5F;
+    float sam_guided_threshold = 0.2F;
+    float sam_nms = 0.1F;
+    float sam_min_area = 0.001F;
+    float sam_max_area = 0.65F;
+    int sam_close_kernel = 5;
+    bool sam_fill_holes = true;
 
     // Mesh extraction. `mesh_source` selects the product path:
     // 0 = geometry-supervised 3DGS then extract, 1 = photogrammetry (MVS).
@@ -604,6 +615,17 @@ inline int texture_optimize_steps(const ProjectSettings& settings) {
 // Folder of stills SfM/training actually reads. Equals images_dir for a photo
 // folder; the extract destination when images_dir is a video.
 std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings);
+
+// Mask directory used by SAM, QA overlays, MVS, and 3DGS: the sibling
+// "masks" folder of the reconstruction images.
+std::filesystem::path masks_directory(const ProjectSettings& settings);
+// Marker written by the mask editor once every frame has a mask. Alignment
+// reuses the directory instead of regenerating and discarding manual edits.
+inline constexpr const char* k_mask_ready_marker = ".photara_masks_ready";
+bool masks_complete_for_alignment(const ProjectSettings& settings);
+
+// Human-readable SAM backend for the in-process mask editor.
+const char* sam_backend_name(const ProjectSettings& settings);
 
 // Settings path fields and ImGui buffers are UTF-8. On Windows, constructing
 // filesystem::path from char* uses the ACP, so these keep Chinese paths intact.

@@ -167,6 +167,14 @@ std::vector<std::uint8_t> encode_settings(
     writer.string(store_path(settings.extractor_model, base));
     writer.string(store_path(settings.lightglue_model, base));
     writer.value(static_cast<std::int32_t>(settings.alignment_capture_type));
+    writer.string(settings.video_segments);
+    writer.value(settings.sam_threshold);
+    writer.value(settings.sam_guided_threshold);
+    writer.value(settings.sam_nms);
+    writer.value(settings.sam_min_area);
+    writer.value(settings.sam_max_area);
+    writer.value(static_cast<std::int32_t>(settings.sam_close_kernel));
+    writer.value(static_cast<std::uint8_t>(settings.sam_fill_holes));
     return writer.take();
 }
 
@@ -405,6 +413,32 @@ Settings decode_settings(
     } else {
         // Older projects inferred capture order from the input file type.
         settings.alignment_capture_type = io::is_video_path(settings.image_directory) ? 1 : 0;
+    }
+    if (version >= 17) {
+        settings.video_segments = reader.string();
+        settings.sam_threshold = reader.value<float>();
+        settings.sam_guided_threshold = reader.value<float>();
+        settings.sam_nms = reader.value<float>();
+        settings.sam_min_area = reader.value<float>();
+        settings.sam_max_area = reader.value<float>();
+        settings.sam_close_kernel = reader.value<std::int32_t>();
+        settings.sam_fill_holes = reader.value<std::uint8_t>() != 0;
+        auto finite_range = [](const float value, const float low, const float high) {
+            return std::isfinite(value) && value >= low && value <= high;
+        };
+        if (!finite_range(settings.sam_threshold, 0.F, 1.F))
+            settings.sam_threshold = 0.5F;
+        if (!finite_range(settings.sam_guided_threshold, 0.F, 1.F))
+            settings.sam_guided_threshold = 0.2F;
+        if (!finite_range(settings.sam_nms, 0.F, 1.F))
+            settings.sam_nms = 0.1F;
+        if (!finite_range(settings.sam_min_area, 0.F, 1.F))
+            settings.sam_min_area = 0.001F;
+        if (!finite_range(settings.sam_max_area, 0.F, 1.F) ||
+            settings.sam_max_area <= settings.sam_min_area)
+            settings.sam_max_area = 0.65F;
+        if (settings.sam_close_kernel < 1 || settings.sam_close_kernel % 2 == 0)
+            settings.sam_close_kernel = 5;
     }
     settings.sanitize();
     return settings;

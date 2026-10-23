@@ -413,6 +413,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.video_quality = app.settings.video_quality;
     settings.video_scale = app.settings.video_scale;
     settings.video_rotate = app.settings.video_rotate;
+    settings.video_segments = app.settings.video_segments;
     settings.splat_output_format = app.settings.splat_format == 1
         ? "ply"
         : app.settings.splat_format == 2
@@ -461,6 +462,13 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sam_keep_prompted = app.settings.sam_keep_prompted;
     settings.sam_video = app.settings.sam_video;
     settings.sam_max_size = app.settings.sam_max_size;
+    settings.sam_threshold = app.settings.sam_threshold;
+    settings.sam_guided_threshold = app.settings.sam_guided_threshold;
+    settings.sam_nms = app.settings.sam_nms;
+    settings.sam_min_area = app.settings.sam_min_area;
+    settings.sam_max_area = app.settings.sam_max_area;
+    settings.sam_close_kernel = app.settings.sam_close_kernel;
+    settings.sam_fill_holes = app.settings.sam_fill_holes;
     settings.build_mesh = app.settings.build_mesh;
     settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
@@ -515,6 +523,7 @@ void apply_project_settings(
     app.settings.video_quality = settings.video_quality;
     app.settings.video_scale = settings.video_scale;
     app.settings.video_rotate = settings.video_rotate;
+    app.settings.video_segments = settings.video_segments;
     if (settings.splat_output_format == "ply")
         app.settings.splat_format = 1;
     else if (settings.splat_output_format == "sog")
@@ -573,6 +582,13 @@ void apply_project_settings(
     app.settings.sam_keep_prompted = settings.sam_keep_prompted;
     app.settings.sam_video = settings.sam_video;
     app.settings.sam_max_size = std::max(0, settings.sam_max_size);
+    app.settings.sam_threshold = settings.sam_threshold;
+    app.settings.sam_guided_threshold = settings.sam_guided_threshold;
+    app.settings.sam_nms = settings.sam_nms;
+    app.settings.sam_min_area = settings.sam_min_area;
+    app.settings.sam_max_area = settings.sam_max_area;
+    app.settings.sam_close_kernel = settings.sam_close_kernel;
+    app.settings.sam_fill_holes = settings.sam_fill_holes;
     app.settings.build_mesh = settings.build_mesh;
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
@@ -1109,6 +1125,7 @@ void select_image_folder(App& app) {
             L"Select the capture image folder", app.settings.images_dir))
         return;
     app.settings.video_frames_dir.fill('\0');
+    app.settings.video_segments.clear();
     apply_image_directory_selection(app);
 }
 
@@ -1116,10 +1133,13 @@ void change_image_source(App& app, const std::filesystem::path& path) {
     if (app.job.running() || app.loading_scene) return;
     if (defer_project_transition(app, [&app, path] { change_image_source(app, path); })) return;
     store_utf8_path_field(app.settings.images_dir, path);
-    if (photara::io::is_video_path(path)) app.settings.alignment_capture_type = 1;
+    const bool video = photara::io::is_video_path(path);
+    if (video)
+        app.settings.alignment_capture_type = 1;
     app.settings.dataset_source.fill('\0');
     app.settings.dataset_initial_cloud.fill('\0');
     app.settings.video_frames_dir.fill('\0');
+    app.settings.video_segments.clear();
     apply_image_directory_selection(app);
 }
 
@@ -1305,6 +1325,7 @@ void apply_video_selection(App& app) {
     app.settings.dataset_source.fill('\0');
     app.settings.dataset_initial_cloud.fill('\0');
     app.settings.video_frames_dir.fill('\0');
+    app.settings.video_segments.clear();
     app.settings.project_dir.fill('\0');
     app.settings.runtime_dir.fill('\0');
     app.saved_project_settings.clear();

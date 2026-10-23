@@ -55,6 +55,40 @@ int main() {
     expect(!photara::io::is_video_path("photo.jpg"), "jpg is not video");
     expect(!photara::io::is_video_path("images"), "folder is not video");
 
+    {
+        std::vector<photara::io::VideoSegment> segments;
+        std::string parse_error;
+        expect(
+            photara::io::parse_video_segments(
+                "2:3; 0.5:1.5", segments, &parse_error),
+            "segments parse");
+        expect(segments.size() == 2, "two segments parsed");
+        expect(
+            segments.size() == 2 &&
+                segments[0].start_seconds == 0.5 &&
+                segments[0].end_seconds == 1.5 &&
+                segments[1].start_seconds == 2.0,
+            "segments are sorted by start time");
+        expect(
+            photara::io::serialize_video_segments(segments) ==
+                "0.500:1.500;2.000:3.000",
+            "segments serialize");
+        expect(
+            photara::io::serialize_video_segments({{1.0, 0.0}}) == "1.000:-",
+            "open-ended segment serializes");
+        std::vector<photara::io::VideoSegment> merged;
+        expect(
+            photara::io::parse_video_segments("0:5;3:8", merged),
+            "overlapping segments parse");
+        expect(
+            merged.size() == 1 && merged[0].start_seconds == 0.0 &&
+                merged[0].end_seconds == 8.0,
+            "overlapping segments merge");
+        expect(
+            !photara::io::parse_video_segments("1", segments, &parse_error),
+            "segment without a colon is rejected");
+    }
+
     const auto frames = photara::io::default_video_frames_dir("D:/scan/clip.mp4");
     expect(
         frames.filename() == "images" && frames.parent_path().filename() == "clip",
@@ -100,6 +134,20 @@ int main() {
         std::filesystem::exists(out / "00000.png") &&
             std::filesystem::exists(out / "00001.png"),
         "selected frames are numbered");
+
+    {
+        const auto offset_cand = dir / "offset_cand";
+        const auto offset_out = dir / "offset_out";
+        std::filesystem::create_directories(offset_cand, error);
+        photara::io::save_rgb_png(sharp, offset_cand / "c_000001.png");
+        expect(
+            photara::io::select_sharpest_frames(
+                offset_cand, offset_out, 1, 0, nullptr, {}, 10) == 1,
+            "offset selection keeps one frame");
+        expect(
+            std::filesystem::exists(offset_out / "00010.png"),
+            "offset selection starts at first_index");
+    }
     const double kept0 = photara::io::laplacian_sharpness(out / "00000.png");
     const double kept1 = photara::io::laplacian_sharpness(out / "00001.png");
     expect(kept0 > blur_score * 5.0 && kept1 > blur_score * 5.0,
@@ -143,7 +191,7 @@ int main() {
         const auto extracted = dir / "extracted";
         const std::string synth =
             "ffmpeg -nostdin -y -hide_banner -loglevel error -f lavfi -i "
-            "testsrc=duration=1:size=64x64:rate=10 -pix_fmt yuv420p \"" +
+            "testsrc=duration=2:size=64x64:rate=10 -pix_fmt yuv420p \"" +
             video.string() + "\"";
         if (std::system(synth.c_str()) == 0 &&
             std::filesystem::exists(video, error)) {
@@ -162,6 +210,40 @@ int main() {
                     "extracted frame 00000.jpg");
                 const auto again = photara::io::extract_video_frames(options);
                 expect(again.reused, "second extract reuses matching frames");
+
+                photara::io::VideoExtractOptions segmented;
+                segmented.video = video;
+                segmented.output_dir = dir / "segmented";
+                segmented.fps = 5.0F;
+                segmented.sharp_window = 1;
+                segmented.quality = 90;
+                segmented.segments = {{0.2, 0.8}, {1.2, 1.8}};
+                const auto segment_result =
+                    photara::io::extract_video_frames(segmented);
+                expect(
+                    segment_result.frames_written == 6,
+                    "two 0.6 s segments at 5 fps write six frames");
+                expect(
+                    photara::io::has_matching_video_extract(segmented),
+                    "segmented extract matches its manifest");
+                segmented.segments = {{0.0, 2.0}};
+                expect(
+                    !photara::io::has_matching_video_extract(segmented),
+                    "different segments do not match the manifest");
+
+                photara::io::VideoPreviewOptions preview;
+                preview.video = video;
+                preview.output_dir = dir / "preview";
+                preview.fps = 5.0F;
+                const int preview_frames =
+                    photara::io::generate_video_preview(preview);
+                expect(
+                    preview_frames >= 5,
+                    "preview proxy writes progressive frames");
+                expect(
+                    std::filesystem::exists(
+                        dir / "preview" / "p_000001.jpg"),
+                    "preview frames are numbered from one");
             } catch (const std::exception& failure) {
                 std::cerr << "FAIL: ffmpeg extract: " << failure.what() << '\n';
                 ++failures;

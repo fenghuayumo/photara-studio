@@ -4,8 +4,10 @@
 // the user accepts Meta's licence; this call only runs a model that is already
 // on disk and writes keep-masks (255 = keep) for SfM and 3DGS.
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,13 @@ struct GenerateOptions {
     float max_area_fraction = 0.65F;
     int close_kernel = 5;
     bool fill_holes = true;
+    // Interactive single-image generation must not replace a preview with an
+    // empty result when the prompt did not identify a target.
+    bool require_target = false;
+    // Optional editor hooks. Cancellation is checked between images because
+    // the SAM decoder itself has no interrupt path.
+    const std::atomic<bool>* cancel = nullptr;
+    std::function<void(std::size_t completed, std::size_t total)> progress;
 };
 
 struct GenerateResult {
