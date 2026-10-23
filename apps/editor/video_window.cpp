@@ -77,64 +77,86 @@ double clamp_time(const double value, const double duration) {
     return std::clamp(value, 0.0, duration);
 }
 
+int current_preview_index(const VideoWindowState& window) {
+    const double last_time = std::max(0.0, window.duration - 0.5 / window.proxy_fps);
+    return static_cast<int>(std::min(window.playhead, last_time) * window.proxy_fps) + 1;
+}
+
 void cancel_preview_job(App& app) {
     auto& window = app.video_window;
-    if (!window.preview_job.valid()) return;
-    if (window.preview) window.preview->cancel.store(true);
-    window.retired_previews.push_back(
-        {std::move(window.preview_job), window.proxy_dir});
+    if (window.preview_job.valid()) {
+        if (window.preview) window.preview->cancel.store(true);
+        window.retired_previews.push_back({std::move(window.preview_job), window.proxy_dir});
+    } else if (!window.proxy_dir.empty()) {
+        std::promise<int> completed;
+        completed.set_value(0);
+        window.retired_previews.push_back({completed.get_future(), window.proxy_dir});
+    }
     window.preview_job = {};
     window.preview.reset();
     window.proxy_dir.clear();
 }
 
-void start_preview_job(App& app, const std::filesystem::path& source) {
+void start_preview_job(App& app, const std::filesystem::path& source,
+                       double start = 0.0, bool reset = true, bool append = false) {
     auto& window = app.video_window;
-    cancel_preview_job(app);
+    if (!append) cancel_preview_job(app);
     window.source = source;
     window.preview_done = false;
     window.preview_frames = 0;
     window.preview_progress = -1.F;
     window.preview_error.clear();
-    window.duration = 0.0;
-    window.source_fps = 0.0;
-    window.width = 0;
-    window.height = 0;
-    window.playhead = 0.0;
-    window.playing = false;
-    window.last_tick = 0.0;
-    if (window.frame.pending.valid()) {
-        try {
-            (void)window.frame.pending.get();
-        } catch (...) {
-        }
+    if (reset) {
+        window.duration = 0.0;
+        window.source_fps = 0.0;
+        window.width = 0;
+        window.height = 0;
+        window.playhead = 0.0;
+        window.playing = false;
+        window.last_tick = 0.0;
+        window.range_in = 0.0;
+        window.range_out = 0.0;
+        load_segments(app);
     }
-    window.frame.pending = {};
-    window.frame.texture.reset();
-    window.frame.loaded_index = -1;
-    window.frame.failed_index = -1;
-    load_segments(app);
-
+    // Only decode a short interval around the requested source time.
+    if (!reset) start = std::min(start, std::max(0.0, window.duration - 1.0 / window.proxy_fps));
+    window.preview_start = std::floor(start * window.proxy_fps) / window.proxy_fps;
     std::error_code error;
-    const int generation = ++window.preview_generation;
-    const auto directory = preview_directory(app, generation);
-    std::filesystem::remove_all(directory, error);
-    std::filesystem::create_directories(directory, error);
-    if (error) {
-        window.preview_error =
-            "Cannot create the video preview folder";
-        return;
+    auto directory = window.proxy_dir;
+    if (!append) {
+        window.cached_start = window.preview_start;
+        window.cached_end = window.preview_start;
+        window.decoded_frames.clear();
+        if (window.frame.pending.valid()) {
+            try { (void)window.frame.pending.get(); } catch (...) {}
+        }
+        window.frame.pending = {};
+        if (reset) window.frame.texture.reset();
+        window.frame.loaded_index = -1;
+        window.frame.failed_index = -1;
+        directory = preview_directory(app, ++window.preview_generation);
+        std::filesystem::remove_all(directory, error);
+        std::filesystem::create_directories(directory, error);
+        if (error) {
+            window.preview_error = "Cannot create the video preview folder";
+            return;
+        }
+        window.proxy_dir = directory;
     }
-    window.proxy_dir = directory;
     auto state = std::make_shared<VideoPreviewState>();
     window.preview = state;
     const float proxy_fps = window.proxy_fps;
+    const double preview_start = window.preview_start;
+    const double preview_length = window.preview_length;
+    const photara::io::VideoProbe known_probe{
+        window.duration, window.source_fps, window.width, window.height};
     window.preview_job = std::async(
         std::launch::async,
-        [source, directory, state, proxy_fps]() -> int {
+        [source, directory, state, proxy_fps, preview_start, preview_length, known_probe, append]() -> int {
             try {
-                photara::io::VideoProbe probe;
-                photara::io::probe_video({}, source, probe);
+                auto probe = known_probe;
+                if (probe.width <= 0 || probe.duration_seconds <= 0.0)
+                    photara::io::probe_video({}, source, probe);
                 state->duration.store(probe.duration_seconds);
                 state->source_fps.store(probe.fps);
                 state->width.store(probe.width);
@@ -143,6 +165,13 @@ void start_preview_job(App& app, const std::filesystem::path& source) {
                 options.video = source;
                 options.output_dir = directory;
                 options.fps = proxy_fps;
+                options.max_width = 960;
+                options.max_height = 540;
+                options.start_seconds = preview_start;
+                options.duration_seconds = preview_length;
+                options.first_frame = static_cast<int>(std::llround(preview_start * proxy_fps)) + 1;
+                options.source_probe = probe;
+                options.keep_existing = append;
                 options.cancel = &state->cancel;
                 options.progress = [state](const float value) {
                     state->progress.store(value);
@@ -176,13 +205,16 @@ void harvest_retired_previews(App& app) {
 void poll_preview_job(App& app) {
     auto& window = app.video_window;
     if (!window.preview_job.valid() || !window.preview) return;
-    if (window.duration <= 0.0)
+    const bool awaiting_metadata = window.duration <= 0.0;
+    if (awaiting_metadata)
         window.duration = window.preview->duration.load();
     if (window.source_fps <= 0.0)
         window.source_fps = window.preview->source_fps.load();
     if (window.width <= 0) window.width = window.preview->width.load();
     if (window.height <= 0) window.height = window.preview->height.load();
     window.preview_progress = window.preview->progress.load();
+    if (awaiting_metadata && window.duration > 0.0 && window.range_out <= window.range_in)
+        window.range_out = window.duration;
     if (window.preview_job.wait_for(std::chrono::seconds(0)) !=
         std::future_status::ready)
         return;
@@ -192,6 +224,8 @@ void poll_preview_job(App& app) {
         window.preview_frames = window.preview_job.get();
         window.preview_done = true;
         window.preview_progress = 1.F;
+        window.cached_end = std::min(window.duration,
+            window.preview_start + window.preview_frames / window.proxy_fps);
     } catch (const std::exception& error) {
         window.preview_frames = 0;
         if (!cancelled) window.preview_error = error.what();
@@ -202,15 +236,6 @@ void poll_preview_job(App& app) {
         (window.range_out <= window.range_in ||
          window.range_out > window.duration))
         window.range_out = window.duration;
-}
-
-int available_preview_frames(const VideoWindowState& window) {
-    if (window.preview_done) return window.preview_frames;
-    if (window.duration > 0.0 && window.preview_progress > 0.F)
-        return static_cast<int>(
-            window.duration * window.proxy_fps *
-                std::min(1.F, window.preview_progress));
-    return 0;
 }
 
 std::filesystem::path preview_frame_path(
@@ -239,29 +264,66 @@ void harvest_frame(VideoWindowFrame& frame) {
     frame.pending_index = -1;
 }
 
-// The proxy writes frames sequentially, so playback can only display an index
-// that is already on disk. A single async decode keeps the UI responsive while
-// prefetching the next visible frame.
+// Decode ahead in bounded batches. The render thread only uploads the newest
+// frame due on the playback clock; it never waits for a disk read or JPEG decode.
 void request_frame(VideoWindowState& window, const int index) {
-    auto& frame = window.frame;
     if (index <= 0) return;
-    harvest_frame(frame);
-    if (frame.pending.valid()) return;
-    if (index == frame.loaded_index) return;
-    if (index == frame.failed_index && ImGui::GetTime() < frame.failed_until)
-        return;
-    const auto path = preview_frame_path(window, index);
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(path, error)) {
-        frame.failed_index = index;
-        frame.failed_until = ImGui::GetTime() + 0.25;
-        return;
+    if (window.decode_batch.valid() &&
+        window.decode_batch.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        try {
+            auto batch = window.decode_batch.get();
+            if (window.decode_directory == window.proxy_dir) {
+                for (auto& frame : batch)
+                    window.decoded_frames.push_back(std::move(frame));
+            }
+        } catch (...) {}
     }
-    frame.pending_index = index;
-    frame.pending_path = path;
-    // The caller draws the previous texture while this decode runs.
-    frame.pending = std::async(
-        std::launch::async, [path]() { return photara::io::load_rgb(path); });
+    auto& frames = window.decoded_frames;
+    if (window.frame.loaded_index > index) {
+        window.frame.loaded_index = -1;
+        frames.clear();
+    }
+    int selected = -1;
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        if (frames[i].index <= index && frames[i].index > window.frame.loaded_index &&
+            (selected < 0 || frames[i].index > frames[selected].index))
+            selected = static_cast<int>(i);
+    }
+    if (selected >= 0) {
+        window.frame.texture.upload(frames[selected].image);
+        window.frame.loaded_index = frames[selected].index;
+    }
+    frames.erase(std::remove_if(frames.begin(), frames.end(), [&](const auto& frame) {
+        return frame.index <= index;
+    }), frames.end());
+    if (window.decode_batch.valid()) return;
+    const bool missing_current = window.frame.loaded_index != index;
+    if (!missing_current && frames.size() >= 12) return;
+    if (missing_current) frames.clear();
+    int first = std::max(index, window.frame.loaded_index + 1);
+    if (!missing_current)
+        for (const auto& frame : frames) first = std::max(first, frame.index + 1);
+    std::vector<std::pair<int, std::filesystem::path>> paths;
+    // Retain roughly half a second in RAM; ffmpeg writes the disk cache ahead.
+    for (int next = first; next < first + 12; ++next) {
+        const auto path = preview_frame_path(window, next);
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error)) break;
+        paths.emplace_back(next, path);
+    }
+    if (paths.empty()) return;
+    window.decode_directory = window.proxy_dir;
+    window.decode_batch = std::async(std::launch::async, [paths = std::move(paths)] {
+        std::vector<VideoDecodedFrame> result;
+        for (const auto& [number, path] : paths) {
+            try {
+                const auto size = photara::io::load_image_size(path);
+                result.push_back({number, photara::io::load_rgb_with_minimum_size(
+                    path, size.width, size.height)});
+            } catch (...) { break; } // The last file can still be being written.
+        }
+        return result;
+    });
 }
 
 void start_extract_job(App& app) {
@@ -399,15 +461,21 @@ void draw_preview_canvas(App& app, float height) {
     const ImVec2 image_max{
         image_min.x + image_size.x, image_min.y + image_size.y};
 
-    const int available = available_preview_frames(window);
-    const int desired = window.duration > 0.0
-        ? static_cast<int>(window.playhead * window.proxy_fps) + 1
-        : 1;
-    if (available > 0) {
-        request_frame(window, std::clamp(desired, 1, available));
-        const int next = std::min(available, desired + 1);
-        if (!window.frame.pending.valid() && next != desired)
-            request_frame(window, next);
+    if (!window.follow_alignment) {
+        const int desired = current_preview_index(window);
+        const double chunk_end = window.preview_start + window.preview_length;
+        if (window.duration > 0.0 &&
+            (window.playhead < window.cached_start ||
+             window.playhead >= std::max(window.cached_end, chunk_end)) &&
+            (!window.dragging_timeline || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+            start_preview_job(app, window.source, window.playhead, false);
+        }
+        if (window.playing && window.preview_done && !window.preview_job.valid() &&
+            window.preview_error.empty() && window.cached_end < window.duration - 0.5 / window.proxy_fps &&
+            window.playhead >= window.cached_end - 4.0) {
+            start_preview_job(app, window.source, window.cached_end, false, true);
+        }
+        request_frame(window, desired);
     }
 
     if (window.frame.texture.descriptor) {
@@ -427,23 +495,10 @@ void draw_preview_canvas(App& app, float height) {
             theme::u32(theme::text_muted), label);
     }
 
-    if (window.preview_job.valid()) {
-        char label[96];
-        if (window.preview_progress >= 0.F)
-            std::snprintf(
-                label, sizeof(label), "%s %d%%",
-                tr("Building playback proxy..."),
-                static_cast<int>(window.preview_progress * 100.F));
-        else
-            std::snprintf(
-                label, sizeof(label), "%s", tr("Probing video..."));
-        draw->AddText(
-            {image_min.x + 8.F, image_max.y - 22.F},
-            theme::u32(theme::text_bright), label);
-    } else if (!window.follow_alignment && !window.preview_done && window.preview_error.empty()) {
-        draw->AddText(
-            {image_min.x + 8.F, image_max.y - 22.F},
-            theme::u32(theme::warning), tr("Buffering preview frames..."));
+    if (!window.follow_alignment && window.preview_job.valid() &&
+        window.frame.loaded_index != current_preview_index(window)) {
+        draw->AddText({image_min.x + 12.F, image_max.y - 24.F},
+            theme::u32(theme::text_bright), tr("Loading preview..."));
     }
 
     ImGui::InvisibleButton(
@@ -460,61 +515,51 @@ void draw_preview_canvas(App& app, float height) {
 void draw_timeline(App& app) {
     auto& window = app.video_window;
     const double duration = window.duration;
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const auto origin = ImGui::GetCursorScreenPos();
     const float width = ImGui::GetContentRegionAvail().x;
-    constexpr float height = 24.F;
-    ImGui::InvisibleButton(
-        "##video_timeline", {width, height},
-        ImGuiButtonFlags_MouseButtonLeft);
-    if (ImGui::IsItemActive() && duration > 0.0) {
+    constexpr float height = 40.F;
+    ImGui::InvisibleButton("##video_timeline", {width, height});
+    window.dragging_timeline = ImGui::IsItemActive();
+    if (window.dragging_timeline && duration > 0.0) {
         const float x = ImGui::GetIO().MousePos.x - origin.x;
-        window.playhead = clamp_time(
-            static_cast<double>(x) / std::max(1.F, width) * duration,
-            duration);
+        window.playhead = clamp_time(x / std::max(1.F, width) * duration, duration);
         window.playing = false;
     }
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(
-        origin, {origin.x + width, origin.y + height},
-        theme::u32(theme::surface_2), 4.F);
-    if (duration > 0.0) {
-        const float buffered = window.preview_done
-            ? 1.F
-            : std::max(0.F, std::min(1.F, window.preview_progress));
-        if (buffered > 0.F)
-            draw->AddRectFilled(
-                origin,
-                {origin.x + width * buffered, origin.y + height},
-                theme::u32(theme::surface_3), 4.F);
-        for (const auto& segment : window.segments) {
-            const float x0 = static_cast<float>(
-                segment.start_seconds / duration) * width;
-            const double end = segment.end_seconds > segment.start_seconds
-                ? segment.end_seconds
-                : duration;
-            const float x1 = static_cast<float>(end / duration) * width;
-            draw->AddRectFilled(
-                {origin.x + x0, origin.y + 3.F},
-                {origin.x + std::min(width, x1), origin.y + height - 3.F},
-                theme::u32(theme::accent_deep, 0.75F), 3.F);
-        }
-        const float playhead_x = static_cast<float>(
-            window.playhead / duration) * width;
-        draw->AddLine(
-            {origin.x + playhead_x, origin.y},
-            {origin.x + playhead_x, origin.y + height},
+    auto* draw = ImGui::GetWindowDrawList();
+    const float y = origin.y + 29.F;
+    draw->AddRectFilled({origin.x, y}, {origin.x + width, y + 5.F},
+        theme::u32(theme::surface_3), 2.5F);
+    if (duration <= 0.0) return;
+    ImGui::PushFont(theme::small_font());
+    for (int tick = 0; tick <= 4; ++tick) {
+        const auto label = format_clock(duration * tick / 4.0);
+        const auto size = ImGui::CalcTextSize(label.c_str());
+        const float x = std::clamp(width * tick / 4.F - size.x * 0.5F, 0.F, width - size.x);
+        draw->AddText({origin.x + x, origin.y + 2.F}, theme::u32(theme::text_faint), label.c_str());
+    }
+    ImGui::PopFont();
+    const double buffered_end = std::max(window.cached_end, window.preview_start +
+        window.preview_length * std::clamp(window.preview_progress, 0.F, 1.F));
+    const auto xpos = [&](double time) {
+        return origin.x + static_cast<float>(clamp_time(time, duration) / duration) * width;
+    };
+    draw->AddRectFilled({xpos(window.cached_start), y},
+        {xpos(buffered_end), y + 5.F}, theme::u32(theme::text_faint), 2.F);
+    if (window.range_out > window.range_in) {
+        draw->AddRectFilled({xpos(window.range_in), y - 3.F}, {xpos(window.range_out), y + 8.F},
+            theme::u32(theme::accent, 0.18F), 3.F);
+        for (double time : {window.range_in, window.range_out})
+            draw->AddLine({xpos(time), y - 4.F}, {xpos(time), y + 9.F}, theme::u32(theme::accent), 2.F);
+    }
+    for (const auto& segment : window.segments) {
+        const double end = segment.end_seconds > segment.start_seconds ? segment.end_seconds : duration;
+        draw->AddRectFilled({xpos(segment.start_seconds), y}, {xpos(end), y + 5.F},
             theme::u32(theme::accent), 2.F);
-        if (ImGui::IsItemHovered()) {
-            const float x = ImGui::GetIO().MousePos.x - origin.x;
-            const double hovered = clamp_time(
-                static_cast<double>(x) / std::max(1.F, width) * duration,
-                duration);
-            ImGui::SetTooltip("%s", format_clock(hovered).c_str());
-        }
-    } else {
-        draw->AddText(
-            {origin.x + 8.F, origin.y + 4.F},
-            theme::u32(theme::text_faint), tr("No video loaded"));
+    }
+    draw->AddCircleFilled({xpos(window.playhead), y + 2.5F}, 5.F, theme::u32(theme::text_bright));
+    if (ImGui::IsItemHovered()) {
+        const double hovered = (ImGui::GetIO().MousePos.x - origin.x) / std::max(1.F, width) * duration;
+        ImGui::SetTooltip("%s", format_clock(hovered).c_str());
     }
 }
 
@@ -531,17 +576,33 @@ void draw_transport(App& app) {
         window.last_tick = ImGui::GetTime();
     }
     ImGui::SameLine();
-    if (theme::toolbar_button(tr("<<"), {38.F, 32.F}, ready)) {
+    const auto previous_origin = ImGui::GetCursorScreenPos();
+    if (theme::toolbar_button("##previous_frame", {32.F, 32.F}, ready)) {
         window.playing = false;
         window.playhead = clamp_time(
             window.playhead - 1.0 / window.proxy_fps, window.duration);
     }
     ImGui::SameLine();
-    if (theme::toolbar_button(tr(">>"), {38.F, 32.F}, ready)) {
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Previous frame"));
+    auto* draw = ImGui::GetWindowDrawList();
+    const auto icon_colour = theme::u32(theme::text_muted);
+    draw->AddTriangleFilled({previous_origin.x + 20.F, previous_origin.y + 10.F},
+        {previous_origin.x + 12.F, previous_origin.y + 16.F},
+        {previous_origin.x + 20.F, previous_origin.y + 22.F}, icon_colour);
+    draw->AddLine({previous_origin.x + 10.F, previous_origin.y + 10.F},
+        {previous_origin.x + 10.F, previous_origin.y + 22.F}, icon_colour, 1.5F);
+    const auto next_origin = ImGui::GetCursorScreenPos();
+    if (theme::toolbar_button("##next_frame", {32.F, 32.F}, ready)) {
         window.playing = false;
         window.playhead = clamp_time(
             window.playhead + 1.0 / window.proxy_fps, window.duration);
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Next frame"));
+    draw->AddTriangleFilled({next_origin.x + 12.F, next_origin.y + 10.F},
+        {next_origin.x + 20.F, next_origin.y + 16.F},
+        {next_origin.x + 12.F, next_origin.y + 22.F}, icon_colour);
+    draw->AddLine({next_origin.x + 22.F, next_origin.y + 10.F},
+        {next_origin.x + 22.F, next_origin.y + 22.F}, icon_colour, 1.5F);
     ImGui::SameLine();
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.F);
     ImGui::Text(
@@ -553,8 +614,15 @@ void draw_transport(App& app) {
         if (window.last_tick <= 0.0) window.last_tick = now;
         const double delta = std::min(0.25, now - window.last_tick);
         window.last_tick = now;
-        window.playhead += delta;
-        if (window.playhead >= window.duration) {
+        const int desired = current_preview_index(window);
+        // Advance on elapsed time, skipping stale frames when rendering is late.
+        // Only stop the clock when the producer has actually run out of frames.
+        int available = window.frame.loaded_index;
+        for (const auto& frame : window.decoded_frames) available = std::max(available, frame.index);
+        if (available >= desired)
+            window.playhead = std::min(window.playhead + delta,
+                std::min(window.duration, available / static_cast<double>(window.proxy_fps)));
+        if (window.playhead >= window.duration - 0.5 / window.proxy_fps) {
             window.playhead = window.duration;
             window.playing = false;
         }
@@ -566,96 +634,69 @@ void draw_transport(App& app) {
 void draw_segments(App& app) {
     auto& window = app.video_window;
     theme::caption(tr("Capture segments"));
-    ImGui::TextDisabled("%s", tr(
-        "Add one or more source-time ranges. Extraction merges them in time "
-        "order into one numbered frame sequence."));
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", tr("Use the playhead to mark the start and end."));
     ImGui::Spacing();
     ImGui::BeginDisabled(window.duration <= 0.0);
     float range_in = static_cast<float>(window.range_in);
     float range_out = static_cast<float>(window.range_out);
-    const float field_width = std::max(100.F, (ImGui::GetContentRegionAvail().x - 330.F) * 0.5F);
-    ImGui::TextDisabled("%s", tr("Start"));
-    ImGui::SameLine(field_width + ImGui::GetStyle().ItemSpacing.x);
-    ImGui::TextDisabled("%s", tr("End"));
-    ImGui::SetNextItemWidth(field_width);
-    if (ImGui::DragFloat(
-            "##vw_range_in", &range_in, 0.05F, 0.F,
-            static_cast<float>(window.duration), "%.2f s"))
-        window.range_in = clamp_time(range_in, window.duration);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(field_width);
-    if (ImGui::DragFloat(
-            "##vw_range_out", &range_out, 0.05F, 0.F,
-            static_cast<float>(window.duration), "%.2f s"))
-        window.range_out = clamp_time(range_out, window.duration);
-    ImGui::SameLine();
-    if (ImGui::Button(tr("Set In")))
-        window.range_in = window.playhead;
-    ImGui::SameLine();
-    if (ImGui::Button(tr("Set Out")))
-        window.range_out = window.playhead;
-    ImGui::SameLine();
-    if (ImGui::Button(tr("Add Segment"), {0.F, 0.F})) {
-        double end = window.range_out;
-        if (end <= window.range_in) end = window.duration;
-        window.segments.push_back({window.range_in, end});
-        window.segments =
-            photara::io::normalize_video_segments(window.segments);
+    if (ImGui::BeginTable("##range_fields", 2, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("%s", tr("Start"));
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::DragFloat("##vw_range_in", &range_in, 0.05F, 0.F,
+                static_cast<float>(window.duration), "%.2f s"))
+            window.range_in = clamp_time(range_in, window.duration);
+        if (ImGui::Button(tr("Set In"), {-1.F, 28.F})) window.range_in = window.playhead;
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextDisabled("%s", tr("End"));
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::DragFloat("##vw_range_out", &range_out, 0.05F, 0.F,
+                static_cast<float>(window.duration), "%.2f s"))
+            window.range_out = clamp_time(range_out, window.duration);
+        if (ImGui::Button(tr("Set Out"), {-1.F, 28.F})) window.range_out = window.playhead;
+        ImGui::EndTable();
+    }
+    ImGui::Spacing();
+    const bool valid_range = window.range_out > window.range_in;
+    if (theme::primary_button(tr("Add Segment"), {-1.F, 32.F}, valid_range)) {
+        window.segments.push_back({window.range_in, window.range_out});
+        window.segments = photara::io::normalize_video_segments(window.segments);
         sync_segment_text(app);
-        window.range_in = window.range_out;
-        window.range_out = window.duration;
     }
     ImGui::EndDisabled();
     ImGui::Spacing();
-    if (!window.segments_error.empty())
-        ImGui::TextColored(
-            theme::danger, "%s", window.segments_error.c_str());
-
+    ImGui::Separator();
+    ImGui::Spacing();
     if (window.segments.empty()) {
         ImGui::TextColored(
             theme::text_muted, "%s", tr("Whole video will be extracted."));
         return;
     }
-    if (ImGui::BeginTable(
-            "##vw_segments", 3,
-            ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
-        ImGui::TableSetupColumn(tr("Range"));
-        ImGui::TableSetupColumn(tr("Duration"));
-        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed,
-                                120.F);
-        ImGui::TableHeadersRow();
-        int remove = -1;
-        for (std::size_t i = 0; i < window.segments.size(); ++i) {
-            const auto& segment = window.segments[i];
-            const double end = segment.end_seconds > segment.start_seconds
-                ? segment.end_seconds
-                : window.duration;
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::Text(
-                "%zu  %s - %s", i + 1,
-                format_clock(segment.start_seconds).c_str(),
-                format_clock(end).c_str());
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(
-                format_seconds(end - segment.start_seconds).c_str());
-            ImGui::TableSetColumnIndex(2);
-            if (ImGui::SmallButton(
-                    (std::string(tr("Go")) + "##vw_go_" +
-                     std::to_string(i)).c_str()))
-                window.playhead = segment.start_seconds;
-            ImGui::SameLine();
-            if (ImGui::SmallButton(
-                    (std::string(tr("Remove")) + "##vw_rm_" +
-                     std::to_string(i)).c_str()))
-                remove = static_cast<int>(i);
+    int remove = -1;
+    for (std::size_t i = 0; i < window.segments.size(); ++i) {
+        const auto& segment = window.segments[i];
+        const double end = segment.end_seconds > segment.start_seconds
+            ? segment.end_seconds : window.duration;
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::TextColored(theme::accent, "%02d", static_cast<int>(i + 1));
+        ImGui::SameLine();
+        ImGui::Text("%s - %s", format_clock(segment.start_seconds).c_str(), format_clock(end).c_str());
+        ImGui::TextDisabled("%s", format_seconds(end - segment.start_seconds).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(tr("Go"))) {
+            window.playhead = segment.start_seconds;
+            window.playing = false;
         }
-        ImGui::EndTable();
-        if (remove >= 0) {
-            window.segments.erase(window.segments.begin() + remove);
-            sync_segment_text(app);
-        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(tr("Remove"))) remove = static_cast<int>(i);
+        ImGui::Spacing();
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        window.segments.erase(window.segments.begin() + remove);
+        sync_segment_text(app);
     }
     if (ImGui::Button(tr("Clear Segments"))) {
         window.segments.clear();
@@ -668,7 +709,7 @@ void draw_extract_settings(App& app) {
     auto& settings = app.settings;
     theme::caption(tr("Frame extraction"));
     if (ImGui::BeginTable(
-            "##vw_extract_controls", 3,
+            "##vw_extract_controls", 2,
             ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
@@ -682,25 +723,26 @@ void draw_extract_settings(App& app) {
         ImGui::DragInt(
             "##vw_max_frames", &settings.video_max_frames, 1, 0, 100000,
             tr("max %d"));
-        ImGui::TableSetColumnIndex(2);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
         ImGui::TextDisabled("%s", tr("Sharpness"));
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderInt(
             "##vw_sharp", &settings.video_sharp_window, 1, 10,
             tr("sharp %d"));
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
+        ImGui::TableSetColumnIndex(1);
         ImGui::TextDisabled("%s", tr("Image format / quality"));
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderInt(
             "##vw_quality", &settings.video_quality, -1, 100,
             settings.video_quality < 0 ? tr("PNG") : tr("JPEG %d"));
-        ImGui::TableSetColumnIndex(1);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
         ImGui::TextDisabled("%s", tr("Output scale"));
         ImGui::SetNextItemWidth(-1.F);
         ImGui::DragFloat(
             "##vw_scale", &settings.video_scale, 0.01F, 0.05F, 4.F, "%.2fx");
-        ImGui::TableSetColumnIndex(2);
+        ImGui::TableSetColumnIndex(1);
         ImGui::TextDisabled("%s", tr("Rotation"));
         ImGui::SetNextItemWidth(-1.F);
         const char* rotations[] = {"0°", "90°", "180°", "270°"};
@@ -775,53 +817,27 @@ void draw_extract_settings(App& app) {
 
 void draw_source_header(const App& app, const std::filesystem::path& source) {
     const auto& window = app.video_window;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_1);
-    ImGui::BeginChild("##vw_source_header", {0.F, 48.F}, true,
-                      ImGuiWindowFlags_NoScrollbar);
-    const std::string filename = path_to_utf8(source.filename());
-    const float header_width = ImGui::GetWindowWidth();
-    ImGui::SetCursorPos({12.F, 7.F});
-    const ImVec2 title_min = ImGui::GetCursorScreenPos();
-    ImGui::PushClipRect(title_min, {title_min.x + header_width - 180.F,
-                                   title_min.y + 20.F}, true);
+    const float width = ImGui::GetContentRegionAvail().x;
+    const auto filename = path_to_utf8(source.filename());
+    const auto origin = ImGui::GetCursorScreenPos();
+    ImGui::PushClipRect(origin, {origin.x + width - 200.F, origin.y + 24.F}, true);
     ImGui::TextColored(theme::text_bright, "%s", filename.c_str());
     ImGui::PopClipRect();
-    const float pill_x = std::min(
-        12.F + ImGui::CalcTextSize(filename.c_str()).x + 12.F,
-        header_width - 150.F);
-    ImGui::SetCursorPos({pill_x, 8.F});
-    if (window.preview_job.valid())
-        theme::pill(tr("preparing playback"), theme::warning, theme::surface_3);
-    else if (window.preview_done)
-        theme::pill(
-            (std::to_string(window.preview_frames) + " " +
-             tr("proxy frames")).c_str(),
-            theme::success, theme::surface_3);
-    else
-        theme::pill(tr("Video"), theme::text_muted, theme::surface_3);
-
-    ImGui::SetCursorPos({12.F, 27.F});
-    ImGui::PushFont(theme::small_font());
-    const std::string full_path = path_to_utf8(source);
-    const ImVec2 path_min = ImGui::GetCursorScreenPos();
-    const float path_right = window.width > 0
-        ? ImGui::GetWindowPos().x + header_width - 170.F
-        : ImGui::GetWindowPos().x + header_width - 12.F;
-    ImGui::PushClipRect(path_min, {path_right, path_min.y + 18.F}, true);
-    ImGui::TextDisabled("%s", full_path.c_str());
-    ImGui::PopClipRect();
-    ImGui::PopFont();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path_to_utf8(source).c_str());
     if (window.width > 0 && window.height > 0) {
-        char details[80];
-        std::snprintf(details, sizeof(details), "%d × %d  ·  %.2f fps",
-                      window.width, window.height, window.source_fps);
-        const float details_width = ImGui::CalcTextSize(details).x;
-        ImGui::SetCursorPos(
-            {header_width - details_width - 14.F, 29.F});
+        char details[96];
+        if (window.source_fps > 0.0)
+            std::snprintf(details, sizeof(details), "%d x %d  /  %.2f fps",
+                window.width, window.height, window.source_fps);
+        else
+            std::snprintf(details, sizeof(details), "%d x %d", window.width, window.height);
+        ImGui::SameLine(std::max(0.F, width - ImGui::CalcTextSize(details).x));
         ImGui::TextDisabled("%s", details);
     }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PushFont(theme::small_font());
+    ImGui::TextDisabled("%s", tr("Preview and select the parts to reconstruct."));
+    ImGui::PopFont();
+    ImGui::Spacing();
 }
 
 }  // namespace
@@ -883,9 +899,9 @@ void draw_video_window(App& app) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         viewport->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5F, 0.5F));
-    ImGui::SetNextWindowSize({1120.F, 800.F}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({1180.F, 760.F}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(
-        ImVec2(760.F, 520.F), ImVec2(FLT_MAX, FLT_MAX));
+        ImVec2(800.F, 640.F), ImVec2(FLT_MAX, FLT_MAX));
     if (!ImGui::Begin(
             i18n::id("Video Preview", "###VideoWindow"),
             &window.show, ImGuiWindowFlags_NoCollapse)) {
@@ -917,45 +933,63 @@ void draw_video_window(App& app) {
         }
     }
     ImGui::Spacing();
+    if (!window.preview_error.empty())
+        ImGui::TextWrapped("%s", window.preview_error.c_str());
     if (!window.segments_error.empty())
         ImGui::TextColored(
             theme::danger, "%s", window.segments_error.c_str());
 
-    const float available_height = ImGui::GetContentRegionAvail().y;
-    const float canvas_height =
-        std::clamp(available_height - 328.F, 190.F, 520.F);
-    draw_preview_canvas(app, canvas_height);
+    const bool wide = ImGui::GetContentRegionAvail().x >= 1000.F;
+    const float footer_height = 44.F;
+    const float content_height = std::max(240.F, ImGui::GetContentRegionAvail().y - footer_height);
+    const float sidebar_width = 304.F;
+    const float viewer_width = wide
+        ? ImGui::GetContentRegionAvail().x - sidebar_width - 16.F : 0.F;
+    const float viewer_height = wide ? content_height : std::max(200.F, content_height - 214.F);
+    ImGui::BeginChild("##vw_viewer", {viewer_width, viewer_height}, ImGuiChildFlags_None,
+        ImGuiWindowFlags_NoScrollbar);
+    const float controls_height = window.follow_alignment ? 0.F : 92.F;
+    draw_preview_canvas(app, std::max(100.F, ImGui::GetContentRegionAvail().y - controls_height));
     if (!window.follow_alignment) {
+        ImGui::Spacing();
         draw_timeline(app);
+        ImGui::Spacing();
         draw_transport(app);
     }
-    ImGui::Separator();
-
-    const float list_height =
-        std::clamp(ImGui::GetContentRegionAvail().y - 36.F, 120.F, 260.F);
-    ImGui::BeginChild(
-        "##vw_options", {0.F, list_height}, ImGuiChildFlags_None,
-        ImGuiWindowFlags_None);
+    ImGui::EndChild();
+    if (wide) ImGui::SameLine(0.F, 16.F);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_1);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14.F, 14.F});
+    ImGui::BeginChild("##vw_options", {0.F, wide ? content_height : 206.F},
+        ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::BeginDisabled(app.job.running());
-    if (ImGui::BeginTabBar("##vw_tabs")) {
-        if (ImGui::BeginTabItem(tr("Segments"))) {
-            draw_segments(app);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(tr("Extraction Settings"))) {
-            draw_extract_settings(app);
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
+    draw_segments(app);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader(tr("Extraction Settings"))) draw_extract_settings(app);
     ImGui::EndDisabled();
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", tr("Selected segments are used when aligning photos."));
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 90.F));
+    if (theme::toolbar_button(tr("Done"), {90.F, 28.F})) window.show = false;
 
     ImGui::End();
 }
 
 void shutdown_video_window(App& app) {
     auto& window = app.video_window;
+    if (window.decode_batch.valid()) {
+        try { (void)window.decode_batch.get(); } catch (...) {}
+    }
+    window.decoded_frames.clear();
     if (window.preview_job.valid()) {
         if (window.preview) window.preview->cancel.store(true);
         try {

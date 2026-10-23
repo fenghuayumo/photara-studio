@@ -731,7 +731,7 @@ void parse_probe_line(const std::string& line, VideoProbe& out) {
     }
     const auto fps_at = line.find(" fps");
     if (fps_at != std::string::npos) {
-        const auto begin = line.rfind(' ', fps_at);
+        const auto begin = line.rfind(' ', fps_at - 1);
         if (begin != std::string::npos && begin + 1 < fps_at) {
             const double fps = std::strtod(line.c_str() + begin + 1, nullptr);
             if (fps > 0.1 && fps < 1000.0) out.fps = fps;
@@ -1366,6 +1366,10 @@ int generate_video_preview(const VideoPreviewOptions& options_in) {
     if (!(options.fps > 0.0F) || !std::isfinite(options.fps))
         throw std::invalid_argument("Video preview fps must be positive");
     options.fps = std::clamp(options.fps, 0.5F, 30.F);
+    if (!std::isfinite(options.start_seconds) || options.start_seconds < 0.0 ||
+        !std::isfinite(options.duration_seconds) || options.duration_seconds < 0.0 ||
+        options.first_frame < 1)
+        throw std::invalid_argument("Invalid video preview range");
     options.max_width = std::max(64, options.max_width);
     options.max_height = std::max(64, options.max_height);
     options.quality = std::clamp(options.quality, 1, 100);
@@ -1379,7 +1383,7 @@ int generate_video_preview(const VideoPreviewOptions& options_in) {
         throw std::runtime_error(
             "Cannot create video preview directory: " +
             path_utf8(options.output_dir));
-    clear_preview_stills(options.output_dir);
+    if (!options.keep_existing) clear_preview_stills(options.output_dir);
 
     const auto ffmpeg = resolve_ffmpeg(options.ffmpeg);
     if (!ffmpeg_available(ffmpeg))
@@ -1387,8 +1391,9 @@ int generate_video_preview(const VideoPreviewOptions& options_in) {
             "ffmpeg was not found (" + path_utf8(ffmpeg) +
             "). Install ffmpeg and add it to PATH, or set --ffmpeg.");
 
-    VideoProbe probe{};
-    probe_video(ffmpeg, options.video, probe);
+    VideoProbe probe = options.source_probe;
+    if (probe.width <= 0 || probe.duration_seconds <= 0.0)
+        probe_video(ffmpeg, options.video, probe);
     int target_width = options.max_width;
     if (probe.width > 0 && probe.height > 0) {
         const double scale = std::min(
@@ -1399,18 +1404,25 @@ int generate_video_preview(const VideoPreviewOptions& options_in) {
             2, static_cast<int>(probe.width * scale) & ~1);
     }
     std::ostringstream filter;
-    filter << "fps=" << options.fps << ",scale=" << target_width << ":-2";
+    filter << "fps=" << options.fps << ",scale=" << target_width << ":-2:flags=fast_bilinear";
     const auto jpeg_quality = jpeg_qscale(options.quality);
     std::vector<std::string> args = {
-        "-nostdin", "-y", "-hide_banner", "-progress", "pipe:1",
-        "-i", path_utf8(options.video),
-        "-an", "-vf", filter.str(), "-qscale:v",
-        std::to_string(jpeg_quality),
-        path_utf8(options.output_dir / "p_%06d.jpg")};
+        "-nostdin", "-y", "-hide_banner", "-progress", "pipe:1", "-stats_period", "0.1"};
+    if (options.start_seconds > 0.0) {
+        args.insert(args.end(), {"-ss", std::to_string(options.start_seconds)});
+    }
+    args.insert(args.end(), {"-i", path_utf8(options.video)});
+    if (options.duration_seconds > 0.0)
+        args.insert(args.end(), {"-t", std::to_string(options.duration_seconds)});
+    args.insert(args.end(), {"-an", "-sn", "-vf", filter.str(), "-qscale:v",
+        std::to_string(jpeg_quality), "-start_number", std::to_string(options.first_frame),
+        path_utf8(options.output_dir / "p_%06d.jpg")});
 
     const std::uint64_t expected = probe.duration_seconds > 0.0
         ? static_cast<std::uint64_t>(
-              probe.duration_seconds * static_cast<double>(options.fps) + 0.5)
+              (options.duration_seconds > 0.0 ? std::min(options.duration_seconds,
+                  std::max(0.0, probe.duration_seconds - options.start_seconds))
+                  : probe.duration_seconds) * static_cast<double>(options.fps) + 0.5)
         : 0;
     if (options.progress && expected == 0) options.progress(-1.F);
     std::string launch_error;
@@ -1445,7 +1457,8 @@ int generate_video_preview(const VideoPreviewOptions& options_in) {
         if (error) break;
         std::error_code file_error;
         if (entry.is_regular_file(file_error) &&
-            is_preview_still_name(entry.path().filename().string()))
+            is_preview_still_name(entry.path().filename().string()) &&
+            std::atoi(entry.path().stem().string().c_str() + 2) >= options.first_frame)
             ++frames;
     }
     if (options.progress) options.progress(1.F);
