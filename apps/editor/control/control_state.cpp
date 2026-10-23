@@ -353,6 +353,10 @@ std::string state_revision_key(const App& app) {
             {"yaw", app.camera.yaw},
             {"pitch", app.camera.pitch},
             {"distance", app.camera.distance},
+            {"target", {app.camera.target.x, app.camera.target.y, app.camera.target.z}},
+            {"fov_degrees", app.camera.fov_degrees},
+            {"ortho_height", app.camera.ortho_height},
+            {"projection", static_cast<int>(app.camera.projection)},
         }},
         {"message", app.message},
     };
@@ -373,6 +377,8 @@ json snapshot_job(const App& app, const ControlBus& bus) {
     job["running"] = app.job.running();
     job["paused"] = app.job.paused();
     job["preparing"] = app.pending_train_prepare.valid();
+    job["finishing"] = !app.job.running() && !app.pending_train_prepare.valid() &&
+        app.active_job != JobKind::none;
     if (app.train_preparation)
         job["prepare_stage"] =
             prepare_stage_name(app.train_preparation->stage.load());
@@ -636,7 +642,7 @@ json apply_parameter_patch(App& app, const json& patch) {
             "INVALID_REQUEST", "Unknown parameter name",
             {{"unknown", std::move(unknown)}});
 
-    ProjectSettings& settings = app.settings;
+    ProjectSettings settings = app.settings;
     std::string message;
     json changed = json::array();
     const auto note = [&changed](const char* name) { changed.push_back(name); };
@@ -1091,6 +1097,7 @@ json apply_parameter_patch(App& app, const json& patch) {
     }
 
     normalize_settings(settings);
+    app.settings = settings;
     const json normalized_all = settings_json(settings);
     json normalized = json::object();
     for (const auto& name : changed) {
@@ -1209,6 +1216,9 @@ json snapshot_state(const App& app, const ControlBus& bus) {
                 app.job.running() ? "job_running" :
                 app.pending_train_prepare.valid() ? "preparing" :
                 !app.has_mesh ? "no_mesh" : "no_alignment")},
+            {"export_sfm", action_state(
+                !app.job.running() && !app.pending_train_prepare.valid() &&
+                    can_export_sfm(app), "no_alignment_or_busy")},
             {"export", action_state(can_export, "no_exportable_result")},
             {"pause", action_state(app.job.running() && !app.job.paused(),
                                    "job_not_running")},
@@ -1227,6 +1237,7 @@ json snapshot_state(const App& app, const ControlBus& bus) {
                 {"pitch", app.camera.pitch},
                 {"distance", app.camera.distance},
                 {"fov_degrees", app.camera.fov_degrees},
+                {"ortho_height", app.camera.ortho_height},
                 {"projection", static_cast<int>(app.camera.projection)},
             }},
         }},

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -50,6 +51,7 @@ constexpr int k_exit_ok = 0;
 constexpr int k_exit_command = 2;
 constexpr int k_exit_connection = 3;
 constexpr int k_exit_usage = 4;
+constexpr int k_exit_timeout = 5;
 
 struct Options {
     bool json_output{};
@@ -58,6 +60,7 @@ struct Options {
     std::string url;
     std::string token;
     std::string project;
+    std::string request_id;
     long long pid{};
     std::vector<std::string> args;
 };
@@ -367,13 +370,22 @@ json rpc(
         return failure("CONNECTION", error);
     }
     static std::uint64_t next_id = 1;
-    const json request{
+    json request{
         {"jsonrpc", "2.0"},
         {"id", next_id++},
         {"method", method},
         {"params", params},
         {"client", options.client},
     };
+    if (!discovery.session_id.empty()) request["session_id"] = discovery.session_id;
+    const bool read_only = method == "studio.ping" || method == "studio.get_state" ||
+        method == "studio.job.status" || method == "studio.params.describe" ||
+        method == "studio.inspect.logs";
+    if (!read_only) {
+        static const std::string invocation_id = "ctl_" + std::to_string(std::random_device{}()) + "_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        request["request_id"] = options.request_id.empty() ? invocation_id : options.request_id;
+    }
     const HttpResponse response = http_request(
         host, port, "POST", "/v1/rpc", discovery.token, request.dump());
     if (response.status == 0) {
@@ -384,8 +396,15 @@ json rpc(
         error = "HTTP " + std::to_string(response.status);
         try {
             const json parsed = json::parse(response.body);
-            if (parsed.contains("error"))
-                return parsed;
+            if (parsed.contains("error")) {
+                json result = parsed;
+                if (request.contains("request_id")) {
+                    result["error"]["details"]["request_id"] = request["request_id"];
+                    result["error"]["details"]["client"] = options.client;
+                    result["error"]["details"]["session_id"] = discovery.session_id;
+                }
+                return result;
+            }
         } catch (...) {
         }
         return failure("CONNECTION", error);
@@ -506,6 +525,8 @@ Options parse_options(const int argc, char** argv) {
             options.token = next();
         } else if (argument == "--project") {
             options.project = next();
+        } else if (argument == "--request-id") {
+            options.request_id = next();
         } else if (argument == "--pid") {
             try {
                 options.pid = std::stoll(next());
@@ -536,6 +557,9 @@ void print_usage() {
         "  photara-ctl capture --out PATH [--max-long-edge N]\n"
         "  photara-ctl project open <path>\n"
         "  photara-ctl project set-source <path>\n"
+        "  photara-ctl project save [path] [--overwrite]\n"
+        "  photara-ctl view set key=value...\n"
+        "  photara-ctl export model --out PATH [--format ply|sog|spz|glb] [--sh-degree N] [--overwrite]\n"
         "  photara-ctl window open <video|mask>\n"
         "  photara-ctl events [--since ID]\n"
         "  photara-ctl watch\n\n"
@@ -544,6 +568,7 @@ void print_usage() {
         "  --pid PID                 Select a Studio instance\n"
         "  --project PATH            Select by project path\n"
         "  --client NAME             Audit client name\n"
+        "  --request-id ID           Deduplicate a mutation within this session\n"
         "  --json / --jsonl          Machine-readable output\n";
 }
 
@@ -659,25 +684,37 @@ int main(const int argc, char** argv) {
                 std::cout << "Started " << params["stage"]
                           << " op=" << result.value("op_id", "") << '\n';
         } else if (action == "status") {
-            const json result = call("studio.job.status", json::object());
+            json params = json::object();
+            if (options.args.size() == 4 && options.args[2] == "--op")
+                params["op_id"] = options.args[3];
+            else if (options.args.size() != 2) return k_exit_usage;
+            const json result = call("studio.job.status", params);
             if (options.json_output) print_json(result, true);
             else print_job_human(result["job"]);
         } else if (action == "wait") {
             int timeout_seconds = 60;
+            json params = json::object();
             for (std::size_t i = 2; i < options.args.size(); ++i) {
                 if (options.args[i] == "--timeout" && i + 1 < options.args.size()) {
                     try {
                         timeout_seconds = std::stoi(options.args[++i]);
                     } catch (...) {
+                        return k_exit_usage;
                     }
-                }
+                } else if (options.args[i] == "--op" && i + 1 < options.args.size())
+                    params["op_id"] = options.args[++i];
+                else return k_exit_usage;
             }
+            if (timeout_seconds < 1) return k_exit_usage;
             const auto begin = std::chrono::steady_clock::now();
             json last = json::object();
             while (true) {
-                last = call("studio.job.status", json::object())["job"];
+                last = call("studio.job.status", params)["job"];
+                // Bind to the first observed operation; never follow a newer job.
+                if (!params.contains("op_id") && last.contains("op_id") && last["op_id"].is_string())
+                    params["op_id"] = last["op_id"];
                 const bool active = last.value("running", false) ||
-                                    last.value("preparing", false);
+                                    last.value("preparing", false) || last.value("finishing", false);
                 if (!active) break;
                 if (std::chrono::steady_clock::now() - begin >
                     std::chrono::seconds(std::max(1, timeout_seconds))) {
@@ -688,6 +725,11 @@ int main(const int argc, char** argv) {
             }
             if (options.json_output) print_json(last, true);
             else print_job_human(last);
+            if (last.value("timed_out", false)) return k_exit_timeout;
+            const std::string status = last.value("status", "idle");
+            if (status == "failed" || status == "cancelled" ||
+                (!last["exit_code"].is_null() && last["exit_code"].get<int>() != 0) ||
+                !last.value("last_error", std::string{}).empty()) return k_exit_command;
         } else if (action == "pause" || action == "resume" ||
                    action == "stop") {
             const json result = call(
@@ -758,20 +800,51 @@ int main(const int argc, char** argv) {
         else
             std::cout << "Opened " << result.value("window", "")
                       << " window\n";
+    } else if (command == "view") {
+        if (options.args.size() < 3 || options.args[1] != "set") return k_exit_usage;
+        json patch = json::object();
+        for (std::size_t i = 2; i < options.args.size(); ++i) {
+            const auto [name, value] = parse_assignment(options.args[i]);
+            patch[name] = value;
+        }
+        const json result = call("studio.view.patch", {{"patch", patch}});
+        print_json(result, options.json_output);
+    } else if (command == "export") {
+        if (options.args.size() < 4 || options.args[1] != "model") return k_exit_usage;
+        json params = json::object();
+        for (std::size_t i = 2; i < options.args.size(); ++i) {
+            const auto& flag = options.args[i];
+            if (flag == "--overwrite") params["overwrite"] = true;
+            else if ((flag == "--out" || flag == "--format" || flag == "--sh-degree") &&
+                     i + 1 < options.args.size()) {
+                const std::string name = flag == "--out" ? "path" : flag == "--format" ? "format" : "sh_degree";
+                const auto& value = options.args[++i];
+                params[name] = flag == "--sh-degree" ? parse_value(value) : json(value);
+            } else return k_exit_usage;
+        }
+        const json result = call("studio.export.model", params);
+        print_json(result, options.json_output);
     } else if (command == "project") {
-        if (options.args.size() < 3) {
+        if (options.args.size() < 2) {
             print_usage();
             return k_exit_usage;
         }
         const std::string& action = options.args[1];
         const std::string method =
             action == "open" ? "studio.project.open"
-                             : "studio.project.set_source";
-        if (action != "open" && action != "set-source") {
+                : action == "save" ? "studio.project.save" : "studio.project.set_source";
+        if (action != "open" && action != "set-source" && action != "save") {
             print_usage();
             return k_exit_usage;
         }
-        const json result = call(method, json{{"path", options.args[2]}});
+        json params = json::object();
+        for (std::size_t i = 2; i < options.args.size(); ++i) {
+            if (action == "save" && options.args[i] == "--overwrite") params["overwrite"] = true;
+            else if (!params.contains("path")) params["path"] = options.args[i];
+            else return k_exit_usage;
+        }
+        if (action != "save" && !params.contains("path")) return k_exit_usage;
+        const json result = call(method, params);
         if (options.json_output) print_json(result, true);
         else std::cout << "Project updated: "
                        << result.value("message", "") << '\n';

@@ -2411,23 +2411,9 @@ photara::splat::GaussianModel load_export_model(
         archive.chunk(photara::project::ChunkType::gaussians));
 }
 
-void export_trained_model(App& app) {
-    if (app.job.running() || app.splat_export.job.valid() || !can_export_model(app)) return;
+bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
+    if (app.job.running() || app.splat_export.job.valid() || !can_export_model(app)) return false;
     const auto format = splat_export_format(app);
-    const auto* extension = splat_export_extension_wide(app);
-    app.splat_export.sh_degree = std::clamp(app.splat_export.sh_degree, 0, 3);
-    std::filesystem::path out =
-        path_from_utf8_field(app.splat_export.path.data());
-    if (out.empty()) {
-        if (!browse_splat_export_path(app)) return;
-        out = path_from_utf8_field(app.splat_export.path.data());
-    }
-    if (out.empty()) return;
-    if (app.splat_export.format != 4 && app.splat_export.format != 5 && out.extension().empty()) {
-        out += ".";
-        out += std::filesystem::path(extension);
-        store_path_field(app.splat_export.path, out);
-    }
     try {
         const auto source = existing_splat_model(app);
         photara::splat::GaussianModel model;
@@ -2465,7 +2451,7 @@ void export_trained_model(App& app) {
                 });
             app.splat_export.show = true;
             set_message(app, "Processing splat assets on Vulkan...", theme::success);
-            return;
+            return true;
         }
         const auto dest_ext = lower_path_extension(out);
         const auto source_ext = lower_path_extension(source);
@@ -2475,7 +2461,7 @@ void export_trained_model(App& app) {
             app.settings.splat_format =
                 splat_settings_format_from_export(app.splat_export.format);
             set_message(app, "Exported splat", theme::success);
-            return;
+            return true;
         }
         photara::splat::restrict_sh_degree(model, export_degree);
         photara::splat::save_gaussians(model, out, format);
@@ -2485,9 +2471,31 @@ void export_trained_model(App& app) {
         message += std::to_string(export_degree);
         message += ")";
         set_message(app, message, theme::success);
+        return true;
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
+        return false;
     }
+}
+
+void export_trained_model(App& app) {
+    if (app.job.running() || app.splat_export.job.valid() || !can_export_model(app)) return;
+    const auto format = splat_export_format(app);
+    const auto* extension = splat_export_extension_wide(app);
+    app.splat_export.sh_degree = std::clamp(app.splat_export.sh_degree, 0, 3);
+    std::filesystem::path out =
+        path_from_utf8_field(app.splat_export.path.data());
+    if (out.empty()) {
+        if (!browse_splat_export_path(app)) return;
+        out = path_from_utf8_field(app.splat_export.path.data());
+    }
+    if (out.empty()) return;
+    if (app.splat_export.format != 4 && app.splat_export.format != 5 && out.extension().empty()) {
+        out += ".";
+        out += std::filesystem::path(extension);
+        store_path_field(app.splat_export.path, out);
+    }
+    export_trained_model_to_path(app, out);
 }
 
 enum class MeshExportFormat { ply, obj, glb };
