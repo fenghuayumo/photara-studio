@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +17,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -963,14 +967,79 @@ double laplacian_sharpness(const std::filesystem::path& path) {
     }
 }
 
-int select_sharpest_frames(
+namespace {
+using SharpnessScores = std::unordered_map<std::filesystem::path, double>;
+
+// Score already closed candidate files while ffmpeg continues decoding. Workers
+// are bounded so the scorer leaves CPU capacity for video decoding/encoding.
+class SharpnessPipeline {
+public:
+    SharpnessPipeline(bool enabled, const std::atomic<bool>* cancel) : cancel_(cancel) {
+        const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned count = enabled ? std::min(4u, std::max(1u, cores / 2)) : 0;
+        for (unsigned i = 0; i < count; ++i) {
+            workers_.emplace_back([this](std::stop_token token) {
+                for (;;) {
+                    std::filesystem::path path;
+                    {
+                        std::unique_lock lock(mutex_);
+                        available_.wait(lock, token, [&] { return closing_ || !pending_.empty(); });
+                        if (token.stop_requested() || cancelled(cancel_) ||
+                            (closing_ && pending_.empty())) return;
+                        if (pending_.empty()) continue;
+                        path = std::move(pending_.front());
+                        pending_.pop_front();
+                    }
+                    const double score = laplacian_sharpness(path);
+                    std::lock_guard lock(mutex_);
+                    scores_.emplace(std::move(path), score);
+                }
+            });
+        }
+    }
+    ~SharpnessPipeline() {
+        for (auto& worker : workers_) worker.request_stop();
+        available_.notify_all();
+        for (auto& worker : workers_) if (worker.joinable()) worker.join();
+    }
+    void enqueue(std::filesystem::path path) {
+        if (workers_.empty() || cancelled(cancel_)) return;
+        {
+            std::lock_guard lock(mutex_);
+            pending_.push_back(std::move(path));
+        }
+        available_.notify_one();
+    }
+    SharpnessScores finish() {
+        {
+            std::lock_guard lock(mutex_);
+            closing_ = true;
+        }
+        available_.notify_all();
+        for (auto& worker : workers_) if (worker.joinable()) worker.join();
+        return std::move(scores_);
+    }
+private:
+    const std::atomic<bool>* cancel_;
+    std::mutex mutex_;
+    std::condition_variable_any available_;
+    std::deque<std::filesystem::path> pending_;
+    SharpnessScores scores_;
+    bool closing_{};
+    std::vector<std::jthread> workers_;
+};
+} // namespace
+
+static int select_sharpest_frames_with_scores(
+
     const std::filesystem::path& candidate_dir,
     const std::filesystem::path& output_dir,
     int window,
     int max_frames,
     const std::atomic<bool>* cancel,
     const std::function<void(const std::string&)>& log,
-    int first_index) {
+    int first_index,
+    const SharpnessScores& prepared_scores) {
     auto files = list_images(candidate_dir);
     if (files.empty()) return 0;
     window = std::max(window, 1);
@@ -982,8 +1051,19 @@ int select_sharpest_frames(
                 static_cast<std::size_t>(max_frames)));
 
     std::vector<double> scores(files.size(), -1.0);
+    std::vector<std::size_t> unscored;
     if (window > 1) {
-        const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+        for (std::size_t i = 0; i < files.size(); ++i) {
+            const auto prepared = prepared_scores.find(files[i]);
+            if (prepared != prepared_scores.end() && prepared->second >= 0.0)
+                scores[i] = prepared->second;
+            else
+                unscored.push_back(i);
+        }
+    }
+    if (!unscored.empty()) {
+        const unsigned threads = static_cast<unsigned>(std::min<std::size_t>(
+            unscored.size(), std::min(8u, std::max(1u, std::thread::hardware_concurrency()))));
         std::atomic<std::size_t> next{0};
         std::atomic<std::size_t> done{0};
         std::vector<std::thread> pool;
@@ -991,8 +1071,9 @@ int select_sharpest_frames(
         for (unsigned t = 0; t < threads; ++t) {
             pool.emplace_back([&] {
                 for (;;) {
-                    const std::size_t i = next.fetch_add(1);
-                    if (i >= files.size() || cancelled(cancel)) return;
+                    const std::size_t next_item = next.fetch_add(1);
+                    if (next_item >= unscored.size() || cancelled(cancel)) return;
+                    const std::size_t i = unscored[next_item];
                     try {
                         scores[i] = laplacian_sharpness(files[i]);
                     } catch (...) {
@@ -1002,11 +1083,16 @@ int select_sharpest_frames(
                 }
             });
         }
-        while (done.load() < files.size() && !cancelled(cancel)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            if (log)
-                log("select sharp frames scored " + std::to_string(done.load()) +
+        auto last_report = std::chrono::steady_clock::now();
+        while (done.load() < unscored.size() && !cancelled(cancel)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            const auto now = std::chrono::steady_clock::now();
+            if (log && now - last_report >= std::chrono::seconds(1)) {
+                log("select sharp frames scored " + std::to_string(
+                        files.size() - unscored.size() + done.load()) +
                     "/" + std::to_string(files.size()));
+                last_report = now;
+            }
         }
         for (auto& thread : pool) thread.join();
         if (cancelled(cancel)) return -1;
@@ -1053,6 +1139,15 @@ int select_sharpest_frames(
             if (i != best) std::filesystem::remove(files[i], error);
     }
     return kept;
+}
+
+int select_sharpest_frames(
+    const std::filesystem::path& candidate_dir,
+    const std::filesystem::path& output_dir,
+    int window, int max_frames, const std::atomic<bool>* cancel,
+    const std::function<void(const std::string&)>& log, int first_index) {
+    return select_sharpest_frames_with_scores(candidate_dir, output_dir, window,
+        max_frames, cancel, log, first_index, {});
 }
 
 VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
@@ -1177,6 +1272,8 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
     };
     std::string last_error_line;
     std::string launch_error;
+    SharpnessScores prepared_scores;
+    const auto extraction_started = std::chrono::steady_clock::now();
     auto run_range = [&](
         const std::filesystem::path& directory, const double start_seconds,
         const double range_seconds, const int frame_limit,
@@ -1193,11 +1290,15 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
             args.push_back("-t");
             args.push_back(format_seconds(range_seconds));
         }
+        args.insert(args.end(), {"-an", "-sn"});
         args.push_back("-vf");
         args.push_back(ffmpeg_filter(options, candidate_fps));
         if (jpeg) {
             args.emplace_back("-qscale:v");
             args.push_back(std::to_string(jpeg_qscale(options.quality)));
+        } else {
+            // PNG compression affects file size, not pixel values.
+            args.insert(args.end(), {"-compression_level", "1"});
         }
         if (frame_limit > 0) {
             args.emplace_back("-frames:v");
@@ -1206,8 +1307,20 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
         args.push_back(path_utf8(directory / pattern));
 
         std::uint64_t last_frame = 0;
+        std::uint64_t next_to_score = 1;
+        SharpnessPipeline scorer(window > 1, options.cancel);
+        const auto enqueue_scores = [&](std::uint64_t through) {
+            if (window <= 1) return;
+            while (next_to_score <= through) {
+                char name[40];
+                std::snprintf(name, sizeof(name), "c_%06llu.%s",
+                    static_cast<unsigned long long>(next_to_score++), jpeg ? "jpg" : "png");
+                scorer.enqueue(directory / name);
+            }
+        };
         core::ProgressReporter progress("extract video frames", expected_candidates);
-        return run_ffmpeg(
+        const auto decoding_started = std::chrono::steady_clock::now();
+        const int rc = run_ffmpeg(
             ffmpeg, args,
             [&](const std::string& line) {
                 if (line.rfind("frame=", 0) == 0) {
@@ -1216,6 +1329,8 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
                     if (frame > last_frame) {
                         progress.advance(frame - last_frame);
                         last_frame = frame;
+                        // Leave the newest file alone until ffmpeg closes it.
+                        enqueue_scores(frame > 0 ? frame - 1 : 0);
                         char preview_name[40];
                         std::snprintf(preview_name, sizeof(preview_name),
                             "c_%06llu.%s", static_cast<unsigned long long>(
@@ -1240,6 +1355,19 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
                 }
             },
             launch_error, options.cancel);
+        const auto decoding_finished = std::chrono::steady_clock::now();
+        if (rc == 0) {
+            enqueue_scores(last_frame);
+            auto scores = scorer.finish();
+            core::Logger::instance().info("video_extract_stage decode_ms=",
+                std::chrono::duration<double, std::milli>(
+                    decoding_finished - decoding_started).count(),
+                " score_wait_ms=", std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - decoding_finished).count(),
+                " scored=", scores.size());
+            prepared_scores.merge(scores);
+        }
+        return rc;
     };
     auto throw_ffmpeg_failure = [&]() {
         std::filesystem::remove_all(candidate_root, error);
@@ -1281,9 +1409,10 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
             if (rc != 0) throw_ffmpeg_failure();
             candidates_done += static_cast<std::uint64_t>(
                 count_images(segment_dir));
-            const int kept = select_sharpest_frames(
+            const int kept = select_sharpest_frames_with_scores(
                 segment_dir, options.output_dir, window, remaining,
-                options.cancel, options.log, written);
+                options.cancel, options.log, written, prepared_scores);
+            prepared_scores.clear();
             std::filesystem::remove_all(segment_dir, error);
             if (kept < 0) throw std::runtime_error("cancelled");
             written += kept;
@@ -1295,9 +1424,10 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
             options.max_frames > 0 ? options.max_frames * window : 0, 0);
         if (rc != 0) throw_ffmpeg_failure();
         if (window > 1) {
-            written = select_sharpest_frames(
+            written = select_sharpest_frames_with_scores(
                 candidate_root, options.output_dir, window, options.max_frames,
-                options.cancel, options.log);
+                options.cancel, options.log, 0, prepared_scores);
+            prepared_scores.clear();
             std::filesystem::remove_all(candidate_root, error);
             if (written < 0) throw std::runtime_error("cancelled");
         } else {
@@ -1348,6 +1478,10 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
             " total=", written, " image=",
             std::quoted(path_utf8(options.output_dir / final_name)));
     }
+    core::Logger::instance().info("video_extract_timing total_ms=",
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - extraction_started).count(),
+        " frames=", written, " sharpness_pipeline=", window > 1);
     save_manifest(stored_manifest, wanted);
     partial.armed = false;
     emit(
