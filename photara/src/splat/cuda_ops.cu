@@ -2700,8 +2700,8 @@ LossGradients compute_training_loss(
     const bool ai_prior_active) {
     if (rendered.median_depth.device() == tinytensor::Device::Vulkan ||
         rendered.color.device() == tinytensor::Device::Vulkan) {
-        if (options.use_mvs_depth || options.use_mvs_normals || options.alpha_mode == AlphaMode::transparent)
-            throw std::invalid_argument("Vulkan training loss does not support external MVS/transparent alpha targets");
+        if (options.use_mvs_depth || options.use_mvs_normals)
+            throw std::invalid_argument("Vulkan training loss does not support external MVS depth/normal targets");
         LossGradients result;
         result.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
         if (options.photometric_weight > 0.F) {
@@ -2712,6 +2712,7 @@ LossGradients compute_training_loss(
         } else {
             result.color = tinytensor::Tensor::zeros_like(rendered.color);
         }
+        add_alpha_mask_loss_vulkan(rendered, target, options, result, collect_scalar_terms);
         if (need_geometry_gradients)
             add_depth_normal_loss_vulkan(rendered, target.camera,
                 depth_normal_active ? options.depth_normal_weight : 0.F,

@@ -21,6 +21,9 @@ struct RasterizeOptions {
     // Vulkan colour correction only needs an owned RGB tensor. Skipping the
     // alpha copy also avoids allocating a matching zero-gradient tensor.
     bool copy_color_only{false};
+    // Transparent-mask supervision needs owned alpha without forcing an RGB
+    // copy or any depth/normal attachments.
+    bool copy_alpha{false};
     // Vulkan training consumes contribution visibility only after backward.
     // Deferring its uint32-to-float conversion lets that dispatch join the
     // densification/optimizer batch instead of forcing a queue hand-off before

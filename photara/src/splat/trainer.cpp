@@ -1156,11 +1156,10 @@ GaussianModel Trainer::train(
         if (options_.densify_revised_noise)
             throw std::invalid_argument(
                 "Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_mvs_depth || options_.use_mvs_normals ||
-            options_.alpha_mode == AlphaMode::transparent)
+        if (options_.use_mvs_depth || options_.use_mvs_normals)
             throw std::invalid_argument(
                 "Vulkan training does not yet support external "
-                "MVS depth/normal targets or transparent alpha supervision");
+                "MVS depth/normal targets");
         core::Logger::instance().info(
             "splat training backend=vulkan orchestration=shared");
     } else {
@@ -1814,6 +1813,9 @@ GaussianModel Trainer::train(
             !vulkan_backend || ppisp_enabled || bilagrid_enabled;
         raster_options.copy_color_only =
             vulkan_backend && (ppisp_enabled || bilagrid_enabled);
+        raster_options.copy_alpha = vulkan_backend && options_.use_mask &&
+            target.has_mask && !target.mask_is_validity &&
+            options_.alpha_mode == AlphaMode::transparent && options_.match_alpha_weight > 0.F;
         raster_options.defer_visibility = vulkan_backend;
         // Environment override for measurement (see
         // PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE in the rasterizer): keep
@@ -2049,6 +2051,8 @@ GaussianModel Trainer::train(
             loss.alpha = rendered.alpha.is_valid()
                 ? tinytensor::Tensor::zeros_like(rendered.alpha)
                 : tinytensor::Tensor{};
+            detail::add_alpha_mask_loss_vulkan(
+                rendered, target, options_, loss, report_progress);
             if (allocate_geometry_gradients)
                 detail::add_depth_normal_loss_vulkan(rendered, target.camera,
                     depth_normal_active ? options_.depth_normal_weight : 0.F,
