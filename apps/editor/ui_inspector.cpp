@@ -486,19 +486,6 @@ void draw_alignment_configuration(App& app) {
                 settings.feature_matcher = "gpu_mutual_ratio";
             }
         }
-#if defined(PHOTARA_HAS_SAM)
-        if (settings.sam_masks) {
-            ImGui::Spacing();
-            ImGui::BeginDisabled(has_external_dataset(app));
-            ImGui::Checkbox(tr("Use SAM3 masks for alignment"), &settings.sam_use_mask_for_sfm);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("%s", tr("Off (recommended): align using the full image, including background features.\n"
-                    "On: ignore features outside the first-pass SAM3 masks.\n"
-                    "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
-                    "Applies to the next alignment. 3DGS training and mask refinement are unchanged."));
-            ImGui::EndDisabled();
-        }
-#endif
     }
     if (ImGui::CollapsingHeader(tr("Solver and cache"))) {
         alignment_label("Solver type");
@@ -684,9 +671,15 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr(
                 "SAM 3 segments a text prompt into a foreground mask before alignment.\n"
                 "Masks are used for 3DGS training. Post-alignment refinement is optional.\n"
-                "Using masks for alignment is optional in Camera Alignment.\n"
+                "Use the option below to enable masks for alignment.\n"
                 "The model is Meta's and is downloaded only after you accept its licence."));
         ImGui::BeginDisabled(!app.settings.sam_masks || has_external_dataset(app));
+        ImGui::Checkbox(tr("Use SAM3 masks for alignment"), &app.settings.sam_use_mask_for_sfm);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr("Off (recommended): align using the full image, including background features.\n"
+                "On: ignore features outside the first-pass SAM3 masks.\n"
+                "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
+                "Applies to the next alignment. 3DGS training and mask refinement are unchanged."));
         ImGui::Checkbox(tr("Refine masks after alignment"), &app.settings.sam_sfm_guided);
         ImGui::TextWrapped("%s", tr("Off by default. Enabling reruns SAM after alignment using the sparse point cloud, overwrites masks, and increases runtime and memory / VRAM use."));
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

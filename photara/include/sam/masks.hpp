@@ -65,6 +65,9 @@ struct GenerateResult {
 
 // Writes one PNG per image, named `<stem>.png`, in sorted call order so video
 // tracking sees the capture in sequence. Throws on a model or frame failure.
+// Prefetches one input and saves one output in the background. Completion
+// callbacks run on the calling thread, in input order, after successful saves.
+// All pending I/O finishes before return; save failures propagate to the caller.
 // The selected inference backend is released before the function returns.
 GenerateResult generate_masks(const GenerateOptions& options);
 
