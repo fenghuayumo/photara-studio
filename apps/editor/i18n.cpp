@@ -29,6 +29,19 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Workspace", "工作区", "ワークスペース", "작업 공간"},
+    {"Export Model...", "导出模型...", "モデルをエクスポート...", "모델 내보내기..."},
+    {"Model viewer", "模型查看", "モデル表示", "모델 보기"},
+    {"Model properties", "模型属性", "モデル属性", "모델 속성"},
+    {"Scene hierarchy", "场景层级", "シーン階層", "장면 계층"},
+    {"Focus model", "聚焦模型", "モデルにフォーカス", "모델 포커스"},
+    {"Remove from scene", "从场景移除", "シーンから削除", "장면에서 제거"},
+    {"Show / hide model", "显示 / 隐藏模型", "モデルを表示 / 非表示", "모델 표시 / 숨기기"},
+    {"Transform", "变换", "変換", "변환"},
+    {"File information", "文件信息", "ファイル情報", "파일 정보"},
+    {"Open Model...", "打开模型...", "モデルを開く...", "모델 열기..."},
+    {"Drop a Mesh or 3DGS model into the viewport.", "将网格或 3DGS 模型拖入视口。", "ビューポートにモデルをドロップ。", "뷰포트에 모델을 놓으세요."},
+    {"Select a model to view its properties.", "选择模型以查看属性。", "モデルを選択。", "모델을 선택하세요."},
     {"Video Preview", "视频预览", "動画プレビュー", "동영상 미리보기"},
     {"Mask Editor", "Mask 编辑器", "マスクエディター", "마스크 편집기"},
     {"Manual touch-up", "手动修补（可选）", "手動修正（任意）", "수동 수정 (선택)"},

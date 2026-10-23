@@ -93,6 +93,36 @@ void draw(
     const ImVec2 centre = point(min, max, 0.5F, 0.5F);
 
     switch (icon) {
+        // Dedicated hierarchy glyphs, drawn on the same 24-unit optical grid.
+        // Keep them separate from the filled viewport representation icons.
+        case Icon::model_mesh: {
+            const auto p = [&](float x, float y) { return point(min, max, x / 24.F, y / 24.F); };
+            const float stroke = std::max(1.F, extent * .075F);
+            const ImVec2 outline[]{p(12,2.5F),p(21,7.5F),p(21,17),p(12,22),p(3,17),p(3,7.5F)};
+            draw_list->AddPolyline(outline, 6, colour, ImDrawFlags_Closed, stroke);
+            draw_list->AddLine(p(3,7.5F),p(12,12.5F),colour,stroke);
+            draw_list->AddLine(p(12,12.5F),p(21,7.5F),colour,stroke);
+            draw_list->AddLine(p(12,12.5F),p(12,22),colour,stroke);
+            break;
+        }
+        case Icon::model_gaussian: {
+            const auto p = [&](float x, float y) { return point(min, max, x / 24.F, y / 24.F); };
+            const float stroke = std::max(1.F, extent * .075F);
+            draw_list->AddCircle(centre, extent * .13F, colour, 20, stroke);
+            draw_list->AddEllipse(centre, {extent * .44F, extent * .23F}, colour, -.65F, 40, stroke);
+            draw_list->AddCircleFilled(p(5,17), extent * .085F, colour, 16);
+            draw_list->AddCircleFilled(p(19,7), extent * .085F, colour, 16);
+            break;
+        }
+        case Icon::eye:
+        case Icon::eye_off: {
+            const auto p = [&](float x, float y) { return point(min, max, x, y); };
+            draw_list->AddBezierCubic(p(.1F,.5F), p(.3F,.12F), p(.7F,.12F), p(.9F,.5F), colour, thickness);
+            draw_list->AddBezierCubic(p(.1F,.5F), p(.3F,.88F), p(.7F,.88F), p(.9F,.5F), colour, thickness);
+            draw_list->AddCircle(centre, extent * .12F, colour, 12, thickness);
+            if (icon == Icon::eye_off) draw_list->AddLine(p(.15F,.15F), p(.85F,.85F), colour, thickness);
+            break;
+        }
         case Icon::select: {
             const ImVec2 cursor[] = {
                 point(min, max, 0.24F, 0.18F),

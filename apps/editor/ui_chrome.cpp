@@ -151,10 +151,10 @@ void build_dock_space(App& app) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float status_h = app.show_status_bar ? k_status_height : 0.F;
     const ImVec2 pos{
-        viewport->WorkPos.x, viewport->WorkPos.y + k_toolbar_height};
+        viewport->WorkPos.x, viewport->WorkPos.y + (model_viewer_active(app) ? 0.F : k_toolbar_height)};
     const ImVec2 size{
         viewport->WorkSize.x,
-        std::max(1.F, viewport->WorkSize.y - k_toolbar_height - status_h)};
+        std::max(1.F, viewport->WorkSize.y - (model_viewer_active(app) ? 0.F : k_toolbar_height) - status_h)};
 
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
@@ -230,6 +230,11 @@ Action draw_menu_bar(App& app) {
         set_viewport_workspace(app, ViewportWorkspace::scene_3d);
 
     if (!ImGui::BeginMainMenuBar()) return action;
+    if (ImGui::BeginMenu(tr("Workspace"))) {
+        if (ImGui::MenuItem(tr("Model viewer"), nullptr, model_viewer_active(app))) app.model_workspace = 1;
+        if (ImGui::MenuItem(tr("Reconstruction"), nullptr, !model_viewer_active(app))) app.model_workspace = 0;
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu(tr("File"))) {
         if (ImGui::MenuItem(tr("New Project"), "Ctrl+N", false, !busy)) {
             new_project(app);
@@ -636,6 +641,7 @@ ClearResultsAction draw_clear_results_modal(App& app) {
 }
 
 Action draw_toolbar(App& app) {
+    if (model_viewer_active(app)) return Action::none;
     Action action = Action::none;
     const bool busy = app.job.running();
     const bool images_ready = app.settings.images_dir[0] != '\0';
@@ -658,6 +664,7 @@ Action draw_toolbar(App& app) {
         ImGuiWindowFlags_NoScrollbar;
     ImGui::Begin("##toolbar", nullptr, toolbar_flags);
     ImGui::PopStyleVar(3);
+
 
     if (icons::labeled_button(
             "##image_folder", icons::Icon::folder, tr("Image Folder"),

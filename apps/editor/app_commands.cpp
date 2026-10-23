@@ -1100,6 +1100,7 @@ void new_project(App& app) {
 }
 
 void apply_image_directory_selection(App& app) {
+    app.model_workspace = 0;
     clear_loaded_result(app);
     app.settings.dataset_source.fill('\0');
     app.settings.dataset_initial_cloud.fill('\0');
@@ -1320,6 +1321,7 @@ void cleanup_cache_session(const App& app) {
 }
 
 void apply_video_selection(App& app) {
+    app.model_workspace = 0;
     app.settings.alignment_capture_type = 1;
     clear_loaded_result(app);
     app.settings.dataset_source.fill('\0');
@@ -1436,7 +1438,7 @@ void apply_dropped_paths(App& app, const std::vector<std::string>& dropped) {
             set_message(app, tr("Wait for the current operation before importing a model"), theme::warning);
             return;
         }
-        if (app.splat_edit.dirty()) {
+        if (app.splat_edit.dirty() && gaussians.empty()) {
             set_message(app, tr("Export Gaussian edits, then start a new project before importing another model"), theme::warning);
             return;
         }
@@ -1444,11 +1446,14 @@ void apply_dropped_paths(App& app, const std::vector<std::string>& dropped) {
         if (!gaussians.empty()) {
             // Dropping onto an existing list adds models so a merge can be
             // assembled incrementally; the first drop starts a fresh scene.
-            if (app.gaussian_models.empty()) clear_loaded_result(app);
+            if (app.gaussian_models.empty() && !app.splat_edit.dirty()) clear_loaded_result(app);
             import_gaussian_models(app, gaussians);
         } else {
             clear_loaded_result(app);
             app.imported_mesh_source = mesh;
+            app.viewer_mesh_visible = true;
+            app.viewer_model = -1;
+            app.model_workspace = 1;
             refresh_artifacts(app);
             app.suppress_scene_auto_load = true;
             show_mesh_view(app, true);
@@ -1645,13 +1650,7 @@ void import_gaussian_models(
             theme::warning);
         return;
     }
-    if (app.splat_edit.dirty()) {
-        set_message(
-            app,
-            tr("Export Gaussian edits, then start a new project before importing another model"),
-            theme::warning);
-        return;
-    }
+    auto next_models = app.gaussian_models;
     std::size_t added = 0;
     std::string failure;
     for (const std::filesystem::path& path : paths) {
@@ -1684,7 +1683,7 @@ void import_gaussian_models(
         GaussianModelEntry entry;
         entry.path = path;
         entry.name = path_to_utf8(path.filename());
-        app.gaussian_models.push_back(std::move(entry));
+        next_models.push_back(std::move(entry));
         ++added;
     }
     if (added == 0) {
@@ -1694,6 +1693,41 @@ void import_gaussian_models(
             theme::warning);
         return;
     }
+    if (app.splat_edit.dirty()) {
+        // Edits belong to the visible composition, not individual inputs.
+        // Snapshot it as one source before adding anything; hidden inputs
+        // remain independent and source files are never overwritten.
+        try {
+            photara::splat::GaussianModel edited;
+            if (!app.splat_edit.copy_model(edited))
+                throw std::runtime_error("Cannot preserve Gaussian edits");
+            GaussianModelEntry snapshot;
+            if (!app.gaussian_models.empty()) {
+                snapshot.path = app.gaussian_models.front().path;
+                snapshot.name = app.gaussian_models.front().name;
+            } else {
+                snapshot.path = path_from_utf8_field(app.settings.splat_model_source.data());
+                snapshot.name = "Edited 3DGS";
+            }
+            snapshot.splat_count = edited.size();
+            snapshot.embedded = std::make_shared<const std::vector<std::uint8_t>>(
+                photara::splat::encode_gaussians(edited));
+            snapshot.cached_model = std::make_shared<const photara::splat::GaussianModel>(std::move(edited));
+            snapshot.cached_key = "edited:" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            std::vector<GaussianModelEntry> preserved;
+            preserved.push_back(std::move(snapshot));
+            for (const auto& entry : app.gaussian_models)
+                if (!entry.visible) preserved.push_back(entry);
+            preserved.insert(preserved.end(), next_models.end() - static_cast<std::ptrdiff_t>(added), next_models.end());
+            next_models = std::move(preserved);
+        } catch (const std::exception& failure) {
+            set_message(app, failure.what(), theme::danger);
+            return;
+        }
+    }
+    app.gaussian_models = std::move(next_models);
+    app.model_workspace = 1;
+    app.viewer_model = static_cast<int>(app.gaussian_models.size() - added);
     sync_gaussian_model_settings(app);
     refresh_artifacts(app);
     reset_gaussian_preview(app);
@@ -2916,6 +2950,7 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
     write_preview_vis(app);
 }
 void apply_opened_project(App& app) {
+    app.model_workspace = 0;
     clear_loaded_result(app);
     app.settings.runtime_dir.fill('\0');
     app.saved_results_discarded = false;

@@ -6,6 +6,9 @@ struct GLFWwindow;
 
 namespace editor {
 void draw_gaussian_models_panel(App& app);
+bool model_viewer_active(const App& app);
+void draw_model_hierarchy(App& app);
+void draw_model_properties(App& app);
 
 Action draw_menu_bar(App& app);
 Action draw_toolbar(App& app);

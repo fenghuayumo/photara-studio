@@ -220,8 +220,8 @@ bool pick_splat_model_files(
             FOS_ALLOWMULTISELECT);
         dialog->SetTitle(title);
         COMDLG_FILTERSPEC filters[] = {
-            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb;*.usdc)",
-             L"*.ply;*.sog;*.spz;*.glb;*.usdc"},
+            {L"Mesh / Gaussian splat (*.obj;*.ply;*.sog;*.spz;*.glb;*.usdc)",
+             L"*.obj;*.ply;*.sog;*.spz;*.glb;*.usdc"},
             {L"All files (*.*)", L"*.*"}};
         dialog->SetFileTypes(2, filters);
         if (SUCCEEDED(dialog->Show(nullptr))) {
