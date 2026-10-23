@@ -144,11 +144,11 @@ void draw_gaussian_models_panel(App& app) {
 
     ImGui::Dummy({0, 2.F});
     ImGui::SetCursorPosX(10.F);
-    ImGui::BeginDisabled(merge_busy || edits_locked);
+    ImGui::BeginDisabled(merge_busy);
     if (ImGui::Button(tr("Add Model..."), {116.F, 0.F})) {
         std::vector<std::filesystem::path> picked;
         if (pick_splat_model_files(L"Add Gaussian splat models", picked)) {
-            if (app.gaussian_models.empty()) clear_loaded_result(app);
+            if (app.gaussian_models.empty() && !app.splat_edit.dirty()) clear_loaded_result(app);
             import_gaussian_models(app, picked);
         }
     }
@@ -194,6 +194,124 @@ void draw_gaussian_models_panel(App& app) {
     ImGui::PopStyleVar();
 }
 
+bool model_viewer_active(const App& app) {
+    if (app.job.running()) return false;
+    if (app.model_workspace >= 0) return app.model_workspace == 1;
+    return !app.job.running() && app.settings.images_dir[0] == '\0' &&
+        app.settings.dataset_source[0] == '\0' && app.layout.project_file.empty();
+}
+
+void draw_model_hierarchy(App& app) {
+    ImGui::Dummy({0.F, 5.F});
+    const bool locked = app.job.running() || app.loading_scene ||
+        app.gaussian_merge.running || app.splat_export.job.valid() || app.splat_simplify.running;
+    const auto row = [&](const char* name, int index, bool visible, icons::Icon icon) {
+        ImGui::PushID(index);
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const float label_width = std::max(1.F, ImGui::GetContentRegionAvail().x - 30.F);
+        const std::string id = "##model_row";
+        if (ImGui::Selectable(id.c_str(), app.viewer_model == index,
+                ImGuiSelectableFlags_AllowDoubleClick, {label_width, 28.F})) {
+            app.viewer_model = index;
+            if (visible) {
+                if (index < 0) show_mesh_view(app, false);
+                else set_visualization_mode(app, VisualizationMode::splat);
+            }
+            if (ImGui::IsMouseDoubleClicked(0)) frame_reconstruction(app);
+        }
+        const ImVec4 text = visible ? theme::text_bright : theme::text_muted;
+        icons::draw(ImGui::GetWindowDrawList(), icon, {origin.x + 5.F, origin.y + 6.F},
+            {origin.x + 21.F, origin.y + 22.F}, theme::u32(visible ? theme::accent : theme::text_muted));
+        ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(),
+            {origin.x + 29.F, origin.y + 5.F}, {origin.x + label_width - 4.F, origin.y + 25.F},
+            origin.x + label_width - 4.F, origin.x + label_width - 4.F, name, nullptr, nullptr);
+        bool remove = false;
+        if (ImGui::BeginPopupContextItem("model_actions")) {
+            app.viewer_model = index;
+            if (ImGui::MenuItem(tr("Focus model"))) frame_reconstruction(app);
+            if (ImGui::MenuItem(tr("Remove from scene"), nullptr, false, !locked)) remove = true;
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (icons::ghost_button("##visibility", visible ? icons::Icon::eye : icons::Icon::eye_off,
+                {26.F,28.F}, false, !locked && !app.splat_edit.dirty(), tr("Show / hide model"))) {
+            if (index < 0) {
+                app.viewer_mesh_visible = !visible;
+                if (!visible) show_mesh_view(app, false);
+                else { app.view_mode = VisualizationMode::points; app.suppress_scene_auto_load = true; }
+            } else {
+                app.gaussian_models[index].visible = !visible;
+                refresh_gaussian_composition(app);
+            }
+        }
+        ImGui::PopID();
+        return remove;
+    };
+    if (ImGui::TreeNodeEx(tr("Scene"), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        if (app.has_mesh) {
+            const auto name = app.imported_mesh_source.empty() ? std::string(tr("Mesh")) : path_to_utf8(app.imported_mesh_source.filename());
+            if (row(name.c_str(), -1, app.viewer_mesh_visible, icons::Icon::model_mesh)) {
+                app.mesh.clear(); app.imported_mesh_source.clear(); app.has_mesh = false;
+                app.final_mesh_ready = false; app.suppress_scene_auto_load = true;
+                app.view_mode = VisualizationMode::points;
+            }
+        }
+        for (std::size_t i = 0; i < app.gaussian_models.size(); ++i) {
+            auto& entry = app.gaussian_models[i];
+            if (row(entry.name.c_str(), static_cast<int>(i), entry.visible, icons::Icon::model_gaussian)) {
+                remove_gaussian_model(app, i);
+                app.viewer_model = app.gaussian_models.empty() ? -1 : 0;
+                break;
+            }
+        }
+        if (!app.has_mesh && app.gaussian_models.empty()) theme::caption(tr("Drop a Mesh or 3DGS model into the viewport."));
+        ImGui::TreePop();
+    }
+}
+
+void draw_model_properties(App& app) {
+    if (app.viewer_model >= static_cast<int>(app.gaussian_models.size())) app.viewer_model = -1;
+    if (app.viewer_model < 0 && !app.has_mesh && !app.gaussian_models.empty()) app.viewer_model = 0;
+    if (app.viewer_model >= 0) {
+        auto& entry = app.gaussian_models[app.viewer_model];
+        ImGui::TextUnformatted(entry.name.c_str());
+        ImGui::TextDisabled("3DGS | %s splats", format_count(entry.splat_count).c_str());
+        if (ImGui::CollapsingHeader(tr("Transform"))) {
+            ImGui::BeginDisabled(app.splat_edit.dirty() || app.loading_scene || app.gaussian_merge.running);
+            bool changed = false;
+            if (ImGui::BeginTable("##placement", 2, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 48.F);
+                ImGui::TableSetupColumn("value");
+                ImGui::TableNextRow(); ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(tr("Offset"));
+                ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F);
+                ImGui::DragFloat3("##offset", entry.offset, .05F);
+                changed = ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::TableNextRow(); ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(tr("Scale"));
+                ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F);
+                ImGui::DragFloat("##scale", &entry.scale, .005F, .01F, 1000.F);
+                changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::EndTable();
+            }
+            if (changed) refresh_gaussian_composition(app);
+            ImGui::EndDisabled();
+        }
+        if (ImGui::CollapsingHeader(tr("File information"))) ImGui::TextWrapped("%s", path_to_utf8(entry.path).c_str());
+        if (ImGui::Button(tr("Export Model..."))) export_trained_model(app);
+    } else if (app.has_mesh) {
+        ImGui::TextUnformatted(app.imported_mesh_source.empty() ? tr("Mesh") : path_to_utf8(app.imported_mesh_source.filename()).c_str());
+        if (ImGui::CollapsingHeader(tr("File information"))) ImGui::TextWrapped("%s", path_to_utf8(app.imported_mesh_source).c_str());
+        if (ImGui::Button(tr("Export Mesh..."))) export_mesh_file(app);
+    } else { theme::caption(tr("Select a model to view its properties.")); return; }
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader(tr("Display"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox(tr("Show ground grid"), &app.view_options.show_grid);
+        ImGui::Checkbox(tr("Show origin axes"), &app.view_options.show_axes);
+        // Rendering controls remain in the existing viewport toolbar.
+    }
+}
+
 void draw_scene_panel(App& app) {
     if (!app.show_scene) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
@@ -204,6 +322,7 @@ void draw_scene_panel(App& app) {
         return;
     }
 
+    if (model_viewer_active(app)) { ImGui::Indent(10.F); draw_model_hierarchy(app); ImGui::Unindent(10.F); ImGui::End(); return; }
     const float wrap = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 20.F;
     const bool external_dataset = has_external_dataset(app);
 

@@ -5,6 +5,10 @@
 namespace editor::icons {
 
 enum class Icon {
+    eye,
+    eye_off,
+    model_mesh,
+    model_gaussian,
     select,
     translate,
     rotate,

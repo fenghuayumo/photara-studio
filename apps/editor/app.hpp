@@ -285,6 +285,10 @@ struct App {
     bool pending_align_viewport_clear{};
 
     bool show_scene{true};
+    // -1 follows the capture/project context, 0 reconstruction, 1 viewer.
+    int model_workspace{-1};
+    int viewer_model{-1}; // Gaussian index; -1 selects the mesh.
+    bool viewer_mesh_visible{true};
     bool show_viewport{true};
     bool show_console{true};
     bool show_inspector{true};

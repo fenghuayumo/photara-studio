@@ -154,6 +154,7 @@ void test_inspector_workflow() {
     io.Fonts->AddFontDefault(); io.Fonts->Build();
     theme::apply_style();
     App app;
+    app.model_workspace = 0;
     store_path_field(app.settings.images_dir, "images");
     app.has_sparse = true;
     app.has_mesh = true;
@@ -219,6 +220,16 @@ void test_inspector_workflow() {
 }
 
 int main(int argc, char** argv) {
+    {
+        editor::App viewer;
+        require(editor::model_viewer_active(viewer), "empty launch should open model viewer");
+        viewer.settings.images_dir[0] = 'x';
+        require(!editor::model_viewer_active(viewer), "capture should open reconstruction workspace");
+        viewer.model_workspace = 1;
+        require(editor::model_viewer_active(viewer), "explicit viewer selection ignored");
+        viewer.model_workspace = 0;
+        require(!editor::model_viewer_active(viewer), "explicit reconstruction selection ignored");
+    }
     if (argc > 1 && std::string(argv[1]) == "--view-shortcuts-only") {
         try {
             test_studio_view_shortcuts();
@@ -300,6 +311,16 @@ int main(int argc, char** argv) {
         restored.splat_edit.sync("edited-close-test", host);
         restored.splat_edit.replace_from_model(restored, model(23.F), false);
         require(restored.splat_edit.dirty(), "multi-source close fixture has no edits");
+        const auto extra = folder / "extra.ply";
+        photara::splat::save_gaussians(model(31.F), extra);
+        editor::import_gaussian_models(restored, {extra}, false); wait_load(restored);
+        require(restored.gaussian_models.size() == 2 && restored.composed_model &&
+                restored.composed_model->size() == 2,
+                "edited composition did not accept another model");
+        require(restored.composed_model->means.to_vector()[0] == 23.F &&
+                restored.composed_model->means.to_vector()[3] == 31.F,
+                "import discarded edited positions or incoming model");
+        require(bool(restored.gaussian_models[0].embedded), "edits were not preserved as a source");
         test_delete_open_row(restored);
         require(!restored.splat_edit.dirty(), "removal left stale composition edits");
         test_delete_open_row(restored);

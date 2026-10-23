@@ -524,9 +524,16 @@ void draw_alignment_configuration(App& app) {
 Action draw_inspector(App& app) {
     Action action = Action::none;
     if (!app.show_inspector) return action;
-    if (!ImGui::Begin(i18n::id("Reconstruction settings", "###Inspector"), &app.show_inspector)) {
+    if (!ImGui::Begin(i18n::id(model_viewer_active(app) ? "Model properties" : "Reconstruction settings", "###Inspector"), &app.show_inspector)) {
         ImGui::End();
         return action;
+    }
+    if (model_viewer_active(app)) {
+        ImGui::BeginChild("##model_properties", {0.F,0.F}, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.F,12.F});
+        draw_model_properties(app);
+        ImGui::PopStyleVar();
+        ImGui::EndChild(); ImGui::End(); return action;
     }
     const bool busy = app.job.running();
     const InspectorSection section = current_inspector_section(app);
