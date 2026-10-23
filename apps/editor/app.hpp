@@ -23,6 +23,7 @@
 #include "splat/checkpoint.hpp"
 
 #include "imgui.h"
+#include "shortcuts.hpp"
 
 #include <array>
 #include <atomic>

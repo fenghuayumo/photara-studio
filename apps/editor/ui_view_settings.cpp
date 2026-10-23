@@ -147,11 +147,11 @@ void draw_view_settings(App& app) {
         int projection = static_cast<int>(app.camera.projection);
         const char* projections[] = {
             tr("Perspective"), tr("Orthographic"), tr("Fisheye"), tr("Panorama")};
-        const char* projection_keys[] = {"Alt+1", "Alt+0 / Num 5", "Alt+2", "Alt+3"};
+        const std::string projection_keys[] = {shortcuts::label("perspective"), shortcuts::label("projection") + " / Num 5", shortcuts::label("fisheye"), shortcuts::label("panorama")};
         if (ImGui::BeginCombo("##editor_projection", projections[projection])) {
             for (int index = 0; index < 4; ++index) {
                 const bool selected = projection == index;
-                if (ImGui::MenuItem(projections[index], projection_keys[index], selected)) {
+                if (ImGui::MenuItem(projections[index], projection_keys[index].c_str(), selected)) {
                     set_editor_projection(app.camera, static_cast<EditorProjection>(index));
                     app.preview_follow_view = false;
                 }
@@ -169,10 +169,10 @@ void draw_view_settings(App& app) {
         theme::caption("Standard view");
         constexpr const char* view_labels[] = {
             "Front", "Back", "Left", "Right", "Top", "Bottom"};
-        constexpr const char* view_keys[] = {
-            "Alt+4 / Num 1", "Alt+Shift+4 / Ctrl+Num 1",
-            "Alt+Shift+5 / Ctrl+Num 3", "Alt+5 / Num 3",
-            "Alt+6 / Num 7", "Alt+Shift+6 / Ctrl+Num 7"};
+        const std::string view_keys[] = {
+            shortcuts::label("front") + " / Num 1", shortcuts::label("back") + " / Ctrl+Num 1",
+            shortcuts::label("left") + " / Ctrl+Num 3", shortcuts::label("right") + " / Num 3",
+            shortcuts::label("top") + " / Num 7", shortcuts::label("bottom") + " / Ctrl+Num 7"};
         constexpr OrthographicView views[] = {
             OrthographicView::front, OrthographicView::back,
             OrthographicView::left, OrthographicView::right,
@@ -197,7 +197,7 @@ void draw_view_settings(App& app) {
                 active_view >= 0 ? tr(view_labels[active_view]) : tr("Free view"))) {
             for (int index = 0; index < 6; ++index) {
                 const bool selected = index == active_view;
-                if (ImGui::MenuItem(tr(view_labels[index]), view_keys[index], selected)) {
+                if (ImGui::MenuItem(tr(view_labels[index]), view_keys[index].c_str(), selected)) {
                     set_orthographic_view(app.camera, views[index]);
                     app.preview_follow_view = false;
                 }
