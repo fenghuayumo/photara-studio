@@ -175,6 +175,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.sam_max_area);
     writer.value(static_cast<std::int32_t>(settings.sam_close_kernel));
     writer.value(static_cast<std::uint8_t>(settings.sam_fill_holes));
+    writer.value(static_cast<std::uint8_t>(settings.sam_sfm_guided));
     return writer.take();
 }
 
@@ -440,6 +441,8 @@ Settings decode_settings(
         if (settings.sam_close_kernel < 1 || settings.sam_close_kernel % 2 == 0)
             settings.sam_close_kernel = 5;
     }
+    if (version >= 18)
+        settings.sam_sfm_guided = reader.value<std::uint8_t>() != 0;
     settings.sanitize();
     return settings;
 }

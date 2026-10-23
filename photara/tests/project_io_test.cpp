@@ -29,6 +29,10 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
     settings.extractor_model.clear(); settings.lightglue_model.clear();
     auto bytes = encode_settings(settings, project);
+    // Remove v18 refinement opt-in and v17 video/SAM fields first.
+    bytes.resize(bytes.size() - 2 * sizeof(std::uint8_t) -
+        sizeof(std::uint64_t) - settings.video_segments.size() -
+        5 * sizeof(float) - sizeof(std::int32_t));
     // Remove v15 alignment fields and the v16 capture-type field before
     // constructing the historical v12 fixture. Model paths above are empty.
     const auto alignment_suffix = 4 * sizeof(std::int32_t) + sizeof(double) +
@@ -275,6 +279,7 @@ int main() {
     expect(settings.iterations == 30'000 && settings.densification_cap == 3'000'000 &&
            settings.training_mode == 1 && !settings.speedy_pruning,
            "new projects default to standard 3DGS training");
+    expect(!settings.sam_sfm_guided, "SAM refinement defaults off");
     expect(!settings.sam_use_mask_for_sfm, "SAM alignment masks default off");
     settings.ai_priors = true;
     settings.ai_prior_source = 1;
@@ -341,6 +346,7 @@ int main() {
     settings.sam_masks = true;
     settings.sam_text = "glass cup";
     settings.sam_use_mask_for_sfm = true;
+    settings.sam_sfm_guided = true;
 
     Archive archive = Archive::create();
     replace_sfm_stage(archive, source, settings, ascan_path);
@@ -425,6 +431,7 @@ int main() {
         round_trip.shape_axis_ratio_reg == settings.shape_axis_ratio_reg &&
         round_trip.shape_max_axis_ratio == settings.shape_max_axis_ratio, "shape regularizer settings round trip");
     expect(round_trip.mask_mode == 1, "settings mask mode");
+    expect(round_trip.sam_sfm_guided, "SAM refinement opt-in round trip");
     expect(round_trip.sam_use_mask_for_sfm, "SAM alignment mask opt-in round trip");
     expect(round_trip.sam_masks && round_trip.sam_text == "glass cup",
            "SAM generation settings preserved with alignment opt-in");
@@ -674,11 +681,20 @@ int main() {
 
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
+        auto v17 = encode_settings(settings, ascan_path);
+        v17.resize(v17.size() - sizeof(std::uint8_t));
+        const std::uint32_t version = 17;
+        std::memcpy(v17.data(), &version, sizeof(version));
+        expect(!decode_settings(v17, ascan_path).sam_sfm_guided,
+               "Version 17 projects default SAM refinement off");
+    }
+    {
         auto legacy_bytes = encode_settings_v6(updated, ascan_path);
         // Remove texture steps, training mode/pruning, mesh quality, SAM
         // alignment opt-in, and the Focus Region byte.
         legacy_bytes.resize(legacy_bytes.size() - 4 * sizeof(std::int32_t) - 3 * sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
+        expect(!legacy.sam_sfm_guided, "Legacy projects default SAM refinement off");
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");
         expect(legacy.sam_masks && legacy.sam_text == "glass cup",

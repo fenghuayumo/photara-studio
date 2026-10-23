@@ -315,7 +315,7 @@ struct ReconstructCli {
     int sam_max_size{0};
     bool sam_refresh{false};
     bool sam_use_mask_for_sfm{false};
-    bool sam_sfm_guided{true};
+    bool sam_sfm_guided{false};
     float sam_sfm_point_fraction{0.01F};
     float sam_min_area{0.001F};
     float sam_max_area{0.65F};
@@ -1252,8 +1252,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "does not change downstream mask use or SfM-guided refinement",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sam-sfm-guided",
-         "After SfM, refine SAM instance selection with projected central sparse points",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+         "After SfM, rerun SAM with projected central sparse points (default off)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sam-sfm-point-fraction",
          "Fraction of sparse points nearest the camera-ring centre used as SAM guidance",
          cxxopts::value<float>()->default_value("0.01"))
@@ -2620,6 +2620,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.sam_negative_text = cli.sam_negative_text;
     settings.sam_keep_prompted = cli.sam_keep_prompted;
     settings.sam_video = cli.sam_video;
+    settings.sam_sfm_guided = cli.sam_sfm_guided;
     settings.sam_max_size = cli.sam_max_size;
     settings.sam_threshold = cli.sam_threshold;
     settings.sam_guided_threshold = cli.sam_guided_threshold;

@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 17;
+inline constexpr std::uint32_t k_settings_version = 18;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -94,6 +94,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     std::string sam_negative_text;
     bool sam_keep_prompted = true;
     bool sam_video = true;
+    bool sam_sfm_guided = false;
     int sam_max_size = 0;
     float sam_threshold = 0.5F;
     float sam_guided_threshold = 0.2F;

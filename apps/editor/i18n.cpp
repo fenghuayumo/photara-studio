@@ -1430,6 +1430,9 @@ constexpr Entry k_entries[] = {
      "움직이는 사람이 정적인 배경을 가릴 때 사용합니다.\n"
      "transparent: 마스크가 목표 불투명도입니다.\n"
      "유효 영역은 불투명하게 두고, 가려진 영역은 투명하게 학습합니다."},
+    {"Refine masks after alignment", "对齐后细化蒙版", "アライメント後にマスクを精緻化", "정렬 후 마스크 개선"},
+    {"Off by default. Enabling reruns SAM after alignment using the sparse point cloud, overwrites masks, and increases runtime and memory / VRAM use.", "默认关闭。开启后，对齐完成会利用稀疏点云再次运行 SAM 并覆盖蒙版，增加耗时及内存／显存占用。", "既定はオフ。オンにするとアライメント後に疎点群を使って SAM を再実行し、マスクを上書きします。処理時間とメモリ／VRAM 使用量が増加します。", "기본값은 꺼짐입니다. 활성화하면 정렬 후 희소 포인트 클라우드로 SAM을 다시 실행하고 마스크를 덮어쓰며 시간 및 메모리/VRAM 사용량이 증가합니다."},
+    {"Runs when this alignment generated new SAM masks. Existing masks reused from disk are not automatically refined.", "仅在本次对齐生成了新 SAM 蒙版时执行；复用磁盘上已有蒙版时不会自动细化。", "今回のアライメントで新しい SAM マスクを生成した場合に実行します。既存マスクの再利用時は自動で精緻化しません。", "이번 정렬에서 새 SAM 마스크를 생성한 경우 실행합니다. 기존 마스크 재사용 시 자동 개선하지 않습니다."},
     {"SAM3 masks", "SAM3 蒙版", "SAM3 マスク", "SAM3 마스크"},
     {"Generate SAM3 masks", "生成 SAM3 蒙版", "SAM3 マスクを生成", "SAM3 마스크 생성"},
     {"Alignment masks", "对齐蒙版", "アライメント用マスク", "정렬 마스크"},
@@ -1463,19 +1466,19 @@ constexpr Entry k_entries[] = {
      "インポートしたカメラを直接使用するため、アライメント用マスクは適用されません。",
      "가져온 카메라를 직접 사용하므로 정렬 마스크는 적용되지 않습니다."},
     {"SAM 3 segments a text prompt into a foreground mask before alignment.\n"
-     "Masks are used for 3DGS training and refined after alignment.\n"
+     "Masks are used for 3DGS training. Post-alignment refinement is optional.\n"
      "Using masks for alignment is optional in Camera Alignment.\n"
      "The model is Meta's and is downloaded only after you accept its licence.",
      "SAM 3 在对齐前把文字提示分成前景蒙版。\n"
-     "蒙版用于 3DGS 训练，并在对齐后精修。\n"
+     "蒙版用于 3DGS 训练，对齐后细化为可选功能。\n"
      "可在「相机对齐」中选择是否使用蒙版对齐。\n"
      "模型属于 Meta，只有在你接受其许可协议后才会下载。",
      "SAM 3 はアライメント前にテキストから前景マスクを作ります。\n"
-     "マスクは 3DGS 学習に使用し、アライメント後に精修します。\n"
+     "マスクは 3DGS 学習に使用します。アライメント後の精緻化は任意です。\n"
      "アライメントで使うかは「カメラアライメント」で選択できます。\n"
      "モデルは Meta のもので、ライセンスに同意したあとだけダウンロードします。",
      "SAM 3는 정렬 전에 텍스트 프롬프트로 전경 마스크를 만듭니다.\n"
-     "마스크는 3DGS 학습에 사용하며 정렬 후 개선됩니다.\n"
+     "마스크는 3DGS 학습에 사용하며 정렬 후 개선은 선택 사항입니다.\n"
      "「카메라 정렬」에서 정렬에 마스크를 사용할지 선택할 수 있습니다.\n"
      "모델은 Meta의 것이며, 라이선스에 동의한 뒤에만 다운로드합니다."},
     {"Prompt", "提示词", "プロンプト", "프롬프트"},

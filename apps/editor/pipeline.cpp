@@ -310,6 +310,7 @@ void append_sam_flags(
         refresh && !masks_complete_for_alignment(settings);
     command << " --sam-keep-prompted="
             << (settings.sam_keep_prompted ? "true" : "false")
+            << " --sam-sfm-guided=" << (settings.sam_sfm_guided ? "true" : "false")
             << " --sam-video=" << (settings.sam_video ? "true" : "false")
             << " --sam-max-size " << std::max(0, settings.sam_max_size)
             << " --sam-threshold " << settings.sam_threshold

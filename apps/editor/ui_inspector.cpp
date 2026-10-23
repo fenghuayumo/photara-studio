@@ -683,9 +683,15 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
                 "SAM 3 segments a text prompt into a foreground mask before alignment.\n"
-                "Masks are used for 3DGS training and refined after alignment.\n"
+                "Masks are used for 3DGS training. Post-alignment refinement is optional.\n"
                 "Using masks for alignment is optional in Camera Alignment.\n"
                 "The model is Meta's and is downloaded only after you accept its licence."));
+        ImGui::BeginDisabled(!app.settings.sam_masks || has_external_dataset(app));
+        ImGui::Checkbox(tr("Refine masks after alignment"), &app.settings.sam_sfm_guided);
+        ImGui::TextWrapped("%s", tr("Off by default. Enabling reruns SAM after alignment using the sparse point cloud, overwrites masks, and increases runtime and memory / VRAM use."));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr("Runs when this alignment generated new SAM masks. Existing masks reused from disk are not automatically refined."));
+        ImGui::EndDisabled();
         if (app.settings.sam_masks) {
             theme::caption(tr("Prompt"));
             ImGui::SetNextItemWidth(-1.F);
