@@ -259,6 +259,12 @@ sam3_result sam3_track_frame(sam3_tracker     & tracker,
                              const sam3_model & model,
                              const sam3_image & frame);
 
+/* Update a tracker using the current sam3_encode_image output. Multiple text
+ * trackers can share one image encoding; each retains its own temporal memory. */
+sam3_result sam3_track_encoded_frame(sam3_tracker & tracker,
+                                    sam3_state & state,
+                                    const sam3_model & model);
+
 /* Refine a tracked instance with interactive point prompts. */
 bool sam3_refine_instance(sam3_tracker                   & tracker,
                           sam3_state                     & state,

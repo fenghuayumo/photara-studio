@@ -916,6 +916,9 @@ struct sam3_state {
     int orig_height = 0;
     int n_threads   = 4;
 
+    // Text features depend only on this state's model and prompt, not the image.
+    std::unordered_map<std::string, std::vector<float>> text_feature_cache;
+
     int encode_img_size  = 0;  // effective img_size for encoding (0 = hp.img_size)
     int encode_feat_size = 0;  // effective feat_size for the active backbone
 
@@ -9861,7 +9864,10 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     ** ── SUB-GRAPH 1: Text Encoder ────────────────────────────────────
     */
     std::vector<float> text_feats_cpu(D * L);
-    {
+    const auto cached_text = state.text_feature_cache.find(params.text_prompt);
+    if (cached_text != state.text_feature_cache.end()) {
+        text_feats_cpu = cached_text->second;
+    } else {
         const size_t sz = ggml_tensor_overhead() * 16384 + ggml_graph_overhead() * 2;
         struct ggml_init_params gp = {sz, nullptr, true};
         ggml_context_ptr ctx_ptr(ggml_init(gp));
@@ -9900,6 +9906,9 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
         ggml_backend_tensor_get(out, text_feats_cpu.data(), 0, D * L * sizeof(float));
+        // Bound interactive sessions with frequently changing prompts.
+        if (state.text_feature_cache.size() >= 16) state.text_feature_cache.clear();
+        state.text_feature_cache.emplace(params.text_prompt, text_feats_cpu);
     }
 
     SAM3_LOG(2, "%s: text encoder done\n", __func__);
@@ -11742,6 +11751,12 @@ static void sam3_finish_tracked_frame(sam3_tracker& tracker, sam3_result& result
 
 sam3_result sam3_track_frame(sam3_tracker& tracker, sam3_state& state,
                              const sam3_model& model, const sam3_image& frame) {
+    if (!sam3_encode_image(state, model, frame)) return {};
+    return sam3_track_encoded_frame(tracker, state, model);
+}
+
+sam3_result sam3_track_encoded_frame(sam3_tracker& tracker, sam3_state& state,
+                                     const sam3_model& model) {
     if (model.hparams.visual_only) {
         fprintf(stderr, "%s: ERROR: track_frame not available on visual-only model "
                 "(use sam3_propagate_frame instead)\n", __func__);
@@ -11750,7 +11765,7 @@ sam3_result sam3_track_frame(sam3_tracker& tracker, sam3_state& state,
 
     sam3_result result;
     const int D = model.hparams.neck_dim;
-    if (!sam3_encode_image(state, model, frame)) return result;
+    if (!state.neck_det[0]) return result;
     int fi = tracker.frame_index;
     fprintf(stderr, "%s: frame %d (%zu active + %zu pending)\n",
             __func__, fi, tracker.masklets.size(), tracker.pending.size());
