@@ -185,6 +185,36 @@ void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& ca
     }
 }
 
+void add_alpha_mask_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
+    const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms) {
+    // Missing rays are not evidence of empty space; validity masks must never
+    // supervise opacity, even if transparent mode was selected for the dataset.
+    if (!options.use_mask || !target.has_mask || target.mask_is_validity ||
+        options.alpha_mode != AlphaMode::transparent || !(options.match_alpha_weight > 0.F))
+        return;
+    const std::size_t count = static_cast<std::size_t>(target.camera.width) * target.camera.height;
+    if (count == 0 || count > std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument("Invalid Vulkan transparent mask dimensions");
+    for (const auto* tensor : {&rendered.alpha, &target.mask})
+        if (!tensor->is_valid() || tensor->device() != device ||
+            tensor->dtype() != tinytensor::DataType::Float32 || !tensor->is_contiguous() ||
+            tensor->numel() != count)
+            throw std::invalid_argument("Missing or mismatched Vulkan transparent alpha/mask tensors");
+    Push push;
+    push.mode = 13;
+    push.count = static_cast<std::uint32_t>(count);
+    push.weight = options.match_alpha_weight;
+    push.camera_count = collect_scalar_terms;
+    gradients.alpha = Tensor::empty(rendered.alpha.shape(), device);
+    const auto terms = collect_scalar_terms ? Tensor::empty({count}, device) : Tensor{};
+    launch(push, {rendered.alpha, target.mask, {}, gradients.alpha, {}, terms});
+    if (collect_scalar_terms) {
+        const float value = terms.sum().to_vector()[0];
+        gradients.alpha_value += value;
+        gradients.total += value;
+    }
+}
+
 void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms) {
     if (!(options.lambda_d > 0.F || options.lambda_n > 0.F)) return;

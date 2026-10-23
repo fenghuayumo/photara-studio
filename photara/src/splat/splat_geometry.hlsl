@@ -35,7 +35,21 @@ float3 camera_to_world(float3 p) {
 void main(uint3 tid : SV_DispatchThreadID) {
     uint i = tid.x + tid.y * 65535u * 256u;
     if (i >= pc.count) return;
-    if (pc.mode == 11u || pc.mode == 12u) {
+    if (pc.mode == 13u) {
+        // Full-image BCE for transparent masks. Match CUDA/torch.clamp:
+        // saturated alpha has finite loss and zero derivative.
+        const float epsilon = 1.0e-7f;
+        float raw = input0[i], target = input1[i];
+        float p = clamp(raw, epsilon, 1.0f - epsilon);
+        float scale = pc.weight / (float)pc.count;
+        float gradient = raw > epsilon && raw < 1.0f - epsilon
+            ? scale * ((1.0f-target)*p - target*(1.0f-p)) / (p*(1.0f-p))
+            : 0.0f;
+        output0.Store(4u*i, asuint(gradient));
+        if (pc.camera_count != 0u)
+            terms.Store(4u*i, asuint(-scale *
+                (target*log(p) + (1.0f-target)*log(1.0f-p))));
+    } else if (pc.mode == 11u || pc.mode == 12u) {
         float mask = pc.euclidean != 0u ? camera_data[i] : 1.0f;
         if (!(mask > 0.0f) || isnan(mask) || isinf(mask)) return;
         float scale = pc.weight * mask / (float)pc.count;

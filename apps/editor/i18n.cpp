@@ -259,7 +259,7 @@ constexpr Entry k_entries[] = {
     {"Start at 1 stop; increase for larger exposure differences. Zero removes the bound.", "从 1 档开始；曝光差异较大时增大，0 表示不设上限。", "Start at 1 stop; increase for larger exposure differences. Zero removes the bound.", "Start at 1 stop; increase for larger exposure differences. Zero removes the bound."},
     {"Start at 2; increase for larger white-balance differences. Zero removes the bound.", "从 2 开始；白平衡差异较大时增大，0 表示不设上限。", "Start at 2; increase for larger white-balance differences. Zero removes the bound.", "Start at 2; increase for larger white-balance differences. Zero removes the bound."},
     {"Colour", "颜色校正", "カラー補正", "색상 보정"},
-    {"Mask opacity fitting requires CUDA training and Transparent mask mode.", "遮罩透明度拟合需要 CUDA 训练和透明遮罩模式。", "Mask opacity fitting requires CUDA training and Transparent mask mode.", "Mask opacity fitting requires CUDA training and Transparent mask mode."},
+    {"Mask opacity fitting requires Transparent mask mode.", "遮罩透明度拟合需要启用 transparent 透明遮罩模式。", "マスク不透明度の学習には transparent モードが必要です。", "마스크 불투명도 학습에는 transparent 모드가 필요합니다."},
     {"Image weight", "图像权重", "Image weight", "Image weight"},
     {"Overall strength of image matching.", "整体控制图像拟合强度。", "Overall strength of image matching.", "Overall strength of image matching."},
     {"Structure balance", "结构相似度占比", "Structure balance", "Structure balance"},

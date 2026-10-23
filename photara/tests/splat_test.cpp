@@ -8231,6 +8231,7 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 }
 
 #include "splat_geometry_vulkan.hpp"
+#include "splat_transparent_vulkan.hpp"
 #include "pam_vulkan_test.hpp"
 #include "splat_rings_vulkan.hpp"
 
@@ -8248,6 +8249,11 @@ int main(int argc, char** argv) {
         }
     }
     try {
+        if (argc > 1 && std::string(argv[1]) == "--transparent-vulkan-only") {
+            test_vulkan_transparent_loss();
+            test_vulkan_transparent_trainer();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--speedy-schedule-only") {
             test_speedy_conservative_schedule();
             return 0;

@@ -1554,6 +1554,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)
+            add_test(NAME photara.splat.vulkan_transparent
+                COMMAND photara_splat_test --transparent-vulkan-only)
             add_test(NAME photara.splat.vulkan_pam
                 COMMAND photara_splat_test --pam-vulkan-only)
             add_test(NAME photara.splat.vulkan_rings_preview

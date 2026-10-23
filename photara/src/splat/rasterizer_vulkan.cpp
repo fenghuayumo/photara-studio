@@ -252,10 +252,11 @@ RenderResult vulkan_raster_forward(
         result.color = tinytensor::Tensor::empty(
             {std::size_t{3}, camera.height, camera.width},
             tinytensor::Device::Vulkan);
-        if (!requested_options.copy_color_only)
-            result.alpha = tinytensor::Tensor::empty(
-                {camera.height, camera.width}, tinytensor::Device::Vulkan);
     }
+    if ((requested_options.copy_attachments && !requested_options.copy_color_only) ||
+        requested_options.copy_alpha)
+        result.alpha = tinytensor::Tensor::empty(
+            {camera.height, camera.width}, tinytensor::Device::Vulkan);
     if (settings.need_depth) {
         result.normal = tinytensor::Tensor::empty(
             {std::size_t{3}, camera.height, camera.width},

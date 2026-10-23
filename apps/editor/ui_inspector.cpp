@@ -101,8 +101,7 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) objective_field_tooltip(field);
         ImGui::TableNextColumn();
         const bool alpha_disabled = field.value == &TrainingLossSettings::match_alpha_weight &&
-            (!(settings.use_mask || settings.sam_masks) || settings.mask_mode != 1 ||
-             (settings.training_backend == 1 && studio_vulkan_training()));
+            (!(settings.use_mask || settings.sam_masks) || settings.mask_mode != 1);
         const bool normal_disabled = (field.value == &TrainingLossSettings::normal_field_weight ||
             field.value == &TrainingLossSettings::normal_field_depth_ratio) && !settings.normal_field;
         ImGui::BeginDisabled(alpha_disabled || normal_disabled);
@@ -193,9 +192,8 @@ void draw_training_objective(App& app) {
             const bool geometry = settings.geometry_training || mesh_from_gaussians(settings);
             if (tab.group == LossGroup::image)
                 objective_note("Image loss = image weight x [(1 - structure balance) x L1 + structure balance x SSIM loss].");
-            if (tab.group == LossGroup::image && settings.training_backend == 1 &&
-                studio_vulkan_training())
-                objective_note("Mask opacity fitting requires CUDA training and Transparent mask mode.");
+            if (tab.group == LossGroup::image)
+                objective_note("Mask opacity fitting requires Transparent mask mode.");
             if (tab.group == LossGroup::gaussian)
                 objective_note("Soft constraints on individual Gaussians. Start with the defaults and change one strength at a time.");
             if (tab.group == LossGroup::geometry) {
