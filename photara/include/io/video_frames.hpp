@@ -74,9 +74,9 @@ struct VideoExtractOptions {
     std::function<void(float)> progress;
 };
 
-// Low-resolution playback proxy for the editor. Writes p_000001.jpg,
-// p_000002.jpg, ... progressively into `output_dir` (existing proxy stills are
-// removed first) so the UI can start playing while ffmpeg is still running.
+// Playback stills for the editor, optionally limited to a short seek interval.
+// Writes p_NNNNNN.jpg from first_frame progressively into output_dir (existing
+// preview stills are removed first), allowing playback before decoding ends.
 struct VideoPreviewOptions {
     std::filesystem::path video;
     std::filesystem::path output_dir;
@@ -86,6 +86,12 @@ struct VideoPreviewOptions {
     int max_height = 480;
     // JPEG quality 0..100.
     int quality = 80;
+    // Optional bounded preview; seek before decoding and preserve source-time indexing.
+    double start_seconds = 0.0;
+    double duration_seconds = 0.0;
+    int first_frame = 1;
+    VideoProbe source_probe{};
+    bool keep_existing = false;
     const std::atomic<bool>* cancel = nullptr;
     std::function<void(float)> progress;
 };

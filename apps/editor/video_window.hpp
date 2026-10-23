@@ -42,6 +42,11 @@ struct VideoWindowFrame {
     double failed_until{};
 };
 
+struct VideoDecodedFrame {
+    int index{};
+    photara::io::RgbImage image;
+};
+
 struct VideoWindowState {
     bool show{};
     bool raise{};
@@ -51,6 +56,13 @@ struct VideoWindowState {
     std::filesystem::path source;
     std::filesystem::path proxy_dir;
     int preview_generation{};
+    double preview_start{};
+    double preview_length{6.0};
+    double cached_start{};
+    double cached_end{};
+    std::future<std::vector<VideoDecodedFrame>> decode_batch;
+    std::filesystem::path decode_directory;
+    std::vector<VideoDecodedFrame> decoded_frames;
 
     std::shared_ptr<VideoPreviewState> preview;
     std::future<int> preview_job;
@@ -68,7 +80,7 @@ struct VideoWindowState {
     float preview_progress{-1.F};
     std::string preview_error;
 
-    float proxy_fps{10.F};
+    float proxy_fps{30.F};
     double playhead{};
     bool playing{};
     bool dragging_timeline{};
