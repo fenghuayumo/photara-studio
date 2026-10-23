@@ -170,6 +170,9 @@ public:
     [[nodiscard]] const CaptureFrameProgress& capture_frame() const { return capture_frame_; }
     [[nodiscard]] const CaptureFrameProgress& video_frame() const { return video_frame_; }
     [[nodiscard]] const CaptureFrameProgress& mask_frame() const { return mask_frame_; }
+    [[nodiscard]] bool video_frames_ready() const { return video_frames_ready_; }
+    [[nodiscard]] bool generating_masks() const { return generating_masks_; }
+    [[nodiscard]] std::uint64_t mask_pass() const { return mask_pass_; }
     [[nodiscard]] const TrainingStats& training() const { return training_; }
     [[nodiscard]] const ArtifactFlags& artifacts() const { return artifacts_; }
     [[nodiscard]] const std::string& last_error() const { return last_error_; }
@@ -193,6 +196,9 @@ private:
     CaptureFrameProgress capture_frame_;
     CaptureFrameProgress video_frame_;
     CaptureFrameProgress mask_frame_;
+    bool video_frames_ready_{};
+    bool generating_masks_{};
+    std::uint64_t mask_pass_{};
     TrainingStats training_;
     ArtifactFlags artifacts_;
     std::string last_error_;

@@ -1238,13 +1238,20 @@ void poll_mask_editor(App& app) {
     // Finish the current decode before following a newer generated mask.
     poll_image_load(app);
     const bool aligning = app.job.running() && app.active_job == JobKind::align;
-    if (aligning && app.settings.sam_masks && !state.follow_alignment &&
-        (app.monitor.stage() == Stage::masking || app.monitor.capture_frame().kind == "mask")) {
+    if (aligning && app.settings.sam_masks && app.monitor.generating_masks() &&
+        state.alignment_pass != app.monitor.mask_pass()) {
         state.follow_alignment = true;
+        state.alignment_pass = app.monitor.mask_pass();
+        state.alignment_revision = app.monitor.mask_frame().revision;
         state.show = true;
         state.raise = true;
         refresh_image_list(app, false);
         if (!state.dirty) state.view_mode = 0;
+    }
+    if (state.follow_alignment && (!aligning || !app.monitor.generating_masks())) {
+        state.show = false;
+        state.raise = false;
+        state.follow_alignment = false;
     }
     const auto& live = app.monitor.mask_frame();
     if (state.show && state.follow_alignment && live.kind == "mask" &&
@@ -1259,7 +1266,6 @@ void poll_mask_editor(App& app) {
             state.alignment_revision = live.revision;
         }
     }
-    if (!aligning) state.follow_alignment = false;
     poll_generation(app);
     if (state.undo_requested) {
         state.undo_requested = false;

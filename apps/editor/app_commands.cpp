@@ -3728,6 +3728,7 @@ void start_align(App& app) {
         app.video_window.alignment_revision = 0;
         app.mask_editor.follow_alignment = false;
         app.mask_editor.alignment_revision = 0;
+        app.mask_editor.alignment_pass = 0;
         if (app.video_window.follow_alignment) open_video_window(app);
         // Drop the previous cloud so the next frame only shows this run.
         // The actual GPU/photo teardown waits until after present(); this

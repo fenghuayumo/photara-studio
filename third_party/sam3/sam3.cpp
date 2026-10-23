@@ -926,6 +926,9 @@ struct sam3_state {
     ggml_backend_t        backend = nullptr;
     ggml_backend_buffer_t buffer  = nullptr;
     struct ggml_gallocr*  galloc  = nullptr;
+    // Owned by ctx/galloc. Reuse the native image graph for consecutive frames.
+    struct ggml_cgraph* encode_graph = nullptr;
+    struct ggml_tensor* encode_input = nullptr;
 
     // PE buffer: holds sinusoidal PE tensors for neck outputs
     struct ggml_context*  pe_ctx  = nullptr;
@@ -3620,6 +3623,8 @@ void sam3_state_set_orig_dims(sam3_state& state, int w, int h) {
 }
 
 void sam3_free_state(sam3_state& state) {
+    state.encode_graph = nullptr;
+    state.encode_input = nullptr;
     if (state.galloc) {
         ggml_gallocr_free(state.galloc);
         state.galloc = nullptr;
@@ -4999,6 +5004,8 @@ static void edgetam_build_repvit_graph(struct ggml_context* ctx,
 static bool edgetam_encode_image(sam3_state& state,
                                   const sam3_model& model,
                                   const sam3_image& image) {
+    state.encode_graph = nullptr;
+    state.encode_input = nullptr;
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
     const int img_size = sam3_eff_img_size(state, hp);
@@ -6007,6 +6014,8 @@ static bool edgetam_perceiver_forward(
 static bool sam2_encode_image_hiera(sam3_state& state,
                                      const sam3_model& model,
                                      const sam3_image& image) {
+    state.encode_graph = nullptr;
+    state.encode_input = nullptr;
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
     const int img_size = sam3_eff_img_size(state, hp);
@@ -6186,6 +6195,24 @@ bool sam3_encode_image(sam3_state& state,
 
     auto img_data = sam3_preprocess_image(image, img_size);
 
+    if (state.encode_graph && state.encode_input && state.pe_buf &&
+        state.backend == model.backend && state.encode_input->ne[0] == img_size) {
+        ggml_backend_tensor_set(state.encode_input, img_data.data(), 0,
+                                img_data.size() * sizeof(float));
+        if (!sam3_graph_compute(model.backend, state.encode_graph, state.n_threads)) {
+            state.encode_graph = nullptr;
+            state.encode_input = nullptr;
+            return false;
+        }
+#if SAM3_LOG_LEVEL >= 1
+        SAM3_LOG(1, "%s: reused graph, image encoded in %.1f ms\n", __func__,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t_start).count());
+#endif
+        return true;
+    }
+
+
     const size_t buf_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead() * 2;
     struct ggml_init_params gparams = {
         /*.mem_size   =*/buf_size,
@@ -6269,6 +6296,8 @@ bool sam3_encode_image(sam3_state& state,
 
     state.ctx = ctx0_ptr.release();
     state.galloc = galloc.release();
+    state.encode_graph = graph;
+    state.encode_input = inp;
     state.backend = model.backend;
     state.vit_output = vit_out;
 
@@ -6371,6 +6400,8 @@ bool sam3_encode_vit_from_preprocessed_selective(sam3_state                    &
                                                  const float                   * chw_data,
                                                  int                             img_size,
                                                  const std::vector<std::string> & output_tensors) {
+    state.encode_graph = nullptr;
+    state.encode_input = nullptr;
     const auto & hp = model.hparams;
 
     if (img_size != hp.img_size) {
@@ -7132,6 +7163,8 @@ bool sam3_encode_image_from_preprocessed(sam3_state& state,
                                          const sam3_model& model,
                                          const float* chw_data,
                                          int img_size) {
+    state.encode_graph = nullptr;
+    state.encode_input = nullptr;
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
 
@@ -9783,6 +9816,14 @@ sam3_result sam3_segment_pcs(sam3_state& state,
 #if SAM3_LOG_LEVEL >= 1
     auto t_start = std::chrono::high_resolution_clock::now();
 #endif
+    const auto stage_started = std::chrono::steady_clock::now();
+    auto stage_finished = stage_started;
+    const auto log_stage = [&](const char* name) {
+        const auto now = std::chrono::steady_clock::now();
+        SAM3_LOG(1, "sam3_pcs_timing stage=%s ms=%.1f\n", name,
+            std::chrono::duration<double, std::milli>(now - stage_finished).count());
+        stage_finished = now;
+    };
     const auto& hp = model.hparams;
     const int D = hp.neck_dim;           // 256
     const int H = hp.n_img_embd();       // 72
@@ -9911,6 +9952,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         state.text_feature_cache.emplace(params.text_prompt, text_feats_cpu);
     }
 
+    log_stage("text_and_inputs");
     SAM3_LOG(2, "%s: text encoder done\n", __func__);
 
     /*
@@ -9960,6 +10002,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                                 D * N_geo * sizeof(float));
     }
 
+    log_stage("geometry");
     SAM3_LOG(2, "%s: geometry encoder done\n", __func__);
 
     // Build combined prompt on CPU: [text_feats, geo_feats] → [D * T]
@@ -10018,6 +10061,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                  fenc_output_cpu[3], fenc_output_cpu[4]);
     }
 
+    log_stage("fusion");
     SAM3_LOG(2, "%s: fusion encoder done\n", __func__);
     /*
     ** ── SUB-GRAPH 4: DETR Decoder + Scoring ──────────────────────────
@@ -10104,6 +10148,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                                 D * (NQ + 1) * sizeof(float));
     }
 
+    log_stage("detection");
     float presence_prob = 1.0f / (1.0f + expf(-presence_logit));
 
     SAM3_LOG(2, "%s: DETR decoder done\n", __func__);
@@ -10126,7 +10171,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const int n_selected = static_cast<int>(keep.size());
     SAM3_LOG(1, "%s: decoding %d/%d masks after threshold and NMS\n",
              __func__, n_selected, NQ);
-    if (keep.empty()) return result;
+    if (keep.empty()) { log_stage("selection_empty"); return result; }
 
     std::vector<float> selected_queries(static_cast<size_t>(D) * n_selected);
     for (int i = 0; i < n_selected; ++i) {
@@ -10138,6 +10183,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     /*
     ** ── SUB-GRAPH 5: Segmentation Head ───────────────────────────────
     */
+    log_stage("selection");
     const int mask_hw = H * 4;  // 288 for SAM3
     std::vector<float> all_masks(static_cast<size_t>(n_selected) * mask_hw * mask_hw);
     {
@@ -10217,6 +10263,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     /*
     ** ── Post-processing: selected mask resize ──────────────────────
     */
+    log_stage("mask_head");
     for (int i = 0; i < n_selected; ++i) {
         auto& det = dets[keep[i]];
         const float* mask_ptr = all_masks.data() + static_cast<size_t>(i) * mask_hw * mask_hw;
@@ -10232,6 +10279,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         result.detections.push_back(std::move(det));
     }
 
+    log_stage("mask_resize");
     SAM3_LOG(2, "%s: %zu detections after NMS\n", __func__, result.detections.size());
 
 #if SAM3_LOG_LEVEL >= 1
