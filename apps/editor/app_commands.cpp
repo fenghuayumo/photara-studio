@@ -1718,21 +1718,14 @@ void remove_gaussian_model(App& app, const std::size_t index) {
             theme::warning);
         return;
     }
-    if (app.splat_edit.dirty()) {
-        set_message(
-            app,
-            tr("Export Gaussian edits, then start a new project before importing another model"),
-            theme::warning);
-        return;
-    }
+    // Removal explicitly ends editing of the composed preview. Its edits
+    // cannot be assigned back to individual sources; reload the remainder.
     app.gaussian_models.erase(
         app.gaussian_models.begin() + static_cast<std::ptrdiff_t>(index));
     sync_gaussian_model_settings(app);
     refresh_artifacts(app);
     reset_gaussian_preview(app);
-    if (!app.gaussian_models.empty() || app.has_model) {
-        // With an empty list this falls back to the project's trained
-        // working copy, if one exists.
+    if (!app.gaussian_models.empty()) {
         request_gaussian_scene_load(app);
     } else {
         app.view_mode = VisualizationMode::points;
