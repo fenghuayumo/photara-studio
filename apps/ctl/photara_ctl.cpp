@@ -560,6 +560,9 @@ void print_usage() {
         "  photara-ctl project save [path] [--overwrite]\n"
         "  photara-ctl view set key=value...\n"
         "  photara-ctl export model --out PATH [--format ply|sog|spz|glb] [--sh-degree N] [--overwrite]\n"
+        "  photara-ctl export mesh --out PATH [--format ply|obj|glb] [--include-texture] [--overwrite]\n"
+        "  photara-ctl edit select_all|clear_selection|invert_selection|delete_selected|undo|redo\n"
+        "  photara-ctl quality\n"
         "  photara-ctl window open <video|mask>\n"
         "  photara-ctl events [--since ID]\n"
         "  photara-ctl watch\n\n"
@@ -809,12 +812,20 @@ int main(const int argc, char** argv) {
         }
         const json result = call("studio.view.patch", {{"patch", patch}});
         print_json(result, options.json_output);
+    } else if (command == "edit") {
+        if (options.args.size() != 2) return k_exit_usage;
+        const json result = call("studio.edit.apply", {{"action", options.args[1]}});
+        print_json(result, options.json_output);
+    } else if (command == "quality") {
+        const json result = call("studio.inspect.quality", json::object());
+        print_json(result, options.json_output);
     } else if (command == "export") {
-        if (options.args.size() < 4 || options.args[1] != "model") return k_exit_usage;
+        if (options.args.size() < 4 || (options.args[1] != "model" && options.args[1] != "mesh")) return k_exit_usage;
         json params = json::object();
         for (std::size_t i = 2; i < options.args.size(); ++i) {
             const auto& flag = options.args[i];
             if (flag == "--overwrite") params["overwrite"] = true;
+            else if (flag == "--include-texture") params["include_texture"] = true;
             else if ((flag == "--out" || flag == "--format" || flag == "--sh-degree") &&
                      i + 1 < options.args.size()) {
                 const std::string name = flag == "--out" ? "path" : flag == "--format" ? "format" : "sh_degree";
@@ -822,7 +833,7 @@ int main(const int argc, char** argv) {
                 params[name] = flag == "--sh-degree" ? parse_value(value) : json(value);
             } else return k_exit_usage;
         }
-        const json result = call("studio.export.model", params);
+        const json result = call(options.args[1] == "mesh" ? "studio.export.mesh" : "studio.export.model", params);
         print_json(result, options.json_output);
     } else if (command == "project") {
         if (options.args.size() < 2) {

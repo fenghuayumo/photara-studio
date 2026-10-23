@@ -2652,6 +2652,47 @@ void open_mesh_export_panel(App& app) {
     app.mesh_export.show = true;
 }
 
+bool export_mesh_to_path(App& app, const std::filesystem::path& out) {
+    if (app.job.running() || !can_export_mesh_file(app)) return false;
+    const auto format = mesh_export_format(app);
+    const bool with_texture = mesh_export_wants_texture(app);
+    try {
+        if (with_texture && format == MeshExportFormat::obj) {
+            std::filesystem::path stem = out;
+            stem.replace_extension();
+            export_textured_obj_files(app, stem);
+            set_message(
+                app, "Exported mesh (OBJ + MTL + albedo PNG)", theme::success);
+            return true;
+        }
+        if (with_texture && format == MeshExportFormat::glb) {
+            export_textured_glb(app, out);
+            set_message(app, "Exported mesh (GLB with albedo)", theme::success);
+            return true;
+        }
+        if (format == MeshExportFormat::ply) {
+            const auto source = existing_mesh_path(app);
+            if (copy_existing_file(source, out)) {
+                set_message(app, "Exported mesh", theme::success);
+                return true;
+            }
+            photara::mvs::save_mesh_ply(load_geometry_mesh(app), out);
+            set_message(app, "Exported mesh", theme::success);
+            return true;
+        }
+        if (format == MeshExportFormat::obj) {
+            photara::mvs::save_mesh_obj(load_geometry_mesh(app), out);
+            set_message(app, "Exported mesh", theme::success);
+            return true;
+        }
+        photara::io::save_mesh_glb(load_geometry_mesh(app), out);
+        set_message(app, "Exported mesh", theme::success);
+        return true;
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+        return false;
+    }
+}
 void export_mesh_file(App& app) {
     if (app.job.running() || !can_export_mesh_file(app)) return;
     const auto format = mesh_export_format(app);
@@ -2669,41 +2710,9 @@ void export_mesh_file(App& app) {
         out += ".";
         out += std::filesystem::path(extension);
     }
-    try {
-        if (with_texture && format == MeshExportFormat::obj) {
-            std::filesystem::path stem = out;
-            stem.replace_extension();
-            export_textured_obj_files(app, stem);
-            set_message(
-                app, "Exported mesh (OBJ + MTL + albedo PNG)", theme::success);
-            return;
-        }
-        if (with_texture && format == MeshExportFormat::glb) {
-            export_textured_glb(app, out);
-            set_message(app, "Exported mesh (GLB with albedo)", theme::success);
-            return;
-        }
-        if (format == MeshExportFormat::ply) {
-            const auto source = existing_mesh_path(app);
-            if (copy_existing_file(source, out)) {
-                set_message(app, "Exported mesh", theme::success);
-                return;
-            }
-            photara::mvs::save_mesh_ply(load_geometry_mesh(app), out);
-            set_message(app, "Exported mesh", theme::success);
-            return;
-        }
-        if (format == MeshExportFormat::obj) {
-            photara::mvs::save_mesh_obj(load_geometry_mesh(app), out);
-            set_message(app, "Exported mesh", theme::success);
-            return;
-        }
-        photara::io::save_mesh_glb(load_geometry_mesh(app), out);
-        set_message(app, "Exported mesh", theme::success);
-    } catch (const std::exception& failure) {
-        set_message(app, failure.what(), theme::danger);
-    }
+    export_mesh_to_path(app, out);
 }
+
 std::array<float, 16> mesh_world_to_clip(
     const SplatPreviewCamera& camera, const float near_z, const float far_z) {
     const float* m = camera.world_to_camera.data();

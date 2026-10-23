@@ -101,6 +101,7 @@ void ControlBus::resolve(Pending& pending, json value) {
 
 bool ControlBus::should_defer(const Pending& pending) {
     if (pending.method == "studio.job.start") return true;
+    if (pending.method == "studio.edit.apply" || pending.method == "studio.export.mesh") return true;
     if (pending.method == "studio.project.save" || pending.method == "studio.export.model") return true;
     if (pending.method == "studio.project.open" ||
         pending.method == "studio.project.set_source")

@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <fstream>
 #include <stdexcept>
 #include <thread>
 
@@ -80,6 +81,50 @@ int main() {
         require(app.camera.yaw == yaw, "failed camera patch partially applied");
         const auto view = call("studio.view.patch", {{"patch", {{"target", {1, 2, 3}}, {"yaw", 1.0}, {"projection", "orthographic"}, {"ortho_height", 7}}}});
         require(ok(view) && app.camera.target.z == 3 && app.camera.ortho_height == 7, "camera patch failed");
+
+        auto quality = call("studio.inspect.quality");
+        require(quality["checks"][0]["status"] == "unknown", "missing alignment passed quality gate");
+        app.scene.total_views = 10; app.scene.registered_views = 9; app.scene.mean_reprojection = 1.F;
+        require(call("studio.inspect.quality")["checks"][0]["status"] == "passed", "good alignment failed quality gate");
+        app.scene.registered_views = 2;
+        require(call("studio.inspect.quality")["checks"][0]["status"] == "failed", "bad alignment passed quality gate");
+        require(!ok(call("studio.inspect.quality", {{"min_registered_ratio", 2}})), "invalid threshold accepted");
+        require(!ok(call("studio.edit.apply", {{"action", "undo"}})), "unloaded edit accepted");
+        {
+            editor::SplatEdit selection;
+            const float means[]{0, 0, 0, 1, 0, 0};
+            const float scales[]{-1, -1, -1, -1, -1, -1};
+            const float quats[]{1, 0, 0, 0, 1, 0, 0, 0};
+            const float opacity[]{1, 1};
+            editor::SplatEdit::Host host;
+            host.means = means;
+            host.log_scales = scales;
+            host.quaternions = quats;
+            host.opacity_logits = opacity;
+            host.count = 2;
+            selection.sync("selection-test", host);
+            selection.select_all();
+            require(selection.selected_count() == 2 && selection.can_undo(), "select all failed");
+            selection.undo_edit(app);
+            require(selection.selected_count() == 0 && selection.can_redo(), "selection undo failed");
+            selection.redo_edit(app);
+            require(selection.selected_count() == 2, "selection redo failed");
+        }
+        const auto mesh_source = folder / "triangle.ply";
+        {
+            std::ofstream out(mesh_source);
+            out << "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n"
+                   "element face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        }
+        app.imported_mesh_source = mesh_source;
+        app.has_mesh = true;
+        for (const auto& format : {"ply", "obj", "glb"}) {
+            const auto destination = folder / (std::string("export.") + format);
+            require(ok(call("studio.export.mesh", {{"path", editor::path_to_utf8(destination)}, {"format", format}})), "mesh export failed");
+            require(std::filesystem::file_size(destination) > 0, "mesh export is empty");
+        }
+        app.imported_mesh_source.clear();
+        app.has_mesh = false;
 
         // Run save/export against a small in-memory cloud without a GPU or model download.
         app.composed_model = std::make_shared<photara::splat::GaussianModel>(fixture());

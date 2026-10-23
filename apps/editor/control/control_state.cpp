@@ -1244,6 +1244,8 @@ json snapshot_state(const App& app, const ControlBus& bus) {
         {"selection", {
             {"gaussians", gaussian_count},
             {"selected", selected_count},
+            {"can_undo", app.splat_edit.can_undo()},
+            {"can_redo", app.splat_edit.can_redo()},
         }},
         {"settings", settings},
         {"message", {

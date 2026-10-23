@@ -476,6 +476,7 @@ void open_mesh_export_panel(App& app);
 void open_alignment_export_panel(App& app);
 void open_splat_export_panel(App& app);
 void export_mesh_file(App& app);
+bool export_mesh_to_path(App& app, const std::filesystem::path& path);
 void export_alignment(App& app);
 void export_trained_model(App& app);
 bool export_trained_model_to_path(App& app, const std::filesystem::path& path);

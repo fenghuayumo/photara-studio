@@ -59,6 +59,9 @@ public:
         App& app, const photara::splat::GaussianModel& model,
         bool record_undo = true);
     void undo_edit(App& app);
+    void redo_edit(App& app);
+    [[nodiscard]] bool can_undo() const noexcept { return !undo_.empty(); }
+    [[nodiscard]] bool can_redo() const noexcept { return !redo_.empty(); }
     // Rings view selects by the covariance ellipse until the user picks a mode.
     void note_view(bool rings_view, float ring_scale = 2.828427F);
     [[nodiscard]] Tool tool() const noexcept { return tool_; }
