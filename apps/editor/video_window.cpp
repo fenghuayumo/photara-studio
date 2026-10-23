@@ -440,7 +440,7 @@ void draw_preview_canvas(App& app, float height) {
         draw->AddText(
             {image_min.x + 8.F, image_max.y - 22.F},
             theme::u32(theme::text_bright), label);
-    } else if (!window.preview_done && window.preview_error.empty()) {
+    } else if (!window.follow_alignment && !window.preview_done && window.preview_error.empty()) {
         draw->AddText(
             {image_min.x + 8.F, image_max.y - 22.F},
             theme::u32(theme::warning), tr("Buffering preview frames..."));
@@ -449,7 +449,7 @@ void draw_preview_canvas(App& app, float height) {
     ImGui::InvisibleButton(
         "##video_canvas_click", area_size,
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+    if (!window.follow_alignment && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
         window.playing = !window.playing;
         window.last_tick = ImGui::GetTime();
     }
@@ -833,6 +833,35 @@ void open_video_window(App& app) {
 
 void poll_video_window(App& app) {
     harvest_retired_previews(app);
+    auto& window = app.video_window;
+    const bool aligning = app.job.running() && app.active_job == JobKind::align;
+    if (window.follow_alignment) {
+        cancel_preview_job(app);
+        harvest_frame(window.frame);
+        const auto& live = app.monitor.video_frame();
+        if (window.show && live.kind == "video" && live.revision != window.alignment_revision &&
+            !window.frame.pending.valid()) {
+            const auto path = path_from_utf8_field(live.image.c_str());
+            std::error_code error;
+            if (std::filesystem::is_regular_file(path, error)) {
+                window.frame.pending_index = static_cast<int>(live.revision);
+                window.frame.pending_path = path;
+                window.frame.pending = std::async(std::launch::async, [path] {
+                    const auto size = photara::io::load_image_size(path);
+                    return photara::io::load_rgb_with_minimum_size(path, size.width, size.height);
+                });
+                window.alignment_revision = live.revision;
+            }
+        }
+        window.preview_done = false;
+        window.preview_frames = 0;
+        window.preview_progress = -1.F;
+        window.playing = false;
+        if (!aligning) {
+            window.follow_alignment = false;
+            window.source.clear();
+        }
+    }
     poll_preview_job(app);
     poll_extract_job(app);
 }
@@ -844,7 +873,7 @@ void draw_video_window(App& app) {
     const auto source =
         path_from_utf8_field(app.settings.images_dir.data());
     if (photara::io::is_video_path(source) && source != window.source &&
-        !window.extracting)
+        !window.extracting && !window.follow_alignment)
         start_preview_job(app, source);
 
     if (window.raise) {
@@ -876,6 +905,17 @@ void draw_video_window(App& app) {
     }
 
     draw_source_header(app, source);
+    if (window.follow_alignment) {
+        const auto& live = app.monitor.video_frame();
+        ImGui::TextUnformatted(tr(app.monitor.stage() == Stage::preparing
+            ? "Alignment is extracting frames automatically." : "Frame extraction complete."));
+        {
+            ImGui::Text("%llu / %llu", static_cast<unsigned long long>(live.completed),
+                static_cast<unsigned long long>(live.total));
+            theme::progress_track({-1.F, 6.F}, live.total > 0
+                ? static_cast<float>(live.completed) / live.total : -1.F, theme::accent);
+        }
+    }
     ImGui::Spacing();
     if (!window.segments_error.empty())
         ImGui::TextColored(
@@ -885,8 +925,10 @@ void draw_video_window(App& app) {
     const float canvas_height =
         std::clamp(available_height - 328.F, 190.F, 520.F);
     draw_preview_canvas(app, canvas_height);
-    draw_timeline(app);
-    draw_transport(app);
+    if (!window.follow_alignment) {
+        draw_timeline(app);
+        draw_transport(app);
+    }
     ImGui::Separator();
 
     const float list_height =
@@ -894,6 +936,7 @@ void draw_video_window(App& app) {
     ImGui::BeginChild(
         "##vw_options", {0.F, list_height}, ImGuiChildFlags_None,
         ImGuiWindowFlags_None);
+    ImGui::BeginDisabled(app.job.running());
     if (ImGui::BeginTabBar("##vw_tabs")) {
         if (ImGui::BeginTabItem(tr("Segments"))) {
             draw_segments(app);
@@ -905,6 +948,7 @@ void draw_video_window(App& app) {
         }
         ImGui::EndTabBar();
     }
+    ImGui::EndDisabled();
     ImGui::EndChild();
 
     ImGui::End();

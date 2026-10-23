@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -668,6 +669,12 @@ GenerateResult generate_masks(const GenerateOptions& options) {
             gray, options.output_dir / (image_path.stem().string() + ".png"));
         ++result.written;
         ++completed;
+        const auto image_u8 = image_path.generic_u8string();
+        const std::string image_utf8(
+            reinterpret_cast<const char*>(image_u8.data()), image_u8.size());
+        core::Logger::instance().info(
+            "capture_frame kind=mask ready=1 completed=", completed,
+            " total=", options.images.size(), " image=", std::quoted(image_utf8));
         progress.advance();
         if (options.progress)
             options.progress(completed, options.images.size());

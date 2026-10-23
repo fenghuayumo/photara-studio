@@ -884,7 +884,7 @@ void draw_canvas(App& app) {
     const float source_radius =
         std::max(1.F, state.brush_radius / std::max(0.0001F, scale));
 
-    if (state.manual_editing && over_image && !double_click && !state.generating &&
+    if (state.manual_editing && !app.job.running() && over_image && !double_click && !state.generating &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         push_undo(state);
         state.painting = true;
@@ -908,7 +908,7 @@ void draw_canvas(App& app) {
         state.texture_dirty = true;
     }
 
-    if (state.stroke_active || (state.manual_editing && over_image && !state.generating)) {
+    if (state.stroke_active || (state.manual_editing && !app.job.running() && over_image && !state.generating)) {
         const ImVec4 colour = state.brush_mode == 0 ? theme::success : theme::danger;
         if (state.stroke_active)
             draw->AddCircleFilled(
@@ -951,19 +951,19 @@ void draw_toolbar(App& app) {
     if (ImGui::Button(tr("Refresh")))
         refresh_image_list(app, true);
     ImGui::SameLine();
-    ImGui::BeginDisabled(!state.loaded || state.undo.empty() || state.generating);
+    ImGui::BeginDisabled(!state.loaded || state.undo.empty() || state.generating || app.job.running());
     if (ImGui::Button(tr("Undo")))
         app.mask_editor.undo_requested = true;
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!state.loaded || state.redo.empty() || state.generating);
+    ImGui::BeginDisabled(!state.loaded || state.redo.empty() || state.generating || app.job.running());
     if (ImGui::Button(tr("Redo")))
         app.mask_editor.redo_requested = true;
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (theme::primary_button(
             tr("Save Mask"), {120.F, 0.F},
-            state.loaded && (state.has_mask || state.dirty) && !state.generating))
+            state.loaded && (state.has_mask || state.dirty) && !state.generating && !app.job.running()))
         save_current_mask(app);
     if (state.dirty) {
         ImGui::SameLine();
@@ -1235,7 +1235,31 @@ void open_mask_editor(App& app) {
 
 void poll_mask_editor(App& app) {
     auto& state = app.mask_editor;
+    // Finish the current decode before following a newer generated mask.
     poll_image_load(app);
+    const bool aligning = app.job.running() && app.active_job == JobKind::align;
+    if (aligning && app.settings.sam_masks && !state.follow_alignment &&
+        (app.monitor.stage() == Stage::masking || app.monitor.capture_frame().kind == "mask")) {
+        state.follow_alignment = true;
+        state.show = true;
+        state.raise = true;
+        refresh_image_list(app, false);
+        if (!state.dirty) state.view_mode = 0;
+    }
+    const auto& live = app.monitor.mask_frame();
+    if (state.show && state.follow_alignment && live.kind == "mask" &&
+        live.revision != state.alignment_revision && !state.dirty && !state.generating &&
+        !state.pending_load.valid()) {
+        refresh_image_list(app, false);
+        const auto path = path_from_utf8_field(live.image.c_str()).lexically_normal();
+        const auto found = std::find_if(state.images.begin(), state.images.end(),
+            [&](const auto& image) { return image.lexically_normal() == path; });
+        if (found != state.images.end()) {
+            apply_select(app, static_cast<int>(found - state.images.begin()));
+            state.alignment_revision = live.revision;
+        }
+    }
+    if (!aligning) state.follow_alignment = false;
     poll_generation(app);
     if (state.undo_requested) {
         state.undo_requested = false;
@@ -1282,7 +1306,7 @@ void draw_mask_editor(App& app) {
         return;
     }
 
-    if (ImGui::GetIO().WantTextInput == false &&
+    if (!app.job.running() && ImGui::GetIO().WantTextInput == false &&
         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
         const ImGuiIO& io = ImGui::GetIO();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
@@ -1299,6 +1323,19 @@ void draw_mask_editor(App& app) {
     if (state.texture_dirty && state.loaded) rebuild_overlay(state);
     draw_toolbar(app);
     draw_view_controls(state);
+    if (app.job.running() && app.active_job == JobKind::align &&
+        state.follow_alignment && app.monitor.stage() == Stage::masking) {
+        const auto& live = app.monitor.mask_frame();
+        {
+            const auto completed = live.kind == "mask" ? live.completed : app.monitor.task().completed;
+            const auto total = live.kind == "mask" ? live.total : app.monitor.task().total;
+            ImGui::Text("%s %llu / %llu", tr("Generating masks"),
+                static_cast<unsigned long long>(completed),
+                static_cast<unsigned long long>(total));
+            theme::progress_track({-1.F, 6.F}, total > 0
+                ? static_cast<float>(completed) / total : -1.F, theme::accent);
+        }
+    }
     ImGui::Separator();
 
     const float list_height = 132.F;
@@ -1316,7 +1353,9 @@ void draw_mask_editor(App& app) {
     ImGui::SameLine();
     ImGui::BeginChild(
         "##mask_tools", {0.F, 0.F}, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::BeginDisabled(app.job.running());
     draw_tools(app);
+    ImGui::EndDisabled();
     ImGui::EndChild();
     ImGui::EndChild();
 

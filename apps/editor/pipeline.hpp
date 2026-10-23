@@ -63,6 +63,13 @@ struct SubTask {
     bool active{};
 };
 
+struct CaptureFrameProgress {
+    std::string kind;
+    std::string image;
+    std::uint64_t completed{}, total{}, revision{};
+    bool ready{};
+};
+
 struct TrainingStats {
     unsigned iteration{};
     unsigned total_iterations{};
@@ -160,6 +167,9 @@ public:
     [[nodiscard]] JobKind kind() const { return kind_; }
     [[nodiscard]] Stage stage() const { return stage_; }
     [[nodiscard]] const SubTask& task() const { return task_; }
+    [[nodiscard]] const CaptureFrameProgress& capture_frame() const { return capture_frame_; }
+    [[nodiscard]] const CaptureFrameProgress& video_frame() const { return video_frame_; }
+    [[nodiscard]] const CaptureFrameProgress& mask_frame() const { return mask_frame_; }
     [[nodiscard]] const TrainingStats& training() const { return training_; }
     [[nodiscard]] const ArtifactFlags& artifacts() const { return artifacts_; }
     [[nodiscard]] const std::string& last_error() const { return last_error_; }
@@ -180,6 +190,9 @@ private:
     JobKind kind_{JobKind::none};
     Stage stage_{Stage::idle};
     SubTask task_;
+    CaptureFrameProgress capture_frame_;
+    CaptureFrameProgress video_frame_;
+    CaptureFrameProgress mask_frame_;
     TrainingStats training_;
     ArtifactFlags artifacts_;
     std::string last_error_;

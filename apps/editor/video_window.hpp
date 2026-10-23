@@ -8,6 +8,7 @@
 #include "imgui.h"
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -45,6 +46,8 @@ struct VideoWindowState {
     bool show{};
     bool raise{};
     bool initialized{};
+    bool follow_alignment{};
+    std::uint64_t alignment_revision{};
     std::filesystem::path source;
     std::filesystem::path proxy_dir;
     int preview_generation{};
