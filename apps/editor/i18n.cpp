@@ -1467,19 +1467,19 @@ constexpr Entry k_entries[] = {
      "가져온 카메라를 직접 사용하므로 정렬 마스크는 적용되지 않습니다."},
     {"SAM 3 segments a text prompt into a foreground mask before alignment.\n"
      "Masks are used for 3DGS training. Post-alignment refinement is optional.\n"
-     "Using masks for alignment is optional in Camera Alignment.\n"
+     "Use the option below to enable masks for alignment.\n"
      "The model is Meta's and is downloaded only after you accept its licence.",
      "SAM 3 在对齐前把文字提示分成前景蒙版。\n"
      "蒙版用于 3DGS 训练，对齐后细化为可选功能。\n"
-     "可在「相机对齐」中选择是否使用蒙版对齐。\n"
+     "可通过下方选项选择是否使用蒙版对齐。\n"
      "模型属于 Meta，只有在你接受其许可协议后才会下载。",
      "SAM 3 はアライメント前にテキストから前景マスクを作ります。\n"
      "マスクは 3DGS 学習に使用します。アライメント後の精緻化は任意です。\n"
-     "アライメントで使うかは「カメラアライメント」で選択できます。\n"
+     "下の項目でアライメントにマスクを使うか選択できます。\n"
      "モデルは Meta のもので、ライセンスに同意したあとだけダウンロードします。",
      "SAM 3는 정렬 전에 텍스트 프롬프트로 전경 마스크를 만듭니다.\n"
      "마스크는 3DGS 학습에 사용하며 정렬 후 개선은 선택 사항입니다.\n"
-     "「카메라 정렬」에서 정렬에 마스크를 사용할지 선택할 수 있습니다.\n"
+     "아래 옵션에서 정렬에 마스크를 사용할지 선택할 수 있습니다.\n"
      "모델은 Meta의 것이며, 라이선스에 동의한 뒤에만 다운로드합니다."},
     {"Prompt", "提示词", "プロンプト", "프롬프트"},
     {"Several phrases, separated by semicolons.",

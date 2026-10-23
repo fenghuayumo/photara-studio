@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -413,6 +414,61 @@ io::RgbImage fit_long_side(io::RgbImage image, const int max_side) {
         fitted.pixels.data(), fitted.width, fitted.height);
     return fitted;
 }
+using MaskClock = std::chrono::steady_clock;
+
+double elapsed_ms(const MaskClock::time_point begin, const MaskClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+struct PreparedMaskFrame {
+    io::ImageSize file_size;
+    io::RgbImage rgb;
+    double prepare_ms{};
+};
+
+PreparedMaskFrame prepare_mask_frame(
+    const std::filesystem::path& image_path, const std::atomic<bool>* cancel) {
+    const auto started = MaskClock::now();
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        throw std::runtime_error("cancelled");
+    // JPEG reads used by the rest of the pipeline may be reduced. The
+    // mask has to match the file's stored pixel size.
+    const io::ImageSize file_size = io::load_image_size(image_path);
+    const std::uint32_t file_long_side =
+        std::max(file_size.width, file_size.height);
+    // Decode at sufficient resolution for the checkpoint's native input.
+    // In particular, do not select libjpeg's 1/2 DCT path for 1920-wide
+    // inputs: its small speed gain measurably moves mask boundaries.
+    constexpr std::uint32_t jpeg_decode_side = 1008U;
+    const std::uint32_t decode_width = file_long_side <= jpeg_decode_side
+        ? file_size.width
+        : std::max(
+              1U, static_cast<std::uint32_t>(
+                      (static_cast<std::uint64_t>(file_size.width) *
+                           jpeg_decode_side + file_long_side - 1U) /
+                      file_long_side));
+    const std::uint32_t decode_height = file_long_side <= jpeg_decode_side
+        ? file_size.height
+        : std::max(
+              1U, static_cast<std::uint32_t>(
+                      (static_cast<std::uint64_t>(file_size.height) *
+                           jpeg_decode_side + file_long_side - 1U) /
+                      file_long_side));
+    io::RgbImage rgb = fit_long_side(
+        io::load_rgb_with_minimum_size(
+            image_path, decode_width, decode_height),
+        1008);
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        throw std::runtime_error("cancelled");
+    return {file_size, std::move(rgb), elapsed_ms(started, MaskClock::now())};
+}
+
+struct SavedMaskFrame {
+    std::filesystem::path image_path;
+    double prepare_ms{}, read_wait_ms{}, encode_ms{}, segment_ms{};
+    double save_ms{}, save_wait_ms{}, total_ms{};
+};
+
 #endif
 
 }  // namespace
@@ -520,40 +576,53 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         options.images.size());
     GenerateResult result;
     std::size_t completed = 0;
-    for (const auto& image_path : options.images) {
-        const auto frame_started = std::chrono::steady_clock::now();
-        if (options.cancel &&
-            options.cancel->load(std::memory_order_relaxed))
+    std::future<SavedMaskFrame> pending_save;
+    const std::string backend_name = sam3_model_backend_name(*model);
+    // Completion and callbacks stay on the inference thread and only count
+    // PNGs whose background save has succeeded.
+    const auto finish_save = [&](const bool wait) {
+        if (!pending_save.valid()) return;
+        if (!wait && pending_save.wait_for(std::chrono::seconds(0)) !=
+                         std::future_status::ready) return;
+        const SavedMaskFrame saved = pending_save.get();
+        ++result.written;
+        ++completed;
+        const auto image_u8 = saved.image_path.generic_u8string();
+        const std::string image_utf8(
+            reinterpret_cast<const char*>(image_u8.data()), image_u8.size());
+        core::Logger::instance().info(
+            "capture_frame kind=mask ready=1 completed=", completed,
+            " total=", options.images.size(), " image=", std::quoted(image_utf8));
+        core::Logger::instance().info(
+            "sam_frame_timing backend=", backend_name,
+            " prepare_ms=", saved.prepare_ms, " read_wait_ms=", saved.read_wait_ms,
+            " encode_ms=", saved.encode_ms, " segment_ms=", saved.segment_ms,
+            " save_ms=", saved.save_ms, " save_wait_ms=", saved.save_wait_ms,
+            " total_ms=", saved.total_ms);
+        progress.advance();
+        if (options.progress) options.progress(completed, options.images.size());
+    };
+    const auto preload = [&](const std::size_t index) {
+        return std::async(std::launch::async,
+            [path = options.images[index], cancel = options.cancel] {
+                return prepare_mask_frame(path, cancel);
+            });
+    };
+    auto next_frame = preload(0);
+    for (std::size_t index = 0; index < options.images.size(); ++index) {
+        const auto& image_path = options.images[index];
+        const auto frame_started = MaskClock::now();
+        if (options.cancel && options.cancel->load(std::memory_order_relaxed))
             throw std::runtime_error("cancelled");
-        // JPEG reads used by the rest of the pipeline may be reduced. The
-        // mask has to match the file's stored pixel size.
-        const io::ImageSize file_size = io::load_image_size(image_path);
-        const std::uint32_t file_long_side =
-            std::max(file_size.width, file_size.height);
-        // Decode at sufficient resolution for the checkpoint's native input.
-        // In particular, do not select libjpeg's 1/2 DCT path for 1920-wide
-        // inputs: its small speed gain measurably moves mask boundaries.
-        constexpr std::uint32_t jpeg_decode_side = 1008U;
-        const std::uint32_t decode_width = file_long_side <= jpeg_decode_side
-            ? file_size.width
-            : std::max(
-                  1U, static_cast<std::uint32_t>(
-                          (static_cast<std::uint64_t>(file_size.width) *
-                               jpeg_decode_side +
-                           file_long_side - 1U) /
-                          file_long_side));
-        const std::uint32_t decode_height = file_long_side <= jpeg_decode_side
-            ? file_size.height
-            : std::max(
-                  1U, static_cast<std::uint32_t>(
-                          (static_cast<std::uint64_t>(file_size.height) *
-                               jpeg_decode_side +
-                           file_long_side - 1U) /
-                          file_long_side));
-        io::RgbImage rgb = fit_long_side(
-            io::load_rgb_with_minimum_size(
-                image_path, decode_width, decode_height),
-            1008);
+        finish_save(false);
+        const auto read_started = MaskClock::now();
+        auto prepared = next_frame.get();
+        const double read_wait_ms = elapsed_ms(read_started, MaskClock::now());
+        if (options.cancel && options.cancel->load(std::memory_order_relaxed))
+            throw std::runtime_error("cancelled");
+        if (index + 1 < options.images.size()) next_frame = preload(index + 1);
+        const auto file_size = prepared.file_size;
+        auto rgb = std::move(prepared.rgb);
         const int width = static_cast<int>(rgb.width);
         const int height = static_cast<int>(rgb.height);
         sam3_image frame = image_from_rgb(std::move(rgb));
@@ -649,52 +718,53 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                 " threshold=", options.threshold);
         }
 
-        const int output_width = static_cast<int>(file_size.width);
-        const auto inference_finished = std::chrono::steady_clock::now();
-        const int output_height = static_cast<int>(file_size.height);
-        io::GrayImage gray;
-        gray.width = file_size.width;
-        gray.height = file_size.height;
-        gray.pixels.resize(
-            static_cast<std::size_t>(output_width) * output_height);
-        for (int y = 0; y < output_height; ++y) {
-            const int source_y = y * height / output_height;
-            const auto* row =
-                selected.data() + static_cast<std::size_t>(source_y) * width;
-            auto* destination = gray.pixels.data() +
-                static_cast<std::size_t>(y) * output_width;
-            for (int x = 0; x < output_width; ++x) {
-                const bool hit = row[x * width / output_width] != 0;
-                destination[x] = options.keep_prompted
-                    ? static_cast<std::uint8_t>(hit ? 255 : 0)
-                    : static_cast<std::uint8_t>(hit ? 0 : 255);
-            }
-        }
-        io::save_gray_png(
-            gray, options.output_dir / (image_path.stem().string() + ".png"));
-        ++result.written;
-        ++completed;
-        const auto image_u8 = image_path.generic_u8string();
-        const std::string image_utf8(
-            reinterpret_cast<const char*>(image_u8.data()), image_u8.size());
-        core::Logger::instance().info(
-            "capture_frame kind=mask ready=1 completed=", completed,
-            " total=", options.images.size(), " image=", std::quoted(image_utf8));
-        const auto saved = std::chrono::steady_clock::now();
-        const auto milliseconds = [](const auto begin, const auto end) {
-            return std::chrono::duration<double, std::milli>(end - begin).count();
-        };
-        core::Logger::instance().info(
-            "sam_frame_timing backend=", sam3_model_backend_name(*model),
-            " prepare_ms=", milliseconds(frame_started, image_prepared),
-            " encode_ms=", milliseconds(image_prepared, image_encoded),
-            " segment_ms=", milliseconds(image_encoded, inference_finished),
-            " save_ms=", milliseconds(inference_finished, saved),
-            " total_ms=", milliseconds(frame_started, saved));
-        progress.advance();
-        if (options.progress)
-            options.progress(completed, options.images.size());
+        const auto inference_finished = MaskClock::now();
+        // Backpressure: one writer only. If storage is slower than inference,
+        // wait here rather than accumulating full-resolution masks in RAM.
+        const auto save_wait_started = MaskClock::now();
+        finish_save(true);
+        const double save_wait_ms = elapsed_ms(save_wait_started, MaskClock::now());
+        pending_save = std::async(std::launch::async,
+            [selected = std::move(selected), width, height, file_size, image_path,
+             output_dir = options.output_dir, keep_prompted = options.keep_prompted,
+             cancel = options.cancel, frame_started, image_prepared, image_encoded,
+             inference_finished, prepare_ms = prepared.prepare_ms, read_wait_ms,
+             save_wait_ms] {
+                const auto save_started = MaskClock::now();
+                if (cancel && cancel->load(std::memory_order_relaxed))
+                    throw std::runtime_error("cancelled");
+                const int output_width = static_cast<int>(file_size.width);
+                const int output_height = static_cast<int>(file_size.height);
+                io::GrayImage gray;
+                gray.width = file_size.width;
+                gray.height = file_size.height;
+                gray.pixels.resize(static_cast<std::size_t>(output_width) * output_height);
+                for (int y = 0; y < output_height; ++y) {
+                    const int source_y = y * height / output_height;
+                    const auto* row = selected.data() + static_cast<std::size_t>(source_y) * width;
+                    auto* destination = gray.pixels.data() + static_cast<std::size_t>(y) * output_width;
+                    for (int x = 0; x < output_width; ++x) {
+                        const bool hit = row[x * width / output_width] != 0;
+                        destination[x] = keep_prompted
+                            ? static_cast<std::uint8_t>(hit ? 255 : 0)
+                            : static_cast<std::uint8_t>(hit ? 0 : 255);
+                    }
+                }
+                if (cancel && cancel->load(std::memory_order_relaxed))
+                    throw std::runtime_error("cancelled");
+                io::save_gray_png(gray, output_dir / (image_path.stem().string() + ".png"));
+                const auto saved = MaskClock::now();
+                return SavedMaskFrame{image_path, prepare_ms, read_wait_ms,
+                    elapsed_ms(image_prepared, image_encoded),
+                    elapsed_ms(image_encoded, inference_finished),
+                    elapsed_ms(save_started, saved), save_wait_ms,
+                    elapsed_ms(frame_started, saved)};
+            });
     }
+    // No downstream stage may start or close the progress preview before the
+    // last PNG is fully written; get() also propagates background I/O errors.
+    finish_save(true);
+
     core::Logger::instance().info(
         "sam_masks=", result.written, " dir=", options.output_dir,
         " model=", model_path, " keep_prompted=", options.keep_prompted,
