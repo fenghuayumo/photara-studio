@@ -194,40 +194,22 @@ void build_dock_space(App& app) {
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
     // Direct keyboard shortcuts do not inherit ImGui's disabled widget state.
+    shortcuts::suspended = app.show_preferences;
     if (app.pending_train_prepare.valid()) return action;
     const bool busy = app.job.running();
     const ImGuiIO& io = ImGui::GetIO();
-    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_N) && !busy) {
-        new_project(app);
+    if (!io.WantTextInput && !shortcuts::suspended) {
+        if (shortcuts::pressed("new_project") && !busy) new_project(app);
+        if (shortcuts::pressed("open_images") && !busy) select_image_folder(app);
+        if (shortcuts::pressed("open_project") && !busy) select_project_folder(app);
+        if (shortcuts::pressed("save") && (!busy || app.active_job == JobKind::train)) save_project(app);
+        if (shortcuts::pressed("save_as") && !busy) save_project_as(app);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
+            action = io.KeyShift ? Action::stop : app.job.paused() ? Action::resume : Action::pause;
+        if (shortcuts::pressed("workspace_2d")) set_viewport_workspace(app, ViewportWorkspace::image_2d);
+        if (shortcuts::pressed("workspace_3d")) set_viewport_workspace(app, ViewportWorkspace::scene_3d);
+        if (shortcuts::pressed("preferences")) open_preferences(app, -1);
     }
-    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_O) && !busy) {
-        select_image_folder(app);
-    }
-    if (!io.WantTextInput && io.KeyCtrl && io.KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_O) && !busy) {
-        select_project_folder(app);
-    }
-    if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) &&
-        (!busy || (app.active_job == JobKind::train && !io.KeyShift))) {
-        if (io.KeyShift) save_project_as(app);
-        else save_project(app);
-    }
-    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy) {
-        if (io.KeyShift) action = Action::stop;
-        else
-            action = app.job.paused() ? Action::resume : Action::pause;
-    }
-    if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
-        ImGui::IsKeyPressed(ImGuiKey_2))
-        set_viewport_workspace(app, ViewportWorkspace::image_2d);
-    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift && !io.KeyAlt &&
-        ImGui::IsKeyPressed(ImGuiKey_Comma))
-        open_preferences(app, -1);
-    if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
-        ImGui::IsKeyPressed(ImGuiKey_3))
-        set_viewport_workspace(app, ViewportWorkspace::scene_3d);
 
     if (!ImGui::BeginMainMenuBar()) return action;
     if (ImGui::BeginMenu(tr("Workspace"))) {
@@ -236,10 +218,10 @@ Action draw_menu_bar(App& app) {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu(tr("File"))) {
-        if (ImGui::MenuItem(tr("New Project"), "Ctrl+N", false, !busy)) {
+        if (ImGui::MenuItem(tr("New Project"), shortcuts::text("new_project"), false, !busy)) {
             new_project(app);
         }
-        if (ImGui::MenuItem(tr("Select Image Folder..."), "Ctrl+O", false, !busy)) {
+        if (ImGui::MenuItem(tr("Select Image Folder..."), shortcuts::text("open_images"), false, !busy)) {
             select_image_folder(app);
         }
         if (busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -249,13 +231,13 @@ Action draw_menu_bar(App& app) {
         }
         if (busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(k_busy_change_capture_tooltip));
-        if (ImGui::MenuItem(tr("Open Project..."), "Ctrl+Shift+O", false, !busy)) {
+        if (ImGui::MenuItem(tr("Open Project..."), shortcuts::text("open_project"), false, !busy)) {
             select_project_folder(app);
         }
-        if (ImGui::MenuItem(tr("Save Project"), "Ctrl+S", false, !app.saving_training && (!busy || app.active_job == JobKind::train))) {
+        if (ImGui::MenuItem(tr("Save Project"), shortcuts::text("save"), false, !app.saving_training && (!busy || app.active_job == JobKind::train))) {
             save_project(app);
         }
-        if (ImGui::MenuItem(tr("Save Project As..."), "Ctrl+Shift+S", false, !busy)) {
+        if (ImGui::MenuItem(tr("Save Project As..."), shortcuts::text("save_as"), false, !busy)) {
             save_project_as(app);
         }
         ImGui::Separator();
@@ -276,7 +258,7 @@ Action draw_menu_bar(App& app) {
                 app.layout.root.has_filename()))
             action = Action::reveal;
         ImGui::Separator();
-        if (ImGui::MenuItem(tr("Preferences..."), "Ctrl+,"))
+        if (ImGui::MenuItem(tr("Preferences..."), shortcuts::text("preferences")))
             open_preferences(app, -1);
         if (ImGui::MenuItem(tr("Exit"), "Alt+F4")) app.close_requested = true;
         ImGui::EndMenu();
@@ -286,11 +268,11 @@ Action draw_menu_bar(App& app) {
             app.splat_edit.bound_to(app.splat_renderer->source_key()) &&
             app.splat_edit.gaussian_count() > 0;
         const bool any_selected = splats && app.splat_edit.selected_count() > 0;
-        if (ImGui::MenuItem(tr("Select All"), "Ctrl+A", false, splats))
+        if (ImGui::MenuItem(tr("Select All"), shortcuts::text("select_all"), false, splats))
             app.splat_edit.select_all();
-        if (ImGui::MenuItem(tr("Deselect All"), "Ctrl+Shift+A", false, any_selected))
+        if (ImGui::MenuItem(tr("Deselect All"), shortcuts::text("clear"), false, any_selected))
             app.splat_edit.clear_selection();
-        if (ImGui::MenuItem(tr("Invert Selection"), "Ctrl+I", false, splats))
+        if (ImGui::MenuItem(tr("Invert Selection"), shortcuts::text("invert"), false, splats))
             app.splat_edit.invert_selection();
         ImGui::Separator();
         if (ImGui::MenuItem(tr("Delete Selected"), "Delete", false, any_selected))

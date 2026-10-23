@@ -1210,7 +1210,15 @@ void load_editor_preferences(App& app) {
         if (equals == std::string::npos) continue;
         const std::string key = line.substr(0, equals);
         const std::string value = line.substr(equals + 1);
-        if (key == "training_autosave_seconds") {
+        if (key.starts_with("shortcut.")) {
+            if (auto* entry = shortcuts::find(key.substr(9))) {
+                int encoded{};
+                const auto parsed = std::from_chars(value.data(), value.data() + value.size(), encoded);
+                const shortcuts::Binding binding{static_cast<ImGuiKey>(encoded / 16), encoded % 16};
+                if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                    shortcuts::valid(binding)) entry->binding = binding;
+            }
+        } else if (key == "training_autosave_seconds") {
             int seconds{};
             const auto result = std::from_chars(value.data(), value.data() + value.size(), seconds);
             if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && seconds >= 0 && seconds <= 86400)
@@ -1258,6 +1266,9 @@ void store_editor_preferences(const App& app) {
            << "alignment=" << alignment << '\n'
            << "sam=" << sam << '\n'
            << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n';
+    for (const auto& entry : shortcuts::entries)
+        output << "shortcut." << entry.id << '='
+               << (static_cast<int>(entry.binding.key) * 16 + entry.binding.modifiers) << '\n';
 }
 
 void store_editor_cache_dir(const App& app) {

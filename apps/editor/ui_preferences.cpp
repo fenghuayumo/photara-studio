@@ -24,6 +24,75 @@ void preference_heading(const char* text) {
     ImGui::PopStyleColor();
 }
 
+void draw_shortcuts_page(App& app) {
+    static int editing = -1;
+    static std::string error;
+    preference_heading("Keyboard shortcuts");
+    ImGui::TextWrapped("%s", tr("Click a binding, then press the desired key combination. Esc cancels. Changes are saved automatically."));
+    if (ImGui::Button(tr("Restore defaults"))) {
+        for (auto& entry : shortcuts::entries) entry.binding = entry.defaults;
+        store_editor_preferences(app);
+    }
+    if (ImGui::BeginTable("##shortcuts", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        for (int i = 0; i < static_cast<int>(shortcuts::entries.size()); ++i) {
+            auto& entry = shortcuts::entries[i];
+            ImGui::PushID(entry.id);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(tr(entry.group));
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(tr(entry.label));
+            ImGui::TableNextColumn();
+            if (ImGui::Button(shortcuts::label(entry.binding).c_str(), {-1.F, 0.F})) {
+                editing = i; error.clear(); ImGui::OpenPopup("Change shortcut");
+            }
+            if (ImGui::BeginPopupModal("Change shortcut", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted(tr(entry.label));
+                ImGui::TextUnformatted(tr("Press a key combination (Esc to cancel)."));
+                if (editing == i && !ImGui::IsWindowAppearing()) {
+                    for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_MouseLeft; ++key) {
+                        if ((key >= ImGuiKey_LeftCtrl && key <= ImGuiKey_RightSuper) || key == ImGuiKey_Menu) continue;
+                        if (!ImGui::IsKeyPressed(static_cast<ImGuiKey>(key), false)) continue;
+                        if (key == ImGuiKey_Escape) { editing = -1; ImGui::CloseCurrentPopup(); break; }
+                        const shortcuts::Binding candidate{static_cast<ImGuiKey>(key), shortcuts::modifiers()};
+                        error.clear();
+                        for (const auto& other : shortcuts::entries) {
+                            if (&other != &entry && other.binding.key == candidate.key &&
+                                other.binding.modifiers == candidate.modifiers) {
+                                error = std::string(tr("Already assigned: ")) + tr(other.label); break;
+                            }
+                        }
+                        if (!shortcuts::valid(candidate))
+                            error = tr("Reserved for contextual tools.");
+                        if (error.empty()) {
+                            entry.binding = candidate; store_editor_preferences(app);
+                            editing = -1; ImGui::CloseCurrentPopup();
+                        }
+                        break;
+                    }
+                }
+                if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
+                if (ImGui::Button(tr("Unbind"))) {
+                    entry.binding = {ImGuiKey_None, 0}; store_editor_preferences(app);
+                    editing = -1; ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(tr("Cancel"))) { editing = -1; ImGui::CloseCurrentPopup(); }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Separator();
+    preference_heading("Contextual controls (fixed)");
+    ImGui::TextWrapped("%s", tr("3D: LMB orbit, MMB pan, RMB + WASD/QE fly, Shift accelerates, wheel zooms, F frames, double-click focuses. Selection tools: RMB orbits."));
+    ImGui::TextWrapped("%s", tr("Selection: Shift adds, Alt removes, Ctrl intersects. Polygon: Enter finishes, Backspace removes a vertex. Esc cancels or steps back."));
+    ImGui::TextWrapped("%s", tr("Brush: [ / ] or Alt+wheel changes size. Depth: Ctrl+wheel moves range; Ctrl+Shift+wheel changes thickness."));
+    ImGui::TextWrapped("%s", tr("Box / sphere: G moves, T rotates box, S scales; [ / ] or Alt+wheel resizes. Enter replaces, Shift+Enter adds, Alt+Enter removes, Ctrl+Enter intersects."));
+    ImGui::TextWrapped("%s", tr("Keypad: 1 front, Ctrl+1 back, 3 right, Ctrl+3 left, 7 top, Ctrl+7 bottom, 5 toggles orthographic."));
+    ImGui::TextWrapped("%s", tr("Images / masks: Left / Right changes image. Image QA: F or double-click fits. Masks: Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo."));
+    ImGui::TextWrapped("%s", tr("Task: Esc pauses / resumes, Shift+Esc stops. Console: Ctrl+F searches, Up / Down selects, Ctrl+C copies."));
+}
+
 void preferences_footer() {
     ImGui::Dummy({0.F, 8.F});
     theme::caption(
@@ -320,7 +389,7 @@ void draw_language_page() {
 
 void open_preferences(App& app, const int page) {
     app.show_preferences = true;
-    if (page >= 0 && page <= 2) app.preferences_page = page;
+    if (page >= 0 && page <= 3) app.preferences_page = page;
     app.preferences_raise = true;
 }
 
@@ -427,7 +496,7 @@ void draw_cache_folder_link(App& app) {
 
 void draw_preferences_window(App& app) {
     if (!app.show_preferences) return;
-    if (app.preferences_page < 0 || app.preferences_page > 2)
+    if (app.preferences_page < 0 || app.preferences_page > 3)
         app.preferences_page = 0;
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -467,6 +536,8 @@ void draw_preferences_window(App& app) {
         app.preferences_page = 1;
     if (preference_nav("Storage", app.preferences_page == 2))
         app.preferences_page = 2;
+    if (preference_nav("Keyboard shortcuts", app.preferences_page == 3))
+        app.preferences_page = 3;
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
@@ -480,6 +551,7 @@ void draw_preferences_window(App& app) {
         ImGuiChildFlags_AlwaysUseWindowPadding);
     if (app.preferences_page == 1) draw_language_page();
     else if (app.preferences_page == 2) draw_storage_page(app);
+    else if (app.preferences_page == 3) draw_shortcuts_page(app);
     else draw_compute_page(app);
     ImGui::EndChild();
     ImGui::PopStyleVar(2);

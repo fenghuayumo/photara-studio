@@ -1581,7 +1581,7 @@ void draw_splat_render_tab(
 bool handle_view_camera_shortcuts(App& app, const bool viewport_hot) {
     const ImGuiIO& io = ImGui::GetIO();
     if (!viewport_hot || app.workspace != ViewportWorkspace::scene_3d ||
-        io.WantTextInput || (io.KeyShift && !io.KeyAlt) || io.KeySuper ||
+        io.WantTextInput || shortcuts::suspended || io.KeySuper ||
         ImGui::IsAnyItemActive() ||
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
         app.splat_edit.gesture_active() || app.camera.interacting ||
@@ -1590,41 +1590,37 @@ bool handle_view_camera_shortcuts(App& app, const bool viewport_hot) {
         ImGui::IsMouseDown(ImGuiMouseButton_Middle))
         return false;
 
-    if (io.KeyAlt) {
-        if (io.KeyCtrl) return false;
-        if (ImGui::IsKeyPressed(ImGuiKey_4, false))
-            set_orthographic_view(app.camera, io.KeyShift ? OrthographicView::back
-                                                        : OrthographicView::front);
-        else if (ImGui::IsKeyPressed(ImGuiKey_5, false))
-            set_orthographic_view(app.camera, io.KeyShift ? OrthographicView::left
-                                                        : OrthographicView::right);
-        else if (ImGui::IsKeyPressed(ImGuiKey_6, false))
-            set_orthographic_view(app.camera, io.KeyShift ? OrthographicView::bottom
-                                                        : OrthographicView::top);
-        else if (io.KeyShift)
-            return false;
-        else if (ImGui::IsKeyPressed(ImGuiKey_0, false))
-            set_editor_projection(app.camera,
-                app.camera.projection == EditorProjection::orthographic
-                    ? EditorProjection::perspective : EditorProjection::orthographic);
-        else if (ImGui::IsKeyPressed(ImGuiKey_1, false))
-            set_editor_projection(app.camera, EditorProjection::perspective);
-        else if (ImGui::IsKeyPressed(ImGuiKey_2, false))
-            set_editor_projection(app.camera, EditorProjection::fisheye);
-        else if (ImGui::IsKeyPressed(ImGuiKey_3, false))
-            set_editor_projection(app.camera, EditorProjection::panorama);
-        else
-            return false;
-    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
+    if (shortcuts::pressed("perspective"))
+        set_editor_projection(app.camera, EditorProjection::perspective);
+    else if (shortcuts::pressed("fisheye"))
+        set_editor_projection(app.camera, EditorProjection::fisheye);
+    else if (shortcuts::pressed("panorama"))
+        set_editor_projection(app.camera, EditorProjection::panorama);
+    else if (shortcuts::pressed("front"))
+        set_orthographic_view(app.camera, OrthographicView::front);
+    else if (shortcuts::pressed("back"))
+        set_orthographic_view(app.camera, OrthographicView::back);
+    else if (shortcuts::pressed("right"))
+        set_orthographic_view(app.camera, OrthographicView::right);
+    else if (shortcuts::pressed("left"))
+        set_orthographic_view(app.camera, OrthographicView::left);
+    else if (shortcuts::pressed("top"))
+        set_orthographic_view(app.camera, OrthographicView::top);
+    else if (shortcuts::pressed("bottom"))
+        set_orthographic_view(app.camera, OrthographicView::bottom);
+    else if (shortcuts::pressed("projection"))
+        set_editor_projection(app.camera, app.camera.projection == EditorProjection::orthographic
+            ? EditorProjection::perspective : EditorProjection::orthographic);
+    else if (!io.KeyAlt && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
         set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::back
                                                    : OrthographicView::front);
-    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
+    } else if (!io.KeyAlt && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
         set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::left
                                                    : OrthographicView::right);
-    } else if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
+    } else if (!io.KeyAlt && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
         set_orthographic_view(app.camera, io.KeyCtrl ? OrthographicView::bottom
                                                    : OrthographicView::top);
-    } else if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Keypad5, false)) {
+    } else if (!io.KeyAlt && !io.KeyShift && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Keypad5, false)) {
         set_editor_projection(app.camera,
             app.camera.projection == EditorProjection::orthographic
                 ? EditorProjection::perspective : EditorProjection::orthographic);

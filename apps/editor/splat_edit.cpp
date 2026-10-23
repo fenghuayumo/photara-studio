@@ -745,15 +745,15 @@ bool SplatEdit::handle_depth_shortcuts(
     const splat_render::Camera& camera, const bool pointer_in_view) {
     const ImGuiIO& io = ImGui::GetIO();
     if (!pointer_in_view || !synced_ || !tools_open_ || volume_tool() ||
-        gesture_active() || io.WantTextInput || !io.KeyCtrl || io.KeyAlt || io.KeySuper ||
+        gesture_active() || io.WantTextInput || shortcuts::suspended || io.KeySuper ||
         ImGui::IsAnyItemActive() || ImGui::IsPopupOpen(nullptr,
             ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
         ImGui::IsMouseDown(0) || ImGui::IsMouseDown(1) || ImGui::IsMouseDown(2)) return false;
-    if (!io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+    if (shortcuts::pressed("fit_depth")) {
         if (fit_selection_depth_range(camera, true)) depth_readout_until_ = ImGui::GetTime() + 2.;
         return false;
     }
-    if (io.MouseWheel == 0.F) return false;
+    if (!io.KeyCtrl || io.KeyAlt || io.MouseWheel == 0.F) return false;
     if (!depth_range_enabled_ && !fit_selection_depth_range(camera, selected_count_ > 0)) return false;
     const double near_depth = selection_depth_near_, far_depth = selection_depth_far_;
     const double centre = (near_depth + far_depth) * .5;
@@ -1661,7 +1661,7 @@ void SplatEdit::finish_gesture(
 
 void SplatEdit::handle_keys(App& app) {
     const ImGuiIO& io = ImGui::GetIO();
-    if (io.WantTextInput) return;
+    if (io.WantTextInput || shortcuts::suspended) return;
     const bool mouse_busy = ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
                             ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
                             ImGui::IsMouseDown(ImGuiMouseButton_Middle);
@@ -1690,34 +1690,16 @@ void SplatEdit::handle_keys(App& app) {
         return;
     }
 
-    if (io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Z, true)) {
-        if (io.KeyShift) redo(app);
-        else undo(app);
-        return;
+    if (shortcuts::pressed("undo", true)) { undo(app); return; }
+    if (shortcuts::pressed("redo", true) || shortcuts::pressed("redo_alt", true)) { redo(app); return; }
+    if (!mouse_busy) {
+        if (shortcuts::pressed("select_all")) { select_all(); return; }
+        if (shortcuts::pressed("clear")) { clear_selection(); return; }
+        if (shortcuts::pressed("invert")) { invert_selection(); return; }
+        if (!stroking_ && shortcuts::pressed("delete_selection")) {
+            polygon_.clear(); delete_selected(app); return;
+        }
     }
-    if (io.KeyCtrl && !io.KeyShift && !io.KeyAlt &&
-        ImGui::IsKeyPressed(ImGuiKey_Y, true)) {
-        redo(app);
-        return;
-    }
-    if (io.KeyCtrl && !io.KeyAlt && !mouse_busy &&
-        ImGui::IsKeyPressed(ImGuiKey_A, false)) {
-        if (io.KeyShift) clear_selection();
-        else select_all();
-        return;
-    }
-    if (io.KeyCtrl && !io.KeyAlt && !io.KeyShift && !mouse_busy &&
-        ImGui::IsKeyPressed(ImGuiKey_I, false)) {
-        invert_selection();
-        return;
-    }
-    if (!io.KeyCtrl && !io.KeyAlt && !io.KeyShift && !mouse_busy && !stroking_ &&
-        ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-        polygon_.clear();
-        delete_selected(app);
-        return;
-    }
-
     if (tool_ == Tool::brush && !io.KeyCtrl && !io.KeyAlt && !io.KeyShift) {
         if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true))
             brush_radius_ = std::max(4.F, brush_radius_ - 4.F);
@@ -1757,15 +1739,15 @@ void SplatEdit::handle_keys(App& app) {
         }
     }
 
-    if (mouse_busy || stroking_ || io.KeyCtrl || io.KeyAlt || io.KeyShift) return;
-    if (ImGui::IsKeyPressed(ImGuiKey_R, false)) toggle_tool(app, Tool::pick);
-    else if (ImGui::IsKeyPressed(ImGuiKey_C, false)) toggle_tool(app, Tool::circle);
-    else if (ImGui::IsKeyPressed(ImGuiKey_P, false)) toggle_tool(app, Tool::polygon);
-    else if (ImGui::IsKeyPressed(ImGuiKey_L, false)) toggle_tool(app, Tool::lasso);
-    else if (ImGui::IsKeyPressed(ImGuiKey_B, false)) toggle_tool(app, Tool::brush);
-    else if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) toggle_tool(app, Tool::box);
-    else if (ImGui::IsKeyPressed(ImGuiKey_U, false)) toggle_tool(app, Tool::sphere);
-    else if (ImGui::IsKeyPressed(ImGuiKey_N, false)) front_only_ = !front_only_;
+    if (mouse_busy || stroking_) return;
+    if (shortcuts::pressed("pick")) toggle_tool(app, Tool::pick);
+    else if (shortcuts::pressed("circle")) toggle_tool(app, Tool::circle);
+    else if (shortcuts::pressed("polygon")) toggle_tool(app, Tool::polygon);
+    else if (shortcuts::pressed("lasso")) toggle_tool(app, Tool::lasso);
+    else if (shortcuts::pressed("brush")) toggle_tool(app, Tool::brush);
+    else if (shortcuts::pressed("box")) toggle_tool(app, Tool::box);
+    else if (shortcuts::pressed("sphere")) toggle_tool(app, Tool::sphere);
+    else if (shortcuts::pressed("front_only")) front_only_ = !front_only_;
 }
 
 bool SplatEdit::consume_alt_wheel(const bool pointer_in_view) {
@@ -1870,38 +1852,38 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
     };
     // 0 undo, 1 redo, 2 navigate, 3+ selection tool, 20 front depth, 21 all depths.
     const Item items[] = {
-        {icons::Icon::undo, "##splat_undo", "Undo", "Undo the last selection.", "Ctrl+Z", 0, false},
-        {icons::Icon::redo, "##splat_redo", "Redo", "Redo the last selection.", "Ctrl+Shift+Z", 1, false},
+        {icons::Icon::undo, "##splat_undo", "Undo", "Undo the last selection.", shortcuts::text("undo"), 0, false},
+        {icons::Icon::redo, "##splat_redo", "Redo", "Redo the last selection.", shortcuts::text("redo"), 1, false},
         {icons::Icon::select, "##splat_orbit", "Navigate",
          "Left button orbits. A click does not select until a selection tool is on.",
          "Esc", 2, true},
         {icons::Icon::marquee, "##splat_pick", "Pick",
          "Click one Gaussian, or drag a rectangle. Shift adds and Alt removes.",
-         "R", 3, true},
+         shortcuts::text("pick"), 3, true},
         {icons::Icon::circle_select, "##splat_circle", "Circle select",
          "Drag out a circle. A click without dragging leaves the selection unchanged.",
-         "C", 4, false},
+         shortcuts::text("circle"), 4, false},
         {icons::Icon::polygon_select, "##splat_poly", "Polygon select",
          "Click to add corners. Close on the first point or press Enter. Backspace removes the last corner.",
-         "P", 5, false},
+         shortcuts::text("polygon"), 5, false},
         {icons::Icon::lasso, "##splat_lasso", "Lasso select",
          "Hold the left button to draw a freehand loop. Release to select. Shift adds, Alt removes, Esc cancels.",
-         "L", 9, false},
+         shortcuts::text("lasso"), 9, false},
         {icons::Icon::brush, "##splat_brush", "Brush select",
          "Paint over Gaussians. [ ] or Alt+wheel changes the brush size.",
-         "B", 6, false},
+         shortcuts::text("brush"), 6, false},
         {icons::Icon::box_select, "##splat_box", "Box select",
          "Place a box in the scene. Drag the coloured squares, or Alt+wheel, to resize it.",
-         "Y", 7, false},
+         shortcuts::text("box"), 7, false},
         {icons::Icon::sphere_select, "##splat_sphere", "Sphere select",
          "Place a sphere in the scene. Drag the coloured squares, or Alt+wheel, to resize it.",
-         "U", 8, false},
+         shortcuts::text("sphere"), 8, false},
         {icons::Icon::depth_front, "##splat_front", "Front surface",
          "The next gesture keeps only the nearest Gaussian in each small screen cell.",
-         "N", 20, true},
+         shortcuts::text("front_only"), 20, true},
         {icons::Icon::depth_through, "##splat_through", "All depths",
          "The next gesture selects every layer it covers, including Gaussians hidden behind the front one.",
-         "N", 21, false},
+         shortcuts::text("front_only"), 21, false},
         {icons::Icon::sliders, "##splat_depth_range", "Selection depth range",
          "Limit screen selection to a near and far depth. Click to adjust.",
          nullptr, 24, false},
@@ -2019,7 +2001,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         ImGui::Separator();
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 280.F);
         ImGui::TextWrapped("%s", tr("Filter Gaussian centres by depth in the current camera, in scene units. Panorama uses camera distance. This changes selection only."));
-        ImGui::TextWrapped("%s", tr("Ctrl+D: fit selection | Ctrl+wheel: move range | Ctrl+Shift+wheel: change thickness"));
+        ImGui::TextWrapped("%s", (shortcuts::label("fit_depth") + ": " + tr("Fit depth to selection") + " | Ctrl+wheel: move range | Ctrl+Shift+wheel: change thickness").c_str());
         ImGui::BeginDisabled(gesture_active() || volume_tool());
         bool enabled = depth_range_enabled_;
         if (ImGui::Checkbox(tr("Limit selection depth"), &enabled)) {
