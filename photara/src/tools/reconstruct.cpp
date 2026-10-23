@@ -323,6 +323,7 @@ struct ReconstructCli {
     float sam_guided_threshold{0.2F};
     float sam_nms{0.1F};
     int sam_close_kernel{5};
+    bool sam_fill_holes{true};
     bool sam_generated_this_run{false};
     bool texture{false};
     bool delight{false};
@@ -350,6 +351,7 @@ struct ReconstructCli {
     std::filesystem::path video_frames_dir;
     std::filesystem::path video_source;
     std::filesystem::path ffmpeg{"ffmpeg"};
+    std::vector<photara::io::VideoSegment> video_segments;
     bool video_redo{false};
 };
 
@@ -653,6 +655,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("video-rotate", "Clockwise rotation in degrees (0/90/180/270)",
          cxxopts::value<int>()->default_value("0"))
         ("video-frames-dir", "Directory for extracted stills",
+         cxxopts::value<std::string>()->default_value(""))
+        ("video-segments",
+         "Capture ranges in source seconds, start:end;start:end ('-' = to the "
+         "end). Empty keeps the whole video; ranges are merged into one sequence",
          cxxopts::value<std::string>()->default_value(""))
         ("ffmpeg", "ffmpeg executable used to decode video",
          cxxopts::value<std::string>()->default_value("ffmpeg"))
@@ -1264,6 +1270,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.1"))
         ("sam-close-kernel", "Odd binary closing kernel used on guided SAM masks",
          cxxopts::value<int>()->default_value("5"))
+        ("sam-fill-holes", "Fill interior holes in guided SAM masks",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("texture",
          "UV unwrap + projective texture bake. Implies --mesh unless "
          "--working-mesh is set without --dense/--splat",
@@ -1325,6 +1333,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["video-frames-dir"].as<std::string>();
     if (!video_frames_text.empty())
         cli.video_frames_dir = utf8_to_path(video_frames_text);
+    const std::string segments_text =
+        result["video-segments"].as<std::string>();
+    std::string segments_error;
+    if (!photara::io::parse_video_segments(
+            segments_text, cli.video_segments, &segments_error))
+        throw std::invalid_argument(
+            "--video-segments: " + segments_error);
     cli.ffmpeg = utf8_to_path(result["ffmpeg"].as<std::string>());
     if (cli.ffmpeg.empty()) cli.ffmpeg = "ffmpeg";
     cli.video_redo = result["video-redo"].as<bool>();
@@ -1845,6 +1860,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.sam_guided_threshold = result["sam-guided-threshold"].as<float>();
     cli.sam_nms = result["sam-nms"].as<float>();
     cli.sam_close_kernel = result["sam-close-kernel"].as<int>();
+    cli.sam_fill_holes = result["sam-fill-holes"].as<bool>();
     if (cli.sam_max_size < 0)
         throw std::invalid_argument("--sam-max-size must be non-negative");
     if (!(cli.sam_sfm_point_fraction > 0.F &&
@@ -2387,6 +2403,7 @@ photara::io::VideoExtractOptions video_extract_options(
     options.quality = cli.video_quality;
     options.scale = cli.video_scale;
     options.rotate = cli.video_rotate;
+    options.segments = cli.video_segments;
     options.resume = !cli.video_redo;
     return options;
 }
@@ -2514,6 +2531,7 @@ void ensure_sam_masks(
         : cli.sam_threshold;
     options.nms = cli.sam_nms;
     options.close_kernel = cli.sam_close_kernel;
+    options.fill_holes = cli.sam_fill_holes;
     if (options.images.size() < 1)
         throw std::runtime_error(
             "SAM mask generation needs images in " + cli.images_dir.string());
@@ -2576,6 +2594,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.video_quality = cli.video_quality;
     settings.video_scale = cli.video_scale;
     settings.video_rotate = cli.video_rotate;
+    settings.video_segments =
+        photara::io::serialize_video_segments(cli.video_segments);
     settings.camera_model = static_cast<int>(cli.camera_model);
     if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
@@ -2601,6 +2621,13 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.sam_keep_prompted = cli.sam_keep_prompted;
     settings.sam_video = cli.sam_video;
     settings.sam_max_size = cli.sam_max_size;
+    settings.sam_threshold = cli.sam_threshold;
+    settings.sam_guided_threshold = cli.sam_guided_threshold;
+    settings.sam_nms = cli.sam_nms;
+    settings.sam_min_area = cli.sam_min_area;
+    settings.sam_max_area = cli.sam_max_area;
+    settings.sam_close_kernel = cli.sam_close_kernel;
+    settings.sam_fill_holes = cli.sam_fill_holes;
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
     settings.mesh_postprocess_quality = cli.mesh_postprocess_quality == "fast" ? 0 :

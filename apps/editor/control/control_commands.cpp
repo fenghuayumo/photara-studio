@@ -354,6 +354,21 @@ json execute_command(
             {"message", app.message},
         });
     }
+    if (method == "studio.window.open") {
+        std::string name;
+        const json required = require_string(params, "window", name);
+        if (!ok(required)) return required;
+        if (name == "video") {
+            open_video_window(app);
+        } else if (name == "mask") {
+            open_mask_editor(app);
+        } else {
+            return failure(
+                "INVALID_ARGUMENT",
+                "window must be \"video\" or \"mask\"");
+        }
+        return success({{"window", name}, {"visible", true}});
+    }
     if (method == "studio.project.set_source") {
         if (app.job.running() || app.loading_scene)
             return failure("BUSY", "Cannot change the source while a job is running");

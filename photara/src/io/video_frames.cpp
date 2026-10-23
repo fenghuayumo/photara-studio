@@ -13,8 +13,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -35,6 +38,148 @@ extern char** environ;
 #endif
 
 namespace photara::io {
+
+bool operator==(const VideoSegment& a, const VideoSegment& b) {
+    return a.start_seconds == b.start_seconds && a.end_seconds == b.end_seconds;
+}
+
+bool operator<(const VideoSegment& a, const VideoSegment& b) {
+    return a.start_seconds < b.start_seconds;
+}
+
+std::vector<VideoSegment> normalize_video_segments(
+    const std::vector<VideoSegment>& segments, const double duration_seconds) {
+    std::vector<VideoSegment> ranges;
+    ranges.reserve(segments.size());
+    for (const VideoSegment& segment : segments) {
+        if (!std::isfinite(segment.start_seconds) ||
+            !std::isfinite(segment.end_seconds))
+            continue;
+        VideoSegment range = segment;
+        range.start_seconds = std::max(0.0, range.start_seconds);
+        if (duration_seconds > 0.0) {
+            if (range.start_seconds >= duration_seconds) continue;
+            if (range.end_seconds > duration_seconds ||
+                range.end_seconds <= range.start_seconds)
+                range.end_seconds = duration_seconds;
+        }
+        // end <= start is the open-ended convention. Keep it until the sort
+        // so an open range always ends up last after merging.
+        if (range.end_seconds > range.start_seconds + 1.0e-6)
+            range.end_seconds = std::min(
+                range.end_seconds,
+                duration_seconds > 0.0 ? duration_seconds
+                                       : std::numeric_limits<double>::infinity());
+        ranges.push_back(range);
+    }
+    std::stable_sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
+        const double a_end = a.end_seconds > a.start_seconds
+            ? a.end_seconds : std::numeric_limits<double>::infinity();
+        const double b_end = b.end_seconds > b.start_seconds
+            ? b.end_seconds : std::numeric_limits<double>::infinity();
+        if (a.start_seconds != b.start_seconds)
+            return a.start_seconds < b.start_seconds;
+        return a_end < b_end;
+    });
+    std::vector<VideoSegment> merged;
+    for (const VideoSegment& range : ranges) {
+        if (merged.empty()) {
+            merged.push_back(range);
+            continue;
+        }
+        VideoSegment& previous = merged.back();
+        const bool previous_open =
+            previous.end_seconds <= previous.start_seconds;
+        const bool next_open = range.end_seconds <= range.start_seconds;
+        const double previous_end = previous_open
+            ? std::numeric_limits<double>::infinity()
+            : previous.end_seconds;
+        if (range.start_seconds <= previous_end + 1.0e-6) {
+            if (previous_open || next_open) {
+                previous.end_seconds = 0.0;  // Open end.
+            } else {
+                previous.end_seconds = std::max(
+                    previous.end_seconds, range.end_seconds);
+            }
+        } else {
+            merged.push_back(range);
+        }
+    }
+    return merged;
+}
+
+std::string serialize_video_segments(const std::vector<VideoSegment>& segments) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3);
+    bool first = true;
+    for (const VideoSegment& segment : normalize_video_segments(segments)) {
+        if (!first) out << ';';
+        first = false;
+        out << segment.start_seconds << ':';
+        if (segment.end_seconds > segment.start_seconds)
+            out << segment.end_seconds;
+        else
+            out << '-';
+    }
+    return out.str();
+}
+
+bool parse_video_segments(
+    const std::string_view text, std::vector<VideoSegment>& segments,
+    std::string* error) {
+    segments.clear();
+    auto fail = [&](const std::string& message) {
+        if (error) *error = message;
+        return false;
+    };
+    auto trim = [](std::string_view value) {
+        while (!value.empty() &&
+               std::isspace(static_cast<unsigned char>(value.front())))
+            value.remove_prefix(1);
+        while (!value.empty() &&
+               std::isspace(static_cast<unsigned char>(value.back())))
+            value.remove_suffix(1);
+        return value;
+    };
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find(';', start);
+        const std::string_view item = trim(text.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start));
+        if (!item.empty()) {
+            const std::size_t colon = item.find(':');
+            if (colon == std::string_view::npos)
+                return fail("Video segment must be start:end: " +
+                            std::string(item));
+            const std::string start_text(trim(item.substr(0, colon)));
+            const std::string end_text(trim(item.substr(colon + 1)));
+            char* parse_end = nullptr;
+            const double segment_start =
+                std::strtod(start_text.c_str(), &parse_end);
+            if (start_text.empty() || !parse_end ||
+                *parse_end != '\0' || !std::isfinite(segment_start))
+                return fail("Invalid segment start: " + start_text);
+            double segment_end = 0.0;
+            if (end_text != "-") {
+                const double parsed = std::strtod(end_text.c_str(), &parse_end);
+                if (end_text.empty() || !parse_end || *parse_end != '\0' ||
+                    !std::isfinite(parsed))
+                    return fail("Invalid segment end: " + end_text);
+                segment_end = parsed;
+            }
+            if (segment_end > segment_start)
+                segments.push_back({segment_start, segment_end});
+            else
+                segments.push_back({segment_start, 0.0});
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    segments = normalize_video_segments(segments);
+    return true;
+}
+
 namespace {
 
 constexpr const char* k_video_extensions[] = {
@@ -125,6 +270,33 @@ std::vector<std::filesystem::path> list_images(const std::filesystem::path& dire
     }
     std::sort(files.begin(), files.end());
     return files;
+}
+
+bool is_preview_still_name(const std::string& name) {
+    const auto dot = name.rfind('.');
+    if (dot == std::string::npos || dot <= 2) return false;
+    std::string ext = name.substr(dot);
+    std::transform(
+        ext.begin(), ext.end(), ext.begin(),
+        [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext != ".jpg" && ext != ".jpeg") return false;
+    if (name[0] != 'p' || name[1] != '_') return false;
+    for (std::size_t i = 2; i < dot; ++i)
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return false;
+    return dot > 2;
+}
+
+void clear_preview_stills(const std::filesystem::path& directory) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error)) return;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (error) break;
+        std::error_code file_error;
+        if (!entry.is_regular_file(file_error)) continue;
+        if (is_preview_still_name(entry.path().filename().string()))
+            std::filesystem::remove(entry.path(), file_error);
+    }
 }
 
 #if defined(_WIN32)
@@ -403,6 +575,7 @@ struct ExtractManifest {
     int quality{};
     float scale{};
     int rotate{};
+    std::string segments;
 };
 
 ExtractManifest make_manifest(const VideoExtractOptions& options) {
@@ -419,6 +592,7 @@ ExtractManifest make_manifest(const VideoExtractOptions& options) {
     manifest.quality = options.quality;
     manifest.scale = options.scale;
     manifest.rotate = options.rotate;
+    manifest.segments = serialize_video_segments(options.segments);
     return manifest;
 }
 
@@ -429,7 +603,8 @@ bool same_manifest(const ExtractManifest& a, const ExtractManifest& b) {
     return a.source == b.source && a.size == b.size && a.mtime == b.mtime &&
            close(a.fps, b.fps) && a.sharp_window == b.sharp_window &&
            a.max_frames == b.max_frames && a.quality == b.quality &&
-           close(a.scale, b.scale) && a.rotate == b.rotate;
+           close(a.scale, b.scale) && a.rotate == b.rotate &&
+           a.segments == b.segments;
 }
 
 std::filesystem::path manifest_path(const std::filesystem::path& output_dir) {
@@ -455,6 +630,7 @@ bool load_manifest(const std::filesystem::path& path, ExtractManifest& out) {
         else if (key == "quality") loaded.quality = std::atoi(value.c_str());
         else if (key == "scale") loaded.scale = std::strtof(value.c_str(), nullptr);
         else if (key == "rotate") loaded.rotate = std::atoi(value.c_str());
+        else if (key == "segments") loaded.segments = value;
     }
     out = loaded;
     return !out.source.empty();
@@ -473,7 +649,8 @@ void save_manifest(
         << "max_frames=" << manifest.max_frames << '\n'
         << "quality=" << manifest.quality << '\n'
         << "scale=" << manifest.scale << '\n'
-        << "rotate=" << manifest.rotate << '\n';
+        << "rotate=" << manifest.rotate << '\n'
+        << "segments=" << manifest.segments << '\n';
 }
 
 void clear_extracted_stills(const std::filesystem::path& directory) {
@@ -792,7 +969,8 @@ int select_sharpest_frames(
     int window,
     int max_frames,
     const std::atomic<bool>* cancel,
-    const std::function<void(const std::string&)>& log) {
+    const std::function<void(const std::string&)>& log,
+    int first_index) {
     auto files = list_images(candidate_dir);
     if (files.empty()) return 0;
     window = std::max(window, 1);
@@ -851,7 +1029,7 @@ int select_sharpest_frames(
         char name[64];
         const std::string ext = files[best].extension().string();
         std::snprintf(
-            name, sizeof(name), "%05d%s", kept,
+            name, sizeof(name), "%05d%s", first_index + kept,
             ext.empty() ? ".jpg" : ext.c_str());
         const auto destination = output_dir / name;
         std::error_code io;
@@ -949,110 +1127,202 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
     const float candidate_fps = options.fps * static_cast<float>(window);
     const bool jpeg = options.quality >= 0 && options.quality <= 100;
     const std::string pattern = jpeg ? "c_%06d.jpg" : "c_%06d.png";
+    const std::vector<VideoSegment> ranges =
+        normalize_video_segments(options.segments);
+    const bool segmented = !ranges.empty();
+    auto report = [&](const float fraction) {
+        if (options.progress) options.progress(fraction);
+    };
 
+    double expected_seconds = probe.duration_seconds;
+    if (segmented) {
+        expected_seconds = 0.0;
+        for (const VideoSegment& range : ranges) {
+            const double start = std::max(0.0, range.start_seconds);
+            double end = range.end_seconds > range.start_seconds
+                ? range.end_seconds
+                : probe.duration_seconds;
+            if (probe.duration_seconds > 0.0)
+                end = std::min(end, probe.duration_seconds);
+            if (end > start) expected_seconds += end - start;
+        }
+    }
+    const int total_limit = options.max_frames > 0
+        ? options.max_frames * window
+        : 0;
+    std::uint64_t expected_candidates = expected_seconds > 0.0
+        ? static_cast<std::uint64_t>(
+              expected_seconds * static_cast<double>(candidate_fps) + 0.5)
+        : 0;
+    if (total_limit > 0)
+        expected_candidates = std::min(
+            expected_candidates,
+            static_cast<std::uint64_t>(total_limit));
+    if (expected_candidates == 0) report(-1.F);
+
+    std::filesystem::path candidate_root =
+        options.output_dir.parent_path() / ".photara_frames_tmp";
     std::filesystem::path write_dir = options.output_dir;
-    std::filesystem::path candidate_dir;
-    if (window > 1) {
-        candidate_dir = options.output_dir.parent_path() / ".photara_frames_tmp";
-        std::filesystem::remove_all(candidate_dir, error);
-        std::filesystem::create_directories(candidate_dir, error);
-        write_dir = candidate_dir;
-        partial.temp = candidate_dir;
+    if (window > 1 || segmented) {
+        std::filesystem::remove_all(candidate_root, error);
+        std::filesystem::create_directories(candidate_root, error);
+        partial.temp = candidate_root;
+        if (!segmented) write_dir = candidate_root;
     }
 
-    std::vector<std::string> args = {
-        "-nostdin", "-y", "-hide_banner", "-progress", "pipe:1",
-        "-i", path_utf8(options.video),
-        "-vf", ffmpeg_filter(options, candidate_fps)};
-    if (jpeg) {
-        args.emplace_back("-qscale:v");
-        args.push_back(std::to_string(jpeg_qscale(options.quality)));
-    }
-    int limit = 0;
-    if (options.max_frames > 0)
-        limit = options.max_frames * window;
-    if (limit > 0) {
-        args.emplace_back("-frames:v");
-        args.push_back(std::to_string(limit));
-    }
-    args.push_back(path_utf8(write_dir / pattern));
-
-    emit(options, "extract video frames from " + path_utf8(options.video));
-    const std::uint64_t expected = [&]() -> std::uint64_t {
-        if (probe.duration_seconds <= 0.0) return 0;
-        const double n = probe.duration_seconds * static_cast<double>(candidate_fps);
-        if (n <= 0.0) return 0;
-        auto count = static_cast<std::uint64_t>(n + 0.5);
-        if (limit > 0)
-            count = std::min(count, static_cast<std::uint64_t>(limit));
-        return count;
-    }();
-    core::ProgressReporter progress("extract video frames", expected);
-    std::uint64_t last_frame = 0;
+    auto format_seconds = [](const double seconds) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.3f", seconds);
+        return std::string(text);
+    };
     std::string last_error_line;
     std::string launch_error;
-    const int rc = run_ffmpeg(
-        ffmpeg, args,
-        [&](const std::string& line) {
-            if (line.rfind("frame=", 0) == 0) {
-                const auto frame = static_cast<std::uint64_t>(
-                    std::strtoull(line.c_str() + 6, nullptr, 10));
-                if (frame > last_frame) {
-                    progress.advance(frame - last_frame);
-                    last_frame = frame;
+    auto run_range = [&](
+        const std::filesystem::path& directory, const double start_seconds,
+        const double range_seconds, const int frame_limit,
+        const std::uint64_t completed_before) {
+        std::vector<std::string> args = {
+            "-nostdin", "-y", "-hide_banner", "-progress", "pipe:1"};
+        if (start_seconds > 0.0) {
+            args.push_back("-ss");
+            args.push_back(format_seconds(start_seconds));
+        }
+        args.push_back("-i");
+        args.push_back(path_utf8(options.video));
+        if (range_seconds > 0.0) {
+            args.push_back("-t");
+            args.push_back(format_seconds(range_seconds));
+        }
+        args.push_back("-vf");
+        args.push_back(ffmpeg_filter(options, candidate_fps));
+        if (jpeg) {
+            args.emplace_back("-qscale:v");
+            args.push_back(std::to_string(jpeg_qscale(options.quality)));
+        }
+        if (frame_limit > 0) {
+            args.emplace_back("-frames:v");
+            args.push_back(std::to_string(frame_limit));
+        }
+        args.push_back(path_utf8(directory / pattern));
+
+        std::uint64_t last_frame = 0;
+        core::ProgressReporter progress("extract video frames", expected_candidates);
+        return run_ffmpeg(
+            ffmpeg, args,
+            [&](const std::string& line) {
+                if (line.rfind("frame=", 0) == 0) {
+                    const auto frame = static_cast<std::uint64_t>(
+                        std::strtoull(line.c_str() + 6, nullptr, 10));
+                    if (frame > last_frame) {
+                        progress.advance(frame - last_frame);
+                        last_frame = frame;
+                        if (expected_candidates > 0) {
+                            const double done = static_cast<double>(
+                                completed_before + frame);
+                            report(static_cast<float>(
+                                0.90 * std::min(1.0, done /
+                                    static_cast<double>(expected_candidates))));
+                        }
+                    }
+                } else if (
+                    line.find("error") != std::string::npos ||
+                    line.find("Error") != std::string::npos ||
+                    line.find("Invalid") != std::string::npos) {
+                    last_error_line = line;
                 }
-            } else if (
-                line.find("error") != std::string::npos ||
-                line.find("Error") != std::string::npos ||
-                line.find("Invalid") != std::string::npos) {
-                last_error_line = line;
-            }
-        },
-        launch_error, options.cancel);
-    if (rc != 0) {
-        if (window > 1) std::filesystem::remove_all(candidate_dir, error);
+            },
+            launch_error, options.cancel);
+    };
+    auto throw_ffmpeg_failure = [&]() {
+        std::filesystem::remove_all(candidate_root, error);
+        if (cancelled(options.cancel)) throw std::runtime_error("cancelled");
         std::string message = "ffmpeg failed to extract frames";
         if (!launch_error.empty()) message += ": " + launch_error;
         if (!last_error_line.empty()) message += " (" + last_error_line + ")";
         throw std::runtime_error(message);
-    }
+    };
 
+    emit(options, "extract video frames from " + path_utf8(options.video));
     int written = 0;
-    if (window > 1) {
-        written = select_sharpest_frames(
-            candidate_dir, options.output_dir, window, options.max_frames,
-            options.cancel, options.log);
-        std::filesystem::remove_all(candidate_dir, error);
-        if (written < 0) throw std::runtime_error("cancelled");
+    if (segmented) {
+        std::uint64_t candidates_done = 0;
+        for (std::size_t i = 0; i < ranges.size(); ++i) {
+            if (options.max_frames > 0 && written >= options.max_frames) break;
+            const VideoSegment& range = ranges[i];
+            const double start = std::max(0.0, range.start_seconds);
+            double end = range.end_seconds > range.start_seconds
+                ? range.end_seconds
+                : probe.duration_seconds;
+            if (probe.duration_seconds > 0.0)
+                end = std::min(end, probe.duration_seconds);
+            const double duration = end > start ? end - start : 0.0;
+            const int remaining = options.max_frames > 0
+                ? options.max_frames - written
+                : 0;
+            char folder[32];
+            std::snprintf(folder, sizeof(folder), "seg_%04zu", i);
+            const auto segment_dir = candidate_root / folder;
+            std::filesystem::create_directories(segment_dir, error);
+            if (error)
+                throw std::runtime_error(
+                    "Cannot create video candidate directory: " +
+                    path_utf8(segment_dir));
+            const int rc = run_range(
+                segment_dir, start, duration,
+                remaining > 0 ? remaining * window : 0, candidates_done);
+            if (rc != 0) throw_ffmpeg_failure();
+            candidates_done += static_cast<std::uint64_t>(
+                count_images(segment_dir));
+            const int kept = select_sharpest_frames(
+                segment_dir, options.output_dir, window, remaining,
+                options.cancel, options.log, written);
+            std::filesystem::remove_all(segment_dir, error);
+            if (kept < 0) throw std::runtime_error("cancelled");
+            written += kept;
+        }
+        std::filesystem::remove_all(candidate_root, error);
     } else {
-        auto files = list_images(options.output_dir);
-        if (options.max_frames > 0 &&
-            static_cast<int>(files.size()) > options.max_frames) {
-            for (std::size_t i = static_cast<std::size_t>(options.max_frames);
-                 i < files.size(); ++i)
-                std::filesystem::remove(files[i], error);
-            files.resize(static_cast<std::size_t>(options.max_frames));
-        }
-        int index = 0;
-        for (const auto& file : files) {
-            char name[64];
-            std::snprintf(
-                name, sizeof(name), "%05d%s", index,
-                file.extension().string().c_str());
-            const auto destination = options.output_dir / name;
-            if (file.filename() != name) {
-                std::error_code io;
-                std::filesystem::rename(file, destination, io);
-                if (io) {
-                    throw std::runtime_error(
-                        "Failed to write frame " + path_utf8(destination) +
-                        ": " + io.message());
-                }
+        const int rc = run_range(
+            write_dir, 0.0, 0.0,
+            options.max_frames > 0 ? options.max_frames * window : 0, 0);
+        if (rc != 0) throw_ffmpeg_failure();
+        if (window > 1) {
+            written = select_sharpest_frames(
+                candidate_root, options.output_dir, window, options.max_frames,
+                options.cancel, options.log);
+            std::filesystem::remove_all(candidate_root, error);
+            if (written < 0) throw std::runtime_error("cancelled");
+        } else {
+            auto files = list_images(options.output_dir);
+            if (options.max_frames > 0 &&
+                static_cast<int>(files.size()) > options.max_frames) {
+                for (std::size_t i = static_cast<std::size_t>(options.max_frames);
+                     i < files.size(); ++i)
+                    std::filesystem::remove(files[i], error);
+                files.resize(static_cast<std::size_t>(options.max_frames));
             }
-            ++index;
+            int index = 0;
+            for (const auto& file : files) {
+                char name[64];
+                std::snprintf(
+                    name, sizeof(name), "%05d%s", index,
+                    file.extension().string().c_str());
+                const auto destination = options.output_dir / name;
+                if (file.filename() != name) {
+                    std::error_code io;
+                    std::filesystem::rename(file, destination, io);
+                    if (io) {
+                        throw std::runtime_error(
+                            "Failed to write frame " + path_utf8(destination) +
+                            ": " + io.message());
+                    }
+                }
+                ++index;
+            }
+            written = index;
         }
-        written = index;
     }
+    report(1.F);
 
     if (written < 2) {
         throw std::runtime_error(
@@ -1068,6 +1338,101 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
         "video_frames_dir=" + path_utf8(options.output_dir) +
             " frames=" + std::to_string(written));
     return {options.output_dir, written, false};
+}
+
+int generate_video_preview(const VideoPreviewOptions& options_in) {
+    VideoPreviewOptions options = options_in;
+    if (options.video.empty())
+        throw std::invalid_argument("Video path is empty");
+    if (options.output_dir.empty())
+        throw std::invalid_argument("Video preview needs an output directory");
+    if (!(options.fps > 0.0F) || !std::isfinite(options.fps))
+        throw std::invalid_argument("Video preview fps must be positive");
+    options.fps = std::clamp(options.fps, 0.5F, 30.F);
+    options.max_width = std::max(64, options.max_width);
+    options.max_height = std::max(64, options.max_height);
+    options.quality = std::clamp(options.quality, 1, 100);
+    if (!std::filesystem::is_regular_file(options.video))
+        throw std::runtime_error(
+            "Video file not found: " + path_utf8(options.video));
+
+    std::error_code error;
+    std::filesystem::create_directories(options.output_dir, error);
+    if (error)
+        throw std::runtime_error(
+            "Cannot create video preview directory: " +
+            path_utf8(options.output_dir));
+    clear_preview_stills(options.output_dir);
+
+    const auto ffmpeg = resolve_ffmpeg(options.ffmpeg);
+    if (!ffmpeg_available(ffmpeg))
+        throw std::runtime_error(
+            "ffmpeg was not found (" + path_utf8(ffmpeg) +
+            "). Install ffmpeg and add it to PATH, or set --ffmpeg.");
+
+    VideoProbe probe{};
+    probe_video(ffmpeg, options.video, probe);
+    int target_width = options.max_width;
+    if (probe.width > 0 && probe.height > 0) {
+        const double scale = std::min(
+            1.0, std::min(
+                     static_cast<double>(options.max_width) / probe.width,
+                     static_cast<double>(options.max_height) / probe.height));
+        target_width = std::max(
+            2, static_cast<int>(probe.width * scale) & ~1);
+    }
+    std::ostringstream filter;
+    filter << "fps=" << options.fps << ",scale=" << target_width << ":-2";
+    const auto jpeg_quality = jpeg_qscale(options.quality);
+    std::vector<std::string> args = {
+        "-nostdin", "-y", "-hide_banner", "-progress", "pipe:1",
+        "-i", path_utf8(options.video),
+        "-an", "-vf", filter.str(), "-qscale:v",
+        std::to_string(jpeg_quality),
+        path_utf8(options.output_dir / "p_%06d.jpg")};
+
+    const std::uint64_t expected = probe.duration_seconds > 0.0
+        ? static_cast<std::uint64_t>(
+              probe.duration_seconds * static_cast<double>(options.fps) + 0.5)
+        : 0;
+    if (options.progress && expected == 0) options.progress(-1.F);
+    std::string launch_error;
+    std::string last_error_line;
+    const int rc = run_ffmpeg(
+        ffmpeg, args,
+        [&](const std::string& line) {
+            if (line.rfind("frame=", 0) == 0 && options.progress && expected > 0) {
+                const auto frame = static_cast<std::uint64_t>(
+                    std::strtoull(line.c_str() + 6, nullptr, 10));
+                options.progress(static_cast<float>(std::min(
+                    1.0, static_cast<double>(frame) /
+                             static_cast<double>(expected))));
+            } else if (
+                line.find("error") != std::string::npos ||
+                line.find("Error") != std::string::npos ||
+                line.find("Invalid") != std::string::npos) {
+                last_error_line = line;
+            }
+        },
+        launch_error, options.cancel);
+    if (rc != 0) {
+        if (cancelled(options.cancel)) throw std::runtime_error("cancelled");
+        std::string message = "ffmpeg failed to build the video preview";
+        if (!launch_error.empty()) message += ": " + launch_error;
+        if (!last_error_line.empty()) message += " (" + last_error_line + ")";
+        throw std::runtime_error(message);
+    }
+    int frames = 0;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(options.output_dir, error)) {
+        if (error) break;
+        std::error_code file_error;
+        if (entry.is_regular_file(file_error) &&
+            is_preview_still_name(entry.path().filename().string()))
+            ++frames;
+    }
+    if (options.progress) options.progress(1.F);
+    return frames;
 }
 
 bool has_matching_video_extract(const VideoExtractOptions& options_in) {

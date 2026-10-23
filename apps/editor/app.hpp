@@ -11,6 +11,8 @@
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "splat_edit.hpp"
+#include "video_window.hpp"
+#include "mask_editor.hpp"
 #include "splat/deployment.hpp"
 #include "vulkan_backend.hpp"
 #include "splat_render/renderer.hpp"
@@ -29,6 +31,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -263,6 +266,8 @@ struct App {
     bool show_controls{};
     bool show_about{};
     bool show_preferences{};
+    VideoWindowState video_window;
+    MaskEditorState mask_editor;
     bool preferences_raise{};
     int preferences_page{};
     bool show_sam_license{};
@@ -424,6 +429,7 @@ void refresh_gaussian_composition(App& app);
 void start_gaussian_merge(App& app, const std::filesystem::path& output);
 void poll_gaussian_merge(App& app);
 
+std::optional<photara::sfm::Scene> load_alignment_scene(const App& app);
 void ensure_sparse_loaded(App& app);
 void ensure_gaussian_scene(App& app);
 void ensure_mesh_loaded(App& app);

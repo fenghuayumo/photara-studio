@@ -346,6 +346,14 @@ Action draw_menu_bar(App& app) {
         ImGui::MenuItem(tr("Status Bar"), nullptr, &app.show_status_bar);
         ImGui::Separator();
         if (ImGui::MenuItem(
+                tr("Video Preview"), nullptr, app.video_window.show) &&
+            app.video_window.show)
+            open_video_window(app);
+        if (ImGui::MenuItem(
+                tr("Mask Editor"), nullptr, app.mask_editor.show) &&
+            app.mask_editor.show)
+            open_mask_editor(app);
+        if (ImGui::MenuItem(
                 tr("3D Scene"), "3",
                 app.workspace == ViewportWorkspace::scene_3d))
             set_viewport_workspace(app, ViewportWorkspace::scene_3d);

@@ -971,6 +971,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/icons.cpp
                 ${PHOTARA_STUDIO_DIR}/image_qa_view.cpp
                 ${PHOTARA_STUDIO_DIR}/main.cpp
+                ${PHOTARA_STUDIO_DIR}/mask_editor.cpp
                 ${PHOTARA_STUDIO_DIR}/model_download.cpp
                 ${PHOTARA_STUDIO_DIR}/moge_model.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
@@ -988,6 +989,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/ui_scene.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_viewport.cpp
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
+                ${PHOTARA_STUDIO_DIR}/video_window.cpp
                 ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp)
             if(PHOTARA_ENABLE_AGENT_CONTROL)
                 target_sources(photara_studio PRIVATE
@@ -1047,6 +1049,9 @@ if(TARGET photara_features)
             endif()
             if(PHOTARA_HAS_SAM)
                 target_compile_definitions(photara_studio PRIVATE PHOTARA_HAS_SAM=1)
+                # The mask editor runs SAM in-process for batch generation and
+                # single-image re-runs instead of spawning the CLI.
+                target_link_libraries(photara_studio PRIVATE Photara::SAM)
             endif()
             if(PHOTARA_ENABLE_CUDA)
                 target_compile_definitions(photara_studio PRIVATE

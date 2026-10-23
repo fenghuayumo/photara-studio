@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 16;
+inline constexpr std::uint32_t k_settings_version = 17;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -48,6 +48,9 @@ struct Settings : photara::splat::TrainingLossSettings {
     int video_quality = 95;
     float video_scale = 1.0F;
     int video_rotate = 0;
+    // Capture ranges in source time, `start:end;start:end` with `-` as the
+    // open end. Empty keeps the whole video.
+    std::string video_segments;
     int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
     int alignment_quality = 1; // 0 fast, 1 medium, 2 high.
     int alignment_capture_type = 0; // 0 unordered photos, 1 ordered/video frames.
@@ -92,6 +95,13 @@ struct Settings : photara::splat::TrainingLossSettings {
     bool sam_keep_prompted = true;
     bool sam_video = true;
     int sam_max_size = 0;
+    float sam_threshold = 0.5F;
+    float sam_guided_threshold = 0.2F;
+    float sam_nms = 0.1F;
+    float sam_min_area = 0.001F;
+    float sam_max_area = 0.65F;
+    int sam_close_kernel = 5;
+    bool sam_fill_holes = true;
     bool build_mesh = false;
     // 0 = extract from geometry-supervised 3DGS, 1 = photogrammetry (MVS).
     int mesh_source = 0;

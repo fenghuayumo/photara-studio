@@ -3,6 +3,7 @@
 #include "file_dialogs.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "sam_prompt_suggestions.hpp"
 
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
@@ -657,6 +658,9 @@ Action draw_inspector(App& app) {
             }
                 ImGui::TreePop();
             }
+            if (theme::toolbar_button(
+                    tr("Open Video Window..."), {-1.F, 28.F}))
+                open_video_window(app);
         }
 #if defined(PHOTARA_HAS_SAM)
         ImGui::Spacing();
@@ -685,6 +689,7 @@ Action draw_inspector(App& app) {
                 app.settings.sam_text.size());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", tr("Several phrases, separated by semicolons."));
+            draw_sam_prompt_suggestions(app.settings.sam_text);
             theme::caption(tr("Negative prompt"));
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputText(
@@ -716,6 +721,10 @@ Action draw_inspector(App& app) {
         ImGui::TextWrapped("%s", tr(
             "This build does not include SAM mask generation."));
 #endif
+        ImGui::Spacing();
+        if (theme::toolbar_button(
+                tr("Open Mask Editor..."), {-1.F, 28.F}))
+            open_mask_editor(app);
         theme::caption("Project file");
         if (app.layout.project_file.empty())
             theme::caption(tr("Unsaved session. Press Ctrl+S to save a project."));

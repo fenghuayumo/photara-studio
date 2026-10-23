@@ -517,7 +517,11 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         options.sparse_scene ? "refine sam masks" : "generate sam masks",
         options.images.size());
     GenerateResult result;
+    std::size_t completed = 0;
     for (const auto& image_path : options.images) {
+        if (options.cancel &&
+            options.cancel->load(std::memory_order_relaxed))
+            throw std::runtime_error("cancelled");
         // JPEG reads used by the rest of the pipeline may be reduced. The
         // mask has to match the file's stored pixel size.
         const io::ImageSize file_size = io::load_image_size(image_path);
@@ -599,6 +603,21 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                 }
             }
         }
+        if (options.require_target && !options.video &&
+            options.threshold > 0.2F &&
+            std::none_of(selected.begin(), selected.end(),
+                         [](const std::uint8_t value) { return value != 0; })) {
+            // An interactive retry should use the prompt alone; an existing
+            // reconstruction may supply an unrelated geometric exemplar.
+            for (const std::string& phrase : positive) {
+                sam3_pcs_params prompt;
+                prompt.text_prompt = phrase;
+                prompt.score_threshold = 0.2F;
+                prompt.nms_threshold = options.nms;
+                paint_result(selected, width, height,
+                    sam3_segment_pcs(*state, *model, prompt), true);
+            }
+        }
         for (const std::string& phrase : negative) {
             sam3_pcs_params prompt;
             prompt.text_prompt = phrase;
@@ -608,6 +627,12 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                 selected, width, height,
                 sam3_segment_pcs(*state, *model, prompt), false);
         }
+
+        if (options.require_target &&
+            std::none_of(selected.begin(), selected.end(),
+                         [](const std::uint8_t value) { return value != 0; }))
+            throw std::runtime_error(
+                "SAM did not identify the requested target: " + options.text);
 
         if (options.keep_prompted &&
             std::none_of(selected.begin(), selected.end(),
@@ -642,7 +667,10 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         io::save_gray_png(
             gray, options.output_dir / (image_path.stem().string() + ".png"));
         ++result.written;
+        ++completed;
         progress.advance();
+        if (options.progress)
+            options.progress(completed, options.images.size());
     }
     core::Logger::instance().info(
         "sam_masks=", result.written, " dir=", options.output_dir,

@@ -598,22 +598,32 @@ void PreviewTexture::upload(const photara::io::RgbImage& source) {
         reset();
         return;
     }
-    const bool recreate =
-        image == nullptr || width != source.width || height != source.height;
-    if (recreate) {
-        reset();
-        width = source.width;
-        height = source.height;
-    }
-    const VkDeviceSize bytes =
-        static_cast<VkDeviceSize>(width) * height * 4;
-    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(bytes));
+    std::vector<std::uint8_t> rgba(pixels * 4);
     for (std::size_t i = 0; i < pixels; ++i) {
         rgba[4 * i] = source.pixels[3 * i];
         rgba[4 * i + 1] = source.pixels[3 * i + 1];
         rgba[4 * i + 2] = source.pixels[3 * i + 2];
         rgba[4 * i + 3] = 255;
     }
+    upload_rgba(rgba.data(), source.width, source.height);
+}
+
+void PreviewTexture::upload_rgba(
+    const std::uint8_t* pixels, const std::uint32_t source_width,
+    const std::uint32_t source_height) {
+    if (pixels == nullptr || source_width == 0 || source_height == 0) {
+        reset();
+        return;
+    }
+    const bool recreate =
+        image == nullptr || width != source_width || height != source_height;
+    if (recreate) {
+        reset();
+        width = source_width;
+        height = source_height;
+    }
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(width) * height * 4;
 
     VkBuffer staging{};
     VkDeviceMemory staging_memory{};
@@ -633,7 +643,7 @@ void PreviewTexture::upload(const photara::io::RgbImage& source) {
     check(vkBindBufferMemory(g_device, staging, staging_memory, 0));
     void* mapped{};
     check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
-    std::memcpy(mapped, rgba.data(), static_cast<std::size_t>(bytes));
+    std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
     vkUnmapMemory(g_device, staging_memory);
 
     if (recreate) {

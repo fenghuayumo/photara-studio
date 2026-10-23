@@ -79,6 +79,10 @@ struct PreviewTexture {
 
     void reset();
     void upload(const photara::io::RgbImage& source);
+    // RGBA8 upload for overlays that need a real alpha channel (mask tint).
+    void upload_rgba(
+        const std::uint8_t* pixels, std::uint32_t source_width,
+        std::uint32_t source_height);
     // Copies the sampled image back to host RGB. Used by the 2D QA compare path.
     // When max_long_edge is non-zero the image is scaled down on the GPU first,
     // so the transfer and the host conversion only cover the pixels the caller

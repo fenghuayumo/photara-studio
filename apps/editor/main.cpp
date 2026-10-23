@@ -250,6 +250,8 @@ int main(const int argc, char** argv) {
         editor::poll_alignment_preview(app);
         editor::poll_align_live(app);
         editor::poll_camera_photos(app);
+        editor::poll_video_window(app);
+        editor::poll_mask_editor(app);
         editor::poll_splat_simplify(app);
         editor::poll_gaussian_merge(app);
         editor::poll_splat_export(app);
@@ -335,6 +337,22 @@ int main(const int argc, char** argv) {
             std::clamp(app.settings.video_scale, 0.05F, 4.F);
         app.settings.video_rotate =
             std::clamp(app.settings.video_rotate / 90, 0, 3) * 90;
+        app.settings.sam_threshold =
+            std::clamp(app.settings.sam_threshold, 0.F, 1.F);
+        app.settings.sam_guided_threshold =
+            std::clamp(app.settings.sam_guided_threshold, 0.F, 1.F);
+        app.settings.sam_nms =
+            std::clamp(app.settings.sam_nms, 0.F, 1.F);
+        app.settings.sam_min_area =
+            std::clamp(app.settings.sam_min_area, 0.F, 0.99F);
+        app.settings.sam_max_area =
+            std::clamp(app.settings.sam_max_area, 0.01F, 1.F);
+        if (app.settings.sam_max_area <= app.settings.sam_min_area)
+            app.settings.sam_max_area =
+                std::min(1.F, app.settings.sam_min_area + 0.01F);
+        if (app.settings.sam_close_kernel < 1 ||
+            app.settings.sam_close_kernel % 2 == 0)
+            app.settings.sam_close_kernel = 5;
         app.settings.texture_quality =
             std::clamp(app.settings.texture_quality, 0, 2);
         app.settings.atlas_resolution =
@@ -434,6 +452,8 @@ int main(const int argc, char** argv) {
 
         editor::draw_controls_window(app);
         editor::draw_about_window(app);
+        editor::draw_video_window(app);
+        editor::draw_mask_editor(app);
         editor::draw_preferences_window(app);
         editor::draw_mesh_export_modal(app);
         editor::draw_alignment_export_modal(app);
@@ -590,6 +610,8 @@ int main(const int argc, char** argv) {
     if (app.splat_export.cancel) app.splat_export.cancel->store(true);
     if (app.splat_export.job.valid()) app.splat_export.job.wait();
     editor::wait_splat_model_loads(app);
+    editor::shutdown_video_window(app);
+    editor::shutdown_mask_editor(app);
     editor::cleanup_cache_session(app);
     editor::gpu::wait_idle();
     app.image_qa_session.clear();
