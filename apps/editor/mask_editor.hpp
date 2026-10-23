@@ -32,6 +32,8 @@ struct MaskEditorState {
     bool show{};
     bool raise{};
     bool initialized{};
+    bool follow_alignment{};
+    std::uint64_t alignment_revision{};
 
     std::filesystem::path images_dir;
     std::filesystem::path mask_dir;

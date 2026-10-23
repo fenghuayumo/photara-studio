@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -739,6 +740,9 @@ void LogStream::poll(std::vector<std::string>& fresh_lines) {
 // RunMonitor
 
 void RunMonitor::reset() {
+    capture_frame_ = {};
+    video_frame_ = {};
+    mask_frame_ = {};
     kind_ = JobKind::none;
     stage_ = Stage::idle;
     task_ = {};
@@ -796,6 +800,27 @@ void RunMonitor::consume(const std::string& line) {
             : line.substr(level_end + 2);
     }
 
+    if (line.find("capture_frame kind=") != std::string::npos) {
+        std::string kind;
+        token_after(line, " kind=", kind);
+        const auto at = line.find(" image=");
+        if ((kind == "video" || kind == "mask") && at != std::string::npos) {
+            std::string path;
+            std::istringstream image_stream(line.substr(at + 7));
+            if (image_stream >> std::quoted(path)) {
+                capture_frame_.kind = kind;
+                capture_frame_.image = std::move(path);
+                number_after(line, " completed=", capture_frame_.completed);
+                number_after(line, " total=", capture_frame_.total);
+                unsigned ready = 0;
+                number_after(line, " ready=", ready);
+                capture_frame_.ready = ready != 0;
+                ++capture_frame_.revision;
+                (kind == "video" ? video_frame_ : mask_frame_) = capture_frame_;
+            }
+        }
+        return;
+    }
     if (line.find("checkpoint hit: reconstruction") != std::string::npos ||
         line.find("checkpoint hit: tracks") != std::string::npos)
         resumed_ = true;

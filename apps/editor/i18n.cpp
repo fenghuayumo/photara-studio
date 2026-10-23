@@ -44,6 +44,8 @@ constexpr Entry k_entries[] = {
     {"Select a model to view its properties.", "选择模型以查看属性。", "モデルを選択。", "모델을 선택하세요."},
     {"Video Preview", "视频预览", "動画プレビュー", "동영상 미리보기"},
     {"Mask Editor", "Mask 编辑器", "マスクエディター", "마스크 편집기"},
+    {"Alignment is extracting frames automatically.", "对齐任务正在自动抽帧。", "アライメントの動画フレームを抽出中。", "정렬 작업이 프레임을 자동 추출하는 중입니다."},
+    {"Frame extraction complete.", "视频抽帧已完成。", "フレーム抽出が完了しました。", "프레임 추출이 완료되었습니다."},
     {"Manual touch-up", "手动修补（可选）", "手動修正（任意）", "수동 수정 (선택)"},
     {"No mask generated. Showing original image.", "尚未生成 Mask，当前显示原图。", "マスク未生成。元画像を表示中。", "마스크가 생성되지 않아 원본 이미지를 표시합니다."},
     {"SAM did not identify the requested target. No mask was applied:", "SAM 未识别出目标，未应用新 Mask：", "対象を認識できませんでした。新しいマスクは適用されていません：", "대상을 인식하지 못해 새 마스크를 적용하지 않았습니다:"},

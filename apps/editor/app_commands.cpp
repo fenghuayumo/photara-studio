@@ -3724,6 +3724,11 @@ void start_align(App& app) {
                 cli_path().c_str(), app.settings, app.layout),
             app.layout.align_log);
         app.active_job = JobKind::align;
+        app.video_window.follow_alignment = is_video_source(app.settings);
+        app.video_window.alignment_revision = 0;
+        app.mask_editor.follow_alignment = false;
+        app.mask_editor.alignment_revision = 0;
+        if (app.video_window.follow_alignment) open_video_window(app);
         // Drop the previous cloud so the next frame only shows this run.
         // The actual GPU/photo teardown waits until after present(); this
         // frame's draw list still references those descriptors.

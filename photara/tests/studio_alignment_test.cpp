@@ -105,6 +105,18 @@ int main(int argc, char** argv) {
         test_studio_image_qa_projection();
         test_camera_markers();
         editor::RunMonitor monitor;
+        monitor.begin(editor::JobKind::align, editor::Stage::preparing);
+        monitor.consume(R"(capture_frame kind=video ready=1 completed=20 total=20 image="D:\\capture frames\\00019.jpg")");
+        require(monitor.video_frame().completed == 20 && monitor.video_frame().ready &&
+                monitor.video_frame().image == R"(D:\capture frames\00019.jpg)",
+                "video progress decodes quoted Windows paths");
+        monitor.consume(R"(capture_frame kind=mask ready=1 completed=1 total=20 image="D:\\capture frames\\00000.jpg")");
+        require(monitor.mask_frame().completed == 1 && monitor.mask_frame().total == 20 &&
+                monitor.video_frame().completed == 20 && monitor.video_frame().total == 20,
+                "mask progress preserves completed video progress");
+        monitor.begin(editor::JobKind::align);
+        require(monitor.video_frame().revision == 0 && monitor.mask_frame().revision == 0,
+                "a new alignment clears progress from both previous stages");
         monitor.begin(editor::JobKind::train);
         require(monitor.training_elapsed_seconds() < 0, "initialization does not start the training clock");
         require(monitor.headline().find("Initializing") != std::string::npos, "training initialization has an explicit status");

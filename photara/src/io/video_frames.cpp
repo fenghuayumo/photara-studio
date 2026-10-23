@@ -1216,6 +1216,14 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
                     if (frame > last_frame) {
                         progress.advance(frame - last_frame);
                         last_frame = frame;
+                        char preview_name[40];
+                        std::snprintf(preview_name, sizeof(preview_name),
+                            "c_%06llu.%s", static_cast<unsigned long long>(
+                                frame > 1 ? frame - 1 : frame), jpeg ? "jpg" : "png");
+                        core::Logger::instance().info(
+                            "capture_frame kind=video ready=1 completed=",
+                            completed_before + frame, " total=", expected_candidates,
+                            " image=", std::quoted(path_utf8(directory / preview_name)));
                         if (expected_candidates > 0) {
                             const double done = static_cast<double>(
                                 completed_before + frame);
@@ -1331,6 +1339,15 @@ VideoExtractResult extract_video_frames(const VideoExtractOptions& options_in) {
             "). Increase --video-fps or the clip length.");
     }
 
+    if (written > 0) {
+        char final_name[40];
+        std::snprintf(final_name, sizeof(final_name), "%05d.%s", written - 1,
+            jpeg ? "jpg" : "png");
+        core::Logger::instance().info(
+            "capture_frame kind=video ready=1 completed=", written,
+            " total=", written, " image=",
+            std::quoted(path_utf8(options.output_dir / final_name)));
+    }
     save_manifest(stored_manifest, wanted);
     partial.armed = false;
     emit(
