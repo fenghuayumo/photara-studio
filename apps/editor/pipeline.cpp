@@ -743,6 +743,9 @@ void RunMonitor::reset() {
     capture_frame_ = {};
     video_frame_ = {};
     mask_frame_ = {};
+    video_frames_ready_ = false;
+    generating_masks_ = false;
+    mask_pass_ = 0;
     kind_ = JobKind::none;
     stage_ = Stage::idle;
     task_ = {};
@@ -785,6 +788,11 @@ void RunMonitor::enter_stage(const Stage stage, const float floor) {
 }
 
 void RunMonitor::consume(const std::string& line) {
+    if (line.find("video_frames_dir=") != std::string::npos)
+        video_frames_ready_ = true;
+    if (line.find("sam_masks=") != std::string::npos ||
+        line.find("pipeline_handoff=") != std::string::npos)
+        generating_masks_ = false;
     if (line.find("splat_checkpoint_saving iteration=") != std::string::npos) saving_checkpoint_ = true;
     if (line.find("splat_checkpoint_saved iteration=") != std::string::npos ||
         line.find("Training checkpoint save failed:") != std::string::npos) saving_checkpoint_ = false;
@@ -981,6 +989,10 @@ void RunMonitor::consume(const std::string& line) {
         metrics_at = line.find(" total=", label_begin);
     if (metrics_at == std::string::npos) return;
     const std::string label = line.substr(label_begin, metrics_at - label_begin);
+    if (starts_with(label, "generate sam masks") || starts_with(label, "refine sam masks")) {
+        if (started) ++mask_pass_;
+        generating_masks_ = !finished;
+    }
 
     const Band* bands = k_align_bands;
     std::size_t band_count = std::size(k_align_bands);
@@ -1027,6 +1039,7 @@ void RunMonitor::consume(const std::string& line) {
 }
 
 void RunMonitor::mark_finished(const int exit_code) {
+    generating_masks_ = false;
     saving_checkpoint_ = false;
     if (training_clock_running_) {
         training_stopped_ = std::chrono::steady_clock::now();

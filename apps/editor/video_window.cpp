@@ -873,7 +873,10 @@ void poll_video_window(App& app) {
         window.preview_frames = 0;
         window.preview_progress = -1.F;
         window.playing = false;
-        if (!aligning) {
+        if (!aligning || app.monitor.video_frames_ready() ||
+            app.monitor.stage() != Stage::preparing) {
+            window.show = false;
+            window.raise = false;
             window.follow_alignment = false;
             window.source.clear();
         }
