@@ -147,7 +147,7 @@ void draw_view_settings(App& app) {
         int projection = static_cast<int>(app.camera.projection);
         const char* projections[] = {
             tr("Perspective"), tr("Orthographic"), tr("Fisheye"), tr("Panorama")};
-        const char* projection_keys[] = {"Alt+1", "Num 5", "Alt+2", "Alt+3"};
+        const char* projection_keys[] = {"Alt+1", "Alt+0 / Num 5", "Alt+2", "Alt+3"};
         if (ImGui::BeginCombo("##editor_projection", projections[projection])) {
             for (int index = 0; index < 4; ++index) {
                 const bool selected = projection == index;
@@ -170,7 +170,9 @@ void draw_view_settings(App& app) {
         constexpr const char* view_labels[] = {
             "Front", "Back", "Left", "Right", "Top", "Bottom"};
         constexpr const char* view_keys[] = {
-            "Num 1", "Ctrl+Num 1", "Ctrl+Num 3", "Num 3", "Num 7", "Ctrl+Num 7"};
+            "Alt+4 / Num 1", "Alt+Shift+4 / Ctrl+Num 1",
+            "Alt+Shift+5 / Ctrl+Num 3", "Alt+5 / Num 3",
+            "Alt+6 / Num 7", "Alt+Shift+6 / Ctrl+Num 7"};
         constexpr OrthographicView views[] = {
             OrthographicView::front, OrthographicView::back,
             OrthographicView::left, OrthographicView::right,
