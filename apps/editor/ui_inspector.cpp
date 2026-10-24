@@ -1255,6 +1255,17 @@ Action draw_inspector(App& app) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
                     "Square albedo atlas written with the textured OBJ.");
+            inspector_field("UV partitions");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::InputInt("##uv_partitions", &app.settings.uv_parallel_partitions))
+                app.settings.uv_parallel_partitions = std::clamp(app.settings.uv_parallel_partitions, 1, 64);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("More partitions can speed up UV unwrapping but add seams. Default: 8. Range: 1-64."));
+            inspector_field("UV max stretch");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderFloat("##uv_stretch", &app.settings.uv_max_stretch, 0.F, 1.F, "%.3f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Higher values allow more distortion and fewer cuts. Default: 0.333."));
             inspector_field("Blend space");
             ImGui::SetNextItemWidth(-1.F);
             int blend_space = app.settings.texture_blend_linear ? 1 : 0;

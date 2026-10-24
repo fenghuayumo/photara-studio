@@ -2732,6 +2732,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     const std::uint32_t atlas_resolution =
         cli.atlas_resolution.value_or(kDefaultAtlasResolution);
     settings.atlas_resolution = static_cast<int>(atlas_resolution);
+    settings.uv_parallel_partitions = static_cast<int>(std::clamp(cli.uv_parallel_partitions, 1u, 64u));
+    settings.uv_max_stretch = cli.uv_max_stretch;
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
     settings.texture_photometric_steps = static_cast<int>(cli.texture_optimize_steps);

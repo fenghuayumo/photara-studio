@@ -30,6 +30,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.extractor_model.clear(); settings.lightglue_model.clear();
     settings.sam_detector_model.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(std::uint64_t) - sizeof(float));
     // Remove v18 refinement opt-in and v17 video/SAM fields first.
     bytes.resize(bytes.size() - 2 * sizeof(std::uint8_t) -
@@ -339,6 +340,8 @@ int main() {
     settings.mesh_source = 1;
     settings.texture_quality = 2;
     settings.atlas_resolution = 4096;
+    settings.uv_parallel_partitions = 16;
+    settings.uv_max_stretch = 0.5F;
     settings.texture_delight = true;
     settings.texture_optimize = false;
     settings.texture_photometric_steps = 4500;
@@ -452,6 +455,17 @@ int main() {
         "global SfM project mode is preserved");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
+    expect(round_trip.uv_parallel_partitions == 16 && round_trip.uv_max_stretch == 0.5F,
+        "UV settings survive project roundtrip");
+    {
+        auto legacy = encode_settings(settings, ascan_path);
+        legacy.resize(legacy.size() - sizeof(std::int32_t) - sizeof(float));
+        const std::uint32_t version = 19;
+        std::memcpy(legacy.data(), &version, sizeof(version));
+        const auto restored = decode_settings(legacy, ascan_path);
+        expect(restored.uv_parallel_partitions == 8 && restored.uv_max_stretch == 1.F / 3.F,
+            "older projects use default UV settings");
+    }
     expect(round_trip.mesh_quality == 2, "settings mesh quality");
     expect(round_trip.mesh_postprocess_quality == 0 && round_trip.mesh_simplify &&
         round_trip.mesh_target_faces == 730'000 && round_trip.mesh_remesh &&
@@ -695,6 +709,7 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto v17 = encode_settings(settings, ascan_path);
+        v17.resize(v17.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
         v17.resize(v17.size() - sizeof(std::uint8_t) - sizeof(std::int32_t) -
             sizeof(std::uint64_t) - settings.sam_detector_model.size() - sizeof(float));
         const std::uint32_t version = 17;

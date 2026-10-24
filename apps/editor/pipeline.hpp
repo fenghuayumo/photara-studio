@@ -397,6 +397,8 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // quality: 0 Fast, 1 Standard, 2 High.
     int texture_quality = 1;
     int atlas_resolution = 2048;
+    int uv_parallel_partitions = 8;
+    float uv_max_stretch = 1.F / 3.F;
     bool texture_delight = false;
     bool texture_optimize = true;
     int texture_photometric_steps = 3000;

@@ -1888,6 +1888,8 @@ std::string build_texture_command(
     if (settings.texture_delight) command << " --delight";
     // Bake the extracted geometry as-is; extraction already applies these settings.
     command << " --mesh-target-faces 0 --mesh-remesh=false";
+    command << " --uv-parallel-partitions " << std::clamp(settings.uv_parallel_partitions, 1, 64)
+            << " --uv-max-stretch " << std::clamp(settings.uv_max_stretch, 0.F, 1.F);
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);

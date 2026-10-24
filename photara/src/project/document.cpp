@@ -179,6 +179,8 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.sam_engine == 1 ? 1 : 0));
     writer.string(store_path(settings.sam_detector_model, base));
     writer.value(settings.sam_detector_threshold);
+    writer.value(static_cast<std::int32_t>(settings.uv_parallel_partitions));
+    writer.value(settings.uv_max_stretch);
     return writer.take();
 }
 
@@ -454,6 +456,13 @@ Settings decode_settings(
             settings.sam_detector_threshold < 0.F ||
             settings.sam_detector_threshold > 1.F)
             settings.sam_detector_threshold = 0.35F;
+    }
+    if (version >= 20) {
+        settings.uv_parallel_partitions = std::clamp(reader.value<std::int32_t>(), 1, 64);
+        settings.uv_max_stretch = reader.value<float>();
+        if (!std::isfinite(settings.uv_max_stretch) ||
+            settings.uv_max_stretch < 0.F || settings.uv_max_stretch > 1.F)
+            settings.uv_max_stretch = 1.F / 3.F;
     }
     settings.sanitize();
     return settings;

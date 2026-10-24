@@ -496,6 +496,8 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.bilateral_grid = app.settings.bilateral_grid;
     settings.texture_quality = app.settings.texture_quality;
     settings.atlas_resolution = app.settings.atlas_resolution;
+    settings.uv_parallel_partitions = app.settings.uv_parallel_partitions;
+    settings.uv_max_stretch = app.settings.uv_max_stretch;
     settings.texture_delight = app.settings.texture_delight;
     settings.texture_optimize = app.settings.texture_optimize;
     settings.texture_photometric_steps = app.settings.texture_photometric_steps;
@@ -629,6 +631,8 @@ void apply_project_settings(
     app.settings.texture_photometric_steps = std::max(1, settings.texture_photometric_steps);
     app.settings.texture_seam_steps = std::max(0, settings.texture_seam_steps);
     app.settings.texture_blend_linear = settings.texture_blend_linear;
+    app.settings.uv_parallel_partitions = std::clamp(settings.uv_parallel_partitions, 1, 64);
+    app.settings.uv_max_stretch = std::clamp(settings.uv_max_stretch, 0.F, 1.F);
 }
 
 void request_asfm_scene_load(
