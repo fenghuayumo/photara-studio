@@ -77,6 +77,7 @@ inline std::filesystem::path resolve_image(
         "Dataset image does not exist: " + name.string());
 }
 
+[[nodiscard]] std::unique_ptr<DatasetReader> make_nerfstudio_reader();
 [[nodiscard]] std::unique_ptr<DatasetReader> make_colmap_reader();
 [[nodiscard]] std::unique_ptr<DatasetReader> make_reality_capture_reader();
 [[nodiscard]] std::unique_ptr<DatasetReader> make_openmvs_reader();

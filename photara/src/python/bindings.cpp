@@ -244,7 +244,8 @@ NB_MODULE(photara, module) {
         .value("AUTO", splat::DatasetFormat::auto_detect)
         .value("COLMAP", splat::DatasetFormat::colmap)
         .value("REALITY_CAPTURE", splat::DatasetFormat::reality_capture)
-        .value("OPENMVS", splat::DatasetFormat::openmvs);
+        .value("OPENMVS", splat::DatasetFormat::openmvs)
+        .value("NERFSTUDIO", splat::DatasetFormat::nerfstudio);
 
     nb::enum_<splat::GaussianFormat>(module, "GaussianFormat")
         .value("AUTO", splat::GaussianFormat::auto_detect)
