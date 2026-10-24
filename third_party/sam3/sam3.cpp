@@ -986,6 +986,20 @@ struct sam3_memory_slot {
     struct ggml_tensor* spatial_pe     = nullptr;  // [64, 72, 72]
     int                 frame_index    = -1;
     bool                is_cond_frame  = false;
+
+    // The slot owns the metadata context and backend buffer for its tensors,
+    // so evicting it releases both. ggml cannot free individual tensor
+    // objects, so a shared tracker-wide context would fill up after a few
+    // hundred frames and leak every evicted slot's buffer.
+    ggml_context_ptr        ctx;
+    ggml_backend_buffer_ptr buffer;
+};
+
+struct sam3_obj_ptr_slot {
+    int                 frame_index = -1;
+    struct ggml_tensor* tensor      = nullptr;
+    ggml_context_ptr        ctx;
+    ggml_backend_buffer_ptr buffer;
 };
 
 struct sam3_tracker {
@@ -997,14 +1011,7 @@ struct sam3_tracker {
     std::vector<sam3_masklet> pending;
 
     std::map<int, std::vector<sam3_memory_slot>> mem_banks;
-    std::map<int, std::vector<std::pair<int, struct ggml_tensor*>>> ptr_banks;
-
-    struct ggml_context* ctx = nullptr;
-    ggml_backend_buffer_t buffer = nullptr;
-
-    // Per-tensor backend buffers allocated by sam3_encode_memory / sam3_store_obj_ptr.
-    // Tracked here so they can be freed on tracker reset.
-    std::vector<ggml_backend_buffer_t> owned_buffers;
+    std::map<int, std::vector<sam3_obj_ptr_slot>> ptr_banks;
 
     // Cached PE / RoPE data — pure functions of fixed hyperparameters, computed once.
     bool pe_caches_valid = false;
@@ -11215,7 +11222,7 @@ static sam3_prop_output sam3_propagate_single(
     sam3_tracker& tracker, sam3_state& state, const sam3_model& model,
     const sam3_masklet& masklet,
     const std::vector<sam3_memory_slot>& mem_bank,
-    const std::vector<std::pair<int, struct ggml_tensor*>>& ptr_bank) {
+    const std::vector<sam3_obj_ptr_slot>& ptr_bank) {
     sam3_prop_output output = {};
     const auto& hp = model.hparams;
     const int D = hp.neck_dim, MD = hp.mem_out_dim;
@@ -11264,9 +11271,9 @@ static sam3_prop_output sam3_propagate_single(
     int cur_frame = tracker.frame_index;
     for (int p = 0; p < P; ++p) {
         obj_ptrs[p].resize(D);
-        ggml_backend_tensor_get(ptr_bank[p].second, obj_ptrs[p].data(), 0, D * sizeof(float));
+        ggml_backend_tensor_get(ptr_bank[p].tensor, obj_ptrs[p].data(), 0, D * sizeof(float));
         // Use actual frame distance (matches Python: abs(frame_idx - t))
-        ptr_tpos[p] = std::abs(cur_frame - ptr_bank[p].first);
+        ptr_tpos[p] = std::abs(cur_frame - ptr_bank[p].frame_index);
         if (ptr_tpos[p] < 1) ptr_tpos[p] = 1;  // minimum distance of 1
     }
 
@@ -11652,11 +11659,6 @@ static bool sam3_encode_memory(
             md[i] += no_obj_emb[i % MD];
     }
 
-    if (!tracker.ctx) {
-        struct ggml_init_params tp = {ggml_tensor_overhead() * 4096, nullptr, true};
-        tracker.ctx = ggml_init(tp);
-    }
-
     // ── EdgeTAM perceiver: compress memory features before storage ───────
     if (hp.has_perceiver) {
         // Compute sinusoidal PE for memory features (needed as perceiver input)
@@ -11671,20 +11673,18 @@ static bool sam3_encode_memory(
         }
 
         // Store perceiver output: [MD=64, N_perc] (N_1d + N_2d latents)
+        // and its PE in a slot-owned context/buffer.
         const int N_perc = hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d;
-        auto* st = ggml_new_tensor_2d(tracker.ctx, GGML_TYPE_F32, MD, N_perc);
-        auto* sb = ggml_backend_alloc_buffer(model.backend, MD * N_perc * sizeof(float));
-        struct ggml_tallocr ta_perc = ggml_tallocr_new(sb);
-        ggml_tallocr_alloc(&ta_perc, st);
-        tracker.owned_buffers.push_back(sb);
-        ggml_backend_tensor_set(st, perc_latents.data(), 0, MD * N_perc * sizeof(float));
-
+        struct ggml_init_params tp = {ggml_tensor_overhead() * 2 + 256, nullptr, true};
+        ggml_context_ptr slot_ctx(ggml_init(tp));
+        if (!slot_ctx) return false;
+        auto* st = ggml_new_tensor_2d(slot_ctx.get(), GGML_TYPE_F32, MD, N_perc);
         // Store perceiver PE: [MD=64, 512] (first 256 zeros, last 256 sinusoidal)
-        auto* spe = ggml_new_tensor_2d(tracker.ctx, GGML_TYPE_F32, MD, N_perc);
-        auto* speb = ggml_backend_alloc_buffer(model.backend, MD * N_perc * sizeof(float));
-        struct ggml_tallocr ta_perc2 = ggml_tallocr_new(speb);
-        ggml_tallocr_alloc(&ta_perc2, spe);
-        tracker.owned_buffers.push_back(speb);
+        auto* spe = ggml_new_tensor_2d(slot_ctx.get(), GGML_TYPE_F32, MD, N_perc);
+        ggml_backend_buffer_ptr slot_buf(
+            ggml_backend_alloc_ctx_tensors(slot_ctx.get(), model.backend));
+        if (!slot_buf) return false;
+        ggml_backend_tensor_set(st, perc_latents.data(), 0, MD * N_perc * sizeof(float));
         ggml_backend_tensor_set(spe, perc_pos.data(), 0, MD * N_perc * sizeof(float));
 
         sam3_memory_slot slot;
@@ -11692,8 +11692,10 @@ static bool sam3_encode_memory(
         slot.spatial_pe = spe;
         slot.frame_index = frame_idx;
         slot.is_cond_frame = is_cond;
+        slot.ctx = std::move(slot_ctx);
+        slot.buffer = std::move(slot_buf);
         auto& bk = tracker.mem_banks[inst_id];
-        bk.push_back(slot);
+        bk.push_back(std::move(slot));
         while ((int)bk.size() > hp.num_maskmem) {
             bool removed = false;
             for (auto it = bk.begin(); it != bk.end(); ++it)
@@ -11708,22 +11710,18 @@ static bool sam3_encode_memory(
     }
 
     // ── Standard path (SAM2/SAM3): store raw [MD, H, H] features ────────
-    // Store spatial features
-    auto* st = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, MD, H, H, 1);
-    auto* sb = ggml_backend_alloc_buffer(model.backend, MD * H * H * sizeof(float));
-    struct ggml_tallocr ta = ggml_tallocr_new(sb);
-    ggml_tallocr_alloc(&ta, st);
-    tracker.owned_buffers.push_back(sb);
-    ggml_backend_tensor_set(st, md.data(), 0, md.size() * sizeof(float));
-
-    // Compute and store sinusoidal spatial PE
+    // Slot-owned context/buffer hold both the features and their spatial PE.
     sam3_ensure_tracker_pe_caches(tracker, hp, H);
     const auto& pe_data = tracker.cached_sinpe_64;
-    auto* spe = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, MD, H, H, 1);
-    auto* speb = ggml_backend_alloc_buffer(model.backend, MD * H * H * sizeof(float));
-    struct ggml_tallocr ta2 = ggml_tallocr_new(speb);
-    ggml_tallocr_alloc(&ta2, spe);
-    tracker.owned_buffers.push_back(speb);
+    struct ggml_init_params tp = {ggml_tensor_overhead() * 2 + 256, nullptr, true};
+    ggml_context_ptr slot_ctx(ggml_init(tp));
+    if (!slot_ctx) return false;
+    auto* st = ggml_new_tensor_4d(slot_ctx.get(), GGML_TYPE_F32, MD, H, H, 1);
+    auto* spe = ggml_new_tensor_4d(slot_ctx.get(), GGML_TYPE_F32, MD, H, H, 1);
+    ggml_backend_buffer_ptr slot_buf(
+        ggml_backend_alloc_ctx_tensors(slot_ctx.get(), model.backend));
+    if (!slot_buf) return false;
+    ggml_backend_tensor_set(st, md.data(), 0, md.size() * sizeof(float));
     ggml_backend_tensor_set(spe, pe_data.data(), 0, pe_data.size() * sizeof(float));
 
     sam3_memory_slot slot;
@@ -11731,8 +11729,10 @@ static bool sam3_encode_memory(
     slot.spatial_pe = spe;
     slot.frame_index = frame_idx;
     slot.is_cond_frame = is_cond;
+    slot.ctx = std::move(slot_ctx);
+    slot.buffer = std::move(slot_buf);
     auto& bk = tracker.mem_banks[inst_id];
-    bk.push_back(slot);
+    bk.push_back(std::move(slot));
     while ((int)bk.size() > hp.num_maskmem) {
         bool removed = false;
         for (auto it = bk.begin(); it != bk.end(); ++it)
@@ -11750,18 +11750,21 @@ static void sam3_store_obj_ptr(
     sam3_tracker& tracker, const sam3_model& model,
     int inst_id, const float* pd, int frame_idx) {
     const int D = model.hparams.neck_dim;
-    if (!tracker.ctx) {
-        struct ggml_init_params tp = {ggml_tensor_overhead() * 4096, nullptr, true};
-        tracker.ctx = ggml_init(tp);
-    }
-    auto* pt = ggml_new_tensor_2d(tracker.ctx, GGML_TYPE_F32, D, 1);
-    auto* pb = ggml_backend_alloc_buffer(model.backend, D * sizeof(float));
-    struct ggml_tallocr ta = ggml_tallocr_new(pb);
-    ggml_tallocr_alloc(&ta, pt);
-    tracker.owned_buffers.push_back(pb);
+    struct ggml_init_params tp = {ggml_tensor_overhead() * 2 + 256, nullptr, true};
+    ggml_context_ptr ctx(ggml_init(tp));
+    if (!ctx) return;
+    auto* pt = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, D, 1);
+    ggml_backend_buffer_ptr buffer(
+        ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend));
+    if (!buffer) return;
     ggml_backend_tensor_set(pt, pd, 0, D * sizeof(float));
+    sam3_obj_ptr_slot slot;
+    slot.frame_index = frame_idx;
+    slot.tensor = pt;
+    slot.ctx = std::move(ctx);
+    slot.buffer = std::move(buffer);
     auto& bk = tracker.ptr_banks[inst_id];
-    bk.push_back({frame_idx, pt});
+    bk.push_back(std::move(slot));
     while ((int)bk.size() > model.hparams.max_obj_ptrs) bk.erase(bk.begin());
 }
 
@@ -12147,19 +12150,10 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
     tracker.next_inst_id = 1;
     tracker.masklets.clear();
     tracker.pending.clear();
+    // Slots own their metadata contexts and backend buffers; clearing the
+    // banks releases them.
     tracker.mem_banks.clear();
     tracker.ptr_banks.clear();
-    for (auto* b : tracker.owned_buffers)
-        if (b) ggml_backend_buffer_free(b);
-    tracker.owned_buffers.clear();
-    if (tracker.ctx) {
-        ggml_free(tracker.ctx);
-        tracker.ctx = nullptr;
-    }
-    if (tracker.buffer) {
-        ggml_backend_buffer_free(tracker.buffer);
-        tracker.buffer = nullptr;
-    }
 }
 
 /*****************************************************************************
