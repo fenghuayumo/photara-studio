@@ -90,9 +90,10 @@ WorkflowCrumbs workflow_crumbs(const App& app) {
     }
     if (!aligned && !training && !densing && !texturing) return crumbs;
 
+    // Gaussian extraction runs as a dense job too, but must not read as MVS.
     const bool mvs_route =
-        !training && (mesh_from_mvs(app.settings) || densing ||
-                      (app.settings.mesh_source == 1 && app.settings.build_mesh));
+        !training && (mesh_from_mvs(app.settings) ||
+                      (densing && app.settings.mesh_source == 1));
     if (mvs_route) {
         crumbs.labels[static_cast<std::size_t>(index++)] = tr("MVS Mesh");
         crumbs.labels[static_cast<std::size_t>(index++)] = tr("Texture Baking");

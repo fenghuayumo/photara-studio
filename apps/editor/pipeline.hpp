@@ -518,6 +518,13 @@ inline bool mesh_from_gaussians(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 0;
 }
 
+// Selected mesh source, independent of the Build Mesh toggle. The toggle
+// only schedules an automatic extraction at the end of training; the
+// explicit Extract Mesh action always honors this selection.
+inline bool mesh_source_gaussians(const ProjectSettings& settings) {
+    return settings.mesh_source == 0;
+}
+
 // Resolve Auto for both training-time and standalone Gaussian mesh extraction.
 // Explicit selections take precedence over the normal-field training setting.
 inline int gaussian_mesh_method(const ProjectSettings& settings) {

@@ -1105,9 +1105,11 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(tr("Build mesh"), &app.settings.build_mesh);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
-                "Include a surface mesh in the reconstruction.\n"
-                "Choose From Gaussians or From MVS below.");
-        if (app.settings.build_mesh) {
+                "Also extract a surface automatically at the end of 3DGS training.\n"
+                "Uncheck it to train a splat-only model; Extract Mesh still works.");
+        // The method and quality settings also configure the explicit
+        // Extract Mesh action, so they stay available without Build Mesh.
+        {
             ImGui::Spacing();
             theme::caption("Method");
             if (ImGui::RadioButton(
@@ -1133,7 +1135,7 @@ Action draw_inspector(App& app) {
             ImGui::Spacing();
             theme::caption("Mesh algorithm");
             ImGui::SetNextItemWidth(-1.F);
-            if (mesh_from_gaussians(app.settings)) {
+            if (mesh_source_gaussians(app.settings)) {
                 const char* methods[] = {
                     tr(app.settings.normal_field
                            ? "Auto: PAM" : "Auto: TSDF"),
@@ -1165,13 +1167,8 @@ Action draw_inspector(App& app) {
                     "Fast prioritizes speed and may lose small details.\n"
                     "Standard balances detail and time. High uses more samples and refinement.\n"
                     "Mesh quality does not change 3DGS training settings."));
-            if (mesh_from_gaussians(app.settings))
+            if (mesh_source_gaussians(app.settings))
                 objective_note("Geometry weights are in Gaussian Splatting > Loss & constraints > Geometry.");
-        } else {
-            ImGui::PushTextWrapPos(0.F);
-            theme::caption(
-                "Appearance-only. Train 3DGS without extracting a surface.");
-            ImGui::PopTextWrapPos();
         }
         ImGui::Spacing();
         if (ImGui::TreeNodeEx(tr("Mesh postprocessing"),
@@ -1409,7 +1406,7 @@ Action draw_inspector(App& app) {
         ? "Train 3DGS with depth and normal losses, then extract a "
           "surface from the Gaussians."
         : "Train 3DGS from the aligned cameras using the selected losses and priors.";
-    const char* const extract_tip = mesh_from_gaussians(app.settings)
+    const char* const extract_tip = mesh_source_gaussians(app.settings)
         ? (app.has_model
                ? "Extract a surface from the trained 3DGS model.\n"
                  "Uses the saved Gaussians. Training is not started again."
@@ -1471,7 +1468,7 @@ Action draw_inspector(App& app) {
                 label = "Extract Mesh";
                 tip = extract_tip;
                 next = Action::dense;
-                enabled = aligned && app.settings.build_mesh;
+                enabled = aligned;
                 break;
             case InspectorSection::texture:
                 label = app.has_texture ? "Re-bake Texture" : "Bake Texture";
@@ -1490,8 +1487,6 @@ Action draw_inspector(App& app) {
         theme::caption(app.pending_train_prepare.valid() ? "Preparing training..."
             : (section == InspectorSection::texture && !app.has_mesh)
                 ? "Extract a mesh before baking textures."
-            : (section == InspectorSection::mesh && !app.settings.build_mesh)
-                ? "Enable Build mesh to configure surface extraction."
             : ((section == InspectorSection::training || section == InspectorSection::mesh) && !aligned)
                 ? "Align photos or import a camera dataset first."
             : (has_external_dataset(app) && (section == InspectorSection::project || section == InspectorSection::alignment))

@@ -241,7 +241,6 @@ constexpr Entry k_entries[] = {
     {"Select a reconstruction step in the scene panel.", "在左侧选择一个重建步骤。", "シーンパネルで再構築手順を選択します。", "장면 패널에서 재구성 단계를 선택합니다."},
     {"Choose an image folder or video in Project settings.", "请在项目设置中选择图像文件夹或视频。", "プロジェクト設定で画像フォルダーまたは動画を選択してください。", "프로젝트 설정에서 이미지 폴더 또는 동영상을 선택하세요."},
     {"Extract a mesh before baking textures.", "请先提取网格，再烘焙纹理。", "テクスチャをベイクする前にメッシュを抽出してください。", "텍스처를 베이크하기 전에 메시를 추출하세요."},
-    {"Enable Build mesh to configure surface extraction.", "启用“生成网格”以配置表面提取。", "メッシュ構築を有効にして表面抽出を設定してください。", "메시 생성을 활성화하여 표면 추출을 설정하세요."},
     {"Align photos or import a camera dataset first.", "请先对齐照片或导入相机数据集。", "先に写真の位置合わせまたはカメラデータセットのインポートを行ってください。", "먼저 사진을 정렬하거나 카메라 데이터셋을 가져오세요."},
     {"Imported cameras are ready. Select training or mesh extraction.", "导入相机已就绪，请选择训练或网格提取。", "インポート済みカメラは準備完了です。学習またはメッシュ抽出を選択してください。", "가져온 카메라가 준비되었습니다. 학습 또는 메시 추출을 선택하세요."},
     {"Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings.", "快速模式仅保留 RGB 损失。标准和高质量模式默认启用尺度 0.01、针状抑制 0.001。选择模式会重置损失设置。", "Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings.", "Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."},
@@ -1566,11 +1565,11 @@ constexpr Entry k_entries[] = {
      "学習したガウシアンを保存。PLY / SOG / SPZ / GLB と SH 次数を選択。",
      "학습된 가우시안을 저장합니다. PLY, SOG, SPZ, GLB와 SH 차수를 선택하세요."},
     {"Build mesh", "生成网格", "メッシュを生成", "메시 생성"},
-    {"Include a surface mesh in the reconstruction.\n"
-     "Choose From Gaussians or From MVS below.",
-     "在重建中包含表面网格。\n在下方选择从高斯生成或从 MVS。",
-     "再構成に表面メッシュを含めます。\n下で「ガウシアンから」か「MVS から」を選択。",
-     "재구성에 표면 메시를 포함합니다.\n아래에서 가우시안에서 또는 MVS에서를 선택하세요."},
+    {"Also extract a surface automatically at the end of 3DGS training.\n"
+     "Uncheck it to train a splat-only model; Extract Mesh still works.",
+     "勾选后会在 3DGS 训练结束时自动提取表面。\n取消勾选则只训练高斯模型，仍可单独执行提取网格。",
+     "3DGS の学習終了時に表面も自動抽出します。\nオフにするとガウシアンのみ学習しますが、メッシュ抽出は実行できます。",
+     "3DGS 학습이 끝나면 자동으로 표면을 추출합니다.\n끄면 가우시안만 학습하며, 메시 추출은 별도로 실행할 수 있습니다."},
     {"Method", "方法", "方法", "방법"},
     {"Train 3DGS with depth and normal losses, then extract a "
      "surface from the Gaussians.",
@@ -1617,10 +1616,6 @@ constexpr Entry k_entries[] = {
     {"Multi-view geometry weight", "多视图几何权重", "多視点幾何ウェイト", "다시점 기하 가중치"},
     {"Multi-view NCC weight", "多视图 NCC 权重", "多視点 NCC ウェイト", "다시점 NCC 가중치"},
     {"Geometry loss start iteration", "几何损失起始迭代", "幾何ロス開始イテレーション", "기하 손실 시작 반복"},
-    {"Appearance-only. Train 3DGS without extracting a surface.",
-     "仅外观。训练 3DGS 但不提取表面。",
-     "見た目のみ。表面抽出なしで 3DGS を学習。",
-     "외형만. 표면 추출 없이 3DGS를 학습합니다."},
     {"Save the reconstructed surface. Choose PLY, OBJ, or GLB,\n"
      "and whether to include the baked texture.",
      "保存重建表面。可选 PLY、OBJ 或 GLB，以及是否包含烘焙纹理。",

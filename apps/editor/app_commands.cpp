@@ -4358,12 +4358,16 @@ void start_dense(App& app) {
     if (app.job.running()) return;
     // From Gaussians extracts the surface from the saved 3DGS model.
     // From MVS fuses the mesh from the dense photogrammetry cloud.
-    if (mesh_from_gaussians(app.settings)) {
+    // The source selection applies regardless of Build Mesh: that toggle
+    // only adds an automatic extraction at the end of training.
+    if (mesh_source_gaussians(app.settings)) {
         refresh_artifacts(app);
         if (app.has_model) {
             start_splat_mesh(app);
             return;
         }
+        // No saved model yet: train with an automatic extraction enabled.
+        app.settings.build_mesh = true;
         start_train(app, false);
         return;
     }
