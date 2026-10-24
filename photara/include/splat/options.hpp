@@ -9,6 +9,8 @@
 
 namespace photara::splat {
 
+enum class RenderMethod { gaussian_3dgs = 0, gaussian_3dgut = 1 };
+
 enum class TrainingBackend {
     cuda,
     vulkan,
@@ -66,6 +68,7 @@ struct TrainingOptions {
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
+    RenderMethod render_method{RenderMethod::gaussian_3dgs};
     unsigned iterations{30'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};

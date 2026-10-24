@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/camera_projection.hpp"
+#include "splat/options.hpp"
 #include "internal/tensor_impl.hpp"
 
 #include <array>
@@ -33,6 +34,7 @@ struct Camera {
 };
 
 struct GaussianModel {
+    RenderMethod render_method{RenderMethod::gaussian_3dgs};
     tinytensor::Tensor means;           // [N,3], world space
     tinytensor::Tensor log_scales;      // [N,3]
     tinytensor::Tensor quaternions;     // [N,4], scalar-first

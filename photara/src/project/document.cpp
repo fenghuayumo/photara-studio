@@ -64,7 +64,7 @@ std::vector<std::uint8_t> encode_settings(
     const auto base = project_directory(project_file);
     BufferWriter writer;
     writer.value(k_settings_version);
-    writer.value(k_settings_min_reader);
+    writer.value(settings.render_method == 1 ? k_settings_version : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -181,6 +181,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.sam_detector_threshold);
     writer.value(static_cast<std::int32_t>(settings.uv_parallel_partitions));
     writer.value(settings.uv_max_stretch);
+    writer.value(static_cast<std::int32_t>(settings.render_method));
     return writer.take();
 }
 
@@ -463,6 +464,11 @@ Settings decode_settings(
         if (!std::isfinite(settings.uv_max_stretch) ||
             settings.uv_max_stretch < 0.F || settings.uv_max_stretch > 1.F)
             settings.uv_max_stretch = 1.F / 3.F;
+    }
+    if (version >= 21) {
+        settings.render_method = reader.value<std::int32_t>();
+        if (settings.render_method < 0 || settings.render_method > 1)
+            throw std::invalid_argument("Invalid project rendering method");
     }
     settings.sanitize();
     return settings;

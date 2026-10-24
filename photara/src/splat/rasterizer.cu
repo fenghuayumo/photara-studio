@@ -194,6 +194,7 @@ splat_drender::Gaussians gaussians_of(
     const GaussianModel& model, const detail::ActivatedParameters& activated,
     const RasterizeOptions& options, const tinytensor::Tensor& colors_precomp) {
     splat_drender::Gaussians g;
+    g.primitive = static_cast<splat_drender::Primitive>(model.render_method);
     g.count = static_cast<int>(model.size());
     g.means = model.means.ptr<float>();
     g.opacities = activated.opacities.ptr<float>();
@@ -305,6 +306,8 @@ void validate_model(
 RenderResult Rasterizer::forward(
     const GaussianModel& model, const Camera& camera,
     const RasterizeOptions& requested_options) const {
+    if (model.render_method == RenderMethod::gaussian_3dgut && model.means.device() != tinytensor::Device::CUDA)
+        throw std::invalid_argument("3DGUT currently requires the CUDA backend");
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_raster_forward(
             backend_, model, camera, requested_options);
@@ -367,6 +370,8 @@ RenderResult Rasterizer::forward(
 
 tinytensor::Tensor Rasterizer::pruning_scores(
     const GaussianModel& model, const Camera& camera, RasterizeOptions options) const {
+    if (model.render_method == RenderMethod::gaussian_3dgut)
+        throw std::invalid_argument("3DGUT Speedy pruning is not implemented");
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_pruning_scores(backend_, model, camera, options);
     if (model.means.device() != tinytensor::Device::CUDA)

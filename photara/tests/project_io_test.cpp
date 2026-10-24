@@ -30,6 +30,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.extractor_model.clear(); settings.lightglue_model.clear();
     settings.sam_detector_model.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::int32_t)); // v21 rendering method.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(std::uint64_t) - sizeof(float));
     // Remove v18 refinement opt-in and v17 video/SAM fields first.
@@ -706,9 +707,16 @@ int main() {
             std::filesystem::path(restored.sam_detector_model) == std::filesystem::path(language.sam_detector_model) &&
             restored.sam_detector_threshold == 0.42F, "Language mask settings round trip");
     }
+    {
+        auto gut = updated;
+        gut.render_method = 1;
+        expect(decode_settings(encode_settings(gut, ascan_path), ascan_path).render_method == 1,
+               "3DGUT project rendering method round trip");
+    }
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto v17 = encode_settings(settings, ascan_path);
+        v17.resize(v17.size() - sizeof(std::int32_t)); // v21 rendering method.
         v17.resize(v17.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
         v17.resize(v17.size() - sizeof(std::uint8_t) - sizeof(std::int32_t) -
             sizeof(std::uint64_t) - settings.sam_detector_model.size() - sizeof(float));

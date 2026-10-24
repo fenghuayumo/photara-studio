@@ -1655,6 +1655,7 @@ std::string build_train_command(
             command << " --subject-bounds "
                     << quote(layout.working_subject_bounds);
     }
+    command << " --splat-render-method " << (settings.render_method == 1 ? "3dgut" : "3dgs");
     command << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-mode "
             << (settings.training_mode == 0 ? "fast" :

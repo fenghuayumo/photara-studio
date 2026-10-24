@@ -190,7 +190,7 @@ GaussianModel load_gaussians_ply(
     const std::filesystem::path& path,
     tinytensor::Device device = tinytensor::Device::CUDA);
 
-inline constexpr std::uint32_t k_gaussian_chunk_version = 1;
+inline constexpr std::uint32_t k_gaussian_chunk_version = 2;
 std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model);
 GaussianModel decode_gaussians(
     std::span<const std::uint8_t> bytes,

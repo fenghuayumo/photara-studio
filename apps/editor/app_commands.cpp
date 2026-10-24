@@ -449,6 +449,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
+    settings.render_method = app.settings.render_method;
     static_cast<photara::splat::TrainingLossSettings&>(settings) = app.settings;
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
@@ -568,6 +569,7 @@ void apply_project_settings(
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
+    app.settings.render_method = settings.render_method;
     static_cast<photara::splat::TrainingLossSettings&>(app.settings) = settings;
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
@@ -4226,6 +4228,7 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
                 << " --splat-use-mask false"
                 << " --splat --backend "
                 << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
+                << " --splat-render-method " << (app.settings.render_method == 1 ? "3dgut" : "3dgs")
                 << " --splat-strategy "
                 << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
                 << " --splat-iterations "
@@ -4704,6 +4707,7 @@ void queue_splat_model_load(
             SplatEdit::Host host;
             host.count = cloud.count;
             host.sh_degree = cloud.sh_degree;
+            host.render_method = static_cast<int>(model.render_method);
             host.sh_bases = cloud.sh_bases;
             host.means = cloud.means;
             host.log_scales = cloud.log_scales;

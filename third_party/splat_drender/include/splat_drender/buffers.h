@@ -93,6 +93,8 @@ struct GaussianState {
 };
 
 // Backward-only per-Gaussian intermediates (fresh scratch each call).
+// GUT reuses d_mean2d for world mean, d_conic for activated scale/opacity,
+// and d_ray_plane for quaternion derivatives, before the shared SH/Adam pass.
 struct GradState {
     float4* d_conic = nullptr;     // xyz: conic grads, w: opacity grad
     float4* d_ray_plane = nullptr;

@@ -283,6 +283,7 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     sfm::FingerprintBuilder hash;
     hash.append_string("photara-ply-checkpoint-v1");
     hash.append(options.backend);
+    if (options.render_method != RenderMethod::gaussian_3dgs) hash.append(options.render_method);
     hash.append(options.iterations);
     hash.append(options.sh_degree);
     hash.append(options.sh_degree_interval);

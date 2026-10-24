@@ -1552,6 +1552,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_RUNTIME_DLLS:photara_nerfstudio_dataset_test>
                     $<TARGET_FILE_DIR:photara_nerfstudio_dataset_test> COMMAND_EXPAND_LISTS)
         endif()
+        add_executable(photara_splat_gut_test tests/splat_gut_test.cpp)
+        target_link_libraries(photara_splat_gut_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.gut COMMAND photara_splat_gut_test)
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_gut_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_gut_test>
+                    $<TARGET_FILE_DIR:photara_splat_gut_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
         add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
         target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)

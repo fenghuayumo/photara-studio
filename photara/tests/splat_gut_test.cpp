@@ -1,0 +1,132 @@
+#include "io/image.hpp"
+#include "splat/formats.hpp"
+#include "splat/trainer.hpp"
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+
+using namespace photara;
+using namespace photara::splat;
+void require(bool ok, const char *message) {
+  if (!ok)
+    throw std::runtime_error(message);
+}
+int main() {
+  try {
+    const auto root =
+        std::filesystem::temp_directory_path() / "photara_3dgut_test";
+    std::filesystem::create_directories(root);
+    const auto image = root / "target.png";
+    io::save_rgb_png(
+        io::RgbImage{32, 32, std::vector<std::uint8_t>(32 * 32 * 3, 128)},
+        image);
+    mvs::MvsScene scene;
+    mvs::MvsView view;
+    view.path = image;
+    view.width = view.src_width = view.height = view.src_height = 32;
+    view.fx = view.fy = view.src_fx = view.src_fy = 24.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
+    scene.views.push_back(view);
+    view.id = 1;
+    view.pose.C.x() = .15;
+    scene.views.push_back(view);
+    for (int i = 0; i < 16; ++i) {
+      mvs::DensePoint point;
+      point.position =
+          mvs::Vec3f((i % 4 - 1.5F) * .15F, (i / 4 - 1.5F) * .15F, 2.F);
+      point.normal = mvs::Vec3f::UnitZ();
+      point.color = mvs::Vec3f::Constant(.35F);
+      point.views = {0, 1};
+      scene.dense_cloud.points.push_back(point);
+    }
+    for (const auto method :
+         {RenderMethod::gaussian_3dgs, RenderMethod::gaussian_3dgut}) {
+      TrainingOptions options;
+      options.render_method = method;
+      options.iterations = 8;
+      options.sh_degree = 3;
+      options.sh_degree_interval = 1;
+      options.input_is_dense = false;
+      options.maximum_scale_fraction = 1.F;
+      options.use_mvs_normals = false;
+      options.use_depth_normal_loss = false;
+      options.use_normal_field = false;
+      options.multi_view_geo_weight = options.multi_view_ncc_weight = 0.F;
+      options.densification_cap = 32;
+      options.refine_start_iter = 1;
+      options.refine_stop_iter = 7;
+      options.grow_stop_iter = 7;
+      options.refine_every = 2;
+      options.densify_gradient_threshold = -1.F;
+      options.densify_select_fraction = 1.F;
+      options.mean_noise_weight = 0.F;
+      options.log_interval = 1;
+      unsigned completed = 0;
+      auto model =
+          Trainer(options).train(scene, [&](const TrainingProgress &p) {
+            ++completed;
+            require(std::isfinite(p.loss), "nonfinite training loss");
+            return true;
+          });
+      require(completed == 8, "training did not finish");
+      require(model.render_method == method,
+              "densification lost rendering method");
+      require(model.size() > 16,
+              "densification did not exercise topology change");
+      for (float x : model.means.to_vector())
+        require(std::isfinite(x), "nonfinite trained mean");
+      const auto ply =
+          root /
+          (method == RenderMethod::gaussian_3dgut ? "gut.ply" : "gs.ply");
+      save_gaussians_ply(model, ply);
+      const auto loaded = load_gaussians_ply(ply, tinytensor::Device::CUDA);
+      require(loaded.render_method == method, "PLY lost rendering method");
+      require(loaded.size() == model.size(), "PLY lost model rows");
+      const auto decoded =
+          decode_gaussians(encode_gaussians(model), tinytensor::Device::CPU);
+      require(decoded.render_method == method,
+              "project model chunk lost rendering method");
+      std::ifstream file(ply, std::ios::binary);
+      std::string line;
+      bool tagged = false;
+      while (std::getline(file, line) && line != "end_header")
+        tagged |= line == std::string("comment photara_render_method ") +
+                              (method == RenderMethod::gaussian_3dgut ? "3dgut"
+                                                                      : "3dgs");
+      require(tagged, "PLY header is missing method tag");
+    }
+    // A legacy untagged PLY retains the existing 3DGS interpretation.
+    std::ifstream original(root / "gs.ply", std::ios::binary);
+    std::ofstream legacy(root / "legacy.ply", std::ios::binary);
+    std::string line;
+    while (std::getline(original, line)) {
+      if (line.rfind("comment photara_render_method", 0) != 0)
+        legacy << line << '\n';
+      if (line == "end_header")
+        break;
+    }
+    legacy << original.rdbuf();
+    legacy.close();
+    require(load_gaussians_ply(root / "legacy.ply", tinytensor::Device::CPU)
+                    .render_method == RenderMethod::gaussian_3dgs,
+            "legacy PLY method changed");
+    TrainingOptions invalid;
+    invalid.render_method = RenderMethod::gaussian_3dgut;
+    invalid.backend = TrainingBackend::vulkan;
+    bool rejected = false;
+    try {
+      Trainer trainer(invalid);
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    require(rejected, "3DGUT Vulkan training was silently accepted");
+    std::cout << "3DGUT CUDA training, densification, PLY and archive "
+                 "roundtrips passed\n";
+    return 0;
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
+}

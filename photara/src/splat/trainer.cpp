@@ -1089,6 +1089,7 @@ GaussianModel initialize_from_dense_cloud(
 
     const tinytensor::Device device = training_device(options);
     GaussianModel model;
+    model.render_method = options.render_method;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
@@ -1108,6 +1109,10 @@ GaussianModel initialize_from_dense_cloud(
 
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
+    if (options_.render_method == RenderMethod::gaussian_3dgut && options_.backend != TrainingBackend::cuda)
+        throw std::invalid_argument("3DGUT training currently requires CUDA");
+    if (options_.render_method == RenderMethod::gaussian_3dgut && options_.speedy_pruning)
+        throw std::invalid_argument("3DGUT does not yet support Speedy pruning");
     if (!std::isfinite(options_.scale_regularization_weight) || options_.scale_regularization_weight < 0.F ||
         !std::isfinite(options_.shape_erank_reg) || options_.shape_erank_reg < 0.F ||
         !std::isfinite(options_.shape_axis_ratio_reg) || options_.shape_axis_ratio_reg < 0.F ||
@@ -1190,6 +1195,9 @@ GaussianModel Trainer::train(
         tinytensor::VramScope scope("model.initialize");
         return initialize_from_dense_cloud(scene, options_);
     }();
+    if (warm_start && model.render_method != options_.render_method)
+        throw std::runtime_error("Checkpoint rendering method does not match requested method");
+    model.render_method = options_.render_method;
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1296,8 +1304,10 @@ GaussianModel Trainer::train(
             "native views do not reuse MVS depth/normal maps without reprojection. Cameras: "
             "fisheye/equirectangular splat cameras");
     }
+    if (options_.render_method == RenderMethod::gaussian_3dgut)
+        core::Logger::instance().info("3DGUT CUDA: multi-view point-depth losses are disabled; using differentiable ray rasterization");
     const bool use_multi_view =
-        !native_non_pinhole &&
+        options_.render_method != RenderMethod::gaussian_3dgut && !native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||
          options_.multi_view_ncc_weight > 0.F);
     const unsigned multi_view_tail_interval =
@@ -2932,6 +2942,8 @@ void save_gaussians_ply(
     if (!output) throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
     output << "ply\nformat binary_little_endian 1.0\n"
            << "comment Photara splat (GGGS-derived geometry; 3DGS-compatible SH layout)\n"
+           << "comment photara_render_method "
+           << (model.render_method == RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs") << '\n'
            << "element vertex " << count << '\n'
            << "property float x\nproperty float y\nproperty float z\n"
            << "property float nx\nproperty float ny\nproperty float nz\n"
@@ -3000,6 +3012,7 @@ GaussianModel load_gaussians_ply(
         throw std::runtime_error("Invalid Gaussian PLY header: " + path.string());
     std::size_t count = 0;
     bool binary_little_endian = false;
+    RenderMethod render_method = RenderMethod::gaussian_3dgs;
     bool reading_vertices = false;
     std::vector<std::string> properties;
     while (std::getline(input, line)) {
@@ -3008,7 +3021,14 @@ GaussianModel load_gaussians_ply(
         std::istringstream tokens(line);
         std::string keyword;
         tokens >> keyword;
-        if (keyword == "format") {
+        if (keyword == "comment") {
+            std::string key, method; tokens >> key >> method;
+            if (key == "photara_render_method") {
+                if (method == "3dgut") render_method = RenderMethod::gaussian_3dgut;
+                else if (method == "3dgs") render_method = RenderMethod::gaussian_3dgs;
+                else throw std::runtime_error("Unknown Gaussian PLY rendering method: " + method);
+            }
+        } else if (keyword == "format") {
             std::string format;
             tokens >> format;
             binary_little_endian = format == "binary_little_endian";
@@ -3193,6 +3213,7 @@ GaussianModel load_gaussians_ply(
             "Gaussian PLY contains non-finite parameters: " + path.string());
 
     GaussianModel model;
+    model.render_method = render_method;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3U}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
@@ -3219,10 +3240,10 @@ GaussianModel load_gaussians_ply(
 std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     const std::size_t count = model.size();
     if (count == 0) {
-        const std::uint32_t version = k_gaussian_chunk_version;
+        const std::uint32_t version = model.render_method == RenderMethod::gaussian_3dgut ? 2U : 1U;
         const std::uint64_t stored_count = 0;
         const std::uint32_t sh_degree = model.sh_degree;
-        const std::uint32_t flags = 0;
+        const std::uint32_t flags = model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U;
         std::vector<std::uint8_t> bytes(4 + 8 + 4 + 4);
         std::memcpy(bytes.data(), &version, 4);
         std::memcpy(bytes.data() + 4, &stored_count, 8);
@@ -3248,10 +3269,10 @@ std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     const auto filter_3d = has_filter
         ? download<float>(model.filter_3d)
         : std::vector<float>{};
-    std::uint32_t flags = 0;
+    std::uint32_t flags = model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U;
     if (has_filter) flags |= 1U;
     if (has_normal_features) flags |= 2U;
-    const std::uint32_t version = k_gaussian_chunk_version;
+    const std::uint32_t version = model.render_method == RenderMethod::gaussian_3dgut ? 2U : 1U;
     const std::uint64_t stored_count = count;
     const std::uint32_t sh_degree = model.sh_degree;
     std::vector<std::uint8_t> bytes(
@@ -3334,6 +3355,7 @@ GaussianModel decode_gaussians(
     take_floats(filter);
 
     GaussianModel model;
+    model.render_method = version >= 2 && (flags & 4U) ? RenderMethod::gaussian_3dgut : RenderMethod::gaussian_3dgs;
     if (count == 0) return model;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3U}, device);

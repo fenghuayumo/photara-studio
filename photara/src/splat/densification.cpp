@@ -153,6 +153,7 @@ GaussianModel clone_model(const GaussianModel& model) {
     if (model.filter_3d.is_valid())
         cloned.filter_3d = model.filter_3d.clone();
     cloned.sh_degree = model.sh_degree;
+    cloned.render_method = model.render_method;
     return cloned;
 }
 

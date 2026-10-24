@@ -963,6 +963,12 @@ Action draw_inspector(App& app) {
                 "the display and never disables the training constraint."));
         if (ImGui::TreeNodeEx(tr("Advanced training settings"),
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            theme::caption("Rendering method");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* render_methods[] = {"3DGS", "3DGUT (CUDA)"};
+            if (ImGui::Combo("##render_method", &app.settings.render_method, render_methods, 2)
+                && app.settings.render_method == 1)
+                app.settings.training_backend = 0;
             theme::caption("Densification strategy");
             ImGui::SetNextItemWidth(-1.F);
             const char* strategies[] = {

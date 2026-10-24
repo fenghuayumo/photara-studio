@@ -235,6 +235,7 @@ struct SplatSet {
     std::size_t n{};
     std::size_t sh_dim{};
     unsigned sh_degree{};
+    RenderMethod render_method{RenderMethod::gaussian_3dgs};
 };
 
 float* mean_at(SplatSet& set, const std::size_t i) {
@@ -274,6 +275,7 @@ SplatSet from_model(const GaussianModel& model) {
     set.n = model.size();
     if (set.n == 0) return set;
     set.sh_degree = model.sh_degree;
+    set.render_method = model.render_method;
     set.sh_dim = 3;
     if (model.sh.is_valid() && model.sh.shape().rank() >= 2)
         set.sh_dim = model.sh.shape()[1] * 3;
@@ -308,6 +310,7 @@ SplatSet from_model(const GaussianModel& model) {
 GaussianModel to_model(const SplatSet& set) {
     GaussianModel model;
     model.sh_degree = set.sh_degree;
+    model.render_method = set.render_method;
     if (set.n == 0) return model;
     std::vector<float> logs(set.n * 3), logits(set.n);
     for (std::size_t i = 0; i < set.n; ++i) {

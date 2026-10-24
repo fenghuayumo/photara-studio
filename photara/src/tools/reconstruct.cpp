@@ -242,6 +242,7 @@ struct ReconstructCli {
     float splat_max_scale_fraction{0.002F};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
+    std::string splat_render_method{"3dgs"};
     float splat_growth_factor{0.F};
     unsigned splat_seed{42};
     struct {
@@ -519,6 +520,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-ppisp=BOOL  PPISP exposure/white-balance correction "
                  "(default false)\n"
               << "  --splat-ppisp-type TYPE  no_crf_no_vig (default), no_crf, or original\n"
+              << "  --splat-render-method 3dgs|3dgut (3dgut requires CUDA)\n"
               << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-speedy-pruning=BOOL  opt-in sensitivity pruning (all modes default false)\n"
@@ -1041,6 +1043,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-ppisp-before-bilagrid",
          "Run PPISP before the bilateral grid when both are enabled",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("splat-render-method", "Gaussian rendering: 3dgs or 3dgut (CUDA)",
+         cxxopts::value<std::string>()->default_value("3dgs"))
         ("splat-strategy", "Densification: adc_plus, adc_igs",
          cxxopts::value<std::string>()->default_value("adc_igs"))
         ("splat-densification", "Enable splat split/prune",
@@ -1699,6 +1703,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_ppisp_before_bilagrid =
         result["splat-ppisp-before-bilagrid"].as<bool>();
     cli.splat_strategy = result["splat-strategy"].as<std::string>();
+    cli.splat_render_method = result["splat-render-method"].as<std::string>();
+    if (cli.splat_render_method != "3dgs" && cli.splat_render_method != "3dgut")
+        throw std::invalid_argument("--splat-render-method must be 3dgs or 3dgut");
     cli.splat_densification = result["splat-densification"].as<bool>();
     cli.splat_growth_factor = result["splat-growth-factor"].as<float>();
     if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
@@ -2663,6 +2670,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.training_mode = static_cast<int>(cli.splat_mode);
     settings.speedy_pruning = cli.speedy_options.speedy_pruning;
     settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
+    settings.render_method = cli.splat_render_method == "3dgut" ? 1 : 0;
     if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
     else settings.strategy = 0;
     settings.max_resolution = static_cast<int>(cli.splat_max_resolution);
@@ -3605,6 +3613,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (cli.splat_mesh_only)
         photara::core::Logger::instance().info("splat_mesh_only=1");
     photara::splat::TrainingOptions options;
+    options.render_method = cli.splat_render_method == "3dgut"
+        ? photara::splat::RenderMethod::gaussian_3dgut : photara::splat::RenderMethod::gaussian_3dgs;
     options.backend = cli.backend == "vulkan"
         ? photara::splat::TrainingBackend::vulkan
         : photara::splat::TrainingBackend::cuda;

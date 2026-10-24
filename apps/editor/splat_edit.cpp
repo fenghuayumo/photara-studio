@@ -556,6 +556,7 @@ void SplatEdit::clear() {
     count_ = 0;
     selected_count_ = 0;
     sh_degree_ = 0;
+    render_method_ = 0;
     sh_bases_ = 1;
     // Clearing the model must return its host storage, not retain capacities
     // alongside the next training process's image/model allocations.
@@ -596,6 +597,7 @@ void SplatEdit::sync(const std::string& key, const Host& host) {
     synced_ = true;
     count_ = count;
     sh_degree_ = host.sh == nullptr ? 0U : host.sh_degree;
+    render_method_ = host.render_method;
     sh_bases_ = host.sh == nullptr ? 1U : bases;
     centers_.resize(static_cast<std::size_t>(count) * 4U);
     log_scales_.assign(
@@ -1345,6 +1347,7 @@ void SplatEdit::capture_replace(Snapshot& snap) const {
     snap.kind = Snapshot::Kind::replace;
     snap.count = count_;
     snap.sh_degree = sh_degree_;
+    snap.render_method = render_method_;
     snap.sh_bases = sh_bases_;
     snap.removed_centers = centers_;
     snap.removed_scales = log_scales_;
@@ -1358,6 +1361,7 @@ void SplatEdit::capture_replace(Snapshot& snap) const {
 void SplatEdit::apply_replace(const Snapshot& snap) {
     count_ = snap.count;
     sh_degree_ = snap.sh_degree;
+    render_method_ = snap.render_method;
     sh_bases_ = std::max(1U, snap.sh_bases);
     centers_ = snap.removed_centers;
     log_scales_ = snap.removed_scales;
@@ -1390,6 +1394,7 @@ void SplatEdit::replace_from_model(
         bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
     count_ = count;
     sh_degree_ = model.sh_degree;
+    render_method_ = static_cast<int>(model.render_method);
     sh_bases_ = std::max(1U, bases);
     centers_.assign(static_cast<std::size_t>(count) * 4U, 0.F);
     log_scales_ = scales;
@@ -1499,6 +1504,7 @@ bool SplatEdit::copy_model(photara::splat::GaussianModel& model) const {
     if (!synced_) return false;
     model = {};
     model.sh_degree = sh_degree_;
+    model.render_method = static_cast<photara::splat::RenderMethod>(render_method_);
     const std::size_t count = count_;
     std::vector<float> means(count * 3U);
     for (std::uint32_t index = 0; index < count_; ++index) {

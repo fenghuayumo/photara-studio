@@ -25,11 +25,18 @@ if(SPLAT_DRENDER_BUILD_TESTS)
 endif()
 
 add_library(splat_drender STATIC
+    src/gut.cu
     src/pipeline.cu
     src/render_forward.cu
     src/render_backward.cu
     src/point_sampling.cu)
 add_library(splat_drender::splat_drender ALIAS splat_drender)
+if(SPLAT_DRENDER_BUILD_TESTS)
+    add_executable(splat_gut_gradient_test tests/gut_gradient_test.cu)
+    target_link_libraries(splat_gut_gradient_test PRIVATE splat_drender)
+    set_target_properties(splat_gut_gradient_test PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+    add_test(NAME splat_drender.gut_gradient COMMAND splat_gut_gradient_test)
+endif()
 
 target_include_directories(splat_drender
     PUBLIC

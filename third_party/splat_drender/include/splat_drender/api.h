@@ -14,6 +14,8 @@
 
 namespace splat_drender {
 
+enum class Primitive : int { gaussian_3dgs = 0, gaussian_3dgut = 1 };
+
 struct CameraView {
     int width = 0, height = 0;
     float fx = 1.f, fy = 1.f, cx = 0.f, cy = 0.f;
@@ -38,6 +40,7 @@ struct Gaussians {
     const float* covariances = nullptr;  // [N,6], upper triangular
     int sh_degree = 0;
     int sh_bases = 0;
+    Primitive primitive = Primitive::gaussian_3dgs;
 };
 
 struct RenderSettings {

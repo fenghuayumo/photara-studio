@@ -113,7 +113,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation,
                        float* grad_cov, SHAdam sh_adam = {},
-                       StructureAdam structure_adam = {});
+                       StructureAdam structure_adam = {}, bool gut = false);
 
 void preprocess_points(int count, const float* points, const float* view,
                        CameraIntrinsics K, int width, int height,

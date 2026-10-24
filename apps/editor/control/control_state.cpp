@@ -128,6 +128,7 @@ json settings_json(const ProjectSettings& settings) {
         {"reuse_cache", settings.reuse_cache},
         {"iterations", settings.iterations},
         {"strategy", settings.strategy},
+        {"render_method", settings.render_method},
         {"training_mode", settings.training_mode},
         {"sh_degree", settings.sh_degree},
         {"densification_cap", settings.densification_cap},
@@ -450,6 +451,9 @@ json describe_schema() {
             "iterations", "int", "Total 3DGS training iterations.",
             1, 1000000, 30000));
         fields.push_back(setting_spec(
+            "render_method", "enum", "Gaussian rendering method (3DGUT requires CUDA).",
+            nullptr, nullptr, 0, json::array({"3dgs", "3dgut"})));
+        fields.push_back(setting_spec(
             "strategy", "enum", "Gaussian densification strategy.",
             nullptr, nullptr, 0,
             json::array({"adc_igs", "adc_plus", "dense_adaptive"})));
@@ -690,6 +694,14 @@ json apply_parameter_patch(App& app, const json& patch) {
             return invalid(message);
         settings.iterations = static_cast<int>(value);
         note("iterations");
+    }
+    if (patch.contains("render_method")) {
+        int value{};
+        if (!read_choice(patch["render_method"], "render_method", {"3dgs", "3dgut"}, value, message))
+            return invalid(message);
+        settings.render_method = value;
+        if (value == 1) settings.training_backend = 0;
+        note("render_method");
     }
     if (patch.contains("strategy")) {
         int value{};

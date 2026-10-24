@@ -758,7 +758,7 @@ gaussian_backward(
     float* __restrict__ grad_sh, float* __restrict__ grad_colors,
     float* __restrict__ grad_opacity, float* __restrict__ grad_scale,
     float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam,
-    StructureAdam structure_adam) {
+    StructureAdam structure_adam, bool gut) {
     // Fused SH keeps the coefficients of this thread's Gaussian in a shared
     // tile instead of a 48-register row: the warp then updates all 32 rows it
     // owns with one lane per column, which is the coalesced pattern the
@@ -784,6 +784,12 @@ gaussian_backward(
     // standalone optimizer on a zeroed gradient buffer.
     if (i < count && radius[i] > 0) {
 
+        if (gut) {
+            d_mean = gs.d_mean2d[i];
+            d_scale = make_float3(gs.d_conic[i].x, gs.d_conic[i].y, gs.d_conic[i].z);
+            d_opacity = gs.d_conic[i].w;
+            d_rot = gs.d_ray_plane[i];
+        } else {
         geo::SplatBackward io;
         io.d_conic = gs.d_conic[i];
         // Color-only pools leave the geometry scratch unallocated; zero inputs
@@ -821,6 +827,7 @@ gaussian_backward(
             d_rot = io.grad_rotation;
         }
 
+        }
         if (HasSH) {
             sh::BackwardIO bwd;
             bwd.grad_mean = make_float3(0.f, 0.f, 0.f);
@@ -970,7 +977,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation,
                        float* grad_cov, SHAdam sh_adam,
-                       StructureAdam structure_adam) {
+                       StructureAdam structure_adam, bool gut) {
     auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
@@ -984,7 +991,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                     rotations, cov6, view, camera_center, K, width, height,
                     kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
                     grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                    grad_cov, sh_adam, structure_adam);
+                    grad_cov, sh_adam, structure_adam, gut);
         };
         // Select only when geometry scratch is absent, not merely when this
         // particular Gaussian happens to receive zero geometry gradients.

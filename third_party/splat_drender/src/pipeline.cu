@@ -1,6 +1,7 @@
 // Host pipeline: workspace sizing, launcher dispatch and the
 // order-preserving double radix sort (depth pre-sort + stable tile sort).
 #include "kernels.h"
+#include "gut.h"
 #include "splat_drender/api.h"
 #include "splat_drender/buffers.h"
 
@@ -151,7 +152,9 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
     check_cuda(cudaMemset(gst.n_visible, 0, 2 * sizeof(unsigned)),
                "counter memset");
 
-    launch::preprocess_gaussians(
+    if (g.primitive == Primitive::gaussian_3dgut)
+        gut::preprocess(g, cam, s, K, grid_x, grid_y, gst, radii);
+    else launch::preprocess_gaussians(
         g.count, g.sh_degree, g.sh_bases, g.means, g.sh, g.colors, g.opacities,
         g.scales, g.rotations, g.covariances, cam.world_to_camera, cam.center,
         K, cam.width, cam.height, s.kernel_size, s.scale_modifier, grid_x,
@@ -401,7 +404,7 @@ void run_gaussian_backward(const Gaussians& g, const CameraView& cam,
                               gst.clamped, gst, gs, grads.means, grads.sh,
                               grads.colors, grads.opacities, grads.scales,
                               grads.rotations, grads.covariances, grads.sh_adam,
-                              grads.structure_adam);
+                              grads.structure_adam, g.primitive == Primitive::gaussian_3dgut);
     check_cuda(cudaGetLastError(), "gaussian_backward");
 }
 
@@ -430,6 +433,8 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     if (s.need_depth)
         check(out.median_depth && out.normal, "depth outputs required");
 
+    if (g.primitive == Primitive::gaussian_3dgut)
+        check(g.scales && g.rotations && !g.covariances, "3DGUT requires scales and rotations");
     const CameraIntrinsics K = intrinsics_of(cam);
     const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
@@ -442,6 +447,22 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     const SortCounts counts = build_draw_lists(pools, g, cam, s, grid_x, grid_y,
                                                tiles, wrap_width, s.need_depth,
                                                gst, tst, ist, out.radii);
+
+    if (g.primitive == Primitive::gaussian_3dgut) {
+        PixelState ps;
+        if (s.record_backward_state) {
+            char* pool = pools.pixel(PixelState::bytes(std::size_t(cam.width)*cam.height, 0, false));
+            ps = PixelState::from_pool(pool, std::size_t(cam.width)*cam.height, 0, false);
+        }
+        gut::forward(g, cam, s, K, gst, tst, ist.instance_value[counts.instance_selector], ps, out);
+        check_cuda(cudaGetLastError(), "3DGUT forward");
+        ForwardResult r;
+        r.instance_count=counts.instances; r.visible_count=counts.visible;
+        r.instance_selector=counts.instance_selector; r.snapshot_buckets=0;
+        r.compact_instances=s.record_backward_state && compact_draw_indices(pools, ist, counts);
+        if(r.compact_instances) r.instance_selector=0;
+        return r;
+    }
 
     // Bucket metadata for the warp-per-bucket backward. The upper bound
     // keeps the pool layout deterministic without a second host readback;
@@ -535,9 +556,18 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
     const bool geometry_workspace =
         gaussian_workspace_geometry(s, s.need_depth);
     rebuild_views(pools, g, cam, fwd.visible_count, fwd.instance_count,
-                  s.need_depth, geometry_workspace, gst, ist, tst, pst,
+                  g.primitive == Primitive::gaussian_3dgut ? false : s.need_depth, geometry_workspace, gst, ist, tst, pst,
                   true, fwd.snapshot_buckets, fwd.compact_instances);
 
+    if (g.primitive == Primitive::gaussian_3dgut) {
+        // Direct ray derivatives use the geometry slots as mean/scale/rotation scratch.
+        GradState gs = zero_grad_state(pools, g.count, true);
+        gut::backward(g, cam, s, intrinsics_of(cam), gst, tst,
+            ist.instance_value[fwd.instance_selector], pst, fo, dL, gs, grads);
+        check_cuda(cudaGetLastError(), "3DGUT backward");
+        run_gaussian_backward(g, cam, s, gst, gs, grads, fo.radii, g.sh != nullptr);
+        return;
+    }
     GradState gs = zero_grad_state(pools, g.count, geometry_workspace);
 
     if (s.need_depth) {
@@ -571,6 +601,7 @@ Rasterizer::SampleCounts Rasterizer::sample_depth(
     const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
     const RenderSettings& s, const float* world_points, int point_count,
     const SampleOutputs& out) {
+    check(g.primitive == Primitive::gaussian_3dgs, "3DGUT point-depth queries are not implemented");
     check(g.count > 0 && point_count > 0, "empty sample inputs");
     check(out.ray_points && out.median_depth && out.n_contrib && out.inside,
           "sample outputs required");
@@ -683,6 +714,7 @@ void Rasterizer::sample_depth_backward(
 OccupancyDrawList Rasterizer::prepare_occupancy(
     const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
     const RenderSettings& s) {
+    check(g.primitive == Primitive::gaussian_3dgs, "3DGUT occupancy queries are not implemented");
     check(g.count > 0, "empty occupancy model");
     const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;

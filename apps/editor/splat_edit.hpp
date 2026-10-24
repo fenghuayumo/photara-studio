@@ -33,6 +33,7 @@ public:
         const float* filter_3d{};
         std::uint32_t count{};
         std::uint32_t sh_degree{};
+        int render_method{};
         std::uint32_t sh_bases{1};
     };
 
@@ -107,6 +108,7 @@ private:
         float volume_size[3]{1.F, 1.F, 1.F};
         std::uint32_t count{};
         std::uint32_t sh_degree{};
+        int render_method{};
         std::uint32_t sh_bases{1};
         std::vector<float> xyz;
         // Indices into the model from before this deletion, ascending.
@@ -204,6 +206,7 @@ private:
     std::uint32_t count_{};
     std::uint32_t selected_count_{};
     std::uint32_t sh_degree_{};
+    int render_method_{};
     std::uint32_t sh_bases_{1};
     std::vector<float> centers_;
     std::vector<float> log_scales_;
