@@ -195,7 +195,7 @@ void build_dock_space(App& app) {
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
     // Direct keyboard shortcuts do not inherit ImGui's disabled widget state.
-    shortcuts::suspended = app.show_preferences;
+    shortcuts::suspended = app.show_preferences || app.show_welcome;
     if (app.pending_train_prepare.valid()) return action;
     const bool busy = app.job.running();
     const ImGuiIO& io = ImGui::GetIO();
@@ -371,6 +371,7 @@ Action draw_menu_bar(App& app) {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu(tr("Help"))) {
+        if (ImGui::MenuItem(tr("Welcome to Photara"))) app.show_welcome = true;
         if (ImGui::MenuItem(tr("Viewport Controls"))) app.show_controls = true;
         ImGui::Separator();
         if (ImGui::MenuItem(tr("About Photara Studio"))) app.show_about = true;
@@ -514,6 +515,199 @@ void ensure_about_icon(App& app) {
     } catch (const std::exception&) {
         app.about_icon.reset();
     }
+}
+
+namespace {
+// Native vector artwork: a reconstructed terrain made of scan lines and points.
+// No textures or GPU uploads are needed by the startup window.
+void draw_welcome_cover(ImDrawList* draw, ImVec2 origin, float width, float height) {
+    const ImVec2 end{origin.x + width, origin.y + height};
+    draw->PushClipRect(origin, end, true);
+    draw->AddRectFilledMultiColor(origin, end, IM_COL32(15, 32, 47, 255),
+        IM_COL32(21, 52, 68, 255), IM_COL32(9, 22, 34, 255), IM_COL32(12, 20, 30, 255));
+    for (int row = 0; row < 27; ++row) {
+        ImVec2 previous{};
+        for (int column = 0; column < 74; ++column) {
+            const float x = static_cast<float>(column) / 73.F;
+            const float z = static_cast<float>(row) / 26.F;
+            const float ridge = std::exp(-std::pow((x - 0.68F) * 5.F, 2.F)) *
+                (0.55F + 0.22F * std::sin(x * 24.F + z * 4.F) +
+                 0.15F * std::cos(x * 43.F - z * 5.F));
+            const ImVec2 point{origin.x + width * (0.26F + x * 0.83F - z * 0.12F),
+                origin.y + height * (0.51F + z * 0.64F - ridge * (0.82F - z * 0.40F))};
+            const int alpha = 35 + static_cast<int>(z * 90.F);
+            if (column > 0)
+                draw->AddLine(previous, point, IM_COL32(66, 167, 190, alpha / 2));
+            draw->AddCircleFilled(point, row % 3 == 0 ? 1.3F : 0.8F,
+                column > 44 && column < 53 ? IM_COL32(222, 185, 119, alpha + 55)
+                                         : IM_COL32(94, 204, 228, alpha + 35), 5);
+            previous = point;
+        }
+    }
+    // A soft left-hand veil keeps the wordmark readable over the point cloud.
+    draw->AddRectFilledMultiColor(origin, end, IM_COL32(12, 23, 34, 235),
+        IM_COL32(12, 23, 34, 0), IM_COL32(12, 23, 34, 0), IM_COL32(12, 23, 34, 235));
+    draw->PopClipRect();
+}
+
+bool welcome_action(const char* id, icons::Icon icon, const char* title,
+                    const char* subtitle, float width, float scale) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 size{width, 62.F * scale};
+    const bool clicked = ImGui::Button(id, size);
+    const bool hover = ImGui::IsItemHovered();
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(start, {start.x + size.x, start.y + size.y},
+        theme::u32(hover ? theme::surface_3 : theme::surface_2), 7.F * scale);
+    draw->AddRect(start, {start.x + size.x, start.y + size.y},
+        theme::u32(hover ? theme::accent : theme::border), 7.F * scale);
+    icons::draw(draw, icon, {start.x + 14.F * scale, start.y + 19.F * scale},
+        {start.x + 36.F * scale, start.y + 41.F * scale}, theme::u32(theme::accent));
+    draw->AddText({start.x + 49.F * scale, start.y + 10.F * scale},
+        theme::u32(theme::text_bright), title);
+    draw->AddText(theme::small_font(), 12.F * scale,
+        {start.x + 49.F * scale, start.y + 34.F * scale},
+        theme::u32(theme::text_muted), subtitle);
+    if (ImGui::IsItemFocused())
+        draw->AddRect(start, {start.x + size.x, start.y + size.y}, theme::u32(theme::accent), 7.F * scale);
+    return clicked;
+}
+}  // namespace
+
+void draw_welcome_window(App& app) {
+    if (!app.show_welcome || app.smoke_mode) return;
+    const auto* viewport = ImGui::GetMainViewport();
+    const float scale = std::clamp(ImGui::GetFontSize() / 14.F, 0.85F, 2.F);
+    const float width = std::min(820.F * scale, viewport->WorkSize.x - 24.F);
+    const float height = std::min(610.F * scale, viewport->WorkSize.y - 24.F);
+    ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x * 0.5F,
+        viewport->WorkPos.y + viewport->WorkSize.y * 0.5F}, ImGuiCond_Always, {0.5F, 0.5F});
+    ImGui::SetNextWindowSize({width, height});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.F, 0.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.F * scale);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, theme::surface_1);
+    const char* popup = "###StudioWelcome";
+    if (!ImGui::IsPopupOpen(popup)) ImGui::OpenPopup(popup);
+    if (ImGui::BeginPopupModal(popup, nullptr, ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        const auto origin = ImGui::GetCursorScreenPos();
+        const float cover_height = 216.F * scale;
+        auto* draw = ImGui::GetWindowDrawList();
+        draw_welcome_cover(draw, origin, width, cover_height);
+        draw->AddText(ImGui::GetFont(), 31.F * scale,
+            {origin.x + 30.F * scale, origin.y + 48.F * scale},
+            theme::u32(theme::text_bright), "PHOTARA");
+        draw->AddText(ImGui::GetFont(), 14.F * scale,
+            {origin.x + 32.F * scale, origin.y + 88.F * scale},
+            theme::u32(theme::accent), "S T U D I O");
+        draw->AddText({origin.x + 32.F * scale, origin.y + 157.F * scale},
+            theme::u32(theme::text_bright), tr("Every perspective becomes a world."));
+        draw->AddText(theme::small_font(), 12.F * scale,
+            {origin.x + 32.F * scale, origin.y + 183.F * scale},
+            theme::u32(theme::text_muted), "PHOTOGRAMMETRY  /  GAUSSIAN SPLATTING");
+        draw->AddText({origin.x + width - 112.F * scale, origin.y + 19.F * scale},
+            theme::u32(theme::text_muted), PHOTARA_VERSION);
+        ImGui::SetCursorPos({width - 40.F * scale, 9.F * scale});
+        if (ImGui::Button("X##close-welcome", {28.F * scale, 28.F * scale}))
+            app.show_welcome = false;
+        ImGui::SetCursorPos({28.F * scale, cover_height + 23.F * scale});
+        ImGui::TextUnformatted(tr("Welcome to Photara"));
+        ImGui::SetCursorPosX(28.F * scale);
+        ImGui::TextColored(theme::text_muted, "%s", tr("A new capture. A new dimension."));
+        ImGui::Spacing();
+
+        const float gap = 24.F * scale;
+        const float content_width = width - 56.F * scale;
+        const bool columns = content_width >= 570.F * scale;
+        const float left_width = columns ? content_width * 0.44F : content_width;
+        ImGui::SetCursorPosX(28.F * scale);
+        ImGui::BeginChild("welcome-body", {content_width, 240.F * scale});
+        ImGui::BeginGroup();
+        ImGui::TextColored(theme::text_muted, "%s", tr("Get started"));
+        ImGui::Spacing();
+        const bool busy = app.job.running() || app.loading_scene || app.pending_train_prepare.valid();
+        ImGui::BeginDisabled(busy);
+        if (welcome_action("##new", icons::Icon::photo, tr("New Project"),
+                tr("Start with a clean workspace"), left_width, scale)) {
+            app.show_welcome = false;
+            new_project(app);
+        }
+        if (welcome_action("##open", icons::Icon::folder, tr("Open Project..."),
+                tr("Continue from a saved .ascan project"), left_width, scale))
+            select_project_folder(app);
+        if (welcome_action("##images", icons::Icon::camera, tr("Open Images..."),
+                tr("Bring your photographs into 3D"), left_width, scale)) {
+            app.show_welcome = false;
+            select_image_folder(app);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndGroup();
+        if (columns) ImGui::SameLine(0.F, gap);
+        else ImGui::Spacing();
+        ImGui::BeginGroup();
+        ImGui::TextColored(theme::text_muted, "%s", tr("Recent projects"));
+        ImGui::Spacing();
+        const float right_width = columns ? content_width - left_width - gap : content_width;
+        ImGui::BeginChild("recent-projects", {right_width, 198.F * scale});
+        if (app.recent_projects.empty()) {
+            ImGui::Dummy({0.F, 19.F * scale});
+            icons::inline_icon(icons::Icon::clock, theme::u32(theme::text_faint), 24.F * scale);
+            ImGui::Spacing();
+            ImGui::TextUnformatted(tr("Your next creation starts here"));
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
+            ImGui::TextWrapped("%s", tr("Projects you open or save will appear here."));
+            ImGui::PopStyleColor();
+        }
+        std::filesystem::path selected;
+        for (std::size_t index = 0; index < app.recent_projects.size(); ++index) {
+            const auto& path = app.recent_projects[index];
+            const auto name = path.stem().u8string();
+            const auto location = path.u8string();
+            ImGui::PushID(static_cast<int>(index));
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Selectable("##recent", false, 0, {right_width - 14.F * scale, 44.F * scale}))
+                selected = path;
+            const auto min = ImGui::GetItemRectMin();
+            auto* list = ImGui::GetWindowDrawList();
+            list->PushClipRect(min, {min.x + right_width - 20.F * scale, min.y + 44.F * scale}, true);
+            list->AddText({min.x + 6.F * scale, min.y + 3.F * scale}, theme::u32(theme::text_bright),
+                reinterpret_cast<const char*>(name.c_str()));
+            list->AddText(theme::small_font(), 12.F * scale,
+                {min.x + 6.F * scale, min.y + 25.F * scale}, theme::u32(theme::text_faint),
+                reinterpret_cast<const char*>(location.c_str()));
+            list->PopClipRect();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", reinterpret_cast<const char*>(location.c_str()));
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        if (!selected.empty()) {
+            std::error_code error;
+            if (std::filesystem::is_regular_file(selected, error))
+                open_project_from_path(app, selected);
+            else set_message(app, tr("Project file is unavailable. It may have been moved or deleted."), theme::warning);
+        }
+        if (!app.message.empty()) {
+            ImGui::SetCursorPosX(28.F * scale);
+            ImGui::PushTextWrapPos(width - 28.F * scale);
+            ImGui::TextColored(app.message_colour, "%s", tr(app.message.c_str()));
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::SetCursorPosX(28.F * scale);
+        ImGui::Separator();
+        ImGui::SetCursorPosX(28.F * scale);
+        if (ImGui::Checkbox(tr("Show on startup"), &app.welcome_on_startup)) store_welcome_state(app);
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), width - 190.F * scale));
+        if (ImGui::Button(tr("Enter workspace"), {162.F * scale, 28.F * scale})) app.show_welcome = false;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) app.show_welcome = false;
+        if (!app.show_welcome) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void draw_about_window(App& app) {

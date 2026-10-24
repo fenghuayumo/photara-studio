@@ -75,6 +75,8 @@ int main(const int argc, char** argv) {
             editor::resolve_editor_ini().parent_path() / "editor.language");
     if (!app.smoke_mode) editor::load_editor_cache_dir(app);
     if (!app.smoke_mode) editor::load_editor_preferences(app);
+    if (!app.smoke_mode) editor::load_welcome_state(app);
+    else app.show_welcome = false;
 
     if (app.smoke_mode && !transition_smoke) {
         // The interop smoke harness needs a fixed dataset so runs stay
@@ -463,6 +465,7 @@ int main(const int argc, char** argv) {
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
         ImGui::EndDisabled();
+        editor::draw_welcome_window(app);
         if (app.close_requested && !app.pending_train_prepare.valid()) {
             app.close_requested = false;
             if (editor::has_unsaved_project_changes(app)) app.show_close_confirmation = true;

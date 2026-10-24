@@ -29,6 +29,20 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Welcome to Photara", "欢迎使用 Photara", "Photara へようこそ", "Photara에 오신 것을 환영합니다"},
+    {"Every perspective becomes a world.", "让每一个视角，成为一个世界。", "あらゆる視点から、世界が生まれる。", "모든 시선이 하나의 세계가 됩니다."},
+    {"A new capture. A new dimension.", "从影像出发，探索新的维度。", "新しい撮影から、新しい次元へ。", "새로운 촬영, 새로운 차원."},
+    {"Get started", "开始创作", "はじめる", "시작하기"},
+    {"Start with a clean workspace", "开启一个全新的工作空间", "新しいワークスペースを作成", "새 작업 공간에서 시작"},
+    {"Continue from a saved .ascan project", "继续已保存的 .ascan 项目", "保存した .ascan プロジェクトを開く", "저장된 .ascan 프로젝트 계속하기"},
+    {"Open Images...", "导入照片...", "画像を開く...", "이미지 열기..."},
+    {"Bring your photographs into 3D", "将拍摄的照片转化为三维场景", "写真を3Dシーンへ", "사진을 3D 장면으로 변환"},
+    {"Recent projects", "最近项目", "最近のプロジェクト", "최근 프로젝트"},
+    {"Your next creation starts here", "下一份创作，从这里开始", "次の作品はここから", "다음 작품은 여기서 시작됩니다"},
+    {"Projects you open or save will appear here.", "打开或保存的项目会显示在这里。", "開いたプロジェクトや保存したプロジェクトが表示されます。", "열거나 저장한 프로젝트가 여기에 표시됩니다."},
+    {"Show on startup", "启动时显示", "起動時に表示", "시작 시 표시"},
+    {"Enter workspace", "进入工作区", "ワークスペースへ", "작업 공간으로"},
+    {"Project file is unavailable. It may have been moved or deleted.", "无法找到项目文件，文件可能已移动或删除。", "プロジェクトが見つかりません。移動または削除された可能性があります。", "프로젝트 파일이 이동되었거나 삭제되었습니다."},
     {"Workspace", "工作区", "ワークスペース", "작업 공간"},
     {"Export Model...", "导出模型...", "モデルをエクスポート...", "모델 내보내기..."},
     {"Model viewer", "模型查看", "モデル表示", "모델 보기"},

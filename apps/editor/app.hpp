@@ -266,6 +266,9 @@ struct App {
     std::chrono::steady_clock::time_point checkpoint_save_started{};
     bool show_controls{};
     bool show_about{};
+    bool show_welcome{true};
+    bool welcome_on_startup{true};
+    std::vector<std::filesystem::path> recent_projects;
     bool show_preferences{};
     VideoWindowState video_window;
     MaskEditorState mask_editor;
@@ -391,6 +394,9 @@ void store_editor_cache_dir(const App& app);
 // editor.language and the cache root stays in editor.cache.
 void load_editor_preferences(App& app);
 void store_editor_preferences(const App& app);
+void load_welcome_state(App& app);
+void store_welcome_state(const App& app);
+void remember_recent_project(App& app, const std::filesystem::path& path);
 void select_cache_folder(App& app);
 // Handshake-file folder for this process: created at startup, removed on exit.
 void prepare_cache_session(const App& app);

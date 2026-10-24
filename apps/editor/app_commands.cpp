@@ -43,6 +43,45 @@
 
 namespace editor {
 using i18n::tr;
+
+void load_welcome_state(App& app) {
+    std::ifstream input(resolve_editor_ini().parent_path() / "editor.welcome", std::ios::binary);
+    std::string line;
+    if (std::getline(input, line)) app.welcome_on_startup = line != "0";
+    app.show_welcome = app.welcome_on_startup;
+    app.recent_projects.clear();
+    while (app.recent_projects.size() < 8 && std::getline(input, line)) {
+        if (line.empty() || line.size() > 32768) continue;
+        const auto path = std::filesystem::u8path(line);
+        if (std::find(app.recent_projects.begin(), app.recent_projects.end(), path) == app.recent_projects.end())
+            app.recent_projects.push_back(path);
+    }
+}
+
+void store_welcome_state(const App& app) {
+    if (app.smoke_mode) return;
+    const auto directory = resolve_editor_ini().parent_path();
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    std::ofstream output(directory / "editor.welcome", std::ios::binary | std::ios::trunc);
+    output << (app.welcome_on_startup ? "1\n" : "0\n");
+    for (const auto& path : app.recent_projects) {
+        const auto utf8 = path.u8string();
+        output << reinterpret_cast<const char*>(utf8.c_str()) << '\n';
+    }
+}
+
+void remember_recent_project(App& app, const std::filesystem::path& path) {
+    if (app.smoke_mode || path.empty()) return;
+    std::error_code error;
+    auto absolute = std::filesystem::weakly_canonical(path, error);
+    if (error) absolute = path;
+    auto& recent = app.recent_projects;
+    recent.erase(std::remove(recent.begin(), recent.end(), absolute), recent.end());
+    recent.insert(recent.begin(), absolute);
+    if (recent.size() > 8) recent.resize(8);
+    store_welcome_state(app);
+}
 photara::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh);
 std::string gaussian_source_cache_key(const GaussianModelEntry& entry);
 std::shared_ptr<const photara::splat::GaussianModel> gaussian_source_model(const GaussianModelEntry& entry);
@@ -1008,6 +1047,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             archive.set_chunk(photara::project::ChunkType::training_model_info,
                 photara::splat::training_checkpoint_info_bytes(*progress));
         archive.save(path);
+        remember_recent_project(app, path);
         store_path_field(app.settings.project_dir, path);
         refresh_artifacts(app);
         mark_project_saved(app);
@@ -3028,6 +3068,8 @@ void apply_opened_project(App& app) {
         set_message(app, error.what(), theme::danger);
         return;
     }
+    remember_recent_project(app, app.layout.project_file);
+    app.show_welcome = false;
     if (has_external_dataset(app))
         // The imported alignment drives training for this project; internal
         // SfM artifacts, if any, describe a different capture setup.
