@@ -309,7 +309,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
     int training_backend = 0;
     int alignment_backend = 0;
-    int sam_backend = 0;
+    int sam_backend = 2;
     int max_features = 27'000;
 
     // Video capture. images_dir may be a video file; these knobs control the
@@ -346,7 +346,10 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int mask_mode = 0;
     bool sam_masks = false;
     bool sam_use_mask_for_sfm = false;
+    // 0 = SAM 3 text path, 1 = Grounding DINO + SAM 2.1 boxes.
+    int sam_engine = 1;
     std::array<char, 1024> sam_model{};
+    std::array<char, 1024> sam_detector_model{};
     std::array<char, 512> sam_text{};
     std::array<char, 512> sam_negative_text{};
     bool sam_keep_prompted = true;
@@ -354,6 +357,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     bool sam_sfm_guided = false;
     int sam_max_size = 0;
     float sam_threshold = 0.5F;
+    float sam_detector_threshold = 0.35F;
     float sam_guided_threshold = 0.2F;
     float sam_nms = 0.1F;
     float sam_min_area = 0.001F;

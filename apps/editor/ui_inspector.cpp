@@ -656,25 +656,20 @@ Action draw_inspector(App& app) {
         }
 #if defined(PHOTARA_HAS_SAM)
         ImGui::Spacing();
-        theme::caption(tr("SAM3 masks"));
-        if (ImGui::Checkbox(tr("Generate SAM3 masks"), &app.settings.sam_masks)) {
+        theme::caption(tr("Model masks"));
+        if (ImGui::Checkbox(tr("Generate model masks"), &app.settings.sam_masks)) {
             if (app.settings.sam_masks) {
                 app.settings.use_mask = true;
-                if (!photara::sam::license_accepted() ||
-                    photara::sam::locate_model().empty()) {
-                    app.sam_license_tick = photara::sam::license_accepted();
-                    app.show_sam_license = true;
-                }
             }
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
-                "SAM 3 segments a text prompt into a foreground mask before alignment.\n"
+                "The selected model generates text-prompted masks before alignment.\n"
                 "Masks are used for 3DGS training. Post-alignment refinement is optional.\n"
                 "Use the option below to enable masks for alignment.\n"
-                "The model is Meta's and is downloaded only after you accept its licence."));
+                "Choose a mask model and download its missing files below."));
         ImGui::BeginDisabled(!app.settings.sam_masks || has_external_dataset(app));
-        ImGui::Checkbox(tr("Use SAM3 masks for alignment"), &app.settings.sam_use_mask_for_sfm);
+        ImGui::Checkbox(tr("Use masks for alignment"), &app.settings.sam_use_mask_for_sfm);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr("Off (recommended): align using the full image, including background features.\n"
                 "On: ignore features outside the first-pass SAM3 masks.\n"
@@ -686,6 +681,7 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr("Runs when this alignment generated new SAM masks. Existing masks reused from disk are not automatically refined."));
         ImGui::EndDisabled();
         if (app.settings.sam_masks) {
+            draw_mask_model_controls(app);
             theme::caption(tr("Prompt"));
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputText(
@@ -708,20 +704,14 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip("%s", tr(
                     "On: the prompt names the subject to keep.\n"
                     "Off: the prompt names distractors to remove."));
+            ImGui::BeginDisabled(app.settings.sam_engine == 1);
             ImGui::Checkbox(tr("Track across frames"), &app.settings.sam_video);
-            // The licence dialog is only how the weights get onto disk.
-            // Once a checkpoint is present there is nothing left to download.
-            if (photara::sam::locate_model().empty()) {
-                theme::metric(tr("SAM3 model"), tr("Model not downloaded"));
-                if (ImGui::Button(tr("License and download"), {-1.F, 0.F})) {
-                    app.sam_license_tick = photara::sam::license_accepted();
-                    app.show_sam_license = true;
-                }
-            }
+            ImGui::EndDisabled();
+
         }
 #else
         ImGui::Spacing();
-        theme::caption(tr("SAM3 masks"));
+        theme::caption(tr("Model masks"));
         ImGui::TextWrapped("%s", tr(
             "This build does not include SAM mask generation."));
 #endif

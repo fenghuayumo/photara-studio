@@ -516,6 +516,9 @@ bool save_current_mask(App& app) {
 
 struct MaskGenerateTemplate {
     std::filesystem::path model;
+    std::string engine;
+    std::filesystem::path detector_model;
+    float detector_threshold{0.35F};
     std::filesystem::path output_dir;
     std::vector<std::filesystem::path> images;
     std::string text;
@@ -558,9 +561,7 @@ void start_generation(App& app, const bool all) {
     }
     app.settings.sam_masks = true;
     if (!ensure_sam_ready(app)) return;
-    std::filesystem::path model =
-        path_from_utf8_field(app.settings.sam_model.data());
-    if (model.empty()) model = photara::sam::locate_model();
+    std::filesystem::path model = selected_mask_model(app);
     if (model.empty()) {
         set_message(app, "The SAM 3 model is not available", theme::danger);
         return;
@@ -592,6 +593,9 @@ void start_generation(App& app, const bool all) {
 
     MaskGenerateTemplate request;
     request.model = model;
+    request.engine = app.settings.sam_engine == 1 ? "language" : "sam3";
+    request.detector_model = selected_mask_detector(app);
+    request.detector_threshold = app.settings.sam_detector_threshold;
     request.output_dir = temp_dir;
     if (all)
         request.images = state.images;
@@ -620,6 +624,9 @@ void start_generation(App& app, const bool all) {
          completed]() mutable {
             photara::sam::GenerateOptions options;
             options.model = request.model;
+            options.engine = request.engine;
+            options.detector_model = request.detector_model;
+            options.detector_threshold = request.detector_threshold;
             options.output_dir = request.output_dir;
             options.images = std::move(request.images);
             options.text = request.text;
@@ -1084,6 +1091,7 @@ void draw_tools(App& app) {
     theme::caption(tr("Mask generation"));
     ImGui::TextDisabled("%s", tr(
         "Align Photos generates masks automatically. Use these controls to inspect or regenerate them when needed."));
+    draw_mask_model_controls(app);
     ImGui::TextDisabled("%s", tr("Subject prompt"));
     ImGui::SetNextItemWidth(-1.F);
     ImGui::InputText(

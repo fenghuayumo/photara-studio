@@ -4,6 +4,10 @@ find_package(CGAL QUIET)
 if(PHOTARA_HAS_INFERENCE)
     add_library(photara_inference STATIC
         src/inference/model_cache.cpp
+        src/inference/models/grounding_dino/detector.cpp
+        src/inference/models/grounding_dino/tokenizer.cpp
+        src/inference/models/grounding_dino/model.cpp
+        src/inference/models/grounding_dino/weights.cpp
         src/inference/models/moge/weights.cpp
         src/inference/models/moge/encoder.cpp
         src/inference/models/moge/decoder.cpp
@@ -690,7 +694,7 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_SPLAT=1)
         if(TARGET Photara::Inference)
             target_sources(photara_splat PRIVATE src/splat/prior_prepare.cpp)
-            target_link_libraries(photara_splat PUBLIC Photara::Inference)
+            target_link_libraries(photara_splat PUBLIC Photara::Inference Photara::SAMCache)
             add_executable(photara_splat_prior_prepare src/tools/splat_prior_prepare.cpp)
             target_include_directories(photara_splat_prior_prepare PRIVATE src/splat)
             target_link_libraries(photara_splat_prior_prepare PRIVATE Photara::Splat Photara::Inference)
@@ -866,7 +870,9 @@ if(PHOTARA_ENABLE_FEATURES)
     endif()
 
 if(TARGET photara_features)
-    add_library(photara_sam STATIC src/sam/masks.cpp)
+    add_library(photara_sam STATIC
+        src/sam/language_detector.cpp
+        src/sam/masks.cpp)
     add_library(Photara::SAM ALIAS photara_sam)
     target_link_libraries(photara_sam PUBLIC Photara::SAMCache PRIVATE Photara::SfM)
     target_include_directories(photara_sam PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -874,6 +880,10 @@ if(TARGET photara_features)
     if(PHOTARA_HAS_SAM)
         target_link_libraries(photara_sam PRIVATE photara_sam3)
         target_compile_definitions(photara_sam PRIVATE PHOTARA_HAS_SAM=1)
+    endif()
+    if(TARGET photara_inference)
+        target_link_libraries(photara_sam PRIVATE Photara::Inference)
+        target_compile_definitions(photara_sam PRIVATE PHOTARA_HAS_INFERENCE=1)
     endif()
     add_library(photara_cxxopts INTERFACE)
     add_library(cxxopts::cxxopts ALIAS photara_cxxopts)
@@ -1034,7 +1044,7 @@ if(TARGET photara_features)
             target_include_directories(photara_studio PRIVATE
                 ${PHOTARA_STUDIO_DIR})
             target_link_libraries(photara_studio PRIVATE
-                photara_imgui Photara::SfM Photara::Splat Photara::SAMCache
+                photara_imgui Photara::SfM Photara::Splat Photara::SAM
                 photara::splat_render photara_vk::photara_vk
                 Vulkan::Vulkan glfw)
             if(PHOTARA_HAS_TEXTURE AND TARGET Photara::Texture)
@@ -1346,6 +1356,16 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_exclude_from_default(photara_mesh_preview_test)
         add_dependencies(photara_tests photara_mesh_preview_test)
     endif()
+    add_executable(photara_sam_model_cache_test tests/sam_model_cache_test.cpp)
+    target_link_libraries(photara_sam_model_cache_test PRIVATE Photara::SAMCache)
+    add_test(NAME photara.sam.model_cache COMMAND photara_sam_model_cache_test)
+    photara_exclude_from_default(photara_sam_model_cache_test)
+    add_dependencies(photara_tests photara_sam_model_cache_test)
+    if(PHOTARA_HAS_SAM AND TARGET photara_inference)
+        add_executable(photara_sam_masks_smoke tests/sam_masks_smoke.cpp)
+        target_link_libraries(photara_sam_masks_smoke PRIVATE Photara::SAM Photara::SfM)
+        photara_exclude_from_default(photara_sam_masks_smoke)
+    endif()
     if(TARGET photara_inference)
         add_executable(photara_inference_test tests/inference/inference_test.cpp)
         target_include_directories(photara_inference_test PRIVATE src/inference)
@@ -1363,6 +1383,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         set_tests_properties(photara.inference.vulkan PROPERTIES SKIP_RETURN_CODE 77)
         photara_exclude_from_default(photara_inference_test)
         add_dependencies(photara_tests photara_inference_test)
+
+        add_executable(photara_grounding_dino_smoke
+            tests/inference/grounding_dino_smoke.cpp)
+        target_link_libraries(photara_grounding_dino_smoke PRIVATE
+            Photara::Inference ggml)
+        target_compile_features(
+            photara_grounding_dino_smoke PRIVATE cxx_std_20)
+        photara_exclude_from_default(photara_grounding_dino_smoke)
+        add_dependencies(photara_tests photara_grounding_dino_smoke)
         # Manual real-checkpoint gate; never downloads model files via ctest.
         add_executable(photara_moge_weights_test tests/inference/moge_weights_test.cpp)
         target_include_directories(photara_moge_weights_test PRIVATE src/inference)

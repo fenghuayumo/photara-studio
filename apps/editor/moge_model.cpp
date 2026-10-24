@@ -1,6 +1,7 @@
 #include "moge_model.hpp"
 #include "app.hpp"
 #include "i18n.hpp"
+#include "sam/model_cache.hpp"
 #if defined(PHOTARA_HAS_INFERENCE)
 #include "inference/models/moge.hpp"
 #endif
@@ -14,12 +15,13 @@ ModelDownloadSpec moge_download_spec() {
     spec.expected_bytes=k_moge_model_bytes;
     spec.sha256=k_moge_model_sha256;
     spec.ready_message="MoGe model is ready";
+    spec.authorize=[] { photara::sam::require_model_license(photara::sam::moge_model_license()); };
 #if defined(PHOTARA_HAS_INFERENCE)
     spec.validate=[](const auto& path) {(void)photara::inference::inspect_moge_model(path);};
 #endif
     return spec;
 }
-bool moge_model_ready() {return verified_download_ready(moge_download_spec());}
+bool moge_model_ready() {return photara::sam::license_accepted(photara::sam::moge_model_license()) && verified_download_ready(moge_download_spec());}
 
 void request_moge_download(App& app, bool train_after, bool resume_training) {
 #if defined(PHOTARA_HAS_INFERENCE)
@@ -27,9 +29,10 @@ void request_moge_download(App& app, bool train_after, bool resume_training) {
     app.moge_download_train_requested=train_after;
     app.moge_resume_pending=resume_training;
     app.show_moge_download=true;
-    if (app.moge_download.state()!=ModelDownload::State::running)
+    app.moge_license_tick=photara::sam::license_accepted(photara::sam::moge_model_license());
+    if (app.moge_license_tick && app.moge_download.state()!=ModelDownload::State::running)
         app.moge_download.start(moge_download_spec());
-    set_message(app,"Downloading MoGe model...",theme::accent);
+    set_message(app, app.moge_license_tick ? "Downloading MoGe model..." : "Review the MoGe model agreement before downloading or using it.",theme::accent);
 #else
     set_message(app,"MoGe inference is unavailable in this build. Choose an existing aligned cache.",theme::danger);
 #endif
@@ -46,7 +49,7 @@ bool ensure_moge_ready(App& app, bool resume_training) {
     return false;
 }
 void poll_moge_download(App& app) {
-    if (!app.moge_train_pending) return;
+    if (!app.moge_train_pending || !photara::sam::license_accepted(photara::sam::moge_model_license())) return;
     if (app.close_requested || app.show_close_confirmation || app.close_approved) {
         app.moge_train_pending=false;app.moge_download.cancel();return;
     }
@@ -70,6 +73,10 @@ void draw_moge_download_modal(App& app) {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+480.F);
     ImGui::TextUnformatted(i18n::tr("MoGe-2 ViT-B Normal (MIT), 400 MiB. Downloaded once and reused across projects. Training continues automatically when the model is ready."));
     ImGui::PopTextWrapPos();
+    const auto& license=photara::sam::moge_model_license();
+    ImGui::TextWrapped("%s",license.url);
+    if (ImGui::Button(i18n::tr("Read the license"))) open_model_license_url(license.url);
+    ImGui::Checkbox(i18n::tr("I have read and accept this model's terms"), &app.moge_license_tick);
     const auto state=app.moge_download.state();
     const auto status=app.moge_download.status();
     ImGui::TextWrapped("%s",i18n::tr(status.c_str()));
@@ -79,14 +86,17 @@ void draw_moge_download_modal(App& app) {
             app.moge_train_pending=false;app.moge_resume_pending=false;app.moge_download.cancel();ImGui::CloseCurrentPopup();
         }
     } else {
-        if (state==ModelDownload::State::done) ImGui::CloseCurrentPopup();
+        if (state==ModelDownload::State::done && moge_model_ready()) ImGui::CloseCurrentPopup();
         else {
-            if (ImGui::Button(i18n::tr("Retry download"))) {
-                // A failed automatic training request can be retried without
-                // requiring the user to press Train again.
-                app.moge_train_pending=app.moge_download_train_requested;
-                app.moge_download.start(moge_download_spec());
+            ImGui::BeginDisabled(!app.moge_license_tick);
+            if (ImGui::Button(i18n::tr("Accept and continue"))) {
+                try {
+                    photara::sam::accept_model_license(license);
+                    app.moge_train_pending=app.moge_download_train_requested;
+                    app.moge_download.start(moge_download_spec());
+                } catch (const std::exception& error) { set_message(app,error.what(),theme::danger); }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button(i18n::tr("Close"))) {app.moge_train_pending=false;ImGui::CloseCurrentPopup();}
         }

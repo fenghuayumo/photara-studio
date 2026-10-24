@@ -22,7 +22,10 @@ is never bundled.
 | FreeImage | GPL-2.0, GPL-3.0, or FreeImage Public License (FIPL) | Feature I/O fallback (`find_package(freeimage)`) | JPEG/PNG go through libjpeg and libpng. FreeImage covers the remaining formats. Redistribution must ship the chosen FreeImage license text and the upstream acknowledgement. |
 | SuperPoint weights and inference | Magic Leap restrictive license | Optional `--extractor superpoint` | LightGlue itself is Apache-2.0. SuperPoint weights and the SuperPoint inference path follow Magic Leap's terms. |
 | Intrinsic / Delight ONNX weights | Academic / non-commercial (verify upstream) | Optional `--delight` | Weights are not in this repository. See [docs/LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md). |
-| SAM 3 / SAM 2 / EdgeTAM checkpoints | Meta SAM 3 license | Optional SAM masks; editor download | Weights are not bundled. Studio downloads only after the user accepts [Meta's SAM 3 license](https://github.com/facebookresearch/sam3/blob/main/LICENSE). |
+| SAM 3 checkpoints | [Meta SAM 3 license](https://github.com/facebookresearch/sam3/blob/main/LICENSE) | Optional SAM masks; editor download | No weights are bundled. Each user must accept the model terms before download or use. |
+| SAM 2 / SAM 2.1 checkpoints | [Apache-2.0](https://github.com/facebookresearch/sam2/blob/main/LICENSE) | GDINO + SAM masks | No weights are bundled; user acceptance is required by Photara policy. |
+| EdgeTAM checkpoints | [Apache-2.0](https://github.com/facebookresearch/EdgeTAM/blob/main/LICENSE) | GDINO + EdgeTAM masks | No weights are bundled; user acceptance is required by Photara policy. |
+| Grounding DINO checkpoints | [Apache-2.0](https://github.com/IDEA-Research/GroundingDINO/blob/main/LICENSE) | Text-to-box mask prompts | No weights or vocabulary are bundled; user acceptance is required by Photara policy. |
 | Instant Meshes | BSD-style (Wenzel Jakob et al.) | `PHOTARA_ENABLE_INSTANT_REMESH` via PyNanoInstantMeshes | Linked into mesh tools, not into the core `photara_drender` library. |
 | oneTBB (vendored with Instant Meshes) | Apache-2.0 | Same Instant Meshes fetch | |
 | FFmpeg | Typically LGPL-2.1+ (build-dependent; GPL if `--enable-gpl`) | External executable on `PATH` | Photara calls FFmpeg; it does not vendor or statically link it. |
@@ -108,7 +111,9 @@ distributing the library. No Python USD package is required at runtime.
 | ALIKED | BSD-3-Clause | `--extractor aliked` |
 | SuperPoint | Magic Leap restrictive license | `--extractor superpoint` |
 | Intrinsic `stage_0.onnx`–`stage_3.onnx` | Academic / non-commercial; verify [compphoto/Intrinsic](https://github.com/compphoto/Intrinsic) | `--delight` |
-| SAM 3 (and related SAM 2 / EdgeTAM) checkpoints | Meta SAM 3 license | `--sam-*` / Studio download |
+| SAM 3 checkpoints | Meta SAM 3 license | `--sam-*` / Studio download |
+| SAM 2 / SAM 2.1 / EdgeTAM checkpoints | Apache-2.0 | `--sam-engine language` / Studio download |
+| Grounding DINO checkpoints | Apache-2.0 | `--detector-model` / Studio download |
 
 ## Acknowledgements required by upstream
 

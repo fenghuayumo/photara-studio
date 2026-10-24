@@ -25,3 +25,9 @@
 __pycache__/
 *.py[cod]
 /Models/
+
+# Per-user model terms must never enter source or release artifacts.
+model-agreements/
+*.agreement
+*license-accepted
+*licence-accepted

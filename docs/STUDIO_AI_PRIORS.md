@@ -18,7 +18,8 @@ run inference or block training.
 
 Choose either source:
 
-- **Generate with MoGe**: the first training run downloads the fixed MoGe-2
+- **Generate with MoGe**: the first training run asks the user to review and accept MoGe's terms
+  before downloading the fixed MoGe-2
   ViT-B Normal F32 GGUF (419,001,600 bytes, about 400 MiB) from the project's
   GitHub release. No file selection, Python or local conversion is required.
   Download progress, cancellation and retry are available; interrupted files
@@ -119,8 +120,8 @@ clipping never changes these raw values.
 - Conversion: `python/models/moge/convert_weights.py`, F32, tensor values preserved.
 - License: upstream model card labels the weights MIT. MoGe code is MIT;
   upstream DINOv2 code is Apache-2.0. See `licenses/MoGe-LICENSE.txt` and
-  `THIRD_PARTY_NOTICES.md`. Unlike SAM 3, MoGe download does not require
-  accepting Meta's SAM license.
+  `THIRD_PARTY_NOTICES.md`. MoGe download and local inference require explicit acceptance of its own terms.
+  Photara's application licence and SAM model agreements do not imply MoGe consent.
 
 `photara.studio.model_download` tests SHA-256 vectors, resumed transfers,
 offline reuse, changed-file receipts, checksum and size failures, repair,

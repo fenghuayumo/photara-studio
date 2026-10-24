@@ -176,6 +176,9 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.sam_close_kernel));
     writer.value(static_cast<std::uint8_t>(settings.sam_fill_holes));
     writer.value(static_cast<std::uint8_t>(settings.sam_sfm_guided));
+    writer.value(static_cast<std::int32_t>(settings.sam_engine == 1 ? 1 : 0));
+    writer.string(store_path(settings.sam_detector_model, base));
+    writer.value(settings.sam_detector_threshold);
     return writer.take();
 }
 
@@ -443,6 +446,15 @@ Settings decode_settings(
     }
     if (version >= 18)
         settings.sam_sfm_guided = reader.value<std::uint8_t>() != 0;
+    if (version >= 19) {
+        settings.sam_engine = reader.value<std::int32_t>() == 1 ? 1 : 0;
+        settings.sam_detector_model = path_utf8(load_path(reader.string(), base));
+        settings.sam_detector_threshold = reader.value<float>();
+        if (!std::isfinite(settings.sam_detector_threshold) ||
+            settings.sam_detector_threshold < 0.F ||
+            settings.sam_detector_threshold > 1.F)
+            settings.sam_detector_threshold = 0.35F;
+    }
     settings.sanitize();
     return settings;
 }

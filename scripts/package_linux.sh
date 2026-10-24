@@ -284,12 +284,14 @@ Debian 13, Fedora 40+), a Vulkan-capable graphics driver, and (for CUDA /
 Vulkan ICDs, and the CUDA driver are provided by the operating system / GPU
 vendor and are intentionally not bundled.
 
-SAM 3 model weights are not included. Download them from Studio only after
-accepting Meta's model license. Intrinsic delight models are not included;
-see licenses/LICENSE-Intrinsic.md before redistribution.
+No model weights or user agreement records are included. Each user must review
+and accept the selected model provider's terms in Studio, then download the models
+themselves. Application licence acceptance does not accept model terms.
 
 See LICENSE, NOTICE, and THIRD_PARTY_NOTICES.md for distribution terms.
 EOF
+
+bash "$script_dir/assert_no_bundled_models.sh" "$stage"
 
 package="$output_root/Photara-Studio-$version-linux64.tar.gz"
 if [[ -e "$package" ]]; then rm -f "$package"; fi

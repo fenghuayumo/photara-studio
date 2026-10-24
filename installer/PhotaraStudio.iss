@@ -37,7 +37,7 @@ PrivilegesRequiredOverridesAllowed=dialog commandline
 UninstallDisplayIcon={app}\photara_studio.exe
 
 [Files]
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Excludes: "*.bin,*.bin.*,*.ggml,*.ggml.*,*.gguf,*.gguf.*,*.safetensors,*.safetensors.*,*.onnx,*.onnx.*,*.pt,*.pt.*,*.pth,*.pth.*,*.ckpt,*.ckpt.*,*.tflite,*.tflite.*,*.agreement,*.agreement.*,*.verified,*.verified.*,*license-accepted*,*licence-accepted*,pytorch_model*.bin,*.bin.*,grounding-dino-vocab.txt,Models\*,models\*,model-agreements\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\Photara Studio"; Filename: "{app}\photara_studio.exe"; WorkingDir: "{app}"

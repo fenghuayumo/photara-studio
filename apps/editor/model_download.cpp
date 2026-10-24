@@ -78,6 +78,12 @@ void ModelDownload::start(ModelDownloadSpec spec) {
     if (state() == State::running) return;
     if (worker_.joinable()) worker_.join();
     spec_ = std::move(spec);
+    try {
+        if (spec_.authorize) spec_.authorize();
+    } catch (const std::exception& error) {
+        terminal(error.what(), State::failed);
+        return;
+    }
     cancel_ = false;
     progress_ = -1.F;
     {

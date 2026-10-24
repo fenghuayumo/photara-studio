@@ -28,7 +28,9 @@ std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
     settings.extractor_model.clear(); settings.lightglue_model.clear();
+    settings.sam_detector_model.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(std::uint64_t) - sizeof(float));
     // Remove v18 refinement opt-in and v17 video/SAM fields first.
     bytes.resize(bytes.size() - 2 * sizeof(std::uint8_t) -
         sizeof(std::uint64_t) - settings.video_segments.size() -
@@ -679,10 +681,22 @@ int main() {
         after_align.min_reader_version() == k_ascan_min_reader,
         "ascan min reader version");
 
+    {
+        auto language = updated;
+        language.sam_engine = 1;
+        language.sam_model = (dir / "sam2.1_hiera_tiny_f16.ggml").generic_string();
+        language.sam_detector_model = (dir / "grounding-dino-base.safetensors").string();
+        language.sam_detector_threshold = 0.42F;
+        const auto restored = decode_settings(encode_settings(language, ascan_path), ascan_path);
+        expect(restored.sam_engine == 1 && restored.sam_model == language.sam_model &&
+            std::filesystem::path(restored.sam_detector_model) == std::filesystem::path(language.sam_detector_model) &&
+            restored.sam_detector_threshold == 0.42F, "Language mask settings round trip");
+    }
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto v17 = encode_settings(settings, ascan_path);
-        v17.resize(v17.size() - sizeof(std::uint8_t));
+        v17.resize(v17.size() - sizeof(std::uint8_t) - sizeof(std::int32_t) -
+            sizeof(std::uint64_t) - settings.sam_detector_model.size() - sizeof(float));
         const std::uint32_t version = 17;
         std::memcpy(v17.data(), &version, sizeof(version));
         expect(!decode_settings(v17, ascan_path).sam_sfm_guided,

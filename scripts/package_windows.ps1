@@ -14,7 +14,7 @@ param(
     [string]$Ffmpeg = "",
     # An explicit ISCC.exe takes precedence over automatic discovery.
     [string]$InnoSetup = "",
-    # Delighter weights are large and have a non-commercial license; opt in.
+    # Retained only to reject old invocations that tried to bundle weights.
     [switch]$IncludeIntrinsicModels,
     # Creates only the portable directory and ZIP, without invoking Inno Setup.
     [switch]$NoInstaller,
@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($IncludeIntrinsicModels) { throw 'Model weights must not be bundled. Users must review model terms and download weights themselves.' }
 
 # $PSScriptRoot can be unavailable while parameter defaults are evaluated.
 $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot }
@@ -316,14 +317,6 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'licenses') -Force | Out-Nu
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\LICENSE-Intrinsic.md') `
     -Destination (Join-Path $stage 'licenses\LICENSE-Intrinsic.md')
 
-if ($IncludeIntrinsicModels) {
-    $models = Join-Path $repositoryRoot 'Models\Intrinsic'
-    if (-not (Test-Path -LiteralPath $models -PathType Container)) {
-        throw "Intrinsic models were requested but not found: $models"
-    }
-    Copy-Item -LiteralPath $models -Destination (Join-Path $stage 'Models') -Recurse
-}
-
 $readme = @"
 Photara Studio $Version (Windows x64)
 
@@ -335,9 +328,9 @@ compatible NVIDIA driver. The Vulkan loader, graphics drivers, and the CUDA
 driver are provided by the operating system / GPU vendor and are intentionally
 not bundled.
 
-SAM 3 model weights are not included. Download them from Studio only after accepting
-Meta's model license. Intrinsic delight models are included only in packages built
-with -IncludeIntrinsicModels; see licenses\LICENSE-Intrinsic.md before redistribution.
+No model weights or user agreement records are included. Each user must review
+and accept the selected model provider's terms in Studio, then download the models
+themselves. Application licence acceptance does not accept model terms.
 
 See LICENSE, NOTICE, and THIRD_PARTY_NOTICES.md for distribution terms.
 "@
@@ -347,6 +340,8 @@ See LICENSE, NOTICE, and THIRD_PARTY_NOTICES.md for distribution terms.
     (Join-Path $stage 'README.txt'),
     $readme,
     [System.Text.UTF8Encoding]::new($false))
+
+& (Join-Path $scriptRoot 'assert_no_bundled_models.ps1') -Stage $stage
 
 $zip = Join-Path $output "Photara-Studio-$Version-win64.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

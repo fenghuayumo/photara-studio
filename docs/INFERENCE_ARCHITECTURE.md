@@ -473,9 +473,11 @@ their corresponding new options. Once the new options are in the CMake cache,
 use the new names for subsequent changes. Disabling SAM does not disable
 Inference. Disabling Inference makes the SAM model unavailable, but retains
 license/cache APIs and the CLI's segmentation-unavailable message. Inference sessions do not download weights themselves. Studio downloads the
-optional MoGe GGUF before first AI-prior training and verifies its pinned size
-and SHA-256; see [Studio AI priors](STUDIO_AI_PRIORS.md). SAM retains its separate
-license-acceptance flow. License-acceptance state is not changed automatically.
+optional MoGe GGUF only after the user accepts its terms and verifies its pinned
+size and SHA-256; see [Studio AI priors](STUDIO_AI_PRIORS.md). All mask model families
+also require separate terms acceptance, including local checkpoints. User receipts
+are never bundled; see [Mask models](MASK_MODELS.md). Licence acceptance is never
+recorded automatically.
 
 New sessions request Vulkan by default. CPU fallback on initialization failure
 is configurable, and the actual device is exposed. Unsupported operators fail

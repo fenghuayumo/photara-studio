@@ -456,7 +456,9 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
     settings.sam_masks = app.settings.sam_masks;
     settings.sam_use_mask_for_sfm = app.settings.sam_use_mask_for_sfm;
+    settings.sam_engine = app.settings.sam_engine == 1 ? 1 : 0;
     settings.sam_model = app.settings.sam_model.data();
+    settings.sam_detector_model = app.settings.sam_detector_model.data();
     settings.sam_text = app.settings.sam_text.data();
     settings.sam_negative_text = app.settings.sam_negative_text.data();
     settings.sam_keep_prompted = app.settings.sam_keep_prompted;
@@ -464,6 +466,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.sam_sfm_guided = app.settings.sam_sfm_guided;
     settings.sam_max_size = app.settings.sam_max_size;
     settings.sam_threshold = app.settings.sam_threshold;
+    settings.sam_detector_threshold = app.settings.sam_detector_threshold;
     settings.sam_guided_threshold = app.settings.sam_guided_threshold;
     settings.sam_nms = app.settings.sam_nms;
     settings.sam_min_area = app.settings.sam_min_area;
@@ -570,9 +573,13 @@ void apply_project_settings(
     app.settings.mask_mode = settings.mask_mode == 1 ? 1 : 0;
     app.settings.sam_masks = settings.sam_masks;
     app.settings.sam_use_mask_for_sfm = settings.sam_use_mask_for_sfm;
+    app.settings.sam_engine = settings.sam_engine == 1 ? 1 : 0;
     store_path_field(
         app.settings.sam_model,
         path_from_utf8_field(settings.sam_model.c_str()));
+    store_path_field(
+        app.settings.sam_detector_model,
+        path_from_utf8_field(settings.sam_detector_model.c_str()));
     const auto store_text = [](auto& field, const std::string& text) {
         if (text.size() + 1 > field.size()) return;
         std::memcpy(field.data(), text.data(), text.size());
@@ -585,6 +592,7 @@ void apply_project_settings(
     app.settings.sam_sfm_guided = settings.sam_sfm_guided;
     app.settings.sam_max_size = std::max(0, settings.sam_max_size);
     app.settings.sam_threshold = settings.sam_threshold;
+    app.settings.sam_detector_threshold = settings.sam_detector_threshold;
     app.settings.sam_guided_threshold = settings.sam_guided_threshold;
     app.settings.sam_nms = settings.sam_nms;
     app.settings.sam_min_area = settings.sam_min_area;

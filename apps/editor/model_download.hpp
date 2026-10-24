@@ -16,6 +16,7 @@ struct ModelDownloadSpec {
     std::string sha256;
     std::string ready_message{"Model is ready"};
     std::function<void(const std::filesystem::path&)> validate;
+    std::function<void()> authorize; // Checked before any network or cache processing.
 };
 // Receipt is valid only for the exact SHA, file size and last-write timestamp.
 bool verified_download_ready(const ModelDownloadSpec& spec);

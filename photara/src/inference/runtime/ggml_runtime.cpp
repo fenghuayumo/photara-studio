@@ -92,7 +92,8 @@ void GgmlRuntime::allocate(ggml_cgraph* graph) {
         const auto* node = ggml_graph_node(graph, i);
         if (!ggml_backend_supports_op(backend_, node))
             throw std::runtime_error(std::string("Inference backend does not support ") +
-                ggml_op_name(node->op));
+                ggml_op_name(node->op) + " " + ggml_get_name(node) +
+                " shape=" + std::to_string(node->ne[0]) + "," + std::to_string(node->ne[1]) + "," + std::to_string(node->ne[2]) + "," + std::to_string(node->ne[3]));
     }
     if (!ggml_gallocr_alloc_graph(allocator_, graph))
         throw std::runtime_error("Could not allocate inference graph buffers");

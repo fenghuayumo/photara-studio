@@ -74,10 +74,25 @@ int main(int argc,char** argv) {
         spec.sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         auto partial=spec.destination;partial+=".part";
         write(partial,"ab"); // Resumable transfer, including paths with spaces.
-        editor::ModelDownload download;download.start(spec);wait(download);
+        editor::ModelDownload download;
+        auto denied=spec;denied.destination=root/"denied model.bin";
+        int authorization_calls=0;
+        denied.authorize=[&] {++authorization_calls;throw std::runtime_error("Terms not accepted");};
+        download.start(denied);wait(download);
+        check(download.state()==editor::ModelDownload::State::failed && authorization_calls==1,
+            "Download started before agreement acceptance");
+        check(!std::filesystem::exists(denied.destination) &&
+            !std::filesystem::exists(denied.destination.string()+".part"),
+            "Rejected agreement still created download files");
+        download.start(spec);wait(download);
         check(download.state()==editor::ModelDownload::State::done,download.status().c_str());
         check(editor::verified_download_ready(spec),"Verified receipt not reusable");
         check(!std::filesystem::exists(partial),"Partial file was published incorrectly");
+        auto denied_cache=spec;
+        denied_cache.authorize=[] {throw std::runtime_error("Terms not accepted");};
+        download.start(denied_cache);wait(download);
+        check(download.state()==editor::ModelDownload::State::failed,
+            "Cached model bypassed agreement check");
         auto offline=spec;offline.url=file_url(root/"does-not-exist");
         download.start(offline);wait(download);
         check(download.state()==editor::ModelDownload::State::done,"Existing valid model should work offline");

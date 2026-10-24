@@ -1,4 +1,5 @@
 #include "splat/prior_prepare.hpp"
+#include "sam/model_cache.hpp"
 #include "inference/models/moge.hpp"
 #include "splat/prior.hpp"
 #include "training_data_loader.hpp"
@@ -116,6 +117,7 @@ void prepare_training_priors(const mvs::MvsScene& scene, const TrainingOptions& 
             } catch (const std::exception&) { /* Regenerate stale or incomplete maps. */ }
         }
         if (!predictor) {
+            sam::require_model_license(sam::moge_model_license());
             inference::MogeOptions options;options.num_tokens=tokens;
             predictor=inference::create_moge_predictor(model,options);
             manifest.open(output/"alignment.tsv");

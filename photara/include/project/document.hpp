@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 18;
+inline constexpr std::uint32_t k_settings_version = 19;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -89,7 +89,10 @@ struct Settings : photara::splat::TrainingLossSettings {
     bool sam_masks = false;
     // Opt-in: coarse SAM masks may discard useful alignment features.
     bool sam_use_mask_for_sfm = false;
+    // 0 = SAM 3 text path, 1 = text detector + visual segmentation.
+    int sam_engine = 0;
     std::string sam_model;
+    std::string sam_detector_model;
     std::string sam_text;
     std::string sam_negative_text;
     bool sam_keep_prompted = true;
@@ -97,6 +100,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     bool sam_sfm_guided = false;
     int sam_max_size = 0;
     float sam_threshold = 0.5F;
+    float sam_detector_threshold = 0.35F;
     float sam_guided_threshold = 0.2F;
     float sam_nms = 0.1F;
     float sam_min_area = 0.001F;

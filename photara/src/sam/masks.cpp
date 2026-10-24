@@ -2,6 +2,7 @@
 
 #include "core/logging.hpp"
 #include "io/image.hpp"
+#include "sam/language_detector.hpp"
 #include "sam/model_cache.hpp"
 #include "sfm/scene.hpp"
 
@@ -481,6 +482,10 @@ bool built_with_sam() {
 #endif
 }
 
+bool language_masks_built() {
+    return language_detector_built();
+}
+
 GenerateResult generate_masks(const GenerateOptions& options) {
 #if !defined(PHOTARA_HAS_SAM)
     (void)options;
@@ -506,11 +511,43 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         throw std::invalid_argument("SAM area fractions must satisfy 0 <= min < max <= 1");
     if (options.close_kernel < 1 || options.close_kernel % 2 == 0)
         throw std::invalid_argument("SAM close kernel must be a positive odd number");
-    const auto model_path = options.model.empty() ? locate_model() : options.model;
-    if (!model_file_ready(model_path))
+    bool language_engine = false;
+    if (options.engine == "language" || options.engine == "lang")
+        language_engine = true;
+    else if (options.engine == "sam3")
+        language_engine = false;
+    else if (options.engine == "auto")
+        language_engine =
+            !options.detector_model.empty() && language_detector_built();
+    else
+        throw std::invalid_argument(
+            "SAM engine must be auto, sam3, language, or lang");
+    if (language_engine && !language_detector_built())
         throw std::runtime_error(
-            "SAM 3 checkpoint not found. Accept the SAM 3 licence in Photara "
-            "Studio and download the model, or pass --sam-model");
+            "Language masks require the GGML inference build");
+
+    const auto model_path = options.model.empty()
+        ? locate_model(language_engine ? k_default_sam2_model : "sam3-q4_0")
+        : resolve_model(options.model);
+    if (!model_file_ready(model_path, 1))
+        throw std::runtime_error(
+            "SAM checkpoint not found. Download the selected model in "
+            "Photara Studio, or pass --sam-model");
+    auto detector_model = options.detector_model.empty()
+        ? locate_text_detector_model()
+        : resolve_model(options.detector_model);
+    auto detector_vocab = options.detector_vocab.empty()
+        ? locate_text_detector_vocab()
+        : options.detector_vocab;
+    if (language_engine &&
+        (!model_file_ready(detector_model, 1) ||
+         !model_file_ready(detector_vocab, 1)))
+        throw std::runtime_error(
+            "The language detector model or vocabulary was not found");
+
+    require_model_license(segmentation_license(model_path));
+    if (language_engine)
+        require_model_license(model_license(MaskModelKind::text_detector));
 
     sam3_params params;
     params.model_path = model_path.string();
@@ -534,9 +571,15 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         throw std::runtime_error(
             "Failed to load the SAM 3 checkpoint with backend \"" +
             options.backend + "\"");
+    if (!language_engine && sam3_is_visual_only(*model))
+        throw std::invalid_argument("Visual segmentation checkpoints need --sam-engine language and a Grounding DINO detector");
     sam3_state_ptr state = sam3_create_state(*model, params);
     if (!state)
         throw std::runtime_error("Failed to create the SAM 3 inference state");
+    std::unique_ptr<LanguageDetector> detector;
+    if (language_engine)
+        detector = std::make_unique<LanguageDetector>(
+            detector_model, detector_vocab, options.backend);
 
     const auto geometry_guides = options.sparse_scene
         ? make_geometry_guides(*options.sparse_scene, options.central_fraction)
@@ -550,7 +593,7 @@ GenerateResult generate_masks(const GenerateOptions& options) {
     }
 
     std::vector<sam3_tracker_ptr> trackers;
-    if (options.video) {
+    if (options.video && !language_engine) {
         trackers.reserve(positive.size());
         for (const std::string& phrase : positive) {
             sam3_video_params video;
@@ -625,6 +668,7 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         auto rgb = std::move(prepared.rgb);
         const int width = static_cast<int>(rgb.width);
         const int height = static_cast<int>(rgb.height);
+        io::RgbImage detector_rgb = rgb;
         sam3_image frame = image_from_rgb(std::move(rgb));
         std::vector<std::uint8_t> selected(
             static_cast<std::size_t>(width) * height, 0);
@@ -635,9 +679,41 @@ GenerateResult generate_masks(const GenerateOptions& options) {
         const auto image_prepared = std::chrono::steady_clock::now();
         if (!sam3_encode_image(*state, *model, frame))
             throw std::runtime_error(
-                "SAM 3 failed to encode " + image_path.filename().string());
+                "SAM failed to encode " + image_path.filename().string());
         const auto image_encoded = std::chrono::steady_clock::now();
-        if (options.video) {
+        const auto paint_language_boxes = [&](
+            const std::string& phrase, const bool on, const float threshold) {
+            LanguageDetectOptions detect_options;
+            detect_options.threshold = threshold;
+            detect_options.nms = options.nms;
+            for (const LanguageBox& found : detector->detect(
+                     detector_rgb, phrase, detect_options)) {
+                sam3_pvs_params prompt;
+                prompt.box.x0 = found.x0 * static_cast<float>(width);
+                prompt.box.y0 = found.y0 * static_cast<float>(height);
+                prompt.box.x1 = found.x1 * static_cast<float>(width);
+                prompt.box.y1 = found.y1 * static_cast<float>(height);
+                prompt.use_box = true;
+                const sam3_result segmented =
+                    sam3_segment_pvs(*state, *model, prompt);
+                if (guide) {
+                    const auto chosen =
+                        select_detection(segmented, *guide, options);
+                    if (chosen)
+                        paint_binary(
+                            selected, width, height, chosen->mask,
+                            chosen->detection->mask.width,
+                            chosen->detection->mask.height, on);
+                } else {
+                    paint_result(selected, width, height, segmented, on);
+                }
+            }
+        };
+        if (language_engine) {
+            for (const std::string& phrase : positive)
+                paint_language_boxes(
+                    phrase, true, options.detector_threshold);
+        } else if (options.video) {
             for (sam3_tracker_ptr& tracker : trackers) {
                 const sam3_result tracked =
                     sam3_track_encoded_frame(*tracker, *state, *model);
@@ -683,7 +759,7 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                          [](const std::uint8_t value) { return value != 0; })) {
             // An interactive retry should use the prompt alone; an existing
             // reconstruction may supply an unrelated geometric exemplar.
-            for (const std::string& phrase : positive) {
+            if (!language_engine) for (const std::string& phrase : positive) {
                 sam3_pcs_params prompt;
                 prompt.text_prompt = phrase;
                 prompt.score_threshold = 0.2F;
@@ -691,8 +767,17 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                 paint_result(selected, width, height,
                     sam3_segment_pcs(*state, *model, prompt), true);
             }
+            if (language_engine) {
+                for (const std::string& phrase : positive)
+                    paint_language_boxes(phrase, true, 0.2F);
+            }
         }
         for (const std::string& phrase : negative) {
+            if (language_engine) {
+                paint_language_boxes(
+                    phrase, false, options.detector_threshold);
+                continue;
+            }
             sam3_pcs_params prompt;
             prompt.text_prompt = phrase;
             prompt.score_threshold = options.threshold;
@@ -768,12 +853,14 @@ GenerateResult generate_masks(const GenerateOptions& options) {
     core::Logger::instance().info(
         "sam_masks=", result.written, " dir=", options.output_dir,
         " model=", model_path, " keep_prompted=", options.keep_prompted,
+        " engine=", language_engine ? "language" : "sam3",
         " video=", options.video,
         " geometry_guided=", result.geometry_guided,
         " empty=", result.empty,
         " threshold=", options.threshold,
         " nms=", options.nms,
         " backend=", sam3_model_backend_name(*model));
+    detector.reset();
     trackers.clear();
     state.reset();
     model.reset();

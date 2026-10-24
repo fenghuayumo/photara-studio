@@ -1,8 +1,9 @@
 #pragma once
 
-// In-process SAM 3 mask generation. The editor downloads the checkpoint after
-// the user accepts Meta's licence; this call only runs a model that is already
-// on disk and writes keep-masks (255 = keep) for SfM and 3DGS.
+// In-process prompted mask generation. SAM 3 runs its own text path; the
+// language engine turns text into boxes and prompts a visual segmentation
+// checkpoint. This call only runs models already on disk and writes keep-masks
+// (255 = keep) for SfM and 3DGS.
 
 #include <atomic>
 #include <cstddef>
@@ -19,6 +20,12 @@ namespace photara::sam {
 
 struct GenerateOptions {
     std::filesystem::path model;
+    // sam3 uses the checkpoint's text path. language pairs a text-to-box
+    // detector with box-prompted visual segmentation. auto preserves the
+    // legacy SAM 3 path unless a detector was supplied explicitly.
+    std::string engine = "auto";
+    std::filesystem::path detector_model;
+    std::filesystem::path detector_vocab;
     std::filesystem::path output_dir;
     std::vector<std::filesystem::path> images;
     std::string text;
@@ -33,6 +40,7 @@ struct GenerateOptions {
     // accepted only when the selected SAM model supports them.
     int max_size = 0;
     float threshold = 0.5F;
+    float detector_threshold = 0.35F;
     float nms = 0.1F;
     // Optional sparse reconstruction used to keep the prompted instance
     // consistent across an orbit. The closest central_fraction of
@@ -62,6 +70,7 @@ struct GenerateResult {
 };
 
 [[nodiscard]] bool built_with_sam();
+[[nodiscard]] bool language_masks_built();
 
 // Writes one PNG per image, named `<stem>.png`, in sorted call order so video
 // tracking sees the capture in sequence. Throws on a model or frame failure.

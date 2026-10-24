@@ -3,6 +3,7 @@
 #include "i18n.hpp"
 #include "moge_model.hpp"
 #include "io/video_frames.hpp"
+#include "sam/masks.hpp"
 #include "sam/model_cache.hpp"
 #include "splat/checkpoint.hpp"
 #include "../../photara/src/splat/checkpoint.hpp"
@@ -294,10 +295,24 @@ void append_sam_flags(
     if (!images.empty())
         command << " --masks " << quote(images.parent_path() / "masks");
     if (!settings.sam_masks) return;
+    const bool language = settings.sam_engine == 1;
     std::filesystem::path model =
         path_from_utf8_field(settings.sam_model.data());
-    if (model.empty()) model = photara::sam::locate_model();
+    if (!model.empty()) model = photara::sam::resolve_model(model);
+    if (model.empty())
+        model = photara::sam::locate_model(
+            language ? photara::sam::k_default_sam2_model : "sam3-q4_0");
     if (!model.empty()) command << " --sam-model " << quote(model);
+    command << " --sam-engine " << (language ? "language" : "sam3")
+            << " --detector-threshold "
+            << settings.sam_detector_threshold;
+    if (language) {
+        std::filesystem::path detector =
+            path_from_utf8_field(settings.sam_detector_model.data());
+        if (detector.empty()) detector = photara::sam::locate_text_detector_model();
+        if (!detector.empty())
+            command << " --detector-model " << quote(detector);
+    }
     command << " --sam-backend " << sam_backend_flag(settings)
             << " --sam-text " << quote_text(settings.sam_text.data());
     if (settings.sam_negative_text[0] != '\0')

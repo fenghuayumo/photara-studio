@@ -307,7 +307,10 @@ struct ReconstructCli {
     std::filesystem::path masks_dir;
     bool masks_auto{true};
     std::filesystem::path sam_model;
-    std::string sam_backend{"auto"};
+    std::string sam_engine{"language"};
+    std::vector<std::string> accepted_model_licenses;
+    std::filesystem::path sam_detector_model;
+    std::string sam_backend{"vulkan"};
     std::string sam_text;
     std::string sam_negative_text;
     bool sam_keep_prompted{true};
@@ -320,6 +323,7 @@ struct ReconstructCli {
     float sam_min_area{0.001F};
     float sam_max_area{0.65F};
     float sam_threshold{0.5F};
+    float sam_detector_threshold{0.35F};
     float sam_guided_threshold{0.2F};
     float sam_nms{0.1F};
     int sam_close_kernel{5};
@@ -1223,16 +1227,28 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "are excluded from SfM unless opted in (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
         ("sam-model",
-         "SAM 3 GGML checkpoint. Empty uses the Photara model cache",
+         "SAM GGML checkpoint or catalog id. Empty uses the engine's cached model",
          cxxopts::value<std::string>()->default_value(""))
+        ("accept-model-licenses",
+         "Explicitly accept model terms for comma-separated families: sam3,sam2,edgetam,grounding-dino,moge. See Studio Model agreements for provider links",
+         cxxopts::value<std::string>()->default_value(""))
+        ("sam-engine",
+         "Mask engine: auto, language, or sam3",
+         cxxopts::value<std::string>()->default_value("language"))
+        ("detector-model",
+         "Grounding DINO safetensors checkpoint or catalog id (GGML language engine)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("detector-threshold",
+         "Grounding DINO box score threshold",
+         cxxopts::value<float>()->default_value("0.35"))
         ("sam-backend",
-         "SAM 3 backend: auto, cpu, cuda, vulkan, or metal",
-         cxxopts::value<std::string>()->default_value("auto"))
+         "SAM backend: auto, cpu, cuda, vulkan, or metal",
+         cxxopts::value<std::string>()->default_value("vulkan"))
         ("sam-text",
-         "SAM 3 prompt. Semicolons separate phrases. Generates masks before SfM",
+         "Mask prompt. Semicolons separate phrases. Generates masks before SfM",
          cxxopts::value<std::string>()->default_value(""))
         ("sam-neg-text",
-         "SAM 3 phrases to remove from the mask",
+         "Negative phrases to subtract from the selected objects",
          cxxopts::value<std::string>()->default_value(""))
         ("sam-keep-prompted",
          "Keep the prompted subject (true) or remove the prompted distractors",
@@ -1854,7 +1870,26 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string sam_model_text = result["sam-model"].as<std::string>();
     if (!sam_model_text.empty())
         cli.sam_model = utf8_to_path(sam_model_text);
+    {
+        std::istringstream ids(result["accept-model-licenses"].as<std::string>());
+        std::string id;
+        while (std::getline(ids, id, ',')) {
+            if (!photara::sam::find_model_license(id))
+                throw std::invalid_argument("Unknown model agreement family: " + id);
+            cli.accepted_model_licenses.push_back(id);
+        }
+    }
+    cli.sam_engine = result["sam-engine"].as<std::string>();
+    const std::string detector_model_text =
+        result["detector-model"].as<std::string>();
+    if (!detector_model_text.empty())
+        cli.sam_detector_model = utf8_to_path(detector_model_text);
+    cli.sam_detector_threshold = result["detector-threshold"].as<float>();
     cli.sam_backend = result["sam-backend"].as<std::string>();
+    if (cli.sam_engine != "auto" && cli.sam_engine != "language" &&
+        cli.sam_engine != "sam3")
+        throw std::invalid_argument(
+            "--sam-engine must be auto, language, or sam3");
     if (cli.sam_backend != "auto" && cli.sam_backend != "cpu" &&
         cli.sam_backend != "cuda" && cli.sam_backend != "vulkan" &&
         cli.sam_backend != "metal")
@@ -1878,6 +1913,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.sam_fill_holes = result["sam-fill-holes"].as<bool>();
     if (cli.sam_max_size < 0)
         throw std::invalid_argument("--sam-max-size must be non-negative");
+    if (!(cli.sam_detector_threshold >= 0.F &&
+          cli.sam_detector_threshold <= 1.F))
+        throw std::invalid_argument(
+            "--detector-threshold must be in [0, 1]");
     if (!(cli.sam_sfm_point_fraction > 0.F &&
           cli.sam_sfm_point_fraction <= 1.F))
         throw std::invalid_argument(
@@ -2529,6 +2568,8 @@ void ensure_sam_masks(
     }
     photara::sam::GenerateOptions options;
     options.model = cli.sam_model;
+    options.engine = cli.sam_engine;
+    options.detector_model = cli.sam_detector_model;
     options.backend = cli.sam_backend;
     options.output_dir = output;
     options.images = list_still_images(cli.images_dir);
@@ -2544,6 +2585,7 @@ void ensure_sam_masks(
     options.threshold = sparse_scene
         ? cli.sam_guided_threshold
         : cli.sam_threshold;
+    options.detector_threshold = cli.sam_detector_threshold;
     options.nms = cli.sam_nms;
     options.close_kernel = cli.sam_close_kernel;
     options.fill_holes = cli.sam_fill_holes;
@@ -2629,8 +2671,15 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.mask_mode = cli.splat_alpha_mode == "transparent" ? 1 : 0;
     settings.sam_masks = !cli.sam_text.empty();
     settings.sam_use_mask_for_sfm = cli.sam_use_mask_for_sfm;
-    const auto sam_model_utf8 = cli.sam_model.generic_u8string();
+    settings.sam_engine = cli.sam_engine == "language" ? 1 : 0;
+    const auto resolved_sam = photara::sam::resolve_model(cli.sam_model);
+    const auto sam_model_utf8 = (resolved_sam.empty() ? cli.sam_model : resolved_sam).generic_u8string();
     settings.sam_model.assign(sam_model_utf8.begin(), sam_model_utf8.end());
+    const auto resolved_detector = photara::sam::resolve_model(cli.sam_detector_model);
+    const auto detector_model_utf8 =
+        (resolved_detector.empty() ? cli.sam_detector_model : resolved_detector).generic_u8string();
+    settings.sam_detector_model.assign(
+        detector_model_utf8.begin(), detector_model_utf8.end());
     settings.sam_text = cli.sam_text;
     settings.sam_negative_text = cli.sam_negative_text;
     settings.sam_keep_prompted = cli.sam_keep_prompted;
@@ -2638,6 +2687,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.sam_sfm_guided = cli.sam_sfm_guided;
     settings.sam_max_size = cli.sam_max_size;
     settings.sam_threshold = cli.sam_threshold;
+    settings.sam_detector_threshold = cli.sam_detector_threshold;
     settings.sam_guided_threshold = cli.sam_guided_threshold;
     settings.sam_nms = cli.sam_nms;
     settings.sam_min_area = cli.sam_min_area;
@@ -4442,6 +4492,8 @@ int main(int argc, char** argv) {
     try {
         Utf8Argv utf8_argv(argc, argv);
         ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
+        for (const auto& id : cli.accepted_model_licenses)
+            photara::sam::accept_model_license(*photara::sam::find_model_license(id));
 #if !defined(_WIN32)
         if (!cli.splat_preview_vk_device_uuid.empty()) {
             if (::setenv(

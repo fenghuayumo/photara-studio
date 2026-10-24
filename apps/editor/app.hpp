@@ -272,10 +272,13 @@ struct App {
     bool preferences_raise{};
     int preferences_page{};
     bool show_sam_license{};
-    bool sam_license_tick{};
+    bool sam_license_download{};
+    std::vector<std::string> sam_license_families;
+    std::vector<bool> sam_license_checks;
     SamModelDownload sam_download;
     ModelDownload moge_download;
     bool show_moge_download{};
+    bool moge_license_tick{};
     bool moge_train_pending{};
     bool moge_download_train_requested{};
     bool moge_resume_pending{};
