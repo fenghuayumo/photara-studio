@@ -374,7 +374,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int mesh_postprocess_quality = 1;
     bool mesh_simplify = false;
     std::uint64_t mesh_target_faces = 1'000'000;
-    bool mesh_remesh = false;
+    bool mesh_remesh = true;
     std::uint64_t mesh_remesh_target_faces = 1'000'000;
     int mesh_remesh_smooth_iterations = 1;
     int geometry_from_iter = 7'000;
