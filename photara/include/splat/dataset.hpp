@@ -17,13 +17,14 @@ enum class DatasetFormat {
     colmap,
     reality_capture,
     openmvs,
+    nerfstudio,
 };
 
 [[nodiscard]] DatasetFormat parse_dataset_format(std::string_view value);
 [[nodiscard]] std::string_view dataset_format_name(DatasetFormat format) noexcept;
 
 struct DatasetLoadRequest {
-    // A directory for COLMAP/RealityCapture, or a .csv/.mvs file.
+    // A dataset directory, or a .csv/.mvs/transforms JSON file.
     std::filesystem::path source;
     // Image root. Empty uses conventional paths below source.
     std::filesystem::path image_directory;

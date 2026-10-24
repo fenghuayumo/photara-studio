@@ -449,7 +449,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-simplify-opacity T  drop Gaussians below this opacity (default 0.1)\n"
               << "  --splat-simplify-knn K  merge-neighbour count (default 16)\n"
               << "  --splat-mesh-only  mesh an existing trained splat; does not run the optimizer\n"
-              << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
+              << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS/Nerfstudio cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-prior-dir PATH  aligned AI prior cache; no MVS required\n"
               << "  --splat-prior-model PATH  prepare/reuse priors with a local MoGe-2 normal GGUF\n"
@@ -1308,7 +1308,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         if (!result.count("output"))
             throw std::invalid_argument(
                 "Missing required option: --output");
-    } else if (!result.count("images") || !result.count("output")) {
+    } else if ((!result.count("images") &&
+                result["splat-dataset"].as<std::string>().empty()) ||
+               !result.count("output")) {
         throw std::invalid_argument(
             "Missing required options: --images, --output");
     }
@@ -1504,8 +1506,21 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.subject_bounds = utf8_to_path(subject_bounds_text);
     const std::string splat_dataset_text =
         result["splat-dataset"].as<std::string>();
-    if (!splat_dataset_text.empty())
+    if (!splat_dataset_text.empty()) {
         cli.splat_dataset = utf8_to_path(splat_dataset_text);
+        if (cli.images_dir.empty()) {
+            auto root = std::filesystem::is_directory(cli.splat_dataset)
+                ? cli.splat_dataset : cli.splat_dataset.parent_path();
+            cli.images_dir = root;
+            for (unsigned level = 0; level < 4 && !root.empty(); ++level) {
+                if (std::filesystem::is_directory(root / "images")) {
+                    cli.images_dir = root / "images";
+                    break;
+                }
+                root = root.parent_path();
+            }
+        }
+    }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());

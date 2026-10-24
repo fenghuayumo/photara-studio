@@ -99,10 +99,11 @@ void generate_camera_frustum_points(
 
 void finalize_initial_cloud(
     DatasetLoadResult& result, const DatasetLoadRequest& request) {
-    if (!request.initial_point_cloud.empty()) {
+    if (!request.initial_point_cloud.empty() || !result.initial_point_cloud.empty()) {
+        if (!request.initial_point_cloud.empty())
+            result.initial_point_cloud = request.initial_point_cloud;
         result.scene.dense_cloud =
-            mvs::load_dense_ply(request.initial_point_cloud);
-        result.initial_point_cloud = request.initial_point_cloud;
+            mvs::load_dense_ply(result.initial_point_cloud);
         result.initial_points_dense = true;
     } else {
         use_sparse_points_as_initial_cloud_impl(result.scene);
@@ -137,6 +138,8 @@ DatasetFormat parse_dataset_format(const std::string_view value) {
         dataset_detail::lower_ascii(std::string(value));
     if (normalized.empty() || normalized == "auto")
         return DatasetFormat::auto_detect;
+    if (normalized == "nerfstudio" || normalized == "blender" || normalized == "nerf")
+        return DatasetFormat::nerfstudio;
     if (normalized == "colmap") return DatasetFormat::colmap;
     if (normalized == "realitycapture" ||
         normalized == "reality_capture" ||
@@ -147,7 +150,7 @@ DatasetFormat parse_dataset_format(const std::string_view value) {
         return DatasetFormat::openmvs;
     throw std::invalid_argument(
         "Unknown splat dataset format '" + std::string(value) +
-        "' (expected auto, colmap, realitycapture, or openmvs)");
+        "' (expected auto, colmap, realitycapture, openmvs, or nerfstudio)");
 }
 
 std::string_view dataset_format_name(const DatasetFormat format) noexcept {
@@ -156,6 +159,7 @@ std::string_view dataset_format_name(const DatasetFormat format) noexcept {
         case DatasetFormat::colmap: return "colmap";
         case DatasetFormat::reality_capture: return "realitycapture";
         case DatasetFormat::openmvs: return "openmvs";
+        case DatasetFormat::nerfstudio: return "nerfstudio";
     }
     return "unknown";
 }
@@ -200,13 +204,14 @@ DatasetLoadResult DatasetLoader::load(
             "No registered reader can load explicit format " +
             std::string(dataset_format_name(request.format)));
     throw std::invalid_argument(
-        "Could not detect a COLMAP, RealityCapture, or OpenMVS dataset at " +
+        "Could not detect a COLMAP, RealityCapture, OpenMVS, or Nerfstudio dataset at " +
         request.source.string());
 }
 
 DatasetLoader make_default_dataset_loader() {
     DatasetLoader loader;
     loader.register_reader(dataset_detail::make_colmap_reader());
+    loader.register_reader(dataset_detail::make_nerfstudio_reader());
     loader.register_reader(dataset_detail::make_reality_capture_reader());
     loader.register_reader(dataset_detail::make_openmvs_reader());
     return loader;

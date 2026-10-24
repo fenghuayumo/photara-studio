@@ -643,9 +643,11 @@ if(PHOTARA_ENABLE_FEATURES)
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON)
 
+        find_package(nlohmann_json CONFIG REQUIRED)
         add_library(photara_splat
             src/splat/colmap.cpp
             src/splat/dataset.cpp
+            src/splat/dataset_nerfstudio.cpp
             src/splat/dataset_colmap.cpp
             src/splat/dataset_openmvs.cpp
             src/splat/dataset_reality_capture.cpp
@@ -678,6 +680,7 @@ if(PHOTARA_ENABLE_FEATURES)
             PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
         target_compile_features(photara_splat PUBLIC cxx_std_20)
+        target_link_libraries(photara_splat PRIVATE nlohmann_json::nlohmann_json)
         target_link_libraries(photara_splat PUBLIC
             Photara::MVS
             photara_splat_cuda
@@ -1510,6 +1513,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         endif()
         if(PHOTARA_ENABLE_VULKAN_COMPUTE)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
+        endif()
+        add_executable(photara_nerfstudio_dataset_test tests/nerfstudio_dataset_test.cpp)
+        target_link_libraries(photara_nerfstudio_dataset_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.nerfstudio_dataset COMMAND photara_nerfstudio_dataset_test)
+        if(WIN32)
+            add_custom_command(TARGET photara_nerfstudio_dataset_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_nerfstudio_dataset_test>
+                    $<TARGET_FILE_DIR:photara_nerfstudio_dataset_test> COMMAND_EXPAND_LISTS)
         endif()
         add_executable(photara_splat_test tests/splat_test.cpp)
         add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)

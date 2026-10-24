@@ -105,7 +105,7 @@ bool pick_file(
             {L"Photara Project (*.ascan)", L"*.ascan"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC dataset_filters[] = {
-            {L"Camera datasets (*.csv;*.mvs)", L"*.csv;*.mvs"},
+            {L"Camera datasets (*.csv;*.mvs;*.json)", L"*.csv;*.mvs;*.json"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC point_cloud_filters[] = {
             {L"Point cloud (*.ply)", L"*.ply"},
@@ -416,7 +416,7 @@ Filter filters_for(
     }
     switch (kind) {
         case FilePickKind::dataset:
-            return {"Camera datasets (*.csv *.mvs)", "*.csv *.mvs"};
+            return {"Camera datasets (*.csv *.mvs *.json)", "*.csv *.mvs *.json"};
         case FilePickKind::point_cloud:
             return {"Point cloud (*.ply)", "*.ply"};
         case FilePickKind::video:

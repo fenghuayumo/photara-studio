@@ -608,6 +608,49 @@ json execute_command(
             {"message", app.message},
         });
     }
+    if (method == "studio.project.set_dataset") {
+        // Attach an external dataset (COLMAP / RealityCapture / OpenMVS
+        // directory) with imported cameras so training can skip SfM. Mirrors
+        // the Inspector's "external dataset" selection and reuses the same
+        // transition guards as set_source.
+        if (app.job.running() || app.loading_scene)
+            return failure("BUSY", "Cannot change the dataset while a job is running");
+        std::string text;
+        const json required = require_string(params, "path", text);
+        if (!ok(required)) return required;
+        const std::filesystem::path path =
+            path_from_utf8_field(text.c_str());
+        std::error_code error;
+        if (!std::filesystem::is_directory(path, error) &&
+            !std::filesystem::is_regular_file(path, error))
+            return failure("NOT_FOUND", "Dataset path does not exist");
+        if (has_unsaved_project_changes(app))
+            return failure(
+                "CONFIRMATION_REQUIRED",
+                "The current project has unsaved changes; save or discard them in Studio");
+        const bool previous = app.project_transition_approved;
+        app.project_transition_approved = true;
+        try {
+            editor::change_external_dataset(app, path);
+        } catch (...) {
+            app.project_transition_approved = previous;
+            throw;
+        }
+        app.project_transition_approved = previous;
+        const std::filesystem::path selected =
+            path_from_utf8_field(app.settings.dataset_source.data());
+        std::error_code compare_error;
+        if (selected.empty() ||
+            !std::filesystem::equivalent(selected, path, compare_error)) {
+            return failure(
+                "PRECONDITION_FAILED",
+                app.message.empty() ? "Dataset was not selected" : app.message);
+        }
+        return success({
+            {"dataset", path_to_utf8(selected)},
+            {"message", app.message},
+        });
+    }
     return failure(
         "UNSUPPORTED", "Unknown control method", {{"method", method}});
 }
