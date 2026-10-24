@@ -1164,7 +1164,7 @@ Action draw_inspector(App& app) {
         if (ImGui::TreeNodeEx(tr("Mesh postprocessing"),
                 ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
             ImGui::PushTextWrapPos(0.F);
-            theme::caption("Applied during mesh extraction and texture baking. Manifold repair runs before UV unwrapping.");
+            theme::caption("Applied during mesh extraction only. Texture baking reuses the mesh and repairs manifold topology before UV unwrapping.");
             ImGui::PopTextWrapPos();
             theme::caption("Postprocessing quality");
             const char* qualities[] = {tr("Fast"), tr("Standard"), tr("High")};

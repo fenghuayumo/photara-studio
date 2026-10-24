@@ -1886,7 +1886,8 @@ std::string build_texture_command(
             << " --texture-color-space "
             << (settings.texture_blend_linear ? "linear" : "srgb");
     if (settings.texture_delight) command << " --delight";
-    append_mesh_postprocess_flags(command, settings);
+    // Bake the extracted geometry as-is; extraction already applies these settings.
+    command << " --mesh-target-faces 0 --mesh-remesh=false";
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
