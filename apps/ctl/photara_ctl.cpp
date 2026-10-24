@@ -557,6 +557,7 @@ void print_usage() {
         "  photara-ctl capture --out PATH [--max-long-edge N]\n"
         "  photara-ctl project open <path>\n"
         "  photara-ctl project set-source <path>\n"
+        "  photara-ctl project set-dataset <path>\n"
         "  photara-ctl project save [path] [--overwrite]\n"
         "  photara-ctl view set key=value...\n"
         "  photara-ctl export model --out PATH [--format ply|sog|spz|glb] [--sh-degree N] [--overwrite]\n"
@@ -843,8 +844,11 @@ int main(const int argc, char** argv) {
         const std::string& action = options.args[1];
         const std::string method =
             action == "open" ? "studio.project.open"
-                : action == "save" ? "studio.project.save" : "studio.project.set_source";
-        if (action != "open" && action != "set-source" && action != "save") {
+                : action == "save" ? "studio.project.save"
+                : action == "set-dataset" ? "studio.project.set_dataset"
+                                          : "studio.project.set_source";
+        if (action != "open" && action != "set-source" && action != "set-dataset" &&
+            action != "save") {
             print_usage();
             return k_exit_usage;
         }

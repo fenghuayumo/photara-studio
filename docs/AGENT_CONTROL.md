@@ -23,6 +23,9 @@
 - `view set yaw=1 pitch=0.3 distance=6 target=[0,0,0]` 修改相机；
   支持 fov_degrees、ortho_height、projection、mode、channel、workspace。
   yaw/pitch 单位为弧度；projection 使用 perspective/orthographic/fisheye/panorama。
+- `project set-dataset PATH` 挂载外部数据集（COLMAP/RealityCapture/OpenMVS 目录），
+   使用导入相机并跳过 Align，可直接 `job start train`；配合 Blender 导出插件
+   （photara-blender）实现渲染→导入位姿→3DGS 训练闭环。
 - `export model --out PATH --format ply --sh-degree 3` 支持 ply/sog/spz/glb。
   保存/导出要求绝对路径，位于项目、缓存、临时目录或 PHOTARA_CONTROL_ALLOWED_ROOTS。
   显式指定的已存在文件默认拒绝覆盖，需 --overwrite；不指定路径保存当前项目则更新原文件。
