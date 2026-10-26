@@ -43,7 +43,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         camera[12], camera[13], camera[14]);
     if (mode == kModeEquirect) {
         if (!(dot(t, t) > 1.0e-12f)) return;
-    } else if (!(t.z > (mode == kModeFisheye ? 1.0e-6f : 0.2f))) {
+    } else if (!(t.z > (mode == kModeFisheye ? 1.0e-6f : asfloat(pc.u21)))) {
         return;
     }
     Projection pr = project_camera(

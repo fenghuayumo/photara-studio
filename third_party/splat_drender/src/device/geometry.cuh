@@ -132,7 +132,7 @@ SD_D2 inline bool project_splat(
     Mat3 J{};
     float x_mul = 1.f, y_mul = 1.f;
     if (is_orthographic(K.mode)) {
-        if (!(t.z > 0.2f)) return false;
+        if (!(t.z > K.near_plane)) return false;
         u = t.x;
         v = t.y;
         J.m[0][0] = K.fx;
@@ -220,7 +220,7 @@ SD_D2 inline bool project_splat(
         out.normal = make_float3(native.normal[0], native.normal[1], native.normal[2]);
         out.ray_plane = make_float4(native.plane[0], native.plane[1],
                                     native.plane[2], native.plane[3]);
-        out.coef = native.coefficient;
+        out.coef = K.compensate_2d ? native.coefficient : 1.f;
         return isfinite(out.coef) &&
                out.cov2d[0] * out.cov2d[2] > out.cov2d[1] * out.cov2d[1];
     }
@@ -230,7 +230,7 @@ SD_D2 inline bool project_splat(
     out.cov2d[2] = cov.m[1][1] + kernel_size;
     const float det0 = fmaxf(1.0e-6f, cov.m[0][0] * cov.m[1][1] - cov.m[0][1] * cov.m[0][1]);
     const float det1 = fmaxf(1.0e-6f, out.cov2d[0] * out.cov2d[2] - out.cov2d[1] * out.cov2d[1]);
-    out.coef = sqrtf(det0 / det1);
+    out.coef = K.compensate_2d ? sqrtf(det0 / det1) : 1.f;
 
     const float3 uvh = make_float3(u, v, 1.f);
     const float3 uvh_m = cov_cam_inv * uvh;
@@ -526,7 +526,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
             native.conic[0] * fisheye::Dual(io.d_conic.x) +
             native.conic[1] * fisheye::Dual(2.f * io.d_conic.y) +
             native.conic[2] * fisheye::Dual(io.d_conic.z) +
-            native.coefficient * fisheye::Dual(io.opacity * io.d_conic.w);
+            (io.K.compensate_2d ? native.coefficient : fisheye::Dual(1.f)) * fisheye::Dual(io.opacity * io.d_conic.w);
         loss = loss + native.plane[0] * fisheye::Dual(d_ray_plane_raw.x) +
                native.plane[1] * fisheye::Dual(d_ray_plane_raw.y) +
                native.plane[2] * fisheye::Dual(d_ray_plane_raw.z) +
@@ -539,7 +539,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         io.grad_mean.x += gm.x;
         io.grad_mean.y += gm.y;
         io.grad_mean.z += gm.z;
-        io.grad_opacity = io.d_conic.w * native.coefficient.v;
+        io.grad_opacity = io.d_conic.w * (io.K.compensate_2d ? native.coefficient.v : 1.f);
         float gc[6];
         for (int i = 0; i < 6; ++i) gc[i] = loss.d[i + 3];
         if (io.scale) {
@@ -562,7 +562,7 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
                               (cov2D.m[0][0] + io.kernel_size) *
                                       (cov2D.m[1][1] + io.kernel_size) -
                                   cov2D.m[0][1] * cov2D.m[0][1]);
-    const float coef = sqrtf(det_0 / det_1);
+    const float coef = io.K.compensate_2d ? sqrtf(det_0 / det_1) : 1.f;
 
     const float3 uvh = make_float3(u, v, 1.f);
     const float3 uvh_m = cov_cam_inv * uvh;

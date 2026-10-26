@@ -421,6 +421,12 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.constrain_scale_range);
     hash.append(options.geometry_epsilon);
     hash.append(options.kernel_size);
+    hash.append(options.filter_mode);
+    hash.append(options.rasterization.sort_by_camera_z);
+    hash.append(options.rasterization.alpha_clip);
+    hash.append(options.rasterization.near_plane);
+    hash.append(options.rasterization.pixel_center_offset);
+    hash.append(options.rasterization.compensate_2d);
     hash.append(options.scale_modifier);
     hash.append(options.use_mvs_depth);
     hash.append(options.use_mvs_normals);

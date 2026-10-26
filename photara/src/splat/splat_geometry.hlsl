@@ -146,7 +146,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 camera_data[b]*world.x + camera_data[b+4u]*world.y + camera_data[b+8u]*world.z + camera_data[b+12u],
                 camera_data[b+1u]*world.x + camera_data[b+5u]*world.y + camera_data[b+9u]*world.z + camera_data[b+13u],
                 camera_data[b+2u]*world.x + camera_data[b+6u]*world.y + camera_data[b+10u]*world.z + camera_data[b+14u]);
-            if (pc.euclidean != 0u) { distance = min(distance, length(p)); continue; }
+            if ((pc.euclidean & 1u) != 0u) {
+                float focal = (pc.euclidean & 2u) != 0u ? max(camera_data[b+16u], 1.0e-6f) : 1.0f;
+                distance = min(distance, length(p) / focal); continue;
+            }
             float fx = camera_data[b+16u], fy = camera_data[b+17u];
             float w = camera_data[b+18u], h = camera_data[b+19u];
             if ((uint)camera_data[b+20u] == 1u) {

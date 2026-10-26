@@ -7,7 +7,7 @@ static const uint kModePinhole = 0;
 static const uint kModeFisheye = 1;
 static const uint kModeEquirect = 3;
 static const uint kModeOrtho = 4;
-static const float kAlphaClip = 0.99f;
+#define kAlphaClip asfloat(pc.u20)
 static const float kAlphaFloor = 1.0f / 255.0f;
 static const float kTransmittanceFloor = 1.0e-4f;
 static const float kDepthSeedWindow = 0.4f;
@@ -38,6 +38,10 @@ struct PushConstants {
     uint u17;
     uint u18;
     uint u19;
+    uint u20; // alpha clip
+    uint u21; // near plane
+    uint u22; // 2D energy compensation
+    uint u23; // camera-Z sorting
 #ifdef SPLAT_FUSED_SH_ADAM
     float dc_lr, rest_lr, beta1, beta2, correction1, correction2, epsilon, regularization;
 #endif
@@ -157,7 +161,7 @@ bool camera_visible(float3 t, uint mode) {
     if (mode == kModeEquirect) {
         return finite3(t) && sqrt(dot(t, t)) > 1.0e-6f;
     }
-    return t.z > (mode == kModeFisheye ? 1.0e-6f : 0.2f);
+    return t.z > (mode == kModeFisheye ? 1.0e-6f : asfloat(pc.u21));
 }
 
 struct Projection {
@@ -179,7 +183,7 @@ Projection project_ortho(float3 t, float fx, float fy, float cx, float cy) {
     p.dv1 = 0.0f;
     p.dv2 = 0.0f;
     p.valid = false;
-    if (!(t.z > 0.2f)) return p;
+    if (!(t.z > asfloat(pc.u21))) return p;
     p.pixel_x = t.x * fx + cx;
     p.pixel_y = t.y * fy + cy;
     p.du0 = fx;
@@ -199,7 +203,7 @@ Projection project_pinhole(float3 t, float fx, float fy, float cx, float cy) {
     p.dv1 = 0.0f;
     p.dv2 = 0.0f;
     p.valid = false;
-    if (!(t.z > 0.2f)) return p;
+    if (!(t.z > asfloat(pc.u21))) return p;
     float iz = 1.0f / t.z;
     p.pixel_x = t.x * iz * fx + cx;
     p.pixel_y = t.y * iz * fy + cy;
@@ -608,7 +612,7 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
         built.cov0 = native.cov0;
         built.cov1 = native.cov1;
         built.cov2 = native.cov2;
-        built.coef = native.coef;
+        built.coef = pc.u22 != 0u ? native.coef : 1.0f;
         built.ray_plane = native.plane;
         built.normal = native.normal;
         built.ok = true;
@@ -618,7 +622,7 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     float v = 0.0f;
     Mat3 J = mat_zero();
     if (mode == kModeOrtho) {
-        if (!(t.z > 0.2f)) return built;
+        if (!(t.z > asfloat(pc.u21))) return built;
         J.m[0][0] = fx;
         J.m[1][1] = fy;
     } else if (mode == kModePinhole) {
@@ -706,7 +710,7 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     built.cov2 = cov.m[1][1] + kernel;
     float det0 = max(1.0e-6f, cov.m[0][0] * cov.m[1][1] - cov.m[0][1] * cov.m[0][1]);
     float det1 = max(1.0e-6f, built.cov0 * built.cov2 - built.cov1 * built.cov1);
-    built.coef = sqrt(det0 / det1);
+    built.coef = pc.u22 != 0u ? sqrt(det0 / det1) : 1.0f;
 
     float3 uvh = float3(u, v, 1.0f);
     float3 uvh_m = mat_mul_vec(cov_cam_inv, uvh);

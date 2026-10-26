@@ -89,7 +89,7 @@ __global__ void sensitivity_scores(
     int width, int height, int wrap_width,
     splat_drender::ws::GaussianState gs, const unsigned* ids,
     const uint2* ranges, const unsigned* contributors,
-    const float* image, float* scores) {
+    const float* image, float* scores, float alpha_clip) {
     const int x = blockIdx.x * 16 + threadIdx.x;
     const int y = blockIdx.y * 16 + threadIdx.y;
     if (x >= width || y >= height) return;
@@ -108,7 +108,7 @@ __global__ void sensitivity_scores(
         const float4 co = gs.conic_opacity[g];
         const float power = -.5F * (co.x * dx * dx + co.z * dy * dy) - co.y * dx * dy;
         if (power > 0.F) continue;
-        const float alpha = fminf(splat_drender::cfg::kAlphaClip, co.w * expf(power));
+        const float alpha = fminf(alpha_clip, co.w * expf(power));
         if (alpha < splat_drender::cfg::kAlphaFloor) continue;
         const float3 rgb = gs.rgb[g];
         const float colour = rgb.x + rgb.y + rgb.z;
@@ -172,14 +172,20 @@ splat_drender::CameraMode camera_mode_of(const Camera& camera) {
 }
 
 splat_drender::CameraView camera_view_of(
-    const Camera& camera, const RasterCameraConstants& constants) {
+    const Camera& camera, const RasterCameraConstants& constants, const RasterizeOptions& options) {
     splat_drender::CameraView view;
     view.width = static_cast<int>(camera.width);
     view.height = static_cast<int>(camera.height);
     view.fx = camera.fx;
     view.fy = camera.fy;
-    view.cx = camera.cx;
-    view.cy = camera.cy;
+    // Integer kernel pixel coordinates become half-integer samples by shifting
+    // the principal point; point queries and peak-depth rays share this camera.
+    view.cx = camera.cx - options.rasterization.pixel_center_offset;
+    view.cy = camera.cy - options.rasterization.pixel_center_offset;
+    view.alpha_clip = options.rasterization.alpha_clip;
+    view.near_plane = options.rasterization.near_plane;
+    view.sort_by_camera_z = options.rasterization.sort_by_camera_z;
+    view.compensate_2d = options.rasterization.compensate_2d;
     view.mode = camera_mode_of(camera);
     view.k1 = camera.k1;
     view.k2 = camera.k2;
@@ -357,7 +363,7 @@ RenderResult Rasterizer::forward(
             pools_of(*context),
             gaussians_of(model, context->activated, context->options,
                          context->colors_precomp),
-            camera_view_of(camera, context->constants),
+            camera_view_of(camera, context->constants, context->options),
             settings_of(context->options), out);
     }
     result.rendered_instances = context->forward.instance_count;
@@ -403,7 +409,7 @@ tinytensor::Tensor Rasterizer::pruning_scores(
     sensitivity_scores<<<dim3((camera.width + 15) / 16, (camera.height + 15) / 16), dim3(16,16)>>>(
         camera.width, camera.height,
         camera.model == CameraModel::equirectangular ? int(camera.width) : 0,
-        gs, ids, ts.range, ps.n_contrib, rendered.color.ptr<float>(), scores.ptr<float>());
+        gs, ids, ts.range, ps.n_contrib, rendered.color.ptr<float>(), scores.ptr<float>(), options.rasterization.alpha_clip);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     return scores;
@@ -603,7 +609,7 @@ ModelGradients Rasterizer::backward(
             pools_of(*rendered.context.impl),
             gaussians_of(model, context.activated, context.options,
                          context.colors_precomp),
-            camera_view_of(context.camera, context.constants),
+            camera_view_of(context.camera, context.constants, context.options),
             settings_of(context.options), context.forward, fwd_out, dL, grads);
     }
     if (!fuse_structure)
@@ -700,7 +706,7 @@ DepthSampleResult Rasterizer::sample_depth(
     context->counts = splat_drender::Rasterizer::sample_depth(
         pools_of(*context),
         gaussians_of(model, context->activated, context->options, {}),
-        camera_view_of(camera, context->constants),
+        camera_view_of(camera, context->constants, context->options),
         settings_of(context->options), world_points.ptr<float>(),
         static_cast<int>(point_count), out);
     if (context->counts.compact_instances || context->counts.gaussian_instances == 0)
@@ -748,7 +754,7 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
     splat_drender::Rasterizer::sample_depth_backward(
         pools_of(*sampled.context),
         gaussians_of(model, context.activated, context.options, {}),
-        camera_view_of(context.camera, context.constants),
+        camera_view_of(context.camera, context.constants, context.options),
         settings_of(context.options), context.world_points.ptr<float>(),
         static_cast<int>(point_count), context.counts, fwd,
         reinterpret_cast<const float3*>(grad_camera_points.ptr<float>()),
@@ -824,7 +830,7 @@ OccupancyResult Rasterizer::evaluate_occupancy(
         pools.pixel = resize_buffer(view.storage, "occupancy.cache");
         view.draw = splat_drender::Rasterizer::prepare_occupancy(
             pools, gaussians_of(context.model, context.activated, context.options, {}),
-            camera_view_of(view.camera, view.constants), settings_of(context.options));
+            camera_view_of(view.camera, view.constants, context.options), settings_of(context.options));
         // The packed list owns every value needed by subsequent queries.
         // In particular, neither the sort keys/scratch nor GaussianState is
         // needed while evaluating points. Free them in stream order before
@@ -876,7 +882,7 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     out.occupancy = result.occupancy.ptr<float>();
     out.inside = result.inside.ptr<bool>();
     splat_drender::Rasterizer::evaluate_prepared_occupancy(
-        pools, draw, camera_view_of(view.camera, view.constants), settings_of(context.options),
+        pools, draw, camera_view_of(view.camera, view.constants, context.options), settings_of(context.options),
         world_points.ptr<float>(), static_cast<int>(count), out);
     ++context.stats.queries;
     context.active_view = camera_index;
@@ -929,7 +935,7 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     options.active_sh_degree = std::min(options.active_sh_degree, model.sh_degree);
     splat_drender::Rasterizer::evaluate_occupancy(
         pools, gaussians_of(model, activated, options, {}),
-        camera_view_of(camera, constants), settings_of(options),
+        camera_view_of(camera, constants, options), settings_of(options),
         world_points.ptr<float>(), static_cast<int>(point_count), out);
     return result;
 }

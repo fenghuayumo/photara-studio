@@ -46,7 +46,7 @@ __global__ void preprocess_gaussians(
     const float3 mean =
         make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
     const float3 t = mat::xform_point(mean, view);
-    if (!camera_visible(t, K.mode)) return;
+    if (!camera_visible(t, K.mode, K.near_plane)) return;
 
     geo::Splat splat;
     const float3* scale_ptr =
@@ -92,7 +92,7 @@ __global__ void preprocess_gaussians(
     }
 
     st.mean2d[i] = make_float2(p.pixel_x, p.pixel_y);
-    st.depth_key[i] = depth_bits(norm3df(t.x, t.y, t.z));
+    st.depth_key[i] = depth_bits(K.sort_by_camera_z && !is_equirect(K.mode) ? t.z : norm3df(t.x, t.y, t.z));
     if constexpr (GEOMETRY) {
         st.ray_plane[i] = splat.ray_plane;
         st.normal[i] = splat.normal;
@@ -359,7 +359,7 @@ blend_tile(const uint2* __restrict__ tile_range,
                 const float power =
                     geo::gaussian_power(co, d.x, d.y);
                 if (power > 0.f) continue;
-                const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
+                const float alpha = fminf(K.alpha_clip, co.w * expf(power));
                 if (alpha < cfg::kAlphaFloor) continue;
                 const float test_t = transmittance * (1.f - alpha);
                 if (test_t < cfg::kTransmittanceFloor) {
@@ -439,7 +439,7 @@ blend_tile(const uint2* __restrict__ tile_range,
                     const float power =
                         geo::gaussian_power(co, d.x, d.y);
                     if (power > 0.f) continue;
-                    const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
+                    const float alpha = fminf(K.alpha_clip, co.w * expf(power));
                     if (alpha < cfg::kAlphaFloor) continue;
 
                     const float4 rp = splane[j];

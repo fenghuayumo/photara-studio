@@ -139,7 +139,7 @@ median_scale_walk(const uint2* __restrict__ tile_range,
             const float power =
                 geo::gaussian_power(co, d.x, d.y);
             if (power > 0.f) continue;
-            const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
+            const float alpha = fminf(K.alpha_clip, co.w * expf(power));
             if (alpha < cfg::kAlphaFloor) continue;
 
             const float4 rp = splane[j];
@@ -416,7 +416,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
             geo::gaussian_power(co, dx, dy);
         if (power > 0.f) continue;
         const float G = expf(power);
-        const float alpha = fminf(cfg::kAlphaClip, co.w * G);
+        const float alpha = fminf(K.alpha_clip, co.w * G);
         if (alpha < cfg::kAlphaFloor) continue;
 
         const float blend_weight = alpha * T;
@@ -478,7 +478,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
         dL_dopa += -T_final * inv_1ma * dL_fin;
 
         // The native camera path differentiates the alpha clamp.
-        if (is_fisheye(K.mode) && co.w * G >= cfg::kAlphaClip) {
+        if (is_fisheye(K.mode) && co.w * G >= K.alpha_clip) {
             dL_dopa = 0.f;
             dL_dopa_render = 0.f;
         }

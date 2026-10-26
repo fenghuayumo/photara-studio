@@ -11,6 +11,18 @@ namespace photara::splat {
 
 enum class RenderMethod { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
+// Legacy preserves existing experiments. Classic uses the original 0.3px²
+// dilation without energy compensation; Mip separates its 2D and 3D filters.
+enum class SplatFilterMode { legacy, classic, mip_2d, mip_3d, mip };
+
+struct RasterizationPolicy {
+    bool sort_by_camera_z{false};
+    float alpha_clip{0.99F};
+    float near_plane{0.2F};
+    float pixel_center_offset{0.F};
+    bool compensate_2d{true};
+};
+
 inline constexpr const char* k_3dgut_mesh_guidance =
     "3DGUT is for rendering only. Train with 3DGS to extract a mesh.";
 
@@ -72,6 +84,8 @@ struct TrainingOptions {
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
+    SplatFilterMode filter_mode{SplatFilterMode::legacy};
+    RasterizationPolicy rasterization;
     unsigned iterations{30'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};

@@ -23,7 +23,7 @@ void add_alpha_mask_loss_vulkan(const RenderResult& rendered, const TrainingView
     const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms);
 tinytensor::Tensor compute_3d_filter_vulkan(
     const tinytensor::Tensor& means, const std::vector<Camera>& cameras,
-    float minimum_scale_factor, bool all_camera_euclidean);
+    float minimum_scale_factor, bool all_camera_euclidean, bool per_camera_focal = false);
 tinytensor::Tensor unproject_depth_to_world_vulkan(
     const tinytensor::Tensor& depth, const Camera& camera);
 void add_sample_depth_point_gradients_vulkan(

@@ -51,6 +51,10 @@ CameraIntrinsics intrinsics_of(const CameraView& cam) {
     k.k2 = cam.k2;
     k.k3 = cam.k3;
     k.k4 = cam.k4;
+    k.alpha_clip = cam.alpha_clip;
+    k.near_plane = cam.near_plane;
+    k.sort_by_camera_z = cam.sort_by_camera_z;
+    k.compensate_2d = cam.compensate_2d;
     return k;
 }
 

@@ -267,7 +267,7 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     auto result = tinytensor::Tensor::ones({point_count}, device);
     Rasterizer rasterizer;
     RasterizeOptions raster_options;
-    raster_options.kernel_size = training_options.kernel_size;
+    configure_rasterization(raster_options, training_options);
     raster_options.scale_modifier = training_options.scale_modifier;
     const std::size_t capacity = std::max<std::size_t>(chunk_size, 1);
     // Mask projection uses host double precision. Download once for all
@@ -867,7 +867,7 @@ PamMeshResult extract_pam_mesh(
     for (const auto& view : scene.views)
         occupancy_cameras.push_back(camera_from_mvs_view(view));
     RasterizeOptions occupancy_options;
-    occupancy_options.kernel_size = training_options.kernel_size;
+    configure_rasterization(occupancy_options, training_options);
     occupancy_options.scale_modifier = training_options.scale_modifier;
     // CUDA caches per-view projections; Vulkan keeps one bounded raster
     // workspace reused across views/chunks rather than retaining N*V buffers.

@@ -564,6 +564,7 @@ tinytensor::Tensor visualize(const GaussianModel &model, const Camera &camera,
         raster.active_sh_degree = options.active_sh_degree;
         raster.background = options.background;
         raster.kernel_size = options.kernel_size;
+        raster.rasterization = options.rasterization;
         raster.scale_modifier = options.scale_modifier;
         raster.require_depth = diagnostics;
         raster.record_backward_state = false;

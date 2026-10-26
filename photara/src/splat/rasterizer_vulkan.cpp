@@ -219,6 +219,11 @@ splat_drender::vulkan::SplatSettings raster_settings(const RasterizeOptions& req
         requested_options.background.begin(),
         requested_options.background.end(), settings.background);
     settings.kernel_size = requested_options.kernel_size;
+    settings.alpha_clip = requested_options.rasterization.alpha_clip;
+    settings.near_plane = requested_options.rasterization.near_plane;
+    settings.pixel_center_offset = requested_options.rasterization.pixel_center_offset;
+    settings.sort_by_camera_z = requested_options.rasterization.sort_by_camera_z;
+    settings.compensate_2d = requested_options.rasterization.compensate_2d;
     settings.scale_modifier = requested_options.scale_modifier;
     settings.need_depth = requested_options.require_depth;
     settings.pixel_snapshots = requested_options.record_backward_state;

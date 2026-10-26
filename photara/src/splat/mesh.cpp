@@ -229,7 +229,7 @@ SplatMeshResult extract_splat_mesh(
     render_training_options.use_source_resolution = true;
     RasterizeOptions raster_options;
     raster_options.active_sh_degree = model.sh_degree;
-    raster_options.kernel_size = training_options.kernel_size;
+    configure_rasterization(raster_options, training_options);
     raster_options.scale_modifier = training_options.scale_modifier;
     raster_options.require_depth = true;
     // Mesh extraction consumes only forward depth/normal/alpha. Training
@@ -247,8 +247,9 @@ SplatMeshResult extract_splat_mesh(
             scene.views[view_index], render_training_options);
         geometry_view.fx = target.camera.fx;
         geometry_view.fy = target.camera.fy;
-        geometry_view.cx = target.camera.cx;
-        geometry_view.cy = target.camera.cy;
+        const auto sample_camera = raster_sample_camera(target.camera, raster_options);
+        geometry_view.cx = sample_camera.cx;
+        geometry_view.cy = sample_camera.cy;
         geometry_view.width = target.camera.width;
         geometry_view.height = target.camera.height;
         RenderResult rendered = rasterizer.forward(

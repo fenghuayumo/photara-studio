@@ -255,7 +255,7 @@ void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& tar
 }
 
 Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& cameras,
-    float minimum_scale_factor, bool all_camera_euclidean) {
+    float minimum_scale_factor, bool all_camera_euclidean, bool per_camera_focal) {
     if (means.dtype() != tinytensor::DataType::Float32 || means.shape().rank() != 2 ||
         means.shape()[1] != 3 || cameras.empty())
         throw std::invalid_argument("Vulkan 3D filter requires float32 [N,3] means and cameras");
@@ -279,7 +279,8 @@ Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& 
     Push push;
     push.mode = 1; push.count = static_cast<std::uint32_t>(means.shape()[0]);
     push.camera_count = static_cast<std::uint32_t>(cameras.size());
-    push.euclidean = all_camera_euclidean; push.focal = std::max(focal, 1e-6F);
+    push.euclidean = (all_camera_euclidean || per_camera_focal ? 1u : 0u) | (per_camera_focal ? 2u : 0u);
+    push.focal = per_camera_focal ? 1.F : std::max(focal, 1e-6F);
     push.weight = std::sqrt(std::max(minimum_scale_factor, 0.F));
     launch(push, {means, {}, camera_tensor, result, {}, maximum});
     push.mode = 2;

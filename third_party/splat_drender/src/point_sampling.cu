@@ -31,7 +31,7 @@ __global__ void preprocess_points(
     ps.touched[i] = 0;
     const float3 p = make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
     const float3 t = mat::xform_point(p, view);
-    if (!camera_visible(t, K.mode)) return;
+    if (!camera_visible(t, K.mode, K.near_plane)) return;
     const Projection pr = project(t, K, width, height);
     if (!pr.valid) return;
     if (pr.pixel_x < 0.f || pr.pixel_x > width - 1.f || pr.pixel_y < 0.f ||
@@ -115,12 +115,12 @@ __device__ inline void fetch_gaussians(
 }
 
 __device__ inline void evaluate_gaussian(const float2 gxy, const float4 co,
-                                         const float4 rp, PointRegs& p) {
+                                         const float4 rp, PointRegs& p, float alpha_clip) {
     const float2 d = make_float2(gxy.x - p.xy.x, gxy.y - p.xy.y);
     const float power = -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
                         co.y * d.x * d.y;
     if (power > 0.f) return;
-    const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
+    const float alpha = fminf(alpha_clip, co.w * expf(power));
     if (alpha < cfg::kAlphaFloor) return;
     const float test_t = p.T_gauss * (1.f - alpha);
     if (test_t < cfg::kTransmittanceFloor) {
@@ -216,7 +216,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
                                             co.y * d.x * d.y;
                         if (power > 0.f) continue;
                         const float alpha =
-                            fminf(cfg::kAlphaClip, co.w * expf(power));
+                            fminf(K.alpha_clip, co.w * expf(power));
                         if (alpha < cfg::kAlphaFloor) continue;
                         const float test_t = pts[p].T_gauss * (1.f - alpha);
                         if (test_t < cfg::kTransmittanceFloor) {
@@ -232,7 +232,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
                         pts[p].last_contributor = contributor;
                     } else {
                         evaluate_gaussian(batch.xy[j], batch.conic[j],
-                                          batch.plane[j], pts[p]);
+                                          batch.plane[j], pts[p], K.alpha_clip);
                     }
                 }
             }
@@ -312,7 +312,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
                                 co.y * d.x * d.y;
                             if (power > 0.f) continue;
                             const float alpha =
-                                fminf(cfg::kAlphaClip, co.w * expf(power));
+                                fminf(K.alpha_clip, co.w * expf(power));
                             if (alpha < cfg::kAlphaFloor) continue;
                             const float4 rpl = batch.plane[j];
                             const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
@@ -575,7 +575,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                             co.y * d.x * d.y;
                         if (power > 0.f) continue;
                         const float alpha =
-                            fminf(cfg::kAlphaClip, co.w * expf(power));
+                            fminf(K.alpha_clip, co.w * expf(power));
                         if (alpha < cfg::kAlphaFloor) continue;
                         const float4 rpl = batch.plane[j];
                         const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
@@ -652,7 +652,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                                          (power > 0.f) ||
                                          (alpha_raw[p] < cfg::kAlphaFloor));
                     if (!valid) continue;
-                    const float alpha = fminf(cfg::kAlphaClip, alpha_raw[p]);
+                    const float alpha = fminf(K.alpha_clip, alpha_raw[p]);
 
                     const float4 rpl = batch.plane[j];
                     const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
@@ -676,7 +676,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                     dL_dplane_local.x += dL_dt_peak * d.x;
                     dL_dplane_local.y += dL_dt_peak * d.y;
 
-                    if (is_fisheye(K.mode) && alpha_raw[p] >= cfg::kAlphaClip)
+                    if (is_fisheye(K.mode) && alpha_raw[p] >= K.alpha_clip)
                         dL_dopa = 0.f;
 
                     const float dL_dG = co.w * dL_dopa;

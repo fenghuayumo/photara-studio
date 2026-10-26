@@ -30,6 +30,10 @@ struct CameraIntrinsics {
     float cx = 0.f, cy = 0.f;
     CameraMode mode = CameraMode::pinhole;
     float k1 = 0.f, k2 = 0.f, k3 = 0.f, k4 = 0.f;
+    float alpha_clip = 0.99f;
+    float near_plane = 0.2f;
+    bool sort_by_camera_z = false;
+    bool compensate_2d = true;
 };
 
 SD_HD inline bool is_equirect(CameraMode m) { return m == CameraMode::equirectangular; }
@@ -60,7 +64,7 @@ struct Projection {
 
 SD_HD inline Projection project_pinhole(float3 t, const CameraIntrinsics& K) {
     Projection p;
-    if (!(t.z > 0.2f)) return p;
+    if (!(t.z > K.near_plane)) return p;
     const float iz = 1.f / t.z;
     p.pixel_x = t.x * iz * K.fx + K.cx;
     p.pixel_y = t.y * iz * K.fy + K.cy;
@@ -154,7 +158,7 @@ SD_HD inline Projection project_equirect(float3 t, int width, int height) {
 SD_HD inline Projection project(float3 t, const CameraIntrinsics& K, int width, int height) {
     if (is_orthographic(K.mode)) {
         Projection p;
-        if (!(t.z > 0.2f)) return p;
+        if (!(t.z > K.near_plane)) return p;
         p.pixel_x = K.fx * t.x + K.cx;
         p.pixel_y = K.fy * t.y + K.cy;
         p.J.du[0] = K.fx;
@@ -167,11 +171,11 @@ SD_HD inline Projection project(float3 t, const CameraIntrinsics& K, int width, 
     return project_pinhole(t, K);
 }
 
-SD_HD inline bool camera_visible(float3 t, CameraMode m) {
+SD_HD inline bool camera_visible(float3 t, CameraMode m, float near_plane = 0.2f) {
     if (is_equirect(m))
         return isfinite(t.x) && isfinite(t.y) && isfinite(t.z) &&
                sqrtf(t.x * t.x + t.y * t.y + t.z * t.z) > 1.0e-6f;
-    return t.z > (is_fisheye(m) ? 1.0e-6f : 0.2f);
+    return t.z > (is_fisheye(m) ? 1.0e-6f : near_plane);
 }
 
 #if defined(__CUDACC__)

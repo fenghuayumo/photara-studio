@@ -327,7 +327,7 @@ __global__ void compute_3d_filter_distance_kernel(
     const float* means, const float* cameras, const std::size_t count,
     const std::size_t camera_count, float* distances,
     unsigned* maximum_distance_bits,
-    const bool all_camera_euclidean, const float maximum_focal) {
+    const bool all_camera_euclidean, const float maximum_focal, const bool per_camera_focal) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float x = means[3 * index];
@@ -350,7 +350,7 @@ __global__ void compute_3d_filter_distance_kernel(
             minimum_distance = fminf(
                 minimum_distance,
                 sqrtf(camera_x * camera_x + camera_y * camera_y +
-                      camera_z * camera_z));
+                      camera_z * camera_z) / (per_camera_focal ? fmaxf(camera[16], 1e-6F) : 1.F));
         } else if (static_cast<CameraModel>(static_cast<unsigned>(camera[20])) == CameraModel::opencv_fisheye) {
             if (!(camera_z > 1e-6F)) continue;
             const double iz=1.0/static_cast<double>(camera_z);
@@ -2312,9 +2312,9 @@ PruneMasks prune_masks(
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means, const std::vector<Camera>& cameras,
     const float minimum_scale_factor,
-    const bool all_camera_euclidean) {
+    const bool all_camera_euclidean, const bool per_camera_focal) {
     if (means.device() == tinytensor::Device::Vulkan)
-        return compute_3d_filter_vulkan(means, cameras, minimum_scale_factor, all_camera_euclidean);
+        return compute_3d_filter_vulkan(means, cameras, minimum_scale_factor, all_camera_euclidean, per_camera_focal);
     if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
         means.dtype() != tinytensor::DataType::Float32 ||
         means.shape().rank() != 2 || means.shape()[1] != 3)
@@ -2367,13 +2367,13 @@ tinytensor::Tensor compute_3d_filter(
             means.ptr<float>(), camera_tensor.ptr<float>(), count,
             cameras.size(), result.ptr<float>(),
             reinterpret_cast<unsigned*>(maximum_bits.data_ptr()),
-            all_camera_euclidean || any_equirect, maximum_focal);
+            all_camera_euclidean || any_equirect || per_camera_focal, maximum_focal, per_camera_focal);
     check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
     finalize_3d_filter_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
             result.ptr<float>(), count,
             reinterpret_cast<const unsigned*>(maximum_bits.data_ptr()),
-            1.F / maximum_focal,
+            per_camera_focal ? 1.F : 1.F / maximum_focal,
             std::sqrt(std::max(minimum_scale_factor, 0.F)));
     check_cuda(cudaGetLastError(), "finalize GGGS 3D filter");
     return result;

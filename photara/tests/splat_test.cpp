@@ -8234,6 +8234,7 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 #include "splat_transparent_vulkan.hpp"
 #include "pam_vulkan_test.hpp"
 #include "splat_rings_vulkan.hpp"
+#include "splat_raster_policy.hpp"
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
@@ -8249,6 +8250,13 @@ int main(int argc, char** argv) {
         }
     }
     try {
+        if (argc > 1 && std::string(argv[1]) == "--raster-policy-only") {
+            test_filter_mode_resolution();
+            test_raster_policy(tinytensor::Device::CUDA);
+            test_raster_policy(tinytensor::Device::Vulkan);
+            std::cout << "Raster policy CPU-oracle tests passed on CUDA and Vulkan\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--transparent-vulkan-only") {
             test_vulkan_transparent_loss();
             test_vulkan_transparent_trainer();

@@ -644,8 +644,8 @@ void project_backward(uint3 dispatch_id) {
     float gb = denom2inv * 2.0f * (b * c * gc.x - (denom + 2.0f * b * b) * gc.y + a * b * gc.z);
     float det0 = max(1.0e-6f, a0 * c0v - b * b);
     float det1 = max(1.0e-6f, denom);
-    float coef = sqrt(det0 / det1);
-    if (mode == kModeFisheye) {
+    float coef = pc.u22 != 0u ? sqrt(det0 / det1) : 1.0f;
+    if (mode == kModeFisheye && pc.u22 != 0u) {
         float lc = activated_opacity * gc.w;
         if (a0 * c0v - b * b > 1.0e-6f) {
             float q = lc * 0.5f * coef / det0;

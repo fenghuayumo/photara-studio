@@ -26,7 +26,7 @@ constexpr std::uint32_t k_gauss_slots_geometry = 7;
 constexpr std::uint32_t k_gauss_slots_color = 5;
 constexpr std::uint32_t k_streams = 6;
 constexpr std::uint32_t k_single_sort_limit = 131072;
-constexpr std::uint32_t k_push_uints = 20;
+constexpr std::uint32_t k_push_uints = 24;
 constexpr std::uint32_t k_flag_sh = 1;
 constexpr std::uint32_t k_flag_scales = 2;
 constexpr std::uint32_t k_flag_geometry = 4;
@@ -38,7 +38,7 @@ constexpr std::uint32_t k_flag_gut = 256;
 struct Push {
     std::uint32_t u[k_push_uints]{};
 };
-static_assert(sizeof(Push) == 80);
+static_assert(sizeof(Push) == 96);
 
 void set_float(Push& push, int index, float value) {
     std::memcpy(&push.u[index], &value, sizeof(float));
@@ -500,11 +500,15 @@ public:
     // the 8-bit conversion to the same command batch, which is what the editor
     // preview hands to its own image.
     FrameCounts record_frame(
-        const SplatCamera& camera, const SplatSettings& settings,
+        const SplatCamera& source_camera, const SplatSettings& settings,
         const bool pack_rgba,
         const SplatDeviceFrame* destination = nullptr,
         const bool depth_query_only = false,
         const bool reuse_projection = false) {
+        policy_settings_ = settings;
+        auto camera = source_camera;
+        camera.cx -= settings.pixel_center_offset;
+        camera.cy -= settings.pixel_center_offset;
         const bool gut = settings.primitive == SplatPrimitive::gaussian_3dgut;
         const bool gut_candidates = gut && camera.mode == 0u &&
             !environment_flag("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
@@ -1081,11 +1085,15 @@ public:
                     camera.center.size() == last_center_.size() &&
                     camera.width == last_width_ && camera.height == last_height_ &&
                     camera.mode == last_mode_ && camera.fx == last_fx_ &&
-                    camera.fy == last_fy_ && camera.cx == last_cx_ && camera.cy == last_cy_ &&
+                    camera.fy == last_fy_ && camera.cx - settings.pixel_center_offset == last_cx_ && camera.cy - settings.pixel_center_offset == last_cy_ &&
                     camera.k1 == last_k1_ && camera.k2 == last_k2_ &&
                     camera.k3 == last_k3_ && camera.k4 == last_k4_ &&
                     std::equal(camera.world_to_camera.begin(), camera.world_to_camera.end(), last_transform_.begin()) &&
                     std::equal(camera.center.begin(), camera.center.end(), last_center_.begin()) &&
+                    settings.alpha_clip == policy_settings_.alpha_clip &&
+                    settings.near_plane == policy_settings_.near_plane &&
+                    settings.sort_by_camera_z == policy_settings_.sort_by_camera_z &&
+                    settings.compensate_2d == policy_settings_.compensate_2d &&
                     settings.kernel_size == last_kernel_size_ &&
                     settings.scale_modifier == last_scale_modifier_,
                 "color rerender requires unchanged device geometry and camera with live geometry snapshots");
@@ -3001,15 +3009,19 @@ private:
     }
 
     void dispatch_infos(const ComputePipeline& pipeline, const std::vector<VkDescriptorBufferInfo>& infos,
-                        const Push& push, std::uint32_t groups_x, std::uint32_t groups_y = 1,
+                        Push push, std::uint32_t groups_x, std::uint32_t groups_y = 1,
                         std::uint32_t groups_z = 1, const std::array<float, 8>* sh_settings = nullptr) {
+        set_float(push, 20, policy_settings_.alpha_clip);
+        set_float(push, 21, policy_settings_.near_plane);
+        push.u[22] = policy_settings_.compensate_2d;
+        push.u[23] = policy_settings_.sort_by_camera_z;
         if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
         std::vector<photara::vk::BufferBinding> bindings(infos.size());
         for (std::uint32_t i = 0; i < infos.size(); ++i) bindings[i] = to_binding(infos[i]);
         if (sh_settings) {
             struct FusedPush { Push base; std::array<float, 8> settings; };
-            static_assert(sizeof(FusedPush) == 112);
+            static_assert(sizeof(FusedPush) == 128);
             const FusedPush fused{push, *sh_settings};
             encoder_ring_.acquire().dispatch(
                 pipeline, bindings, &fused, sizeof(fused), groups_x, groups_y, groups_z);
@@ -3098,7 +3110,11 @@ private:
 
     void dispatch_indirect(
         const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
-        const Push& push, const Buffer& indirect, const VkDeviceSize offset) {
+        Push push, const Buffer& indirect, const VkDeviceSize offset) {
+        set_float(push, 20, policy_settings_.alpha_clip);
+        set_float(push, 21, policy_settings_.near_plane);
+        push.u[22] = policy_settings_.compensate_2d;
+        push.u[23] = policy_settings_.sort_by_camera_z;
         std::vector<photara::vk::BufferBinding> bindings;
         bindings.reserve(buffers.size());
         for (const Buffer* buffer : buffers) bindings.push_back(to_binding(*buffer));
@@ -3429,6 +3445,7 @@ private:
     float last_k2_{};
     float last_k3_{};
     float last_k4_{};
+    SplatSettings policy_settings_;
     float last_kernel_size_{};
     float last_scale_modifier_{1.0F};
 };

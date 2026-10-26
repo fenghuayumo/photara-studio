@@ -25,6 +25,7 @@
 #include "splat/cuda_vulkan_preview.hpp"
 #include "splat/formats.hpp"
 #include "splat/model_handoff.hpp"
+#include "splat/rasterizer.hpp"
 #include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #include "splat/loss_settings.hpp"
@@ -198,6 +199,8 @@ struct ReconstructCli {
     unsigned splat_max_resolution{1'920};
     bool splat_undistort{false};
     float splat_kernel_size{0.F};
+    photara::splat::SplatFilterMode splat_filter_mode{photara::splat::SplatFilterMode::legacy};
+    photara::splat::RasterizationPolicy splat_rasterization;
     bool splat_progressive_resolution{true};
     unsigned splat_progressive_interval{3'000};
     float splat_progressive_initial_scale{0.25F};
@@ -920,6 +923,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-undistort",
          "Resample OpenCV fisheye views onto a pinhole camera before splat training",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-filter-mode", "Filtering: legacy, classic, mip2d or mip3d; mip is a combined-filter ablation",
+         cxxopts::value<std::string>()->default_value("legacy"))
+        ("splat-raster-profile", "Raster numerics preset: legacy or brush (camera-Z, 0.999, 0.01, half-pixel)",
+         cxxopts::value<std::string>()->default_value("legacy"))
+        ("splat-depth-sort", "Override sort metric: radial or z", cxxopts::value<std::string>())
+        ("splat-alpha-clip", "Override per-splat alpha ceiling (0,1)", cxxopts::value<float>())
+        ("splat-near-plane", "Override pinhole near plane in scene units", cxxopts::value<float>())
+        ("splat-pixel-center", "Override pixel sample offset: 0 or 0.5", cxxopts::value<float>())
         ("splat-kernel-size",
          "Screen covariance low-pass variance (0 disables; Brush Mip uses 0.1)",
          cxxopts::value<float>()->default_value("0"))
@@ -1622,6 +1633,32 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-max-resolution"].as<unsigned>();
     cli.splat_undistort = result["splat-undistort"].as<bool>();
     cli.splat_kernel_size = result["splat-kernel-size"].as<float>();
+    const auto filter_mode = result["splat-filter-mode"].as<std::string>();
+    using Filter = photara::splat::SplatFilterMode;
+    if (filter_mode == "legacy") cli.splat_filter_mode = Filter::legacy;
+    else if (filter_mode == "classic") cli.splat_filter_mode = Filter::classic;
+    else if (filter_mode == "mip2d") cli.splat_filter_mode = Filter::mip_2d;
+    else if (filter_mode == "mip3d") cli.splat_filter_mode = Filter::mip_3d;
+    else if (filter_mode == "mip") cli.splat_filter_mode = Filter::mip;
+    else throw std::invalid_argument("Invalid --splat-filter-mode");
+    if (filter_mode != "legacy" && (result.count("splat-kernel-size") || result["splat-filter-3d"].as<std::string>() != "auto"))
+        throw std::invalid_argument("Explicit filter mode cannot be combined with --splat-kernel-size or --splat-filter-3d");
+    const auto profile = result["splat-raster-profile"].as<std::string>();
+    if (profile == "brush") cli.splat_rasterization = {true, 0.999F, 0.01F, 0.5F, true};
+    else if (profile != "legacy") throw std::invalid_argument("Invalid --splat-raster-profile");
+    if (result.count("splat-depth-sort")) {
+        const auto sort = result["splat-depth-sort"].as<std::string>();
+        if (sort != "z" && sort != "radial") throw std::invalid_argument("Invalid --splat-depth-sort");
+        cli.splat_rasterization.sort_by_camera_z = sort == "z";
+    }
+    if (result.count("splat-alpha-clip")) cli.splat_rasterization.alpha_clip = result["splat-alpha-clip"].as<float>();
+    if (result.count("splat-near-plane")) cli.splat_rasterization.near_plane = result["splat-near-plane"].as<float>();
+    if (result.count("splat-pixel-center")) cli.splat_rasterization.pixel_center_offset = result["splat-pixel-center"].as<float>();
+    const auto& raster = cli.splat_rasterization;
+    if (!(std::isfinite(raster.alpha_clip) && raster.alpha_clip > 0.F && raster.alpha_clip < 1.F &&
+          std::isfinite(raster.near_plane) && raster.near_plane > 0.F &&
+          (raster.pixel_center_offset == 0.F || raster.pixel_center_offset == 0.5F)))
+        throw std::invalid_argument("Invalid raster alpha clip, near plane or pixel center");
     cli.splat_progressive_resolution =
         result["splat-progressive-resolution"].as<bool>();
     cli.splat_progressive_interval =
@@ -3650,6 +3687,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.lambda_n = cli.splat_lambda_n;
     options.prior_directory = cli.splat_prior_directory;
     options.kernel_size = cli.splat_kernel_size;
+    options.filter_mode = cli.splat_filter_mode;
+    options.rasterization = cli.splat_rasterization;
     options.progressive_resolution = cli.splat_progressive_resolution;
     options.progressive_resolution_interval =
         cli.splat_progressive_interval;
@@ -3848,6 +3887,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.depth_normal_weight = cli.loss_settings.depth_normal_weight;
     if (cli.splat_filter_3d != "auto")
         options.use_3d_filter = cli.splat_filter_3d == "on";
+    if (options.filter_mode != photara::splat::SplatFilterMode::legacy)
+        options.use_3d_filter = options.filter_mode == photara::splat::SplatFilterMode::mip_3d || options.filter_mode == photara::splat::SplatFilterMode::mip;
     options.multi_view_geo_weight = geometry_objective
         ? cli.loss_settings.multi_view_geo_weight
         : 0.F;
@@ -3910,6 +3951,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     for (const auto& field : photara::splat::k_training_loss_fields)
         objective_summary << ' ' << field.cli << '=' << options.*field.training_value;
     photara::core::Logger::instance().info(objective_summary.str());
+    photara::splat::RasterizeOptions effective_raster;
+    photara::splat::configure_rasterization(effective_raster, options);
     photara::core::Logger::instance().info(
         "splat training: iterations=", options.iterations,
         " mode=", static_cast<int>(cli.splat_mode),
@@ -3963,7 +4006,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
-        " screen_space_kernel=", options.kernel_size,
+        " screen_space_kernel=", effective_raster.kernel_size,
+        " compensate_2d=", effective_raster.rasterization.compensate_2d,
+        " filter_mode=", static_cast<int>(options.filter_mode),
+        " sort_z=", options.rasterization.sort_by_camera_z,
+        " alpha_clip=", options.rasterization.alpha_clip,
+        " near_plane=", options.rasterization.near_plane,
+        " pixel_center=", options.rasterization.pixel_center_offset,
         " progressive_resolution=", options.progressive_resolution,
         " progressive_interval=",
         options.progressive_resolution_interval,

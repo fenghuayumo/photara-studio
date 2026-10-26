@@ -61,6 +61,11 @@ struct SplatGaussians {
 enum class SplatPrimitive : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
 struct SplatSettings {
+    float alpha_clip = 0.99F;
+    float near_plane = 0.2F;
+    float pixel_center_offset = 0.F;
+    bool sort_by_camera_z = false;
+    bool compensate_2d = true;
     float background[3] = {0.0F, 0.0F, 0.0F};
     float scale_modifier = 1.0F;
     float kernel_size = 0.0F;

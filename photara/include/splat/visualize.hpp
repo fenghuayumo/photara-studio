@@ -20,6 +20,7 @@ enum class VisualizationMode : unsigned { splat = 0, points = 1, rings = 2 };
 enum class VisualizationChannel : unsigned { color = 0, depth = 1, normal = 2 };
 
 struct VisualizeOptions {
+    RasterizationPolicy rasterization;
     VisualizationMode mode{VisualizationMode::splat};
     unsigned active_sh_degree{0};
     std::array<float, 3> background{0.F, 0.F, 0.F};

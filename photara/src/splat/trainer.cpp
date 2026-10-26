@@ -198,7 +198,7 @@ tinytensor::Tensor render_preview_color(
     const TrainingOptions& options, const unsigned active_sh_degree,
     VisualizeOptions vis, std::uint64_t& vis_revision) {
     vis.active_sh_degree = active_sh_degree;
-    vis.kernel_size = options.kernel_size;
+    configure_rasterization(vis, options);
     vis.scale_modifier = options.scale_modifier;
     load_visualization_sidecar(options.preview_vis_file, vis, vis_revision);
     // Points still uses the CUDA overlay. Rings has a forward-only Vulkan path.
@@ -1109,6 +1109,13 @@ GaussianModel initialize_from_dense_cloud(
 
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
+    const auto& raster = options_.rasterization;
+    if (!(std::isfinite(raster.alpha_clip) && raster.alpha_clip > 0.F && raster.alpha_clip < 1.F &&
+          std::isfinite(raster.near_plane) && raster.near_plane > 0.F &&
+          std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F && raster.pixel_center_offset <= 0.5F))
+        throw std::invalid_argument("Invalid rasterization policy");
+    if (options_.filter_mode != SplatFilterMode::legacy)
+        options_.use_3d_filter = options_.filter_mode == SplatFilterMode::mip_3d || options_.filter_mode == SplatFilterMode::mip;
     enforce_render_method_constraints(options_);
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.backend != TrainingBackend::cuda)
         throw std::invalid_argument("3DGUT training currently requires CUDA");
@@ -1267,11 +1274,11 @@ GaussianModel Trainer::train(
         }
     }
     const float filter_3d_factor =
-        options_.densification_strategy ==
-                DensificationStrategy::adc_plus
+        (options_.filter_mode != SplatFilterMode::legacy || options_.densification_strategy ==
+                DensificationStrategy::adc_plus)
             ? 0.1F
             : 0.2F;
-    const bool splat_filter = options_.densification_strategy ==
+    const bool splat_filter = options_.filter_mode != SplatFilterMode::legacy || options_.densification_strategy ==
                 DensificationStrategy::adc_plus;
     // Keep the Mip-Splatting floor separate from the canonical parameters.
     // The filter is applied only while rasterizing and recomputed after
@@ -1279,7 +1286,7 @@ GaussianModel Trainer::train(
     // cumulative opacity loss.
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras, filter_3d_factor, splat_filter);
+            model.means, filter_cameras, filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
     if (native_non_pinhole) {
         // Panorama and fisheye training rasterize the source projection
         // directly; state which models are in play so a run that silently fell
@@ -1343,7 +1350,7 @@ GaussianModel Trainer::train(
             if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
                     snapshot.means, full_resolution_filter_cameras,
-                    filter_3d_factor, splat_filter);
+                    filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
             // The Vulkan path shares one logical device/queue and has stateful
             // process-wide tensor and raster runtime state. An evaluation
             // thread can therefore race the next training submission even when
@@ -1432,7 +1439,7 @@ GaussianModel Trainer::train(
         refine::gpu_detail::select_training_rows_gpu(model, keep, adam_states);
         if (use_3d_filter)
             model.filter_3d = detail::compute_3d_filter(
-                model.means, filter_cameras, filter_3d_factor, splat_filter);
+                model.means, filter_cameras, filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
         if (densification_enabled)
             densification_stats = detail::make_densification_stats(
                 model.size(), model.means.device());
@@ -1459,7 +1466,7 @@ GaussianModel Trainer::train(
             if (use_3d_filter)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras,
-                    filter_3d_factor, splat_filter);
+                    filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
             if (densification_enabled)
                 densification_stats = detail::make_densification_stats(
                     model.size(), model.means.device());
@@ -1681,7 +1688,7 @@ GaussianModel Trainer::train(
                     filter_cameras.push_back(all_cameras[index]);
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
-                    splat_filter);
+                    splat_filter, options_.filter_mode != SplatFilterMode::legacy);
             }
         }
         const bool report_progress = progress &&
@@ -1768,7 +1775,7 @@ GaussianModel Trainer::train(
             for (float& channel : raster_options.background)
                 channel = std::clamp(background_noise(random), 0.F, 1.F);
         }
-        raster_options.kernel_size = options_.kernel_size;
+        configure_rasterization(raster_options, options_);
         raster_options.scale_modifier = options_.scale_modifier;
         const auto point_query = detail::multi_view_depth_query_options(
             options_, scene_extent);
@@ -2048,6 +2055,8 @@ GaussianModel Trainer::train(
                 loss_render.color, target.rgb, target.mask, mask_enabled,
                 options_.densify_loss_map_power);
         }
+        auto geometry_target = target;
+        geometry_target.camera = raster_sample_camera(target.camera, raster_options);
         detail::LossGradients loss;
         if (vulkan_backend) {
             const bool mask_enabled = target.has_mask &&
@@ -2065,14 +2074,14 @@ GaussianModel Trainer::train(
             detail::add_alpha_mask_loss_vulkan(
                 rendered, target, options_, loss, report_progress);
             if (allocate_geometry_gradients)
-                detail::add_depth_normal_loss_vulkan(rendered, target.camera,
+                detail::add_depth_normal_loss_vulkan(rendered, geometry_target.camera,
                     depth_normal_active ? options_.depth_normal_weight : 0.F,
                     loss, report_progress);
             if (ai_prior_active)
                 detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
         } else {
             loss = detail::compute_training_loss(
-                loss_render, target, options_, report_progress,
+                loss_render, geometry_target, options_, report_progress,
                 depth_normal_active, allocate_geometry_gradients, ai_prior_active);
         }
         if (options_.use_normal_field &&
@@ -2091,12 +2100,14 @@ GaussianModel Trainer::train(
         if (multi_view_active) {
             const TrainingView neighbour =
                 view_cache.get(multi_view_neighbour_index);
+            auto geometry_neighbour = neighbour;
+            geometry_neighbour.camera = raster_sample_camera(neighbour.camera, raster_options);
             const TrainingOptions& multi_view_options =
                 adaptive_multi_view
                 ? adaptive_multi_view_options
                 : multi_view_tail ? tail_multi_view_options : options_;
             const auto world_points = detail::unproject_depth_to_world(
-                rendered.median_depth, target.camera);
+                rendered.median_depth, geometry_target.camera);
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
             const DepthSampleResult sampled = rasterizer.sample_depth(
                 model, world_points, neighbour.camera,
@@ -2105,8 +2116,8 @@ GaussianModel Trainer::train(
                 CudaTrainingStage::multi_view_sample_forward);
             tinytensor::Tensor grad_sampled_points;
             multi_view_loss = detail::add_multi_view_loss(
-                sampled.camera_points, sampled.inside, rendered, target,
-                neighbour, multi_view_options, loss,
+                sampled.camera_points, sampled.inside, rendered, geometry_target,
+                geometry_neighbour, multi_view_options, loss,
                 grad_sampled_points, report_progress,
                 adaptive_multi_view
                     ? &multi_view_stability_accumulator
@@ -2115,7 +2126,7 @@ GaussianModel Trainer::train(
             multi_view_sample_gradients = rasterizer.sample_depth_backward(
                 model, sampled, grad_sampled_points);
             detail::add_sample_depth_point_gradients(
-                target.camera, multi_view_sample_gradients.points, loss);
+                geometry_target.camera, multi_view_sample_gradients.points, loss);
             cuda_profiler.mark(
                 CudaTrainingStage::multi_view_sample_backward);
             has_multi_view_sample_gradients = true;
@@ -2302,7 +2313,7 @@ GaussianModel Trainer::train(
             const RenderResult normal_field_render = rasterizer.forward(
                 model, target.camera, normal_options);
             const auto normal_field_loss = detail::compute_normal_field_loss(
-                normal_field_render, target.camera,
+                normal_field_render, geometry_target.camera,
                 options_.normal_field_weight * options_.normal_field_depth_ratio,
                 report_progress);
             normal_field_gradients = rasterizer.backward(
@@ -2653,7 +2664,7 @@ GaussianModel Trainer::train(
             if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
-                    splat_filter);
+                    splat_filter, options_.filter_mode != SplatFilterMode::legacy);
         }
         cuda_profiler.mark(CudaTrainingStage::filter_3d);
         cuda_profiler.end_iteration(
@@ -2783,7 +2794,7 @@ GaussianModel Trainer::train(
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, full_resolution_filter_cameras,
-            filter_3d_factor, splat_filter);
+            filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
     return model;
 }
 
@@ -2797,7 +2808,7 @@ RenderMetrics render_evaluation_png(
     const TrainingView target = make_training_view(view, evaluation_options);
     RasterizeOptions options;
     options.active_sh_degree = model.sh_degree;
-    options.kernel_size = training_options.kernel_size;
+    configure_rasterization(options, training_options);
     options.scale_modifier = training_options.scale_modifier;
     options.require_depth = false;
     options.record_backward_state = false;
