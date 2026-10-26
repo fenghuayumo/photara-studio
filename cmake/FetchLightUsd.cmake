@@ -11,6 +11,10 @@ if(NOT _code EQUAL 0)
     message(FATAL_ERROR "LightUSD download failed: ${_status}")
 endif()
 set(_prefix "LightUSD-d1ede90f919f6fe7c0014487be5441afb919cc79")
-file(ARCHIVE_EXTRACT INPUT "${_archive}" DESTINATION "${SOURCE_DIR}"
-    PATTERNS "${_prefix}/src/*" "${_prefix}/cmake/*"
-             "${_prefix}/CMakeLists.txt" "${_prefix}/LICENSE*")
+# libarchive attempts locale conversion even for excluded fixture names. On
+# Chinese Windows (CP936) that can abort before the source-only filter runs.
+# Read the archive's UTF-8 names with Python and write only regular build files.
+find_program(_python NAMES python3 python REQUIRED)
+execute_process(COMMAND "${_python}" "${CMAKE_CURRENT_LIST_DIR}/ExtractLightUsd.py"
+    "${_archive}" "${SOURCE_DIR}" "${_prefix}"
+    COMMAND_ERROR_IS_FATAL ANY)
