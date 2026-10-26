@@ -572,7 +572,23 @@ int run_benchmark(int argc, char** argv) {
                 // compare after the identical RGBA quantization used by preview.
                 std::vector<std::uint8_t> rgba;
                 vulkan.render_rgba(vulkan_camera, settings, rgba);
+                const auto filtered_info=vulkan.render(vulkan_camera,settings);
+                const char* candidate_env = std::getenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+                const std::string previous_candidate = candidate_env ? candidate_env : "";
+#ifdef _WIN32
+                _putenv_s("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE","1");
+#else
+                setenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE","1",1);
+#endif
                 const auto original = vulkan.render(vulkan_camera, settings);
+#ifdef _WIN32
+                _putenv_s("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE",previous_candidate.c_str());
+#else
+                if(previous_candidate.empty()) unsetenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+                else setenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE",previous_candidate.c_str(),1);
+#endif
+                std::cout << "candidate_counts method="<<name<<" mode="<<(rings ? "rings" : "rgb")
+                          <<" original="<<original.instance_count<<" filtered="<<filtered_info.instance_count<<std::endl;
                 unsigned maximum = 0; std::size_t different = 0;
                 for (std::size_t p = 0; p < std::size_t(width)*height; ++p) {
                     require(rgba[4*p+3] == 255, "viewport alpha is not opaque");

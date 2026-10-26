@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
@@ -290,9 +292,12 @@ void ray_tests(bool validation) {
                         raster.render_rgba(camera,settings,rgba);
                         for (unsigned p=0;p<pixels;++p) {
                             require(rgba[4*p+3]==255,"packed GUT alpha mismatch");
-                            for (unsigned a=0;a<3;++a)
+                            for (unsigned a=0;a<3;++a) {
+                                if(std::abs(int(rgba[4*p+a])-int(std::clamp(original.color[a*pixels+p],0.F,1.F)*255.F+.5F))>1)
+                                    std::cerr<<"pixel "<<p<<" channel "<<a<<" rgba="<<int(rgba[4*p+a])<<" float="<<original.color[a*pixels+p]<<std::endl;
                                 require(std::abs(int(rgba[4*p+a])-int(std::clamp(original.color[a*pixels+p],0.F,1.F)*255.F+.5F))<=1,
                                         "dense/thin/rings GUT fast path differs from original");
+                            }
                         }
                     }
                 }
@@ -303,7 +308,10 @@ void ray_tests(bool validation) {
             settings.primitive = SplatPrimitive::gaussian_3dgs;
             (void)raster.render(camera, settings);
             settings.primitive = SplatPrimitive::gaussian_3dgut;
-            close(raster.render(camera, settings).color, expected.color, 8e-5, "method switch");
+            const auto switch_first=raster.render(camera,settings);
+            const auto switch_second=raster.render(camera,settings);
+            close(switch_second.color,expected.color,8e-5,"second method switch");
+            close(switch_first.color, expected.color, 8e-5, "method switch");
             std::vector<float> sh(scene.colors.size());
             for (std::size_t k = 0; k < sh.size(); ++k)
                 sh[k] = (scene.colors[k] - .5F) / .28209479177387814F;
@@ -328,6 +336,47 @@ void ray_tests(bool validation) {
             for (float alpha : empty.alpha)
                 require(alpha == 0, "all-culled frame retained stale alpha");
         }
+    // Large supports crossing z=0 and the old z=0.2 projection guard,
+    // eye inside the ellipsoid, offscreen centers, and strongly tilted axes.
+    for (unsigned fixture=0;fixture<16;++fixture) {
+        Scene scene;
+        scene.means={float(int(fixture%4)-2)*.35F,.1F,.21F+float(fixture/4)*.13F,
+                     -.1F,.05F,.75F};
+        scene.scales={.6F,.45F,.5F,.3F,.3F,.6F};
+        if(fixture%3==0) scene.scales={.15F,.7F,.65F,.3F,.3F,.6F};
+        auto camera=scene.camera(0);
+        camera.fx=11.F+fixture;camera.fy=19.F;
+        camera.cx=(fixture%2==0 ? -3.F : 17.F);camera.cy=14.F;
+        raster.upload_model(scene.gaussians());
+        SplatSettings settings;settings.primitive=SplatPrimitive::gaussian_3dgut;
+        settings.background[0]=.13F;settings.background[1]=.07F;settings.background[2]=.11F;
+        const auto expected=reference(scene,camera,settings);
+        const auto actual=raster.render(camera,settings);
+        close(actual.color,expected.color,1e-4,"near-plane RGB");
+        close(actual.alpha,expected.alpha,1e-4,"near-plane alpha");
+        close(actual.normal,expected.normal,1e-4,"near-plane normal");
+        close(actual.median_depth,expected.median_depth,1e-4,"near-plane depth");
+        for (float sigma : {.5F,2.828427F,8.F}) {
+            settings.need_depth=false;settings.preview_rings=true;settings.preview_ring_scale=sigma;
+            const auto filtered=raster.render(camera,settings);
+            const char* value=std::getenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+            const std::string previous=value ? value : "";
+#ifdef _WIN32
+            _putenv_s("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE","1");
+#else
+            setenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE","1",1);
+#endif
+            const auto unfiltered=raster.render(camera,settings);
+#ifdef _WIN32
+            _putenv_s("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE",previous.c_str());
+#else
+            if(previous.empty()) unsetenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+            else setenv("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE",previous.c_str(),1);
+#endif
+            close(filtered.color,unfiltered.color,1e-5,"near-plane rings RGB");
+            close(filtered.alpha,unfiltered.alpha,1e-5,"near-plane rings alpha");
+        }
+    }
     require(device.validation_error_count() == 0, "Vulkan ray renderer validation errors");
     std::cout << "Vulkan GUT CPU ray parity, 4 cameras, transforms, seam, RGBA, method switches "
                  "and empty frames passed\n";

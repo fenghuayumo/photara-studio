@@ -47,7 +47,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
         if (rank < batch) {
             uint id = instances[base+rank];
             ids[rank] = id;
-            uint g = id*7u;
+            uint g = id*((pc.u3 & 512u)!=0u ? 11u : 7u);
             colors[rank] = gauss_f[g+2u];
             rows0[rank] = gauss_f[g+3u]; rows1[rank] = gauss_f[g+4u]; rows2[rank] = gauss_f[g+5u];
             normals[rank] = gauss_f[g+6u].xyz;

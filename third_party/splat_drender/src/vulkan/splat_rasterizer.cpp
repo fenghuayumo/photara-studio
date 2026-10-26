@@ -506,6 +506,22 @@ public:
         const bool depth_query_only = false,
         const bool reuse_projection = false) {
         const bool gut = settings.primitive == SplatPrimitive::gaussian_3dgut;
+        const bool gut_candidates = gut && camera.mode == 0u &&
+            !environment_flag("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+        const auto emit_constants = [&](std::uint32_t count,std::uint32_t mode,
+                std::uint32_t gx,std::uint32_t gy,int wrap,std::uint32_t n,std::uint32_t slots) {
+            Push p=Impl::emit_constants(count,mode,gx,gy,wrap,n,slots);
+            if (gut_candidates) {
+                p.u[7]=1u; p.u[8]=camera.width; p.u[9]=camera.height;
+                set_float(p,10,camera.fx); set_float(p,11,camera.fy);
+                set_float(p,12,camera.cx); set_float(p,13,camera.cy);
+                if(settings.preview_rings) {
+                    const float sigma=std::round(std::clamp(settings.preview_ring_scale,0.5F,8.F)*256.F)/256.F;
+                    set_float(p,14,sigma*sigma);
+                }
+            }
+            return p;
+        };
         require(settings.primitive == SplatPrimitive::gaussian_3dgs || gut,
                 "unknown Vulkan Gaussian primitive");
         require(!gut || (!settings.pixel_snapshots && !depth_query_only && !reuse_projection),
@@ -563,7 +579,7 @@ public:
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
         // GUT uses seven float4 slots for UT bounds, color and ray transforms,
         // even for RGB-only frames. EWA retains its five-slot RGB layout.
-        const std::uint32_t gauss_slots = (gut || settings.need_depth)
+        const std::uint32_t gauss_slots = gut ? (gut_candidates ? 11u : 7u) : settings.need_depth
             ? k_gauss_slots_geometry
             : k_gauss_slots_color;
         Buffer& gauss_f = grow(
@@ -598,7 +614,7 @@ public:
                         (has_scales ? k_flag_scales : 0) |
                         (settings.need_depth ? k_flag_geometry : 0) |
                         (device_model_bound_ ? k_flag_raw_parameters : 0) |
-                        (gut ? k_flag_gut : 0u);
+                        (gut ? k_flag_gut : 0u) | (gut_candidates ? 512u : 0u);
             if (settings.preview_rings)
                 prep.u[3] |= 64u | (static_cast<std::uint32_t>(ring_sigma * 256.F) << 16u);
             prep.u[4] = camera.width;
@@ -633,12 +649,18 @@ public:
             // that actually overflowed (harvested from its mirror) raises it, so
             // the steady state keeps the sort sized to the seeded capacity instead
             // of growing with every peak view.
-            if (count != capacity_count_ || tiles != capacity_tiles_ || settings.primitive != last_primitive_) {
+            if (count != capacity_count_ || tiles != capacity_tiles_ || settings.primitive != last_primitive_ ||
+                gut_candidates != capacity_gut_candidates_ ||
+                (gut && (settings.preview_rings != capacity_gut_rings_ ||
+                         (settings.preview_rings && ring_sigma != capacity_gut_ring_sigma_)))) {
                 instance_capacity_ = 0;
                 capacity_count_ = count;
                 capacity_tiles_ = tiles;
+                capacity_gut_candidates_ = gut_candidates;
+                capacity_gut_rings_ = settings.preview_rings;
+                capacity_gut_ring_sigma_ = ring_sigma;
             }
-            const bool use_gpu_driven = instance_capacity_ != 0;
+            bool use_gpu_driven = instance_capacity_ != 0;
             Buffer& frame_counts = grow(
                 frame_counts_, 19 * sizeof(std::uint32_t),
                 BufferMemory::host_visible,
@@ -678,6 +700,16 @@ public:
                 // The one synchronous frame seeds the capacity; later frames only
                 // raise it when a retired mirror reports an actual overflow.
                 instance_capacity_ = instance_capacity_for(frame_count_values[0]);
+                if (gut) {
+                    // Use the same stable indirect depth/tile pipeline on the
+                    // seeded frame as on every subsequent GUT frame.
+                    Push control_push{};
+                    control_push.u[0]=count;control_push.u[1]=instance_capacity_;
+                    control_push.u[2]=encoder_ring_.index()*k_count_mirror_words;
+                    dispatch(indirect_control_,{&gauss_u,&frame_counts,&count_mirrors},control_push,1);
+                    mirror_recorded_=true;
+                    use_gpu_driven=true;
+                }
             }
             instances = use_gpu_driven
                 ? instance_capacity_
@@ -693,7 +725,7 @@ public:
             zero_buffer(
                 tile_ranges,
                 static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
-            const bool single_sort = !use_gpu_driven && instances <= k_single_sort_limit;
+            const bool single_sort = !gut && !use_gpu_driven && instances <= k_single_sort_limit;
             if (instances > 0) {
                 if (!use_gpu_driven && visible == 0)
                     throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
@@ -874,7 +906,7 @@ public:
             blend_push.u[2] = grid_x;
             blend_push.u[3] = (settings.need_depth ? k_flag_geometry : 0u) |
                               (settings.pixel_snapshots ? k_flag_snapshot : 0u) |
-                              (!pack_rgba ? k_flag_stats : 0u);
+                              (!pack_rgba ? k_flag_stats : 0u) | (gut_candidates ? 512u : 0u);
             blend_push.u[4] = camera.mode;
             blend_push.u[5] = static_cast<std::uint32_t>(wrap_width);
             set_float(blend_push, 6, camera.fx);
@@ -3380,6 +3412,9 @@ private:
     std::uint32_t instance_capacity_{};
     std::uint32_t capacity_count_{};
     std::uint32_t capacity_tiles_{};
+    bool capacity_gut_candidates_{};
+    bool capacity_gut_rings_{};
+    float capacity_gut_ring_sigma_{};
     // Newest real counts published by a retired frame.
     std::uint32_t reported_instances_{};
     std::uint32_t reported_visible_{};

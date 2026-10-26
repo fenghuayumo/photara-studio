@@ -167,3 +167,43 @@ blender quantized using the same byte conversion, rejecting differences above
 one byte level. It excludes model upload, UI/compositing and presentation.
 The viewport forward test additionally exercises 300 overlapping Gaussians,
 partial batches/tiles, rings, and 1e-8 thin scales against the original path.
+
+
+## Pinhole candidate generation
+
+Vulkan GUT now applies the conservative support test before candidate scans,
+expansion and tile sorting for positive-focal-length pinhole cameras. Both RGB
+and geometry outputs use it. The original UT footprint is intersected with
+screen-axis support bounds and four tile halfspaces; accepted candidates retain
+the original order and ray response. Equirectangular, fisheye, orthographic and
+CUDA generation remain unchanged.
+
+Screen bounds use support halfspaces in principal-axis coordinates, with
+12-step interval bisection and outward pixel padding. This works for ellipsoids
+crossing z=0: there is no division by a potentially zero Gaussian point depth
+and no near-plane clipping of the ellipsoid. When the eye lies inside the
+support, the halfspaces cannot reject its rays. The existing center-validity
+rule (pinhole center z > 0.2) and conservative UT fallback remain in place;
+this does not add support for Gaussians whose centers the old projection rejects.
+
+Numerical support padding and cancellation margins match the conservative
+viewport test. Axis ratios above 1e4, invalid/degenerate transforms and oversized
+screens retain the old candidate walk. Clipping is currently enabled below
+65520 pixels per dimension, allowing exact 24-bit numeric packing of tile
+intervals. Cached cofactors, origin, support radius and tile intervals occupy
+four additional float4 records per Gaussian (about 30.5 MiB at 500000 points),
+only on the pinhole candidate path. Count and emit share this cached state and
+the same predicate; interval packing uses ordinary representable float integers.
+
+RGB/rings or candidate-reference switches reseed GPU instance capacity because
+the new support sizes can differ substantially. GUT seeded frames use the same
+stable indirect depth/tile sort as subsequent frames. Both conventional and
+indirect emit shaders consume the cached intervals.
+
+`SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE=1` disables candidate filtering for an
+A/B run. This is independent of `SPLAT_DRENDER_GUT_REFERENCE`, which selects the
+older blend/output path. The viewport benchmark checks the optimized bytes
+against the unfiltered original float blender and reports original/filtered
+candidate counts. Near-camera regression fixtures compare RGB, alpha, normals
+and depth with a double-precision all-Gaussian ray oracle, and rings at sigma
+0.5, 2.828427 and 8 against the unfiltered path.

@@ -57,8 +57,6 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
         float sigma = float((pc.u3 >> 16u) & 4095u) / 256.0f;
         conic.w = kAlphaFloor * exp(0.5f * sigma * sigma);
     }
-    uint touched = enumerate_tiles(mu, conic, int(pc.u6), int(pc.u7), index, 0, int(pc.u19), 0, 0);
-    if (touched == 0u) return;
     float3 eye = float3(camera[16], camera[17], camera[18]);
     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f;
     float3 rgb;
@@ -72,11 +70,19 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     Mat3 A = mat_mul(mat_mul(mat_diag(1.0f/(scale.x*modifier), 1.0f/(scale.y*modifier),
                                      1.0f/(scale.z*modifier)), R), W);
     float3 origin = mat_mul_vec(R, eye - mean) / (scale*modifier);
+    float support2=(pc.u3 & 64u)!=0u ? pow(float((pc.u3>>16u)&4095u)/256.0f,2.0f)
+                                             : -2.0f*log(kAlphaFloor/opacity);
+    gut_init_support(float4(A.m[0][0],A.m[0][1],A.m[0][2],origin.x),
+                     float4(A.m[1][0],A.m[1][1],A.m[1][2],origin.y),
+                     float4(A.m[2][0],A.m[2][1],A.m[2][2],origin.z),opacity,support2,
+                     float4(fx,fy,cx,cy),uint2(width,height),(pc.u3 & 512u)!=0u && width<65520 && height<65520);
+    uint touched = enumerate_tiles(mu, conic, int(pc.u6), int(pc.u7), index, 0, int(pc.u19), 0, 0);
+    if (touched == 0u) return;
     int axis = 0;
     if (scale.y < scale[axis]) axis = 1;
     if (scale.z < scale[axis]) axis = 2;
     float3 normal = mat_mul_vec(mat_transpose(W), float3(R.m[axis][0], R.m[axis][1], R.m[axis][2]));
-    uint base = index*7u;
+    uint base = index*((pc.u3 & 512u)!=0u ? 11u : 7u);
     gauss_f[base] = float4(mu, length(t), asfloat(uint(radius)));
     gauss_f[base+1u] = conic;
     gauss_f[base+2u] = float4(rgb, opacity);
@@ -85,6 +91,16 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     gauss_f[base+4u] = float4(A.m[1][0], A.m[1][1], A.m[1][2], origin.y);
     gauss_f[base+5u] = float4(A.m[2][0], A.m[2][1], A.m[2][2], origin.z);
     gauss_f[base+6u] = float4(normal, 0.0f);
+    // Cache the support test itself, not only the source transform. Count and
+    // emit must make bit-identical discrete decisions across shader variants.
+    if ((pc.u3 & 512u)!=0u) {
+    gauss_f[base+7u]=float4(gut_c0,gut_origin.x);
+    gauss_f[base+8u]=float4(gut_c1,gut_origin.y);
+    gauss_f[base+9u]=float4(gut_c2,gut_origin.z);
+    uint bx=uint(gut_tile_bounds.x)|(uint(gut_tile_bounds.z)<<12u);
+    uint by=uint(gut_tile_bounds.y)|(uint(gut_tile_bounds.w)<<12u);
+    gauss_f[base+10u]=float4(float(bx),float(by),gut_support2,gut_support_enabled ? gut_sign : 0.0f);
+    }
     gauss_u[index] = touched;
     gauss_u[pc.u0+index] = 1u;
     gauss_u[2u*pc.u0+index] = asuint(length(t));
