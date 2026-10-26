@@ -159,6 +159,8 @@ SplatMeshResult extract_splat_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options,
     const SplatMeshOptions& mesh_options) {
+    if (model.render_method == RenderMethod::gaussian_3dgut)
+        throw std::invalid_argument(k_3dgut_mesh_guidance);
     if (model.size() == 0)
         throw std::invalid_argument("Splat mesh extraction requires Gaussians");
     if (scene.views.size() < 2)

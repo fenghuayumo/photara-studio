@@ -807,6 +807,8 @@ PamMeshResult extract_pam_mesh(
     const mvs::Mesh& seed_mesh,
     const TrainingOptions& training_options,
     const PamMeshOptions& options) {
+    if (model.render_method == RenderMethod::gaussian_3dgut)
+        throw std::invalid_argument(k_3dgut_mesh_guidance);
 #if !defined(PHOTARA_HAS_CGAL)
     (void)model;
     (void)source_scene;

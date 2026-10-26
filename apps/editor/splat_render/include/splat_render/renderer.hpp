@@ -22,9 +22,10 @@ inline constexpr std::uint32_t k_camera_orthographic = 1;
 inline constexpr std::uint32_t k_camera_fisheye = 2;
 inline constexpr std::uint32_t k_camera_equirectangular = 3;
 
-// gaussian is the splat_drender EWA forward. rings draws that same screen
-// covariance out to the alpha = 1/255 contour.
+// Gaussian shading follows the loaded model method. Rings visualize its
+// footprint (EWA screen covariance for 3DGS, 3D ray response for 3DGUT).
 enum class Shading : std::uint32_t { gaussian = 0, rings = 1, depth = 2, normal = 3 };
+enum class RenderMethod : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
 struct DisplayOptions {
     bool automatic_depth{true};
@@ -70,6 +71,7 @@ struct GaussianCloud {
     const float* opacity_logits{};
     const float* sh{};
     const float* filter_3d{};
+    RenderMethod render_method{RenderMethod::gaussian_3dgs};
 };
 
 struct FrameTarget {
@@ -81,8 +83,7 @@ struct FrameTarget {
     std::uint32_t height{};
 };
 
-// Vulkan splat preview. Gaussian shading uses the photara_drender EWA forward
-// so it matches training. Rings stay on this device.
+// Vulkan splat preview. The cloud selects the 3DGS EWA or 3DGUT ray response.
 class Renderer {
 public:
     Renderer() = default;
@@ -98,7 +99,7 @@ public:
     bool update_centers(const float* centers, std::uint32_t count);
     void clear_model();
 
-    // Sorts back-to-front and draws. An unchanged camera and shading reuse the last image.
+    // Composites the selected primitive. An unchanged camera and shading reuse the last image.
     bool draw(const Camera& camera, FrameTarget& target, Shading shading = Shading::gaussian,
               const DisplayOptions& display = {});
     [[nodiscard]] std::array<float, 2> depth_range() const { return depth_range_; }
@@ -109,6 +110,7 @@ public:
     [[nodiscard]] const std::string& source_key() const noexcept { return source_key_; }
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     [[nodiscard]] std::uint32_t splat_count() const noexcept { return count_; }
+    [[nodiscard]] RenderMethod render_method() const noexcept { return render_method_; }
     [[nodiscard]] bool supported() const noexcept { return supported_; }
     [[nodiscard]] std::uint64_t frames_epoch() const noexcept { return frames_epoch_; }
     [[nodiscard]] bool has_frame_size(
@@ -174,6 +176,7 @@ private:
     std::uint32_t count_{};
     std::uint32_t sh_degree_{};
     std::uint32_t sh_bases_{1};
+    RenderMethod render_method_{RenderMethod::gaussian_3dgs};
     std::uint64_t generation_{1};
     std::uint64_t frames_epoch_{1};
 

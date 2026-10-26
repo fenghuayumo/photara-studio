@@ -1,6 +1,7 @@
 #include "splat_drender/api.h"
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <iostream>
 #include <stdexcept>
@@ -38,9 +39,12 @@ struct Buffer {
     return v;
   }
 };
+bool sanitizer_smoke = false;
 void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
-         bool transformed = false) {
-  constexpr int N = 2, W = 16, H = 12, P = W * H;
+         bool transformed = false, bool tiled = false, bool many = false,
+         bool thin = false) {
+  const int N = many ? 300 : 2;
+  const int W = tiled ? 35 : 16, H = tiled ? 29 : 12, P = W * H;
   std::array<Buffer, 6> workspace;
   Buffer compact_pool;
   WorkspacePools pools;
@@ -57,6 +61,8 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     means[5] = -2.6f;
   }
   std::vector<float> scales = {.36f, .28f, .20f, .4f, .3f, .25f};
+  if (thin)
+    scales[2] = 1e-8f;
   std::vector<float> rotations = {.98f, .08f, -.12f, .09f, 1.f, 0.f, 0.f, 0.f};
   const float norm =
       std::sqrt(.98f * .98f + .08f * .08f + .12f * .12f + .09f * .09f);
@@ -64,6 +70,27 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     rotations[k] /= norm;
   std::vector<float> opacity = {.88f, .65f},
                      colors = {.8f, .2f, .4f, .1f, .6f, .3f};
+  if (many) {
+    means.resize(3 * N);
+    scales.resize(3 * N);
+    rotations.resize(4 * N);
+    opacity.assign(N, .01f);
+    colors.resize(3 * N);
+    const float q[4] = {rotations[0], rotations[1], rotations[2], rotations[3]};
+    for (int i = 0; i < N; ++i) {
+      means[3 * i] = -.12f;
+      means[3 * i + 1] = .08f;
+      means[3 * i + 2] = 2.f + .002f * i;
+      scales[3 * i] = .36f;
+      scales[3 * i + 1] = .28f;
+      scales[3 * i + 2] = .2f;
+      for (int a = 0; a < 4; ++a)
+        rotations[4 * i + a] = q[a];
+      colors[3 * i] = .8f;
+      colors[3 * i + 1] = .2f;
+      colors[3 * i + 2] = .4f;
+    }
+  }
   if (sh_colors) {
     colors.resize(N * 12);
     for (int k = 0; k < N * 12; ++k)
@@ -81,8 +108,8 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   if (transformed) {
     const float c = std::cos(.2f), s = std::sin(.2f);
     center.put({.15f, -.05f, .1f});
-    view.put({c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0,
-              -.15f*c-.1f*s, .05f, .15f*s-.1f*c, 1});
+    view.put({c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, -.15f * c - .1f * s, .05f,
+              .15f * s - .1f * c, 1});
   }
   Gaussians g;
   g.count = N;
@@ -103,8 +130,8 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   cam.height = H;
   cam.fx = 12;
   cam.fy = 12;
-  cam.cx = 7.5f;
-  cam.cy = 5.5f;
+  cam.cx = tiled ? 17.5f : 7.5f;
+  cam.cy = tiled ? 14.5f : 5.5f;
   cam.mode = mode;
   cam.k1 = .05f;
   cam.world_to_camera = view.floats();
@@ -140,8 +167,11 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
       const int pixel = j % P, x = pixel % W, y = pixel / W;
       // Keep the transformed-camera objective inside the smooth central
       // support, away from opacity-floor and median-selection boundaries.
-      dl[k][j] = transformed && (x < 7 || x > 8 || y < 5 || y > 6)
-                      ? 0.f : .01f * std::sin(float(j + 7 * k) * .37f);
+      dl[k][j] =
+          (transformed || many) && (x < int(cam.cx) || x > int(cam.cx) + 1 ||
+                                    y < int(cam.cy) || y > int(cam.cy) + 1)
+              ? 0.f
+              : .01f * std::sin(float(j + 7 * k) * .37f);
     }
     lossbuf[k].put(dl[k]);
   }
@@ -151,7 +181,7 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   loss.median_depth = lossbuf[2].floats();
   loss.normal = lossbuf[3].floats();
   std::array<Buffer, 5> grads;
-  const int gs[5] = {6, 6, 8, 2, static_cast<int>(colors.size())};
+  const int gs[5] = {3 * N, 3 * N, 4 * N, N, static_cast<int>(colors.size())};
   for (int k = 0; k < 5; ++k) {
     grads[k].resize(gs[k] * 4);
     check(cudaMemset(grads[k].p, 0, gs[k] * 4));
@@ -170,7 +200,7 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     throw std::runtime_error("3DGUT produced no draw list");
   // Independent double-precision CPU oracle, traversing every Gaussian
   // without projected bounds or tile lists. Also checks UT culling coverage.
-  if (mode == CameraMode::pinhole && !sh_colors) {
+  if (mode == CameraMode::pinhole && !sh_colors && !thin) {
     const auto actual_color = output[0].get(3 * P),
                actual_alpha = output[1].get(P);
     for (int py = 0; py < H; ++py)
@@ -233,6 +263,52 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   std::array<std::vector<float>, 5> analytic;
   for (int k = 0; k < 5; ++k)
     analytic[k] = grads[k].get(gs[k]);
+  for (const auto &values : analytic)
+    for (float value : values)
+      if (!std::isfinite(value))
+        throw std::runtime_error("Nonfinite GUT gradient");
+  // Extreme 1e-8 scales are a finiteness stress case: float ray transforms
+  // suffer cancellation and cannot use the old float AD path as an oracle.
+  if (!geometry && !thin &&
+      !(std::getenv("PHOTARA_GUT_REFERENCE") &&
+        std::getenv("PHOTARA_GUT_REFERENCE")[0] == '1')) {
+    const auto fast_color = output[0].get(3 * P);
+#ifdef _WIN32
+    _putenv_s("PHOTARA_GUT_REFERENCE", "1");
+#else
+    setenv("PHOTARA_GUT_REFERENCE", "1", 1);
+#endif
+    for (int k = 0; k < 5; ++k)
+      check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
+    const auto reference_forward = Rasterizer::forward(pools, g, cam, s, out);
+    Rasterizer::backward(pools, g, cam, s, reference_forward, fo, loss, grad);
+    const auto reference_color = output[0].get(3 * P);
+    double color_error = 0, color_norm = 0;
+    for (int k = 0; k < 3 * P; ++k) {
+      const double d = fast_color[k] - reference_color[k];
+      color_error += d * d;
+      color_norm += double(reference_color[k]) * reference_color[k];
+    }
+    if (std::sqrt(color_error / std::max(color_norm, 1e-20)) > 2e-5)
+      throw std::runtime_error("GUT optimized/reference color mismatch");
+    for (int k = 0; k < 5; ++k) {
+      const auto reference = grads[k].get(gs[k]);
+      for (int j = 0; j < gs[k]; ++j)
+        if (std::abs(reference[j] - analytic[k][j]) >
+            3e-5f + .01f * std::abs(reference[j])) {
+          std::cerr << "Reference gradient mismatch thin=" << thin
+                    << " group=" << k << " index=" << j
+                    << " analytic=" << analytic[k][j]
+                    << " reference=" << reference[j] << '\n';
+          throw std::runtime_error("GUT optimized/reference gradient mismatch");
+        }
+    }
+#ifdef _WIN32
+    _putenv_s("PHOTARA_GUT_REFERENCE", "");
+#else
+    unsetenv("PHOTARA_GUT_REFERENCE");
+#endif
+  }
   auto objective = [&] {
     Rasterizer::forward(pools, g, cam, s, out);
     double l = 0;
@@ -245,8 +321,10 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   };
   std::array<std::vector<float> *, 5> parameters = {&means, &scales, &rotations,
                                                     &opacity, &colors};
-  for (int group = 0; group < 5; ++group)
+  for (int group = 0; group < (thin || sanitizer_smoke ? 0 : 5); ++group)
     for (int k = 0; k < gs[group]; ++k) {
+      if (many && k > 7 && k < gs[group] - 4)
+        continue;
       auto &v = *parameters[group];
       const float original = v[k], eps = 2e-4f;
       v[k] = original + eps;
@@ -272,10 +350,13 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   const auto original_means = means;
   bool decreased = false;
   for (float step = .02f; step > 1e-6f; step *= .25f) {
-    for (int k = 0; k < 6; ++k)
+    for (int k = 0; k < 3 * N; ++k)
       means[k] = original_means[k] - step * analytic[0][k];
     input[0].put(means);
-    if (objective() < before) {
+    const double after = objective();
+    if (!std::isfinite(before) || !std::isfinite(after))
+      throw std::runtime_error("Nonfinite GUT objective");
+    if (after < before || thin) {
       decreased = true;
       break;
     }
@@ -289,17 +370,19 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   for (int k = 0; k < 3 * P; ++k)
     if (std::abs(training_color[k] - inference_color[k]) > 1e-6f)
       throw std::runtime_error("3DGUT inference differs from training forward");
-  opacity = {0.f, 0.f};
+  opacity.assign(N, 0.f);
   input[3].put(opacity);
   objective();
   for (float alpha : output[1].get(P))
     if (alpha != 0.f)
       throw std::runtime_error("3DGUT all-culled render retained stale pixels");
-  std::cout << "3DGUT finite differences passed mode=" << int(mode)
-            << " geometry=" << geometry << " compact=" << compact
+  std::cout << (sanitizer_smoke ? "3DGUT sanitizer smoke passed mode=" : thin ? "3DGUT thin-scale finiteness passed mode="
+                     : "3DGUT finite differences passed mode=")
+            << int(mode) << " geometry=" << geometry << " compact=" << compact
             << " SH=" << sh_colors << '\n';
 }
-int main() {
+int main(int argc, char** argv) {
+  sanitizer_smoke = argc > 1 && std::string(argv[1]) == "--sanitizer-smoke";
   try {
     run(CameraMode::pinhole, false, false, false);
     run(CameraMode::pinhole, true, true, false);
@@ -307,6 +390,12 @@ int main() {
     run(CameraMode::equirectangular, false, true, false);
     run(CameraMode::orthographic, true, false, false);
     run(CameraMode::pinhole, true, true, true, true);
+    run(CameraMode::pinhole, false, true, true, true);
+    run(CameraMode::opencv_fisheye, false, true, true);
+    run(CameraMode::orthographic, false, true, false);
+    run(CameraMode::pinhole, false, true, false, false, true);
+    run(CameraMode::pinhole, false, true, false, false, true, true);
+    run(CameraMode::pinhole, false, true, false, false, false, false, true);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

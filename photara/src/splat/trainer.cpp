@@ -1109,6 +1109,7 @@ GaussianModel initialize_from_dense_cloud(
 
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
+    enforce_render_method_constraints(options_);
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.backend != TrainingBackend::cuda)
         throw std::invalid_argument("3DGUT training currently requires CUDA");
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.speedy_pruning)
@@ -1305,7 +1306,7 @@ GaussianModel Trainer::train(
             "fisheye/equirectangular splat cameras");
     }
     if (options_.render_method == RenderMethod::gaussian_3dgut)
-        core::Logger::instance().info("3DGUT CUDA: multi-view point-depth losses are disabled; using differentiable ray rasterization");
+        core::Logger::instance().info("3DGUT: appearance-only training; depth, normal, multi-view and AI geometry losses are disabled");
     const bool use_multi_view =
         options_.render_method != RenderMethod::gaussian_3dgut && !native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||

@@ -11,6 +11,9 @@ namespace photara::splat {
 
 enum class RenderMethod { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
+inline constexpr const char* k_3dgut_mesh_guidance =
+    "3DGUT is for rendering only. Train with 3DGS to extract a mesh.";
+
 enum class TrainingBackend {
     cuda,
     vulkan,
@@ -498,6 +501,22 @@ enum class SpeedyPruningPhase { none, soft, hard };
             static_cast<float>(std::max(options.iterations, 1U)),
         1.F);
     return options.oversize_penalty * std::max(1.F - progress, 0.F);
+}
+
+// 3DGUT optimizes appearance. Surface supervision belongs to the 3DGS mesh
+// workflow; keep this policy shared by the CLI and direct Trainer callers.
+inline void enforce_render_method_constraints(TrainingOptions& options) {
+    if (options.render_method != RenderMethod::gaussian_3dgut) return;
+    options.use_mvs_depth = false;
+    options.use_mvs_normals = false;
+    options.use_depth_normal_loss = false;
+    options.depth_normal_weight = 0.F;
+    options.use_normal_field = false;
+    options.normal_field_weight = 0.F;
+    options.multi_view_geo_weight = 0.F;
+    options.multi_view_ncc_weight = 0.F;
+    options.lambda_d = 0.F;
+    options.lambda_n = 0.F;
 }
 
 }  // namespace photara::splat

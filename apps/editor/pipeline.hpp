@@ -337,7 +337,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     bool speedy_pruning = false;
     int sh_degree = 3;
     int preview_interval = 50;
-    int render_method = 0; // 0=3dgs, 1=3dgut (CUDA only)
+    int render_method = 0; // 0=3dgs, 1=3dgut (training backend checked separately)
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive
     int max_resolution = 1'920;
     bool progressive_resolution = true;

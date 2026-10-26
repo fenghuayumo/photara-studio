@@ -146,8 +146,8 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
                                              (unsigned*)nullptr, g.count),
                "scan size query");
     char* gpool =
-        pools.gaussian(GaussianState::bytes(g.count, scan_bytes, geometry));
-    gst = GaussianState::from_pool(gpool, g.count, scan_bytes, geometry);
+        pools.gaussian(GaussianState::bytes(g.count, scan_bytes, geometry, g.primitive == Primitive::gaussian_3dgut));
+    gst = GaussianState::from_pool(gpool, g.count, scan_bytes, geometry, g.primitive == Primitive::gaussian_3dgut);
     if (radii == nullptr) radii = gst.radius;  // internal fallback (samples)
     check_cuda(cudaMemset(gst.n_visible, 0, 2 * sizeof(unsigned)),
                "counter memset");
@@ -278,9 +278,9 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
                                              (unsigned*)nullptr, g.count),
                "scan size query");
     char* gpool = pools.gaussian(
-        GaussianState::bytes(g.count, scan_bytes, gaussian_geometry));
+        GaussianState::bytes(g.count, scan_bytes, gaussian_geometry, g.primitive == Primitive::gaussian_3dgut));
     gst = GaussianState::from_pool(gpool, g.count, scan_bytes,
-                                   gaussian_geometry);
+                                   gaussian_geometry, g.primitive == Primitive::gaussian_3dgut);
 
     if (compact_instances) {
         ist.instance_value[0] = reinterpret_cast<unsigned*>(
@@ -305,8 +305,8 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     const std::size_t pixel_buckets = snapshot_buckets >= 0
         ? std::size_t(snapshot_buckets) : buckets_ub;
     char* ppool =
-        pools.pixel(PixelState::bytes(pixels, pixel_buckets, pixel_geometry));
-    pst = PixelState::from_pool(ppool, pixels, pixel_buckets, pixel_geometry);
+        pools.pixel(PixelState::bytes(pixels, pixel_buckets, pixel_geometry, g.primitive == Primitive::gaussian_3dgut && snapshot_buckets > 0));
+    pst = PixelState::from_pool(ppool, pixels, pixel_buckets, pixel_geometry, g.primitive == Primitive::gaussian_3dgut && snapshot_buckets > 0);
 }
 
 struct PointListCounts {
@@ -449,16 +449,24 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
                                                gst, tst, ist, out.radii);
 
     if (g.primitive == Primitive::gaussian_3dgut) {
+        const std::size_t snapshot_buckets = gut::use_rgb_snapshots(s)
+            ? bucket_upper_bound(counts.instances, tiles) : 0;
+        if (snapshot_buckets > 0) {
+            launch::bucket_offsets(tiles, int(snapshot_buckets), tst.range,
+                tst.bucket_count, tst.bucket_offset, tst.bucket_tile, nullptr);
+            check_cuda(cudaGetLastError(), "3DGUT bucket offsets");
+        }
         PixelState ps;
         if (s.record_backward_state) {
-            char* pool = pools.pixel(PixelState::bytes(std::size_t(cam.width)*cam.height, 0, false));
-            ps = PixelState::from_pool(pool, std::size_t(cam.width)*cam.height, 0, false);
+            char* pool = pools.pixel(PixelState::bytes(std::size_t(cam.width)*cam.height, snapshot_buckets, false, snapshot_buckets > 0));
+            ps = PixelState::from_pool(pool, std::size_t(cam.width)*cam.height, snapshot_buckets, false, snapshot_buckets > 0);
+            if (snapshot_buckets == 0) ps.snap_ct = nullptr;
         }
         gut::forward(g, cam, s, K, gst, tst, ist.instance_value[counts.instance_selector], ps, out);
         check_cuda(cudaGetLastError(), "3DGUT forward");
         ForwardResult r;
         r.instance_count=counts.instances; r.visible_count=counts.visible;
-        r.instance_selector=counts.instance_selector; r.snapshot_buckets=0;
+        r.instance_selector=counts.instance_selector; r.snapshot_buckets=int(snapshot_buckets);
         r.compact_instances=s.record_backward_state && compact_draw_indices(pools, ist, counts);
         if(r.compact_instances) r.instance_selector=0;
         return r;
@@ -563,7 +571,7 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
         // Direct ray derivatives use the geometry slots as mean/scale/rotation scratch.
         GradState gs = zero_grad_state(pools, g.count, true);
         gut::backward(g, cam, s, intrinsics_of(cam), gst, tst,
-            ist.instance_value[fwd.instance_selector], pst, fo, dL, gs, grads);
+            ist.instance_value[fwd.instance_selector], pst, fo, dL, gs, grads, fwd.snapshot_buckets);
         check_cuda(cudaGetLastError(), "3DGUT backward");
         run_gaussian_backward(g, cam, s, gst, gs, grads, fo.radii, g.sh != nullptr);
         return;

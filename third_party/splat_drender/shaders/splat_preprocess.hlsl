@@ -14,6 +14,7 @@
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> values;
 
 #include "splat_enum.hlsli"
+#include "splat_gut.hlsli"
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
@@ -93,6 +94,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         c3 = covariances[base + 3];
         c4 = covariances[base + 4];
         c5 = covariances[base + 5];
+    }
+
+    if ((flags & 256u) != 0u) {
+        gut_preprocess(index, mean, t, scale, rotation, opacity);
+        return;
     }
 
     SplatGeom geom = project_splat(

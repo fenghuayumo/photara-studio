@@ -392,6 +392,8 @@ int run_benchmark(int argc, char** argv) {
     std::filesystem::create_directories(output);
 
     const auto views = load_views(images, sfm);
+    const std::size_t view_index = argc >= 11 ? std::stoull(argv[10]) : 0;
+    require(view_index < views.size(), "benchmark view out of range");
     require(!views.empty(), "no registered views were found");
     auto model = photara::splat::load_gaussians(model_path);
 
@@ -400,7 +402,7 @@ int run_benchmark(int argc, char** argv) {
     options.use_source_resolution = true;
     options.ignore_undistortion_border = true;
     options.progressive_resolution = false;
-    const auto view = photara::splat::make_training_view(views.front(), options);
+    const auto view = photara::splat::make_training_view(views[view_index], options);
     photara::splat::Camera camera = view.camera;
     camera.width = width;
     camera.height = height;
@@ -410,6 +412,13 @@ int run_benchmark(int argc, char** argv) {
     camera.fy = view.camera.fy * scale_y;
     camera.cx = view.camera.cx * scale_x;
     camera.cy = view.camera.cy * scale_y;
+
+    if (argc >= 12 && std::string(argv[11]) == "pinhole") {
+        camera.model = photara::CameraModel::pinhole;
+        camera.fx = camera.fy = float(height)*.5F/std::tan(35.F*3.14159265359F/180.F);
+        camera.cx = float(width)*.5F; camera.cy = float(height)*.5F;
+        camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
+    }
 
     // Activated attributes for the Vulkan rasterizer (see the parity path).
     std::size_t count = model.size();
@@ -513,7 +522,7 @@ int run_benchmark(int argc, char** argv) {
     vulkan_geometry.need_depth = true;
 
     std::cout << "model=" << model_path.string() << " gaussians=" << count
-              << " view=" << views.front().path.filename().string() << " size=" << width << 'x' << height
+              << " view=" << views[view_index].path.filename().string() << " size=" << width << 'x' << height
               << " device=" << context.device_info().name << " iterations=" << iterations << '\n';
     std::cout << "vulkan upload_model (one-off) = " << std::chrono::duration<double, std::milli>(
                      upload_finish - upload_start).count() << " ms\n\n";
@@ -535,6 +544,50 @@ int run_benchmark(int argc, char** argv) {
         std::cout << "instances@" << width << 'x' << height << " vulkan=" << vulkan_info.instance_count
                   << " visible=" << vulkan_info.visible_count
                   << " | cuda instances=" << cuda_info.rendered_instances << "\n\n";
+    }
+
+    if (std::string(argv[1]) == "--bench-viewport") {
+        std::ofstream csv(output / "viewport.csv");
+        csv << "method,width,height,gaussians,mode,median_ms,fps_equivalent\n";
+        for (const auto primitive : {splat_drender::vulkan::SplatPrimitive::gaussian_3dgs,
+                                    splat_drender::vulkan::SplatPrimitive::gaussian_3dgut}) {
+            splat_drender::vulkan::SplatSettings settings;
+            settings.need_depth = false;
+            settings.primitive = primitive;
+            const char* name = primitive == splat_drender::vulkan::SplatPrimitive::gaussian_3dgut ? "3dgut" : "3dgs";
+            for (bool rings : {false, true}) {
+                settings.preview_rings = rings;
+                // Same GPU RGBA path as the viewport. Wait for completion so
+                // asynchronous submission cannot masquerade as render time.
+                const double ms = time_ms([&] {
+                    const auto image = vulkan.render_rgba_device(vulkan_camera, settings);
+                    sink += image.bytes;
+                    require(vkDeviceWaitIdle(context.device()) == VK_SUCCESS, "viewport benchmark sync");
+                }, 5, iterations);
+                std::cout << "viewport " << name << " mode=" << (rings ? "rings" : "rgb")
+                          << " median_ms=" << ms << " fps_equivalent=" << 1000.0/ms << std::endl;
+                csv << name << ',' << width << ',' << height << ',' << count << ','
+                    << (rings ? "rings" : "rgb") << ',' << ms << ',' << 1000.0/ms << '\n';
+                // Original float-output blender remains the numerical oracle;
+                // compare after the identical RGBA quantization used by preview.
+                std::vector<std::uint8_t> rgba;
+                vulkan.render_rgba(vulkan_camera, settings, rgba);
+                const auto original = vulkan.render(vulkan_camera, settings);
+                unsigned maximum = 0; std::size_t different = 0;
+                for (std::size_t p = 0; p < std::size_t(width)*height; ++p) {
+                    require(rgba[4*p+3] == 255, "viewport alpha is not opaque");
+                    for (unsigned c = 0; c < 3; ++c) {
+                        const int reference = int(std::clamp(original.color[c*std::size_t(width)*height+p],0.F,1.F)*255.F+.5F);
+                        const unsigned delta = unsigned(std::abs(int(rgba[4*p+c])-reference));
+                        maximum = std::max(maximum,delta); different += delta != 0;
+                    }
+                }
+                std::cout << "viewport parity " << name << " mode=" << (rings ? "rings" : "rgb")
+                          << " max_byte_delta=" << maximum << " different_channels=" << different << std::endl;
+                require(maximum <= 1, "viewport fast path differs from original blender");
+            }
+        }
+        return 0;
     }
 
     // Color only, the shading the editor actually previews.
@@ -915,9 +968,131 @@ int run_train_smoke(int argc, char** argv) {
 
 }  // namespace
 
+// Same resident parameters/camera for both methods. This isolates rasterizer
+// cost; it is not a comparison of separately trained models or full training.
+int run_cuda_method_benchmark(int argc, char** argv) {
+    require(argc >= 6,
+        "Usage: photara_splat_vulkan_parity --bench-cuda-methods MODEL IMAGES OUTPUT SFM [MAX_RESOLUTION] [ITERS]");
+    auto model = photara::splat::load_gaussians(argv[2]);
+    const auto views = load_views(argv[3], argv[5]);
+    require(!views.empty(), "no registered views");
+    const unsigned resolution = argc >= 7 ? std::stoul(argv[6]) : 1000;
+    const int iterations = argc >= 8 ? std::max(1, std::stoi(argv[7])) : 10;
+    photara::splat::TrainingOptions options;
+    options.use_mask = false;
+    options.use_source_resolution = true;
+    options.progressive_resolution = false;
+    options.max_image_dimension = resolution;
+    const auto target = photara::splat::make_training_view(views.front(), options);
+    const auto& camera = target.camera;
+    const std::size_t pixels = std::size_t(camera.width)*camera.height;
+    std::vector<float> color_gradient(3*pixels);
+    for (std::size_t i=0;i<color_gradient.size();++i)
+        color_gradient[i] = (0.5F + 0.25F*std::sin(float(i%1000)))/float(pixels);
+    const auto dc = tinytensor::Tensor::from_vector(color_gradient,
+        {3U,camera.height,camera.width},tinytensor::Device::CUDA);
+    const auto da = tinytensor::Tensor::zeros({camera.height,camera.width},tinytensor::Device::CUDA);
+    const std::filesystem::path output(argv[4]);
+    std::filesystem::create_directories(output);
+    if(std::string(argv[1]) == "--compare-gut-paths") {
+        struct ReferenceMode {
+            std::string previous;
+            ReferenceMode() { if(const char* value=std::getenv("PHOTARA_GUT_REFERENCE")) previous=value; }
+            void set(const std::string& value) {
+#ifdef _WIN32
+                _putenv_s("PHOTARA_GUT_REFERENCE",value.c_str());
+#else
+                if(value.empty()) unsetenv("PHOTARA_GUT_REFERENCE");
+                else setenv("PHOTARA_GUT_REFERENCE",value.c_str(),1);
+#endif
+            }
+            ~ReferenceMode() {set(previous);}
+        } mode;
+        model.render_method=photara::splat::RenderMethod::gaussian_3dgut;
+        photara::splat::Rasterizer rasterizer;
+        photara::splat::RasterizeOptions raster;
+        raster.active_sh_degree=model.sh_degree;raster.require_depth=false;
+        std::array<std::vector<float>,7> reference,optimized;
+        auto collect=[&](auto& values) {
+            auto frame=rasterizer.forward(model,camera,raster);
+            auto gradient=rasterizer.backward(model,frame,dc,da,{},{});
+            values[0]=frame.color.to_vector();values[1]=frame.alpha.to_vector();
+            values[2]=gradient.means.to_vector();values[3]=gradient.log_scales.to_vector();
+            values[4]=gradient.quaternions.to_vector();values[5]=gradient.opacity_logits.to_vector();
+            values[6]=gradient.sh.to_vector();
+        };
+        mode.set("1");collect(reference);
+        mode.set("0");collect(optimized);
+        std::ofstream comparison(output/"gut_path_comparison.csv");
+        comparison<<"channel,relative_l2,max_absolute\n";
+        const char* names[]{"RGB","alpha","means_gradient","log_scales_gradient",
+            "quaternions_gradient","opacity_logits_gradient","SH_gradient"};
+        const auto debug_scales=model.log_scales.to_vector();
+        for(std::size_t k=0;k<reference.size();++k) {
+            const double relative=relative_l2(optimized[k],reference[k]);
+            double maximum=0;std::size_t worst=0;
+            for(std::size_t j=0;j<reference[k].size();++j) {
+                require(std::isfinite(optimized[k][j]) && std::isfinite(reference[k][j]),
+                        "GUT comparison produced nonfinite values");
+                const double error=std::abs(double(optimized[k][j])-reference[k][j]);
+                if(error>maximum) {maximum=error;worst=j;}
+            }
+            comparison<<names[k]<<','<<relative<<','<<maximum<<'\n';
+            std::cout<<names[k]<<" relative_l2="<<relative<<" max_absolute="<<maximum<<std::endl;
+            require(std::isfinite(relative) && relative < (k < 2 ? 1e-3 : 5e-3),
+                    "GUT optimized/reference relative error exceeded tolerance");
+            if(k==2 || k==4) {
+                const std::size_t row=worst/(k==2?3:4);
+                std::cout<<" worst_gaussian="<<row<<" reference="<<reference[k][worst]<<" optimized="<<optimized[k][worst]
+                    <<" log_scales="<<debug_scales[3*row]<<','<<debug_scales[3*row+1]<<','<<debug_scales[3*row+2]<<std::endl;
+            }
+        }
+        return 0;
+    }
+    std::ofstream csv(output/"cuda_methods.csv");
+    csv << "method,gaussians,width,height,instances,forward_ms,backward_ms,inference_ms\n";
+    for (const auto method : {photara::splat::RenderMethod::gaussian_3dgs,
+                              photara::splat::RenderMethod::gaussian_3dgut}) {
+        model.render_method = method;
+        photara::splat::Rasterizer rasterizer;
+        photara::splat::RasterizeOptions raster;
+        raster.active_sh_degree = model.sh_degree;
+        raster.require_depth = false;
+        auto frame = rasterizer.forward(model,camera,raster);
+        require(cudaDeviceSynchronize() == cudaSuccess, "benchmark initial sync");
+        const auto instances = frame.rendered_instances;
+        const double forward = time_ms([&] {
+            frame = rasterizer.forward(model,camera,raster);
+            require(cudaDeviceSynchronize() == cudaSuccess, "benchmark forward sync");
+        },3,iterations);
+        const double backward = time_ms([&] {
+            auto gradients = rasterizer.backward(model,frame,dc,da,{},{});
+            require(cudaDeviceSynchronize() == cudaSuccess, "benchmark backward sync");
+        },3,iterations);
+        frame = {};
+        raster.record_backward_state = false;
+        const double inference = time_ms([&] {
+            auto rendered = rasterizer.forward(model,camera,raster);
+            require(cudaDeviceSynchronize() == cudaSuccess, "benchmark inference sync");
+        },3,iterations);
+        const char* name = method == photara::splat::RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs";
+        csv << name << ',' << model.size() << ',' << camera.width << ',' << camera.height << ','
+            << instances << ',' << forward << ',' << backward << ',' << inference << '\n';
+        csv.flush();
+        std::cout << name << " gaussians=" << model.size() << " image=" << camera.width << 'x'
+            << camera.height << " instances=" << instances << " forward_ms=" << forward
+            << " backward_ms=" << backward << " inference_ms=" << inference << std::endl;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     try {
-        if (argc > 1 && std::string(argv[1]) == "--bench") return run_benchmark(argc, argv);
+        if (argc > 1 && (std::string(argv[1]) == "--bench-cuda-methods" ||
+                        std::string(argv[1]) == "--compare-gut-paths"))
+            return run_cuda_method_benchmark(argc, argv);
+        if (argc > 1 && (std::string(argv[1]) == "--bench" ||
+                         std::string(argv[1]) == "--bench-viewport")) return run_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--bench-rgb")
             return run_rgb_benchmark(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--eval-rgb")
@@ -1070,6 +1245,9 @@ int main(int argc, char** argv) {
             vulkan_camera = to_vulkan_camera(camera);
             splat_drender::vulkan::SplatSettings settings;
             settings.need_depth = true;
+            settings.primitive = model.render_method == photara::splat::RenderMethod::gaussian_3dgut
+                ? splat_drender::vulkan::SplatPrimitive::gaussian_3dgut
+                : splat_drender::vulkan::SplatPrimitive::gaussian_3dgs;
             const auto vulkan_output = vulkan.render(vulkan_camera, settings);
 
             const std::size_t area = static_cast<std::size_t>(camera.width) * camera.height;

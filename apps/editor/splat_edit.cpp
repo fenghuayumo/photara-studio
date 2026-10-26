@@ -1283,6 +1283,7 @@ void SplatEdit::upload_model(App& app) {
     cloud.count = count_;
     cloud.sh_degree = sh_.empty() ? 0U : sh_degree_;
     cloud.sh_bases = sh_.empty() ? 1U : sh_bases_;
+    cloud.render_method = static_cast<splat_render::RenderMethod>(render_method_);
     cloud.means = count_ == 0 ? nullptr : means.data();
     cloud.log_scales = count_ == 0 ? nullptr : log_scales_.data();
     cloud.quaternions = count_ == 0 ? nullptr : quaternions_.data();

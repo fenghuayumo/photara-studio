@@ -2,6 +2,7 @@
 #include "splat_drender/api.h"
 #include "splat_drender/buffers.h"
 namespace splat_drender::gut {
+bool use_rgb_snapshots(const RenderSettings &);
 void preprocess(const Gaussians &, const CameraView &, const RenderSettings &,
                 CameraIntrinsics, int, int, ws::GaussianState, int *);
 void forward(const Gaussians &, const CameraView &, const RenderSettings &,
@@ -10,5 +11,6 @@ void forward(const Gaussians &, const CameraView &, const RenderSettings &,
 void backward(const Gaussians &, const CameraView &, const RenderSettings &,
               CameraIntrinsics, ws::GaussianState, ws::TileState,
               const unsigned *, ws::PixelState, const ForwardOutputsView &,
-              const LossGradients &, ws::GradState, const ModelGradients &);
+              const LossGradients &, ws::GradState, const ModelGradients &,
+              int buckets);
 } // namespace splat_drender::gut

@@ -549,10 +549,15 @@ void Renderer::clear_model() {
 bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_key) {
     failure_.clear();
     if (!ensure_device()) return false;
-    if (!source_key.empty() && source_key == source_key_ && count_ == cloud.count)
+    if (!source_key.empty() && source_key == source_key_ && count_ == cloud.count &&
+        render_method_ == cloud.render_method)
         return true;
     if (cloud.count > 16'000'000U) {
         failure_ = "Too many Gaussians for the Vulkan preview";
+        return false;
+    }
+    if (cloud.render_method != RenderMethod::gaussian_3dgs && cloud.render_method != RenderMethod::gaussian_3dgut) {
+        failure_ = "Unknown Gaussian rendering method";
         return false;
     }
     if (cloud.count > 0 &&
@@ -635,6 +640,7 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     count_ = cloud.count;
     sh_degree_ = degree;
     sh_bases_ = bases;
+    render_method_ = cloud.render_method;
     source_key_ = std::string(source_key);
     cache_valid_ = false;
     ++generation_;
@@ -802,7 +808,8 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     }
     if (!ensure_frames(width, height)) return false;
     display_options_ = display;
-    if (shading != Shading::rings) return draw_ewa(camera, frame, target);
+    if (shading != Shading::rings || render_method_ == RenderMethod::gaussian_3dgut)
+        return draw_ewa(camera, frame, target);
 
     wait_gpu();
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
@@ -1004,6 +1011,11 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         const bool geometry = frame.reserved == static_cast<std::uint32_t>(Shading::depth) ||
                               frame.reserved == static_cast<std::uint32_t>(Shading::normal);
         settings.need_depth = geometry;
+        settings.primitive = render_method_ == RenderMethod::gaussian_3dgut
+            ? splat_drender::vulkan::SplatPrimitive::gaussian_3dgut
+            : splat_drender::vulkan::SplatPrimitive::gaussian_3dgs;
+        settings.preview_rings = frame.reserved == static_cast<std::uint32_t>(Shading::rings);
+        settings.preview_ring_scale = frame.viewport[2] > 0.F ? frame.viewport[2] : 2.828427F;
         settings.preview_selection_depth = display_options_.selection_depth_enabled;
         settings.preview_selection_near = display_options_.selection_depth_near;
         settings.preview_selection_far = display_options_.selection_depth_far;

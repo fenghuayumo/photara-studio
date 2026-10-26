@@ -189,6 +189,13 @@ void draw_training_objective(App& app) {
         for (const auto& tab : tabs) {
             if (!ImGui::BeginTabItem(tr(tab.title))) continue;
             ImGui::PushID(static_cast<int>(tab.group));
+            if (tab.group == LossGroup::geometry && settings.render_method == 1) {
+                objective_note("3DGUT uses appearance-only training. Geometry constraints are disabled.");
+                objective_note(photara::splat::k_3dgut_mesh_guidance);
+                ImGui::PopID();
+                ImGui::EndTabItem();
+                continue;
+            }
             const bool geometry = settings.geometry_training || mesh_from_gaussians(settings);
             if (tab.group == LossGroup::image)
                 objective_note("Image loss = image weight x [(1 - structure balance) x L1 + structure balance x SSIM loss].");
@@ -965,10 +972,10 @@ Action draw_inspector(App& app) {
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
             theme::caption("Rendering method");
             ImGui::SetNextItemWidth(-1.F);
-            const char* render_methods[] = {"3DGS", "3DGUT (CUDA)"};
-            if (ImGui::Combo("##render_method", &app.settings.render_method, render_methods, 2)
-                && app.settings.render_method == 1)
-                app.settings.training_backend = 0;
+            const char* render_methods[] = {"3DGS", "3DGUT"};
+            ImGui::Combo("##render_method", &app.settings.render_method, render_methods, 2);
+            if (app.settings.render_method == 1)
+                ImGui::TextWrapped("%s", tr(photara::splat::k_3dgut_mesh_guidance));
             theme::caption("Densification strategy");
             ImGui::SetNextItemWidth(-1.F);
             const char* strategies[] = {

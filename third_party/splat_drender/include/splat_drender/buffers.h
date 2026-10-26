@@ -45,13 +45,17 @@ struct GaussianState {
     unsigned* n_instances = nullptr;      // device scalar
     char* scan_scratch = nullptr;
     std::size_t scan_bytes = 0;
+    // GUT-only principal-axis transform rows. xyz is S^-1 R, w is the
+    // transformed camera origin relative to the Gaussian mean.
+    float4* gut_rows = nullptr;
+    float2* gut_refine = nullptr;
 
     // `geometry` adds the ray-plane / footprint-normal arrays used only by the
     // median-depth and normal channels. Callers that render color only (the
     // photometric training path with need_depth = false) skip 28 bytes per
     // Gaussian of allocation and of preprocess stores.
     static std::size_t bytes(std::size_t n, std::size_t cub_scan_bytes,
-                             bool geometry) {
+                             bool geometry, bool gut = false) {
         // from_pool aligns every array independently; mirror that exactly.
         return align_up(n * sizeof(float2)) +
                align_up(n * sizeof(float4)) * (geometry ? 2 : 1) +
@@ -61,12 +65,13 @@ struct GaussianState {
                align_up(n * sizeof(ushort4)) +
                align_up(n * sizeof(int)) +
                align_up(2 * sizeof(unsigned)) +
-               align_up(cub_scan_bytes) + kAlign;
+               align_up(cub_scan_bytes) +
+               (gut ? align_up(n * 3 * sizeof(float4)) + align_up(n * sizeof(float2)) : 0) + kAlign;
     }
 
     static GaussianState from_pool(char* base, std::size_t n,
                                    std::size_t cub_scan_bytes,
-                                   bool geometry) {
+                                   bool geometry, bool gut = false) {
         GaussianState s;
         char* c = base;
         s.mean2d = reinterpret_cast<float2*>(take(c, n * sizeof(float2)));
@@ -88,6 +93,10 @@ struct GaussianState {
         s.n_instances = s.n_visible + 1;
         s.scan_scratch = take(c, cub_scan_bytes);
         s.scan_bytes = cub_scan_bytes;
+        if (gut) {
+            s.gut_rows = reinterpret_cast<float4*>(take(c, n * 3 * sizeof(float4)));
+            s.gut_refine = reinterpret_cast<float2*>(take(c, n * sizeof(float2)));
+        }
         return s;
     }
 };
@@ -192,9 +201,10 @@ struct PixelState {
     float4* snap_ct = nullptr;       // [buckets,256] rgb + T at bucket start
     float4* snap_normal = nullptr;   // geometry: accumulated normal
     float* dL_dmt = nullptr;         // backward: median-depth grad scale
+    float4* gut_rays = nullptr;     // cached world ray for GUT bucket backward
 
     static std::size_t bytes(std::size_t pixels, std::size_t buckets,
-                             bool geometry) {
+                             bool geometry, bool gut = false) {
         const std::size_t snap = buckets * 256 * sizeof(float4);
         return align_up(pixels * sizeof(unsigned)) +
                align_up(pixels * 3 * sizeof(float)) +
@@ -202,11 +212,11 @@ struct PixelState {
                (geometry ? align_up(snap) +
                                align_up(pixels * sizeof(float))
                          : 0) +
-               kAlign;
+               (gut ? align_up(pixels * sizeof(float4)) : 0) + kAlign;
     }
 
     static PixelState from_pool(char* base, std::size_t pixels,
-                                std::size_t buckets, bool geometry) {
+                                std::size_t buckets, bool geometry, bool gut = false) {
         PixelState s;
         char* c = base;
         s.n_contrib = reinterpret_cast<unsigned*>(take(c, pixels * sizeof(unsigned)));
@@ -216,6 +226,7 @@ struct PixelState {
             s.snap_normal = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
         if (geometry)
             s.dL_dmt = reinterpret_cast<float*>(take(c, pixels * sizeof(float)));
+        if (gut) s.gut_rays = reinterpret_cast<float4*>(take(c, pixels * sizeof(float4)));
         return s;
     }
 };

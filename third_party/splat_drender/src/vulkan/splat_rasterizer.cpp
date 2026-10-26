@@ -33,6 +33,7 @@ constexpr std::uint32_t k_flag_geometry = 4;
 constexpr std::uint32_t k_flag_snapshot = 8;
 constexpr std::uint32_t k_flag_stats = 16;
 constexpr std::uint32_t k_flag_raw_parameters = 32;
+constexpr std::uint32_t k_flag_gut = 256;
 
 struct Push {
     std::uint32_t u[k_push_uints]{};
@@ -149,6 +150,7 @@ public:
           ranges_indirect_(context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
+          blend_gut_(context.create_pipeline("splat_blend_gut.hlsl.spv", 7, sizeof(Push))),
           blend_rings_(context.create_pipeline("splat_blend_rings.hlsl.spv", 7, sizeof(Push))),
           blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
           pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
@@ -182,6 +184,8 @@ public:
               photara::vk::BarrierPolicy::after_compute_indirect) {
         clear_buffer(dummy_);
         query_subgroup_properties();
+        if (subgroup_vote_supported_ && subgroup_backward_supported_)
+            blend_gut_rgba_ = context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 7, sizeof(Push));
         if (subgroup_backward_supported_ && subgroup_size_ == 32u)
             blend_backward_geometry_subgroup_ = context.create_pipeline(
                 "splat_blend_backward_geometry_subgroup.hlsl.spv", 12, sizeof(Push));
@@ -501,6 +505,12 @@ public:
         const SplatDeviceFrame* destination = nullptr,
         const bool depth_query_only = false,
         const bool reuse_projection = false) {
+        const bool gut = settings.primitive == SplatPrimitive::gaussian_3dgut;
+        require(settings.primitive == SplatPrimitive::gaussian_3dgs || gut,
+                "unknown Vulkan Gaussian primitive");
+        require(!gut || (!settings.pixel_snapshots && !depth_query_only && !reuse_projection),
+                "Vulkan 3DGUT supports forward rendering only; backward and point queries are not implemented");
+        require(!gut || has_scales_, "Vulkan 3DGUT requires scales and rotations");
         occupancy_prepared_ = false;
         sample_live_ = false;
         require(!depth_query_only || (!pack_rgba && destination == nullptr &&
@@ -551,7 +561,9 @@ public:
         camera_buffer.upload(camera_pack, sizeof(camera_pack));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
-        const std::uint32_t gauss_slots = settings.need_depth
+        // GUT uses seven float4 slots for UT bounds, color and ray transforms,
+        // even for RGB-only frames. EWA retains its five-slot RGB layout.
+        const std::uint32_t gauss_slots = (gut || settings.need_depth)
             ? k_gauss_slots_geometry
             : k_gauss_slots_color;
         Buffer& gauss_f = grow(
@@ -585,7 +597,8 @@ public:
             prep.u[3] = (has_sh ? k_flag_sh : 0) |
                         (has_scales ? k_flag_scales : 0) |
                         (settings.need_depth ? k_flag_geometry : 0) |
-                        (device_model_bound_ ? k_flag_raw_parameters : 0);
+                        (device_model_bound_ ? k_flag_raw_parameters : 0) |
+                        (gut ? k_flag_gut : 0u);
             if (settings.preview_rings)
                 prep.u[3] |= 64u | (static_cast<std::uint32_t>(ring_sigma * 256.F) << 16u);
             prep.u[4] = camera.width;
@@ -620,7 +633,7 @@ public:
             // that actually overflowed (harvested from its mirror) raises it, so
             // the steady state keeps the sort sized to the seeded capacity instead
             // of growing with every peak view.
-            if (count != capacity_count_ || tiles != capacity_tiles_) {
+            if (count != capacity_count_ || tiles != capacity_tiles_ || settings.primitive != last_primitive_) {
                 instance_capacity_ = 0;
                 capacity_count_ = count;
                 capacity_tiles_ = tiles;
@@ -828,7 +841,9 @@ public:
         // lists. Rendering the neighbour's full RGB/normal/median-depth image
         // is unnecessary, including its per-pixel depth search.
         if (!depth_query_only) {
-            Buffer& out_f = grow(
+            const bool gut_rgba_fast = gut && pack_rgba && !settings.need_depth &&
+                                       blend_gut_rgba_.valid() && !gut_reference_;
+            Buffer& out_f = gut_rgba_fast ? dummy_ : grow(
                 out_f_, static_cast<std::uint64_t>(pixels) *
                     (pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) * sizeof(float));
             Buffer* out_u = pack_rgba
@@ -876,13 +891,22 @@ public:
             blend_push.u[17] = count;
             blend_push.u[18] = pixels;
             blend_push.u[19] = snap_buckets;
-            if (settings.preview_rings) set_float(blend_push, 19, ring_sigma);
-            const ComputePipeline& blend_pipeline = settings.preview_rings ? blend_rings_ : settings.need_depth
+            if (settings.preview_rings) {
+                set_float(blend_push, 19, ring_sigma);
+                if (gut) blend_push.u[3] |= 64u;
+            }
+            const ComputePipeline& blend_pipeline = gut
+                ? (gut_rgba_fast ? blend_gut_rgba_ : blend_gut_) : settings.preview_rings ? blend_rings_ : settings.need_depth
                 ? blend_
                 : (settings.pixel_snapshots && !pack_rgba ? blend_training_ : blend_no_geometry_);
-            dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, &out_f, out_u, bucket_offsets, &snap},
+            Buffer* blend_output = &out_f;
+            if (gut_rgba_fast)
+                blend_output = &grow(rgba_, static_cast<std::uint64_t>(pixels)*4,
+                    BufferMemory::device_local,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap},
                      blend_push, grid_x, grid_y);
-            if (pack_rgba) {
+            if (pack_rgba && !gut_rgba_fast) {
                 Buffer& rgba = grow(
                     rgba_, static_cast<std::uint64_t>(pixels) * 4, BufferMemory::device_local,
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -919,6 +943,7 @@ public:
         // Normal rendering keeps the asynchronous submission path.
         submit_batch(forward_profile_enabled_);
         collect_forward_timestamps();
+        last_primitive_ = settings.primitive;
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
         last_frame_has_stats_ = !pack_rgba && !depth_query_only;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
@@ -1078,6 +1103,7 @@ public:
     }
 
     void pruning_scores_device(const SplatBufferView& scores) {
+        require(last_primitive_ == SplatPrimitive::gaussian_3dgs, "3DGUT pruning scores are not implemented");
         require(last_frame_has_stats_,
                 "pruning_scores_device requires a latest render with contribution statistics");
         const std::uint64_t bytes = static_cast<std::uint64_t>(count_) * sizeof(float);
@@ -1422,6 +1448,8 @@ public:
         const SplatCamera& camera, SplatSettings settings,
         const SplatBufferView& occupancy, const SplatBufferView& inside,
         bool reuse_prepared_view) {
+        require(settings.primitive == SplatPrimitive::gaussian_3dgs,
+                "Vulkan 3DGUT occupancy queries are not implemented");
         require(count > 0 && points.buffer != VK_NULL_HANDLE && points.bytes >= count*12ull &&
             occupancy.buffer != VK_NULL_HANDLE && occupancy.bytes >= count*4ull &&
             inside.buffer != VK_NULL_HANDLE && inside.bytes >= count*4ull,
@@ -3175,6 +3203,10 @@ private:
     ComputePipeline ranges_indirect_;
     ComputePipeline blend_;
     ComputePipeline blend_no_geometry_;
+    ComputePipeline blend_gut_;
+    ComputePipeline blend_gut_rgba_;
+    const bool gut_reference_ = environment_flag("SPLAT_DRENDER_GUT_REFERENCE");
+    SplatPrimitive last_primitive_{SplatPrimitive::gaussian_3dgs};
     ComputePipeline blend_rings_;
     ComputePipeline blend_training_;
     ComputePipeline pruning_scores_;

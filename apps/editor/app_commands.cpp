@@ -4148,6 +4148,10 @@ void export_alignment(App& app) {
 
 void start_train(App& app, const bool smoke, const bool resume_training) {
     if (app.job.running() || app.pending_train_prepare.valid()) return;
+    if (app.settings.render_method == 1 && mesh_from_gaussians(app.settings)) {
+        set_message(app, photara::splat::k_3dgut_mesh_guidance, theme::warning);
+        return;
+    }
     if (!smoke && !ensure_sam_ready(app)) return;
     ensure_task_cache(app);
     if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
@@ -4364,6 +4368,11 @@ void reset_mesh_handoff(App& app) {
 
 void start_splat_mesh(App& app) {
     if (app.job.running()) return;
+    if (app.settings.render_method == 1 || (app.splat_renderer &&
+        app.splat_renderer->render_method() == splat_render::RenderMethod::gaussian_3dgut)) {
+        set_message(app, photara::splat::k_3dgut_mesh_guidance, theme::warning);
+        return;
+    }
     if (!ensure_sam_ready(app)) return;
     ensure_task_cache(app);
     if (!app.settings.images_dir[0] && !app.settings.project_dir[0] && !app.settings.dataset_source[0]) {
@@ -4418,6 +4427,10 @@ void start_dense(App& app) {
     // The source selection applies regardless of Build Mesh: that toggle
     // only adds an automatic extraction at the end of training.
     if (mesh_source_gaussians(app.settings)) {
+        if (app.settings.render_method == 1) {
+            set_message(app, photara::splat::k_3dgut_mesh_guidance, theme::warning);
+            return;
+        }
         refresh_artifacts(app);
         if (app.has_model) {
             start_splat_mesh(app);
@@ -4737,6 +4750,7 @@ void queue_splat_model_load(
             splat_render::GaussianCloud cloud;
             cloud.count = static_cast<std::uint32_t>(count);
             cloud.sh_degree = model.sh_degree;
+            cloud.render_method = static_cast<splat_render::RenderMethod>(model.render_method);
             cloud.sh_bases = model.sh.is_valid()
                 ? static_cast<std::uint32_t>(model.sh.shape()[1]) : 1U;
             cloud.means = model.means.ptr<float>();

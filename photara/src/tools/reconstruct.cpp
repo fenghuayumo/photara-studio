@@ -1991,6 +1991,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.mesh = true;
         cli.dense = false;
     }
+    if (cli.splat && cli.mesh && cli.splat_render_method == "3dgut")
+        throw std::invalid_argument(photara::splat::k_3dgut_mesh_guidance);
     // Internal SfM now follows the same sparse initialization path as direct
     // COLMAP/OpenMVS datasets. --dense remains an explicit MVS diagnostic.
     if (external_splat_dataset && cli.splat && cli.texture && !cli.texture_only)
@@ -3890,6 +3892,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
          options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
     photara::splat::enforce_training_loss_mode(options, cli.splat_mode);
+    photara::splat::enforce_render_method_constraints(options);
     if ((options.lambda_d > 0.F || options.lambda_n > 0.F) && !cli.splat_prior_model.empty()) {
 #if defined(PHOTARA_HAS_INFERENCE)
         photara::splat::prepare_training_priors(scene, options, cli.splat_prior_model, cli.splat_prior_tokens);
@@ -4203,6 +4206,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     double training_seconds = 0.0;
     if (cli.splat_mesh_only) {
         gaussians = load_trained_gaussians(cli, project_archive);
+        if (gaussians.render_method == photara::splat::RenderMethod::gaussian_3dgut)
+            throw std::invalid_argument(photara::splat::k_3dgut_mesh_guidance);
     } else {
     const auto training_started = std::chrono::steady_clock::now();
     gaussians = photara::splat::Trainer(options).train(

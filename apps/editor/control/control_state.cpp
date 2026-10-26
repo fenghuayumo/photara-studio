@@ -451,7 +451,7 @@ json describe_schema() {
             "iterations", "int", "Total 3DGS training iterations.",
             1, 1000000, 30000));
         fields.push_back(setting_spec(
-            "render_method", "enum", "Gaussian rendering method (3DGUT requires CUDA).",
+            "render_method", "enum", "Gaussian rendering method. 3DGUT training currently requires CUDA; viewport rendering uses Vulkan.",
             nullptr, nullptr, 0, json::array({"3dgs", "3dgut"})));
         fields.push_back(setting_spec(
             "strategy", "enum", "Gaussian densification strategy.",
@@ -700,7 +700,6 @@ json apply_parameter_patch(App& app, const json& patch) {
         if (!read_choice(patch["render_method"], "render_method", {"3dgs", "3dgut"}, value, message))
             return invalid(message);
         settings.render_method = value;
-        if (value == 1) settings.training_backend = 0;
         note("render_method");
     }
     if (patch.contains("strategy")) {

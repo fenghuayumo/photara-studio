@@ -1,7 +1,7 @@
 #pragma once
 
-// Vulkan backend of splat_drender: CUDA-equivalent EWA forward, complete
-// differentiable geometry/RGB backward, and multi-view sampling/loss compute
+// Vulkan backend of splat_drender: CUDA-equivalent 3DGS/3DGUT forward, complete
+// 3DGS geometry/RGB backward, and multi-view sampling/loss compute
 // passes. It also renders a trained model without a CUDA context. Per-Gaussian
 // state, sorted instances and pixel snapshots stay alive on the device.
 
@@ -58,6 +58,8 @@ struct SplatGaussians {
     std::uint32_t sh_bases = 0;
 };
 
+enum class SplatPrimitive : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 };
+
 struct SplatSettings {
     float background[3] = {0.0F, 0.0F, 0.0F};
     float scale_modifier = 1.0F;
@@ -78,6 +80,8 @@ struct SplatSettings {
     float preview_selection_far = 100.F;
     float point_depth_bracket = 0.0F;
     float point_depth_tolerance = 0.0F;
+    // 3DGUT currently supports forward rendering only on Vulkan.
+    SplatPrimitive primitive = SplatPrimitive::gaussian_3dgs;
 };
 
 // Channel-major images: color and normal are [3, H, W], alpha and median depth are [H, W].
