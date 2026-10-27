@@ -415,6 +415,7 @@ photara::sfm::Scene load_working_sfm(
 
 photara::project::Settings collect_project_settings(const App& app) {
     photara::project::Settings settings;
+    settings.camera_keyframes = app.camera_keyframes;
     settings.name = app.layout.project_file.empty()
         ? std::string("Untitled")
         : path_to_utf8(app.layout.project_file.stem());
@@ -549,6 +550,9 @@ photara::project::Settings collect_project_settings(const App& app) {
 
 void apply_project_settings(
     App& app, const photara::project::Settings& settings) {
+    clear_camera_path_thumbnails(app);
+    app.camera_keyframes = settings.camera_keyframes;
+    app.camera_key_selected = -1; app.camera_path_time = 0.F; app.camera_path_playing = false;
     if (!settings.image_directory.empty())
         store_path_field(app.settings.images_dir, settings.image_directory);
     store_path_field(app.settings.dataset_source, settings.dataset_source);
@@ -847,7 +851,7 @@ photara::splat::GaussianModel load_export_model(
     const App& app, tinytensor::Device device);
 
 bool has_unsaved_project_changes(const App& app) {
-    const bool has_content = app.settings.images_dir[0] || app.settings.dataset_source[0] ||
+    const bool has_content = !app.camera_keyframes.empty() || app.settings.images_dir[0] || app.settings.dataset_source[0] ||
         has_reconstruction_result(app) || !app.gaussian_models.empty() || !app.imported_mesh_source.empty();
     if (app.saved_project_settings.empty()) return has_content;
     if (app.project_results_dirty || app.job.running() ||
@@ -1124,6 +1128,9 @@ bool alignment_job_running(const App& app) {
 void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
     if (defer_project_transition(app, [&app] { new_project(app); })) return;
+    clear_camera_path_thumbnails(app);
+    app.camera_keyframes.clear(); app.camera_key_selected = -1;
+    app.camera_path_time = 0.F; app.camera_path_playing = false;
     clear_loaded_result(app);
     // The cache root, retention policy, and compute choices are editor-wide
     // settings, not part of the project.

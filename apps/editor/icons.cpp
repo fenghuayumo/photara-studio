@@ -518,6 +518,25 @@ void draw(
                  thickness);
             break;
         }
+        case Icon::add:
+            line(draw_list, min, max, 0.5F, 0.2F, 0.5F, 0.8F, colour, thickness);
+            line(draw_list, min, max, 0.2F, 0.5F, 0.8F, 0.5F, colour, thickness);
+            break;
+        case Icon::more:
+            for (int i = 0; i < 3; ++i)
+                draw_list->AddCircleFilled(point(min, max, 0.25F + 0.25F * i, 0.5F), extent * 0.07F, colour, 12);
+            break;
+        case Icon::previous_keyframe:
+        case Icon::next_keyframe: {
+            const bool previous = icon == Icon::previous_keyframe;
+            const float bar = previous ? 0.24F : 0.76F;
+            const float tip = previous ? 0.32F : 0.68F;
+            const float base = previous ? 0.72F : 0.28F;
+            line(draw_list, min, max, bar, 0.22F, bar, 0.78F, colour, thickness);
+            draw_list->AddTriangleFilled(point(min, max, tip, 0.5F),
+                point(min, max, base, 0.25F), point(min, max, base, 0.75F), colour);
+            break;
+        }
         case Icon::chevron_left: {
             line(draw_list, min, max, 0.60F, 0.24F, 0.34F, 0.50F, colour,
                  thickness);

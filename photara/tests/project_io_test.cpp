@@ -29,7 +29,9 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
     settings.extractor_model.clear(); settings.lightglue_model.clear();
     settings.sam_detector_model.clear();
+    settings.camera_keyframes.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::uint32_t)); // v23 camera keyframes.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v22 filter mode.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v21 rendering method.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
@@ -292,6 +294,38 @@ int main() {
     settings.ai_prior_directory = dir / "aligned priors";
     settings.ai_depth_weight = .025F; settings.ai_normal_weight = 0.F;
     settings.ai_prior_tokens = 1600;
+    {
+        Settings path;
+        CameraKeyframe first; first.time = 0.F; first.yaw = 0.3F;
+        CameraKeyframe second; second.time = 3.F; second.target[1] = 2.F; second.projection = 1;
+        second.thumbnail_width = 2; second.thumbnail_height = 1; second.thumbnail_rgb = {10, 20, 30, 40, 50, 60};
+        path.camera_keyframes = {first, second};
+        const auto restored = decode_settings(encode_settings(path, ascan_path), ascan_path);
+        expect(restored.camera_keyframes.size() == 2 && restored.camera_keyframes[1].time == 3.F &&
+               restored.camera_keyframes[1].target[1] == 2.F && restored.camera_keyframes[1].projection == 1 &&
+               restored.camera_keyframes[1].thumbnail_rgb == second.thumbnail_rgb,
+               "camera keyframes survive project round trip");
+        auto v23 = encode_settings(path, ascan_path);
+        v23.resize(v23.size() - 2 * 2 * sizeof(std::uint32_t) - second.thumbnail_rgb.size());
+        const std::uint32_t old_version = 23, old_min_reader = 1;
+        std::memcpy(v23.data(), &old_version, sizeof(old_version));
+        std::memcpy(v23.data() + sizeof(old_version), &old_min_reader, sizeof(old_min_reader));
+        const auto old_path = decode_settings(v23, ascan_path);
+        expect(old_path.camera_keyframes.size() == 2 && old_path.camera_keyframes[1].thumbnail_rgb.empty(),
+               "version 23 paths remain readable without thumbnails");
+        auto corrupt = encode_settings(path, ascan_path);
+        const std::uint32_t invalid_width = 257;
+        const auto second_thumbnail = corrupt.size() - second.thumbnail_rgb.size() - 2 * sizeof(std::uint32_t);
+        std::memcpy(corrupt.data() + second_thumbnail, &invalid_width, sizeof(invalid_width));
+        bool rejected = false;
+        try { (void)decode_settings(corrupt, ascan_path); } catch (const std::exception&) { rejected = true; }
+        expect(rejected, "oversized thumbnails are rejected");
+        path.camera_keyframes[0].time = 40000.F;
+        rejected = false;
+        try { (void)decode_settings(encode_settings(path, ascan_path), ascan_path); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "out-of-range camera keyframe times are rejected");
+    }
     settings.name = "demo";
     settings.image_directory = dir / "images";
     settings.dataset_source = dir / "colmap";
@@ -733,6 +767,7 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto v17 = encode_settings(settings, ascan_path);
+        v17.resize(v17.size() - sizeof(std::uint32_t)); // v23 camera keyframes.
         v17.resize(v17.size() - sizeof(std::int32_t)); // v22 filter mode.
         v17.resize(v17.size() - sizeof(std::int32_t)); // v21 rendering method.
         v17.resize(v17.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.

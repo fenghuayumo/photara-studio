@@ -29,6 +29,27 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"More options", "更多选项", "その他のオプション", "추가 옵션"},
+    {"Create your first view", "创建第一个视角", "最初の視点を作成", "첫 시점 만들기"},
+    {"Frame the scene, then choose Add view.", "调整场景视角，然后点击「添加视角」。", "構図を決めて「視点を追加」を選択します。", "구도를 잡고 시점 추가를 선택하세요."},
+    {"Add view", "添加视角", "視点を追加", "시점 추가"},
+    {"views", "个视角", "視点", "개 시점"},
+    {"Previous view", "上一个视角", "前の視点", "이전 시점"},
+    {"Next view", "下一个视角", "次の視点", "다음 시점"},
+    {"No preview", "无预览", "プレビューなし", "미리보기 없음"},
+    {"Smooth", "平滑", "スムーズ", "부드럽게"},
+    {"Select a view to edit", "选择视角以编辑", "編集する視点を選択", "편집할 시점 선택"},
+
+    {"Camera Path", "相机轨迹", "カメラパス", "카메라 경로"},
+    {"KEYFRAMES", "关键帧", "キーフレーム", "키프레임"},
+    {"Add keyframe", "添加关键帧", "キーフレームを追加", "키프레임 추가"},
+    {"Update pose", "更新视角", "視点を更新", "시점 업데이트"},
+    {"Delete keyframe", "删除关键帧", "キーフレームを削除", "키프레임 삭제"},
+    {"Keyframe", "关键帧", "キーフレーム", "키프레임"},
+    {"Time (s)", "时间（秒）", "時間（秒）", "시간 (초)"},
+    {"View", "视图", "ビュー", "보기"},
+    {"Compose a view in the viewport, then add a keyframe to start a camera path.", "在视口中调整视角，然后添加关键帧以创建相机轨迹。", "ビューポートで視点を調整し、キーフレームを追加します。", "뷰포트에서 시점을 조정한 후 키프레임을 추가하세요."},
+
     {"Welcome to Photara", "欢迎使用 Photara", "Photara へようこそ", "Photara에 오신 것을 환영합니다"},
     {"Every perspective becomes a world.", "让每一个视角，成为一个世界。", "あらゆる視点から、世界が生まれる。", "모든 시선이 하나의 세계가 됩니다."},
     {"A new capture. A new dimension.", "从影像出发，探索新的维度。", "新しい撮影から、新しい次元へ。", "새로운 촬영, 새로운 차원."},

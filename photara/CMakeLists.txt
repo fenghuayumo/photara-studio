@@ -1001,6 +1001,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/ui_preferences.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_scene.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_viewport.cpp
+                ${PHOTARA_STUDIO_DIR}/ui_camera_path.cpp
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
                 ${PHOTARA_STUDIO_DIR}/video_window.cpp
                 ${PHOTARA_STUDIO_DIR}/vulkan_backend.cpp)
@@ -1755,6 +1756,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_hierarchical_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.hierarchical COMMAND photara_hierarchical_test)
         if(TARGET photara_studio)
+            add_executable(photara_camera_timeline_test ${PHOTARA_STUDIO_DIR}/tests/camera_timeline_test.cpp)
+            target_include_directories(photara_camera_timeline_test PRIVATE ${PHOTARA_STUDIO_DIR})
+            target_compile_features(photara_camera_timeline_test PRIVATE cxx_std_20)
+            add_test(NAME photara.studio.camera_timeline COMMAND photara_camera_timeline_test)
+            photara_exclude_from_default(photara_camera_timeline_test)
+            add_dependencies(photara_tests photara_camera_timeline_test)
             add_executable(photara_prior_preview_test
                 tests/prior_preview_test.cpp
                 ${PHOTARA_STUDIO_DIR}/prior_preview_data.cpp)

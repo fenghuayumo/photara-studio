@@ -64,7 +64,7 @@ std::vector<std::uint8_t> encode_settings(
     const auto base = project_directory(project_file);
     BufferWriter writer;
     writer.value(k_settings_version);
-    writer.value(settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    writer.value(!settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -183,6 +183,22 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.uv_max_stretch);
     writer.value(static_cast<std::int32_t>(settings.render_method));
     writer.value(static_cast<std::int32_t>(settings.filter_mode));
+    writer.value(static_cast<std::uint32_t>(settings.camera_keyframes.size()));
+    for (const auto& key : settings.camera_keyframes) {
+        writer.value(key.time);
+        for (float v : key.target) writer.value(v);
+        writer.value(key.yaw); writer.value(key.pitch); writer.value(key.distance);
+        writer.value(key.fov_degrees); writer.value(key.ortho_height);
+        writer.value(key.fisheye_k1); writer.value(static_cast<std::int32_t>(key.projection));
+    }
+    for (const auto& key : settings.camera_keyframes) {
+        const auto expected = static_cast<std::uint64_t>(key.thumbnail_width) * key.thumbnail_height * 3;
+        if (key.thumbnail_width > 256 || key.thumbnail_height > 256 ||
+            expected != key.thumbnail_rgb.size())
+            throw std::invalid_argument("Invalid camera thumbnail");
+        writer.value(key.thumbnail_width); writer.value(key.thumbnail_height);
+        writer.bytes(key.thumbnail_rgb.data(), key.thumbnail_rgb.size());
+    }
     return writer.take();
 }
 
@@ -475,6 +491,40 @@ Settings decode_settings(
         settings.filter_mode = reader.value<std::int32_t>();
         if (settings.filter_mode < 0 || settings.filter_mode > 2)
             throw std::invalid_argument("Invalid project filter mode");
+    }
+    if (version >= 23) {
+        const auto count = reader.value<std::uint32_t>();
+        if (count > 10000) throw std::invalid_argument("Too many camera keyframes");
+        for (std::uint32_t i = 0; i < count; ++i) {
+            CameraKeyframe key;
+            key.time = reader.value<float>();
+            for (float& v : key.target) v = reader.value<float>();
+            key.yaw = reader.value<float>(); key.pitch = reader.value<float>();
+            key.distance = reader.value<float>(); key.fov_degrees = reader.value<float>();
+            key.ortho_height = reader.value<float>(); key.fisheye_k1 = reader.value<float>();
+            key.projection = reader.value<std::int32_t>();
+            if (!std::isfinite(key.time) || key.time < 0 || key.time > 36000.F || !std::isfinite(key.yaw) ||
+                !std::isfinite(key.pitch) || !std::isfinite(key.distance) || key.distance <= 0 ||
+                !std::isfinite(key.fov_degrees) || !std::isfinite(key.ortho_height) ||
+                !std::isfinite(key.fisheye_k1) || key.projection < 0 || key.projection > 3 ||
+                !std::all_of(std::begin(key.target), std::end(key.target), [](float v) { return std::isfinite(v); }))
+                throw std::invalid_argument("Invalid camera keyframe");
+            settings.camera_keyframes.push_back(key);
+        }
+        if (version >= 24) {
+            for (auto& key : settings.camera_keyframes) {
+                key.thumbnail_width = reader.value<std::uint32_t>();
+                key.thumbnail_height = reader.value<std::uint32_t>();
+                if (key.thumbnail_width > 256 || key.thumbnail_height > 256 ||
+                    (key.thumbnail_width == 0) != (key.thumbnail_height == 0))
+                    throw std::invalid_argument("Invalid camera thumbnail size");
+                const auto size = static_cast<std::size_t>(key.thumbnail_width) * key.thumbnail_height * 3;
+                key.thumbnail_rgb.resize(size);
+                reader.bytes(key.thumbnail_rgb.data(), size);
+            }
+        }
+        std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
+            [](const auto& a, const auto& b) { return a.time < b.time; });
     }
     settings.sanitize();
     return settings;

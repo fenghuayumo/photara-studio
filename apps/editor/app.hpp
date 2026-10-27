@@ -14,6 +14,7 @@
 #include "video_window.hpp"
 #include "mask_editor.hpp"
 #include "splat/deployment.hpp"
+#include "project/document.hpp"
 #include "vulkan_backend.hpp"
 #include "splat_render/renderer.hpp"
 
@@ -168,6 +169,23 @@ struct App {
     bool mesh_gpu_uploaded{};
     bool mesh_gpu_failed{};
     OrbitCamera camera;
+    std::vector<photara::project::CameraKeyframe> camera_keyframes;
+    int camera_key_selected{-1};
+    float camera_path_time{};
+    bool camera_path_playing{};
+    int camera_timeline_drag{-1};
+    float camera_timeline_drag_span{};
+    bool show_camera_path{true};
+    bool camera_path_edit{};
+    bool camera_path_dock_pending{true};
+    int camera_thumbnail_pending{-1};
+    int camera_key_delete_pending{-1};
+    struct CameraThumbnail {
+        gpu::PreviewTexture texture;
+        const std::uint8_t* pixels{};
+        std::size_t size{};
+    };
+    std::vector<CameraThumbnail> camera_thumbnails;
     ViewOptions view_options;
     ViewportGizmoState gizmo;
     ReconstructionBox reconstruction_box;
@@ -418,6 +436,8 @@ void select_image_folder(App& app);
 void select_video_file(App& app);
 void select_project_folder(App& app);
 void open_project_from_path(App& app, const std::filesystem::path& path);
+void clear_camera_path_thumbnails(App& app);
+void capture_camera_path_thumbnail(App& app);
 void save_project(App& app);
 bool save_project_to_path(App& app, const std::filesystem::path& path);
 void request_project_save(App& app, bool exit_after_save);

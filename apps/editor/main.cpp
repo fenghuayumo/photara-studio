@@ -367,8 +367,10 @@ int main(const int argc, char** argv) {
 
         editor::build_dock_space(app);
         editor::draw_scene_panel(app);
-        editor::draw_viewport_panel(app);
         editor::draw_console_panel(app);
+        editor::draw_camera_path_panel(app);
+        editor::draw_viewport_panel(app);
+        app.camera_thumbnail_pending = -1;
         const Action inspector_action = editor::draw_inspector(app);
         if (action == Action::none) action = inspector_action;
         editor::draw_status_bar(app);
@@ -618,6 +620,7 @@ int main(const int argc, char** argv) {
     editor::cleanup_cache_session(app);
     editor::gpu::wait_idle();
     app.image_qa_session.clear();
+    editor::clear_camera_path_thumbnails(app);
     app.photos.clear();
     app.atlas_preview.reset();
     app.image_qa_priors.reset_textures();

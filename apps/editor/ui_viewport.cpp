@@ -1496,6 +1496,8 @@ void draw_splat_render_tab(
     if (shown) {
         draw->AddImage(texture, min, max);
         draw_display_legend(app, min, max);
+        if (!rings && app.display_channel == DisplayChannel::color)
+            capture_camera_path_thumbnail(app);
     } else {
         const std::string& failure = app.splat_renderer->failure();
         draw_empty_viewport(

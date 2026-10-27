@@ -132,11 +132,12 @@ void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
     ImGui::DockBuilderSplitNode(
         dock_main, ImGuiDir_Right, 0.24F, &dock_right, &dock_main);
     ImGui::DockBuilderSplitNode(
-        dock_main, ImGuiDir_Down, 0.28F, &dock_bottom, &dock_main);
+        dock_main, ImGuiDir_Down, 0.34F, &dock_bottom, &dock_main);
 
     ImGui::DockBuilderDockWindow("###Scene", dock_left);
     ImGui::DockBuilderDockWindow("###Viewport", dock_main);
     ImGui::DockBuilderDockWindow("###Console", dock_bottom);
+    ImGui::DockBuilderDockWindow("###CameraPath", dock_bottom);
     ImGui::DockBuilderDockWindow("###Inspector", dock_right);
     if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock_main))
         node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
@@ -331,6 +332,7 @@ Action draw_menu_bar(App& app) {
         ImGui::MenuItem(tr("Viewport"), nullptr, &app.show_viewport);
         ImGui::MenuItem(tr("Reconstruction settings"), nullptr, &app.show_inspector);
         ImGui::MenuItem(tr("Console"), nullptr, &app.show_console);
+        ImGui::MenuItem(tr("Camera Path"), nullptr, &app.show_camera_path);
         ImGui::MenuItem(tr("Status Bar"), nullptr, &app.show_status_bar);
         ImGui::Separator();
         if (ImGui::MenuItem(
