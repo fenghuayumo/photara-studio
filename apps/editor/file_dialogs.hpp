@@ -7,7 +7,7 @@
 namespace editor {
 
 enum class FilePickKind {
-    project, dataset, point_cloud, splat_model, mesh, alignment, video
+    project, dataset, point_cloud, splat_model, mesh, alignment, video, image
 };
 
 bool pick_folder(const wchar_t* title, std::array<char, 1024>& destination);

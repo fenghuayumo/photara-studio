@@ -271,6 +271,7 @@ int main(const int argc, char** argv) {
         editor::poll_splat_simplify(app);
         editor::poll_gaussian_merge(app);
         editor::poll_splat_export(app);
+        editor::poll_video_render(app);
 #if defined(PHOTARA_CONTROL_ENABLED)
         control_bus.pump_main_thread(app);
 #endif
@@ -383,6 +384,7 @@ int main(const int argc, char** argv) {
         editor::draw_scene_panel(app);
         editor::draw_console_panel(app);
         editor::draw_camera_path_panel(app);
+        editor::draw_video_render_settings(app);
         editor::draw_viewport_panel(app);
         app.camera_thumbnail_pending = -1;
         const Action inspector_action = editor::draw_inspector(app);
@@ -681,6 +683,7 @@ int main(const int argc, char** argv) {
 #endif
 
     if (app.job.running()) app.job.stop();
+    editor::shutdown_video_render(app);
     if (app.splat_export.cancel) app.splat_export.cancel->store(true);
     if (app.splat_export.job.valid()) app.splat_export.job.wait();
     editor::wait_splat_model_loads(app);

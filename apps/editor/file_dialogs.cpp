@@ -154,6 +154,10 @@ bool pick_file(
             {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
              L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
             {L"All files (*.*)", L"*.*"}};
+        if (save && kind == FilePickKind::video && default_extension && std::wcscmp(default_extension, L"mp4") == 0)
+            video_filters[0] = {L"MP4 video (*.mp4)", L"*.mp4"};
+        COMDLG_FILTERSPEC image_filters[] = {
+            {L"PNG image (*.png)", L"*.png"}, {L"All files (*.*)", L"*.*"}};
         const COMDLG_FILTERSPEC* filters = project_filters;
         if (kind == FilePickKind::dataset) filters = dataset_filters;
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
@@ -161,6 +165,7 @@ bool pick_file(
         if (kind == FilePickKind::mesh) filters = mesh_filters;
         if (kind == FilePickKind::alignment) filters = alignment_filters;
         if (kind == FilePickKind::video) filters = video_filters;
+        if (kind == FilePickKind::image) filters = image_filters;
         dialog->SetFileTypes(2, filters);
         if (save && default_extension != nullptr)
             dialog->SetDefaultExtension(default_extension);
@@ -420,9 +425,12 @@ Filter filters_for(
         case FilePickKind::point_cloud:
             return {"Point cloud (*.ply)", "*.ply"};
         case FilePickKind::video:
+            if (extension == "mp4") return {"MP4 video (*.mp4)", "*.mp4"};
             return {
                 "Video files",
                 "*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.insv *.wmv *.mts *.m2ts *.360"};
+        case FilePickKind::image:
+            return {"PNG image (*.png)", "*.png"};
         case FilePickKind::project:
         default:
             return {"Photara Project (*.ascan)", "*.ascan"};

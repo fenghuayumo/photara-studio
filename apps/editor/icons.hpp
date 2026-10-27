@@ -18,6 +18,8 @@ enum class Icon {
     snap,
     grid,
     camera,
+    render_image,
+    render_video,
     frame,
     folder,
     align,

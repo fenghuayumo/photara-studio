@@ -4,6 +4,7 @@
 #include "icons.hpp"
 #include "viewport_gizmo.hpp"
 #include "image_qa_projection.hpp"
+#include "file_dialogs.hpp"
 
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
@@ -108,13 +109,65 @@ const char* display_channel_label(const DisplayChannel channel) {
     }
 }
 
+// Compact controls share a quiet surface, while each icon has its own hit
+// target and tooltip. Draw at a fixed optical size to keep the strokes crisp.
+bool render_toolbar_button(const char* id, icons::Icon icon, bool enabled, const char* tooltip) {
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    if (!enabled) ImGui::BeginDisabled();
+    const bool pressed = ImGui::InvisibleButton(id, {31.F, 26.F});
+    if (!enabled) ImGui::EndDisabled();
+    const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+    auto* draw = ImGui::GetWindowDrawList();
+    if (enabled && hovered)
+        draw->AddRectFilled({min.x + 1.F, min.y + 1.F}, {min.x + 30.F, min.y + 25.F},
+                            theme::u32(theme::surface_3), 4.F);
+    const auto colour = !enabled ? theme::text_faint : hovered ? theme::text_bright : theme::text_muted;
+    icons::draw(draw, icon, {min.x + 6.F, min.y + 3.F}, {min.x + 25.F, min.y + 22.F}, theme::u32(colour));
+    if (hovered && tooltip) ImGui::SetTooltip("%s", tooltip);
+    return pressed && enabled;
+}
+
 float draw_view_settings_button(App& app, const ImVec2 origin,
     const float width, const float controls_end) {
     const auto previous_options = app.display_options;
-    const bool compact = width - controls_end < 130.F;
+    const bool compact = width - controls_end < 200.F;
     const float button_width = compact ? 30.F
         : ImGui::CalcTextSize(tr("View settings")).x + 42.F;
     const float x = std::max(controls_end + 8.F, width - button_width - 12.F);
+    const bool show_render = app.workspace == ViewportWorkspace::scene_3d && x - controls_end >= 76.F;
+    if (show_render) {
+        const bool can_capture = app.has_model && app.view_mode == VisualizationMode::splat &&
+            app.splat_renderer && app.splat_renderer->splat_count() > 0;
+        const ImVec2 group_min{origin.x + x - 74.F, origin.y + 4.F};
+        auto* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(group_min, {group_min.x + 66.F, group_min.y + 28.F}, theme::u32(theme::surface_1), 5.F);
+        draw->AddRect(group_min, {group_min.x + 66.F, group_min.y + 28.F}, theme::u32(theme::border), 5.F);
+        draw->AddLine({group_min.x + 33.F, group_min.y + 7.F}, {group_min.x + 33.F, group_min.y + 21.F}, theme::u32(theme::border));
+        ImGui::SetCursorScreenPos({group_min.x + 1.F, group_min.y + 1.F});
+        if (render_toolbar_button("##render_image", icons::Icon::render_image,
+                can_capture, tr("Render image"))) {
+            std::array<char, 1024> output{};
+            if (pick_export_path(L"Render image", output, FilePickKind::image, L"render.png", L"png")) {
+                try {
+                    photara::io::RgbImage image;
+                    if (!app.splat_renderer->download_rgb(image.pixels, image.width, image.height))
+                        throw std::runtime_error("No rendered 3DGS preview is available");
+                    auto path = path_from_utf8_field(output.data());
+                    if (path.extension().empty()) path.replace_extension(".png");
+                    photara::io::save_rgb_png(image, path);
+                    set_message(app, std::string(tr("Rendered image")) + ": " + path_to_utf8(path), theme::success);
+                } catch (const std::exception& error) {
+                    set_message(app, error.what(), theme::danger);
+                }
+            }
+        }
+        ImGui::SameLine(0.F, 2.F);
+        const bool can_video = can_capture && app.camera_keyframes.size() >= 2 &&
+            !app.video_render.job.valid() && !live_preview_active(app);
+        if (render_toolbar_button("##render_video", icons::Icon::render_video,
+            can_video, tr(can_video ? "Render video" : "Add at least two camera views to render video")))
+            app.video_render.show_settings = true;
+    }
     ImGui::SetCursorScreenPos({origin.x + x, origin.y + 4.F});
     if (icons::labeled_button("##view_settings", icons::Icon::sliders,
             compact ? "" : tr("View settings"), {button_width, 28.F},

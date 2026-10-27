@@ -93,6 +93,26 @@ void draw(
     const ImVec2 centre = point(min, max, 0.5F, 0.5F);
 
     switch (icon) {
+        case Icon::render_image: {
+            const float stroke = std::max(1.25F, extent * .07F);
+            draw_list->AddRect(point(min, max, .13F, .18F), point(min, max, .87F, .82F),
+                               colour, extent * .09F, 0, stroke);
+            draw_list->AddCircleFilled(point(min, max, .37F, .38F), extent * .055F, colour, 12);
+            const ImVec2 ridge[]{point(min, max, .23F, .70F), point(min, max, .41F, .53F),
+                                 point(min, max, .52F, .63F), point(min, max, .64F, .50F),
+                                 point(min, max, .78F, .65F)};
+            draw_list->AddPolyline(ridge, 5, colour, 0, stroke);
+            break;
+        }
+        case Icon::render_video: {
+            const float stroke = std::max(1.25F, extent * .07F);
+            draw_list->AddRect(point(min, max, .12F, .25F), point(min, max, .65F, .75F),
+                               colour, extent * .08F, 0, stroke);
+            const ImVec2 lens[]{point(min, max, .67F, .39F), point(min, max, .88F, .28F),
+                                point(min, max, .88F, .72F), point(min, max, .67F, .61F)};
+            draw_list->AddPolyline(lens, 4, colour, ImDrawFlags_Closed, stroke);
+            break;
+        }
         // Dedicated hierarchy glyphs, drawn on the same 24-unit optical grid.
         // Keep them separate from the filled viewport representation icons.
         case Icon::model_mesh: {

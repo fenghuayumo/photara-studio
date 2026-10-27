@@ -3,11 +3,26 @@
 #include "i18n.hpp"
 #include "icons.hpp"
 #include "io/image.hpp"
+#include "io/video_frames.hpp"
+#include "file_dialogs.hpp"
 #include "imgui_internal.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
+#include <chrono>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <thread>
+#include <stdexcept>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace editor {
 namespace {
@@ -139,6 +154,160 @@ void format_time(float seconds, char* out, std::size_t size) {
     std::snprintf(out, size, "%02d:%02d.%02d", minutes, (centiseconds / 100) % 60, centiseconds % 100);
 }
 
+void add_camera_view(App& app) {
+    auto& keys = app.camera_keyframes;
+    const float t = keys.empty() ? 0.F : std::min(36000.F, std::max(app.camera_path_time, keys.back().time + 2.F));
+    if (!keys.empty() && t <= keys.back().time) return;
+    keys.push_back(capture(app.camera, t));
+    app.camera_key_selected = static_cast<int>(keys.size()) - 1;
+    app.camera_path_time = t;
+    app.camera_path_playing = false;
+    app.camera_thumbnail_pending = app.camera_key_selected;
+    sync_thumbnails(app);
+}
+
+std::string process_quote(const std::filesystem::path& path) {
+    const auto input = path_to_utf8(path);
+#ifdef _WIN32
+    // CreateProcess parses Windows argv using backslash-before-quote rules.
+    std::string out = "\"";
+    std::size_t slashes = 0;
+    for (const char c : input) {
+        if (c == '\\') { ++slashes; continue; }
+        if (c == '"') { out.append(slashes * 2 + 1, '\\'); out += c; }
+        else { out.append(slashes, '\\'); out += c; }
+        slashes = 0;
+    }
+    out.append(slashes * 2, '\\');
+    return out + '"';
+#else
+    std::string out = "'";
+    for (const char c : input) out += c == '\'' ? "'\\''" : std::string(1, c);
+    return out + '\'';
+#endif
+}
+
+struct TemporaryFrames {
+    std::filesystem::path path;
+    ~TemporaryFrames() { std::error_code ignored; if (!path.empty()) std::filesystem::remove_all(path, ignored); }
+};
+
+void install_rendered_video(const std::filesystem::path& encoded,
+                            const std::filesystem::path& destination,
+                            const std::string& unique_name) {
+    const auto parent = destination.parent_path().empty() ? std::filesystem::current_path() : destination.parent_path();
+    const auto staged = parent / ("." + unique_name + ".mp4.tmp");
+    try {
+        std::filesystem::copy_file(encoded, staged);
+#ifdef _WIN32
+        if (!MoveFileExW(staged.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Cannot install rendered video (Windows error " + std::to_string(GetLastError()) + ")");
+#else
+        std::filesystem::rename(staged, destination);
+#endif
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove(staged, ignored);
+        throw;
+    }
+}
+
+std::string render_video_worker(
+    std::shared_ptr<const photara::splat::GaussianModel> model,
+    std::vector<splat_render::ModelTransform> transforms, std::vector<Key> keys,
+    OrbitCamera orbit, float near_clip, int width, int height, int fps, int codec,
+    std::filesystem::path destination, std::filesystem::path ffmpeg,
+    photara::vk::Device runtime, const std::shared_ptr<App::VideoRenderProgress>& progress) {
+    try {
+        TemporaryFrames temp;
+        const auto base = std::filesystem::temp_directory_path();
+        for (unsigned attempt = 0; attempt < 100; ++attempt) {
+            const auto id = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto candidate = base / ("photara_video_" + std::to_string(id) + "_" + std::to_string(attempt));
+            std::error_code error;
+            if (std::filesystem::create_directory(candidate, error)) { temp.path = std::move(candidate); break; }
+        }
+        if (temp.path.empty()) throw std::runtime_error("Cannot create temporary video render directory");
+        if (progress->cancel) return "Cancelled";
+        splat_render::Renderer renderer;
+        renderer.attach(runtime);
+        splat_render::GaussianCloud cloud;
+        cloud.count = static_cast<std::uint32_t>(model->size());
+        cloud.sh_degree = model->sh_degree;
+        cloud.sh_bases = model->sh.is_valid() ? static_cast<std::uint32_t>(model->sh.shape()[1]) : 1U;
+        cloud.render_method = static_cast<splat_render::RenderMethod>(model->render_method);
+        cloud.filter_mode = static_cast<splat_render::FilterMode>(model->filter_mode);
+        cloud.means = model->means.ptr<float>(); cloud.log_scales = model->log_scales.ptr<float>();
+        cloud.quaternions = model->quaternions.ptr<float>(); cloud.opacity_logits = model->opacity_logits.ptr<float>();
+        cloud.sh = model->sh.is_valid() ? model->sh.ptr<float>() : nullptr;
+        cloud.filter_3d = model->filter_3d.is_valid() && model->filter_3d.numel() == model->size()
+            ? model->filter_3d.ptr<float>() : nullptr;
+        if (!renderer.upload(cloud, "video-render") || !renderer.set_model_transforms(transforms))
+            throw std::runtime_error(renderer.failure());
+        splat_render::DisplayOptions display;
+        display.near_clip = near_clip;
+        const float duration = keys.back().time - keys.front().time;
+        const int count = std::max(2, static_cast<int>(std::ceil(duration * fps)) + 1);
+        progress->total = count;
+        for (int i = 0; i < count; ++i) {
+            if (progress->cancel) return "Cancelled";
+            const auto key = evaluate(keys, std::min(keys.back().time, keys.front().time + float(i) / fps));
+            orbit.target = {key.target[0], key.target[1], key.target[2]};
+            orbit.yaw = key.yaw; orbit.pitch = key.pitch; orbit.distance = key.distance;
+            orbit.fov_degrees = key.fov_degrees; orbit.ortho_height = key.ortho_height;
+            orbit.fisheye_k1 = key.fisheye_k1; orbit.projection = static_cast<EditorProjection>(key.projection);
+            const auto source = make_preview_camera(orbit, width, height);
+            splat_render::Camera camera;
+            camera.world_to_camera = source.world_to_camera; camera.position = source.position;
+            camera.fx = source.fx; camera.fy = source.fy; camera.cx = source.cx; camera.cy = source.cy;
+            camera.k1 = source.k1; camera.k2 = source.k2; camera.k3 = source.k3; camera.k4 = source.k4;
+            camera.width = width; camera.height = height;
+            switch (orbit.projection) {
+            case EditorProjection::orthographic:
+                camera.model = splat_render::k_camera_orthographic;
+                camera.fx = camera.fy = float(height) / std::max(1e-4F, orbit.ortho_height);
+                camera.cx = width * .5F; camera.cy = height * .5F;
+                camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
+                break;
+            case EditorProjection::fisheye: camera.model = splat_render::k_camera_fisheye; break;
+            case EditorProjection::panorama: camera.model = splat_render::k_camera_equirectangular; break;
+            default: camera.model = splat_render::k_camera_pinhole; break;
+            }
+            splat_render::FrameTarget frame;
+            if (!renderer.draw(camera, frame, splat_render::Shading::gaussian, display))
+                throw std::runtime_error(renderer.failure());
+            photara::io::RgbImage image;
+            if (!renderer.download_rgb(image.pixels, image.width, image.height))
+                throw std::runtime_error("Cannot download a rendered video frame");
+            char filename[32]; std::snprintf(filename, sizeof(filename), "frame_%08d.png", i);
+            photara::io::save_rgb_png(image, temp.path / filename);
+            progress->completed = i + 1;
+        }
+        if (progress->cancel) return "Cancelled";
+        progress->encoding = true;
+        const auto encoded = temp.path / "video.mp4";
+        const std::string command = process_quote(ffmpeg) + " -nostdin -hide_banner -loglevel error -y -framerate " +
+            std::to_string(fps) + " -i " + process_quote(temp.path / "frame_%08d.png") +
+            (codec == 1 ? " -c:v libx265 -tag:v hvc1" : " -c:v libx264") +
+            " -pix_fmt yuv420p -movflags +faststart " + process_quote(encoded);
+        ProcessJob encoder;
+        encoder.start(command, temp.path / "ffmpeg.log");
+        while (encoder.running()) {
+            if (progress->cancel) { encoder.stop(); return "Cancelled"; }
+            encoder.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (encoder.exit_code() != 0) {
+            std::ifstream log(temp.path / "ffmpeg.log");
+            std::string details((std::istreambuf_iterator<char>(log)), {});
+            throw std::runtime_error("Video encoding failed: " + details.substr(0, 500));
+        }
+        if (progress->cancel) return "Cancelled";
+        install_rendered_video(encoded, destination, temp.path.filename().string());
+        return {};
+    } catch (const std::exception& error) { return error.what(); }
+}
+
 void timeline(App& app) {
     auto& keys = app.camera_keyframes;
     const float natural_span = camera_timeline::span(keys.back().time);
@@ -207,6 +376,204 @@ void timeline(App& app) {
 }
 
 } // namespace
+
+bool start_video_render(App& app, const std::filesystem::path& output, const std::filesystem::path& ffmpeg) {
+    auto& render = app.video_render;
+    try {
+        if (render.job.valid()) throw std::runtime_error("A video render is already running");
+        if (ffmpeg.empty()) throw std::runtime_error("ffmpeg was not found");
+        if (render.width < 2 || render.width > 8192 || render.width % 2 ||
+            render.height < 2 || render.height > 8192 || render.height % 2 ||
+            render.fps < 1 || render.fps > 120 || render.codec < 0 || render.codec > 1 || app.camera_keyframes.size() < 2 ||
+            !(app.camera_keyframes.back().time > app.camera_keyframes.front().time) ||
+            (app.camera_keyframes.back().time - app.camera_keyframes.front().time) * render.fps > 100000.F)
+            throw std::runtime_error("Invalid video dimensions, frame rate, or camera path");
+        float previous = -std::numeric_limits<float>::infinity();
+        for (const auto& key : app.camera_keyframes) {
+            if (!std::isfinite(key.time) || key.time <= previous ||
+                key.projection < static_cast<int>(EditorProjection::perspective) ||
+                key.projection > static_cast<int>(EditorProjection::panorama))
+                throw std::runtime_error("Camera path has invalid or unordered keyframes");
+            previous = key.time;
+        }
+        auto extension = output.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".mp4") throw std::runtime_error("Video output must use the .mp4 extension");
+        std::shared_ptr<const photara::splat::GaussianModel> model;
+        std::vector<splat_render::ModelTransform> transforms;
+        if (!app.gaussian_models.empty() && !app.gaussian_preview_baked && !app.splat_edit.dirty()) {
+            model = app.composed_model;
+            transforms = app.gaussian_placements;
+        } else {
+            auto editable = std::make_shared<photara::splat::GaussianModel>();
+            if (app.splat_edit.copy_model(*editable)) model = std::move(editable);
+        }
+        if (!model || model->size() == 0) throw std::runtime_error("No 3DGS model is available to render");
+        auto keys = app.camera_keyframes;
+        for (auto& key : keys) key.thumbnail_rgb.clear();
+        const auto progress = std::make_shared<App::VideoRenderProgress>();
+        render.progress = progress; render.output = output;
+        const auto runtime = gpu::runtime();
+        const auto orbit = app.camera;
+        const auto near_clip = app.navigation_near_clip;
+        const auto width = render.width, height = render.height, fps = render.fps, codec = render.codec;
+        render.job = std::async(std::launch::async,
+            [model, transforms = std::move(transforms), keys = std::move(keys), orbit,
+             near_clip, width, height, fps, codec, output, ffmpeg, runtime, progress]() mutable {
+                return render_video_worker(model, std::move(transforms), std::move(keys), orbit,
+                    near_clip, width, height, fps, codec, output, ffmpeg, runtime, progress);
+            });
+        app.camera_path_playing = false;
+        return true;
+    } catch (const std::exception& error) {
+        render.progress.reset(); set_message(app, error.what(), theme::danger);
+        return false;
+    }
+}
+
+void poll_video_render(App& app) {
+    auto& render = app.video_render;
+    if (!render.job.valid() || render.job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    try {
+        const auto error = render.job.get();
+        if (error.empty()) set_message(app, std::string(tr("Rendered video")) + ": " + path_to_utf8(render.output), theme::success);
+        else if (error == "Cancelled") set_message(app, tr("Video rendering cancelled"), theme::text_muted);
+        else set_message(app, error, theme::danger);
+    } catch (const std::exception& error) { set_message(app, error.what(), theme::danger); }
+    render.progress.reset();
+}
+
+void shutdown_video_render(App& app) {
+    if (app.video_render.progress) app.video_render.progress->cancel = true;
+    if (app.video_render.job.valid()) app.video_render.job.wait();
+}
+
+void draw_video_render_settings(App& app) {
+    auto& render = app.video_render;
+    if (render.show_settings) { ImGui::OpenPopup("##render_video_settings"); render.show_settings = false; }
+    const auto* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x * .5F,
+                            viewport->WorkPos.y + viewport->WorkSize.y * .5F}, ImGuiCond_Appearing, {.5F, .5F});
+    ImGui::SetNextWindowSize({420.F, 0.F}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints({420.F, 0.F}, {420.F, viewport->WorkSize.y - 24.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {22.F, 20.F});
+    const bool settings_open = ImGui::BeginPopupModal("##render_video_settings", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+    ImGui::PopStyleVar();
+    if (settings_open) {
+        icons::inline_icon(icons::Icon::render_video, theme::u32(theme::accent), 19.F);
+        ImGui::SameLine(0.F, 10.F);
+        ImGui::TextUnformatted(tr("Render video"));
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", tr("Export your camera path as an MP4 video."));
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+        constexpr int widths[]{3840, 2560, 1920, 1280};
+        constexpr int heights[]{2160, 1440, 1080, 720};
+        const char* presets[]{"4K   ·   3840 × 2160", "2K   ·   2560 × 1440",
+                              "1080p   ·   1920 × 1080", "720p   ·   1280 × 720"};
+        render.resolution_preset = std::clamp(render.resolution_preset, 0, 3);
+        ImGui::TextUnformatted(tr("Resolution"));
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::Combo("##video_resolution", &render.resolution_preset, presets, 4)) {
+            render.width = widths[render.resolution_preset];
+            render.height = heights[render.resolution_preset];
+        }
+        ImGui::Spacing();
+        ImGui::TextUnformatted(tr("Frame rate"));
+        ImGui::SetNextItemWidth(-1.F);
+        char current_fps[24]; std::snprintf(current_fps, sizeof(current_fps), "%d fps", render.fps);
+        if (ImGui::BeginCombo("##video_fps", current_fps)) {
+            for (const int fps : {24, 25, 30, 50, 60}) {
+                char label[24]; std::snprintf(label, sizeof(label), "%d fps", fps);
+                if (ImGui::Selectable(label, render.fps == fps)) render.fps = fps;
+                if (render.fps == fps) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Spacing();
+        ImGui::TextUnformatted(tr("Encoding"));
+        ImGui::SetNextItemWidth(-1.F);
+        const char* codecs[]{"H.264 / AVC", "H.265 / HEVC"};
+        ImGui::Combo("##video_codec", &render.codec, codecs, 2);
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", tr("Container: MP4"));
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+        const bool valid = render.width >= 2 && render.width <= 8192 && render.width % 2 == 0 &&
+            render.height >= 2 && render.height <= 8192 && render.height % 2 == 0 &&
+            render.fps >= 1 && render.fps <= 120 && app.camera_keyframes.size() >= 2 &&
+            app.camera_keyframes.back().time > app.camera_keyframes.front().time &&
+            (app.camera_keyframes.back().time - app.camera_keyframes.front().time) * render.fps <= 100000.F;
+        if (!valid) ImGui::TextWrapped("%s", tr("Use even dimensions from 2 to 8192, 1–120 fps, and a valid camera path."));
+        const float cancel_w = std::max(82.F, ImGui::CalcTextSize(tr("Cancel")).x + 28.F);
+        const float action_w = std::max(152.F, ImGui::CalcTextSize(tr("Choose output..." )).x + 36.F);
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - cancel_w - action_w - 8.F));
+        if (ImGui::Button(tr("Cancel"), {cancel_w, 32.F})) ImGui::CloseCurrentPopup();
+        ImGui::SameLine(0.F, 8.F);
+        ImGui::BeginDisabled(!valid || render.job.valid());
+        if (theme::primary_button(tr("Choose output..."), {action_w, 32.F})) {
+            const auto ffmpeg = photara::io::locate_ffmpeg();
+            if (ffmpeg.empty()) {
+                set_message(app, tr("ffmpeg was not found. Install ffmpeg and add it to PATH."), theme::warning);
+            } else {
+                std::array<char, 1024> path{};
+                if (pick_export_path(L"Render video", path, FilePickKind::video, L"render.mp4", L"mp4")) {
+                    auto output = path_from_utf8_field(path.data());
+                    if (output.extension().empty()) output.replace_extension(".mp4");
+                    if (start_video_render(app, output, ffmpeg)) ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+    if (render.job.valid() && render.progress) {
+        ImGui::OpenPopup("##render_video_progress");
+        const ImVec2 progress_size{
+            std::min(420.F, std::max(240.F, viewport->WorkSize.x - 24.F)),
+            std::min(210.F, std::max(160.F, viewport->WorkSize.y - 24.F))};
+        ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x * .5F,
+                                viewport->WorkPos.y + viewport->WorkSize.y * .5F},
+                               ImGuiCond_Always, {.5F, .5F});
+        ImGui::SetNextWindowSize(progress_size, ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {22.F, 20.F});
+        const bool progress_open = ImGui::BeginPopupModal("##render_video_progress", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+        ImGui::PopStyleVar();
+        if (progress_open) {
+            icons::inline_icon(icons::Icon::render_video, theme::u32(theme::accent), 19.F);
+            ImGui::SameLine(0.F, 10.F);
+            ImGui::TextUnformatted(tr("Rendering video"));
+            ImGui::Spacing(); ImGui::Separator();
+            const int total = render.progress->total.load();
+            const int completed = std::clamp(render.progress->completed.load(), 0, std::max(0, total));
+            const bool encoding = render.progress->encoding.load();
+            const bool cancelling = render.progress->cancel.load();
+            ImGui::SetCursorPosY(progress_size.y < 195.F ? 58.F : 76.F);
+            if (cancelling) ImGui::TextUnformatted(tr("Cancelling..."));
+            else if (encoding) ImGui::TextUnformatted(tr("Encoding video..."));
+            else if (total > 0) ImGui::Text(tr("Rendering frame %d / %d"), completed, total);
+            else ImGui::TextUnformatted(tr("Preparing model..."));
+            if (!encoding && !cancelling && total > 0) {
+                char percentage[16]; std::snprintf(percentage, sizeof(percentage), "%d%%", completed * 100 / total);
+                ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.F,
+                    ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(percentage).x));
+                ImGui::TextColored(theme::accent, "%s", percentage);
+            }
+            ImGui::SetCursorPosY(progress_size.y < 195.F ? 82.F : 103.F);
+            theme::progress_track({-1.F, 6.F},
+                encoding || cancelling || total == 0 ? -1.F : float(completed) / total, theme::accent);
+            ImGui::SetCursorPosY(progress_size.y - 53.F);
+            const float cancel_width = std::max(94.F, ImGui::CalcTextSize(tr("Cancel")).x + 30.F);
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - cancel_width));
+            ImGui::BeginDisabled(cancelling);
+            if (theme::toolbar_button(tr("Cancel"), {cancel_width, 32.F})) render.progress->cancel = true;
+            ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+    } else if (ImGui::BeginPopupModal("##render_video_progress")) {
+        ImGui::CloseCurrentPopup(); ImGui::EndPopup();
+    }
+}
 
 void clear_camera_path_thumbnails(App& app) {
     for (auto& item : app.camera_thumbnails) item.texture.reset();
@@ -323,26 +690,38 @@ void draw_camera_path_panel(App& app) {
     const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
     ImGui::SetCursorScreenPos({header.x + width - add_width, header.y});
     if (icons::labeled_button("##add", icons::Icon::add, tr("Add view"), {add_width, 30.F}, icons::ButtonStyle::primary)) {
-        const float t = keys.empty() ? 0.F : std::min(36000.F, std::max(app.camera_path_time, keys.back().time + 2.F));
-        if (keys.empty() || t > keys.back().time) {
-            keys.push_back(capture(app.camera, t));
-            app.camera_key_selected = static_cast<int>(keys.size()) - 1; app.camera_path_time = t;
-            app.camera_path_playing = false; app.camera_thumbnail_pending = app.camera_key_selected;
-            sync_thumbnails(app);
-        }
+        add_camera_view(app);
     }
     ImGui::SetCursorScreenPos({header.x, header.y + (compact ? 78.F : 43.F)});
     if (keys.empty()) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const float h = std::max(70.F, ImGui::GetContentRegionAvail().y - 8.F);
+        const float h = std::max(0.F, ImGui::GetContentRegionAvail().y);
         auto* d = ImGui::GetWindowDrawList();
-        icons::draw(d, icons::Icon::camera, {origin.x + 4.F, origin.y + 12.F}, {origin.x + 32.F, origin.y + 40.F}, theme::u32(theme::text_faint));
-        ImGui::SetCursorScreenPos({origin.x + 48.F, origin.y + 7.F});
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(1.F, width - 60.F));
-        ImGui::TextUnformatted(tr("Create your first view"));
-        ImGui::TextDisabled("%s", tr("Frame the scene, then choose Add view."));
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy({0.F, std::max(0.F, h - 55.F)});
+        const bool short_panel = h < 145.F;
+        const float icon_size = short_panel ? 32.F : 48.F;
+        const float group_h = short_panel ? 100.F : 144.F;
+        const float x = origin.x + width * .5F;
+        const float y = origin.y + std::max(0.F, (h - group_h) * .5F);
+        const ImVec2 box_min{x - icon_size * .5F, y}, box_max{x + icon_size * .5F, y + icon_size};
+        d->AddRectFilled(box_min, box_max, theme::u32(theme::surface_1), 7.F);
+        d->AddRect(box_min, box_max, theme::u32(theme::border), 7.F);
+        const float inset = short_panel ? 7.F : 10.F;
+        icons::draw(d, icons::Icon::camera, {box_min.x + inset, box_min.y + inset},
+            {box_max.x - inset, box_max.y - inset}, theme::u32(theme::text_muted));
+        const char* title = tr("No camera views yet");
+        const char* hint = tr("Frame the scene, then add your first view.");
+        const float title_y = box_max.y + 8.F;
+        d->AddText({x - ImGui::CalcTextSize(title).x * .5F, title_y}, theme::u32(theme::text_bright), title);
+        const float hint_y = title_y + ImGui::GetTextLineHeight() + 4.F;
+        if (!short_panel)
+            d->AddText({x - ImGui::CalcTextSize(hint).x * .5F, hint_y}, theme::u32(theme::text_muted), hint);
+        const float button_y = short_panel ? hint_y : hint_y + ImGui::GetTextLineHeight() + 10.F;
+        const float button_w = std::max(130.F, ImGui::CalcTextSize(tr("Add first view")).x + 44.F);
+        if (button_y + 30.F <= origin.y + h) {
+            ImGui::SetCursorScreenPos({x - button_w * .5F, button_y});
+            if (icons::labeled_button("##add_first", icons::Icon::add, tr("Add first view"),
+                    {button_w, 30.F}, icons::ButtonStyle::primary)) add_camera_view(app);
+        }
         ImGui::End(); return;
     }
     const float available_h = ImGui::GetContentRegionAvail().y;

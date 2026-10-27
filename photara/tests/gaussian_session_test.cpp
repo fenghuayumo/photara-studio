@@ -4,12 +4,14 @@
 #include "splat/trainer.hpp"
 #include "splat/formats.hpp"
 #include "splat/model_handoff.hpp"
+#include "io/video_frames.hpp"
 #include "project/document.hpp"
 #include "studio_lasso_test.hpp"
 #include "studio_view_shortcuts_test.hpp"
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <fstream>
 #include <thread>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -126,6 +128,65 @@ int test_gpu_session(const std::filesystem::path& folder,
         const auto expected = editor::load_export_model(gpu, tinytensor::Device::CPU);
         require(editable.means.to_vector() == expected.means.to_vector(), "picking/editing placement differs from export");
         require(gpu.splat_renderer->model_upload_revision() == upload, "opening editing reuploaded the GPU cloud");
+        const auto ffmpeg = photara::io::locate_ffmpeg();
+        if (!ffmpeg.empty()) {
+            photara::project::CameraKeyframe first{}, second{};
+            first.time = 0.F; first.distance = 4.F; first.fov_degrees = 50.F;
+            first.target[0] = 10.F;
+            second = first; second.time = .2F; second.target[0] = 10.8F;
+            gpu.camera_keyframes = {first, second};
+            gpu.video_render.width = 128; gpu.video_render.height = 96; gpu.video_render.fps = 10;
+            const auto video = folder / "camera path test.mp4";
+            require(editor::start_video_render(gpu, video, ffmpeg), "video export did not start");
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+            while (gpu.video_render.job.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready)
+                require(std::chrono::steady_clock::now() < deadline, "video export timed out");
+            const auto failure = gpu.video_render.job.get();
+            if (!failure.empty()) throw std::runtime_error("video export: " + failure);
+            require(gpu.video_render.progress->completed == 3, "video did not render all sampled frames");
+            photara::io::VideoProbe probe;
+            require(photara::io::probe_video(ffmpeg, video, probe) && probe.width == 128 && probe.height == 96 &&
+                        std::abs(probe.fps - 10.) < .01, "encoded video dimensions or frame rate mismatch");
+            photara::io::VideoPreviewOptions preview;
+            preview.video = video; preview.ffmpeg = ffmpeg; preview.output_dir = folder / "decoded";
+            preview.fps = 10.F; preview.max_width = 128; preview.max_height = 96;
+            require(photara::io::generate_video_preview(preview) >= 3, "cannot decode rendered video");
+            const auto first_image = photara::io::load_rgb(preview.output_dir / "p_000001.jpg");
+            const auto last_image = photara::io::load_rgb(preview.output_dir / "p_000003.jpg");
+            require(!first_image.pixels.empty() && first_image.pixels != last_image.pixels,
+                    "rendered video did not follow the camera path");
+            require(*std::max_element(first_image.pixels.begin(), first_image.pixels.end()) > 30,
+                    "rendered video frame is empty");
+            gpu.video_render.progress.reset();
+            std::cout << "Video render, decode, camera movement and cancellation passed\n";
+            gpu.video_render.codec = 1;
+            const auto hevc_video = folder / "camera path hevc.mp4";
+            require(editor::start_video_render(gpu, hevc_video, ffmpeg), "H.265 export did not start");
+            const auto hevc_error = gpu.video_render.job.get();
+            if (hevc_error.find("Unknown encoder") == std::string::npos &&
+                hevc_error.find("not found") == std::string::npos) {
+                if (!hevc_error.empty()) throw std::runtime_error("H.265 video export: " + hevc_error);
+                std::ifstream hevc_stream(hevc_video, std::ios::binary);
+                const std::string hevc_bytes((std::istreambuf_iterator<char>(hevc_stream)), {});
+                require(hevc_bytes.find("hvc1") != std::string::npos, "H.265 selection did not produce HEVC video");
+            }
+            gpu.video_render.progress.reset();
+            gpu.video_render.codec = 0;
+            const auto retained = folder / "existing.mp4";
+            { std::ofstream stream(retained, std::ios::binary); stream << "existing content"; }
+            require(editor::start_video_render(gpu, retained, folder / "missing ffmpeg.exe"), "encoder failure test did not start");
+            require(!gpu.video_render.job.get().empty(), "missing encoder incorrectly succeeded");
+            std::ifstream existing(retained, std::ios::binary);
+            const std::string retained_data((std::istreambuf_iterator<char>(existing)), {});
+            require(retained_data == "existing content", "failed encoder overwrote the previous video");
+            gpu.video_render.progress.reset();
+            const auto cancelled = folder / "cancelled.mp4";
+            require(editor::start_video_render(gpu, cancelled, ffmpeg), "cancelled video export did not start");
+            gpu.video_render.progress->cancel = true;
+            require(gpu.video_render.job.get() == "Cancelled" && !std::filesystem::exists(cancelled),
+                    "cancelled export created an output");
+            gpu.video_render.progress.reset();
+        }
         gpu.splat_edit.replace_from_model(gpu, model(17.F), false);
         require(gpu.splat_edit.dirty(), "edit fixture did not bind to composed cloud");
         const auto project = folder / "edited.ascan";
@@ -239,6 +300,34 @@ void test_inspector_workflow() {
     ImGui::DestroyContext();
 }
 
+void test_video_progress_layout() {
+    ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr; io.DisplaySize = {1000.F, 800.F}; io.DeltaTime = 1.F / 60.F;
+    io.Fonts->AddFontDefault(); io.Fonts->Build();
+    editor::App app;
+    std::promise<std::string> result;
+    app.video_render.job = result.get_future();
+    app.video_render.progress = std::make_shared<editor::App::VideoRenderProgress>();
+    app.video_render.progress->total = 181;
+    const auto frame = [&] {
+        ImGui::NewFrame();
+        editor::draw_video_render_settings(app);
+        ImGui::Render();
+        auto* popup = ImGui::FindWindowByName("##render_video_progress");
+        require(popup && popup->Active, "video progress popup missing");
+        require(std::abs(popup->Size.x - 420.F) < .1F && std::abs(popup->Size.y - 210.F) < .1F,
+                "video progress popup changed size between stages");
+    };
+    frame();
+    app.video_render.progress->completed = 7; frame();
+    app.video_render.progress->completed = 181; frame();
+    app.video_render.progress->encoding = true; frame();
+    app.video_render.progress->cancel = true; frame();
+    result.set_value({}); app.video_render.job.get();
+    ImGui::DestroyContext();
+}
+
 int main(int argc, char** argv) {
     {
         editor::App viewer;
@@ -273,6 +362,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--inspector-only") {
         try {
             test_inspector_workflow();
+            test_video_progress_layout();
             std::cout << "Inspector workflow checks passed\n";
             return 0;
         } catch (const std::exception& error) {

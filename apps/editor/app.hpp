@@ -148,6 +148,21 @@ struct App {
     std::filesystem::path final_splat_source;
     SplatEdit splat_edit;
     std::vector<GaussianModelEntry> gaussian_models;
+    struct VideoRenderProgress {
+        std::atomic<bool> cancel{};
+        std::atomic<int> completed{};
+        std::atomic<int> total{};
+        std::atomic<bool> encoding{};
+    };
+    struct VideoRenderState {
+        bool show_settings{};
+        int width{1920}, height{1080}, fps{30};
+        int resolution_preset{2}; // 4K, 2K, 1080p, 720p
+        int codec{}; // H.264, H.265
+        std::shared_ptr<VideoRenderProgress> progress;
+        std::future<std::string> job;
+        std::filesystem::path output;
+    } video_render;
     // Concatenated model-space attributes. Placement does not change this cloud.
     std::shared_ptr<const photara::splat::GaussianModel> composed_model;
     std::string composed_model_key;
@@ -497,6 +512,10 @@ void release_splat_preview_sets(App& app);
 void poll_splat_model_load(App& app);
 void cancel_splat_model_load(App& app);
 void wait_splat_model_loads(App& app);
+void poll_video_render(App& app);
+bool start_video_render(App& app, const std::filesystem::path& output, const std::filesystem::path& ffmpeg);
+void draw_video_render_settings(App& app);
+void shutdown_video_render(App& app);
 void start_align(App& app);
 void start_train(App& app, bool smoke, bool resume_training = false);
 void poll_train_start(App& app);
