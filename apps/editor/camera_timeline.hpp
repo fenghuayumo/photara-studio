@@ -7,6 +7,12 @@
 
 namespace editor::camera_timeline {
 
+inline float interpolation_weight(float u, int method) {
+    u = std::clamp(u, 0.F, 1.F);
+    if (method == 2) return u < 1.F ? 0.F : 1.F;
+    return method == 1 ? u : u * u * (3.F - 2.F * u);
+}
+
 inline float span(float last_time) {
     return std::max(6.F, std::ceil(std::max(0.F, last_time) * 1.15F));
 }

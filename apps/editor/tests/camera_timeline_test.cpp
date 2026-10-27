@@ -28,5 +28,9 @@ int main() {
            "path endpoints stay within allowed time");
     expect(near(bounded_time(keys, 1, std::numeric_limits<float>::quiet_NaN()), 2.F),
            "non-finite time is ignored");
+    expect(near(interpolation_weight(.25F, 0), .15625F), "smooth easing");
+    expect(near(interpolation_weight(.25F, 1), .25F), "linear interpolation");
+    expect(near(interpolation_weight(.99F, 2), 0.F) && near(interpolation_weight(1.F, 2), 1.F),
+           "hold switches at segment endpoint");
     return 0;
 }

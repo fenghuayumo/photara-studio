@@ -207,6 +207,11 @@ std::vector<std::uint8_t> encode_settings(
             if (!std::isfinite(value)) throw std::invalid_argument("Invalid Gaussian rotation");
             writer.value(value);
         }
+    for (const auto& key : settings.camera_keyframes) {
+        if (key.interpolation < 0 || key.interpolation > 2)
+            throw std::invalid_argument("Invalid camera interpolation");
+        writer.value(static_cast<std::int32_t>(key.interpolation));
+    }
     return writer.take();
 }
 
@@ -531,8 +536,6 @@ Settings decode_settings(
                 reader.bytes(key.thumbnail_rgb.data(), size);
             }
         }
-        std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
-            [](const auto& a, const auto& b) { return a.time < b.time; });
     }
     if (version >= 25) {
         for (auto& model : settings.gaussian_models) for (float& value : model.rotation_degrees) {
@@ -540,6 +543,15 @@ Settings decode_settings(
             if (!std::isfinite(value)) throw std::invalid_argument("Invalid Gaussian rotation");
         }
     }
+    if (version >= 26) {
+        for (auto& key : settings.camera_keyframes) {
+            key.interpolation = reader.value<std::int32_t>();
+            if (key.interpolation < 0 || key.interpolation > 2)
+                throw std::invalid_argument("Invalid camera interpolation");
+        }
+    }
+    std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
+        [](const auto& a, const auto& b) { return a.time < b.time; });
     settings.sanitize();
     return settings;
 }

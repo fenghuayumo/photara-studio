@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 25;
+inline constexpr std::uint32_t k_settings_version = 26;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -32,6 +32,7 @@ struct CameraKeyframe {
     float target[3]{};
     float yaw{}, pitch{}, distance{6.F}, fov_degrees{50.F}, ortho_height{4.F}, fisheye_k1{};
     int projection{};
+    int interpolation{}; // Outgoing segment: smooth, linear, hold.
     std::uint32_t thumbnail_width{}, thumbnail_height{};
     std::vector<std::uint8_t> thumbnail_rgb;
 };

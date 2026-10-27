@@ -58,7 +58,7 @@ Key evaluate(const std::vector<Key>& keys, float t) {
         [](float time, const Key& key) { return time < key.time; });
     const Key& b = *right; const Key& a = *(right - 1);
     float u = (t - a.time) / (b.time - a.time);
-    u = u * u * (3.F - 2.F * u);
+    u = camera_timeline::interpolation_weight(u, a.interpolation);
     const auto mix = [u](float x, float y) { return x + (y - x) * u; };
     Key result; result.projection = a.projection;
     for (int i = 0; i < 3; ++i) result.target[i] = mix(a.target[i], b.target[i]);
@@ -93,60 +93,6 @@ void sync_thumbnails(App& app) {
             catch (...) { item.texture.reset(); }
         }
     }
-}
-void draw_card(App& app, int index, ImVec2 size) {
-    const Key& key = app.camera_keyframes[static_cast<std::size_t>(index)];
-    const bool selected = app.camera_key_selected == index;
-    ImGui::PushID(index);
-    const ImVec2 min = ImGui::GetCursorScreenPos();
-    ImGui::SetNextItemAllowOverlap();
-    ImGui::InvisibleButton("##key", size);
-    if (ImGui::IsItemClicked()) select_key(app, index);
-    const bool hovered = ImGui::IsItemHovered();
-    auto* draw = ImGui::GetWindowDrawList();
-    const ImVec2 max{min.x + size.x, min.y + size.y};
-    draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg), 5.F);
-    const auto& thumb = app.camera_thumbnails[static_cast<std::size_t>(index)].texture;
-    if (thumb.descriptor && thumb.width && thumb.height) {
-        const float scale = std::min(size.x / static_cast<float>(thumb.width), size.y / static_cast<float>(thumb.height));
-        const ImVec2 image_size{thumb.width * scale, thumb.height * scale};
-        const ImVec2 image_min{min.x + (size.x - image_size.x) * 0.5F, min.y + (size.y - image_size.y) * 0.5F};
-        const ImVec2 image_max{image_min.x + image_size.x, image_min.y + image_size.y};
-        draw->AddImageRounded(reinterpret_cast<ImTextureID>(thumb.descriptor), image_min, image_max,
-            {0.F, 0.F}, {1.F, 1.F}, IM_COL32_WHITE, 5.F);
-        draw->AddRectFilled({min.x, max.y - 25.F}, max, IM_COL32(0, 0, 0, 150), 5.F, ImDrawFlags_RoundCornersBottom);
-    } else {
-        const ImVec2 icon_min{min.x + size.x * 0.5F - 11.F, min.y + size.y * 0.5F - 13.F};
-        icons::draw(draw, icons::Icon::camera, icon_min, {icon_min.x + 22.F, icon_min.y + 22.F}, theme::u32(theme::text_faint));
-        const char* label = tr("No preview");
-        const float w = ImGui::CalcTextSize(label).x;
-        draw->AddText({min.x + (size.x - w) * 0.5F, min.y + size.y * 0.5F + 14.F}, theme::u32(theme::text_faint), label);
-    }
-    draw->AddRect(min, max, theme::u32(selected ? theme::accent : hovered ? theme::text_faint : theme::border), 5.F, 0, selected ? 2.F : 1.F);
-    char text[32]; std::snprintf(text, sizeof(text), "%02d", index + 1);
-    draw->AddRectFilled({min.x + 7.F, min.y + 6.F}, {min.x + 31.F, min.y + 25.F}, IM_COL32(12, 16, 22, 190), 4.F);
-    draw->AddText({min.x + 11.F, min.y + 7.F}, theme::u32(selected ? theme::accent : theme::text_bright), text);
-    std::snprintf(text, sizeof(text), "%.2f s", key.time);
-    draw->AddText({min.x + 9.F, max.y - 20.F}, theme::u32(theme::text_bright), text);
-    const ImVec2 cursor = ImGui::GetCursorScreenPos();
-    if (selected || hovered) {
-        ImGui::SetCursorScreenPos({max.x - 61.F, min.y + 6.F});
-        if (icons::button("##remove", icons::Icon::trash, {24.F, 24.F}, false, true, tr("Delete keyframe")))
-            app.camera_key_delete_pending = index;
-        ImGui::SameLine(0.F, 4.F);
-        if (icons::button("##more", icons::Icon::more, {24.F, 24.F}, false, true, tr("More options"))) ImGui::OpenPopup("##view_actions");
-    }
-    if (ImGui::BeginPopup("##view_actions")) {
-        if (ImGui::MenuItem(tr("Edit"))) { app.camera_key_selected = index; app.camera_path_edit = true; }
-        if (ImGui::MenuItem(tr("Update pose"))) {
-            auto& k = app.camera_keyframes[static_cast<std::size_t>(index)];
-            k = capture(app.camera, k.time); app.camera_path_playing = false; app.camera_thumbnail_pending = index;
-        }
-        if (ImGui::MenuItem(tr("Delete keyframe"))) app.camera_key_delete_pending = index;
-        ImGui::EndPopup();
-    }
-    ImGui::SetCursorScreenPos(cursor);
-    ImGui::PopID();
 }
 void format_time(float seconds, char* out, std::size_t size) {
     const int centiseconds = static_cast<int>(std::lround(std::max(0.F, seconds) * 100.F));
@@ -314,9 +260,9 @@ void timeline(App& app) {
     const float span = app.camera_timeline_drag >= 0 ? app.camera_timeline_drag_span : natural_span;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float width = std::max(1.F, ImGui::GetContentRegionAvail().x);
-    const float left = origin.x + 8.F, right = std::max(left + 1.F, origin.x + width - 8.F);
-    const float line_y = origin.y + 31.F;
-    ImGui::InvisibleButton("##timeline", {width, 46.F});
+    const float left = origin.x + 80.F, right = std::max(left + 1.F, origin.x + width - 8.F);
+    const float line_y = origin.y + 49.F;
+    ImGui::InvisibleButton("##timeline", {width, 72.F});
     const auto x_for = [&](float t) { return left + (right - left) * std::clamp(t / span, 0.F, 1.F); };
     if (ImGui::IsItemActivated()) {
         app.camera_timeline_drag = -1;
@@ -342,6 +288,10 @@ void timeline(App& app) {
     }
     if (ImGui::IsItemDeactivated()) app.camera_timeline_drag = -1;
     auto* d = ImGui::GetWindowDrawList();
+    d->AddRectFilled({origin.x, origin.y + 34.F}, {origin.x + width, origin.y + 66.F},
+        theme::u32(theme::surface_1), 4.F);
+    d->AddText({origin.x + 10.F, line_y - ImGui::GetTextLineHeight() * .5F},
+        theme::u32(theme::text_muted), tr("Camera"));
     const float major = camera_timeline::tick_step(span * 85.F / (right - left));
     const float minor = major / 5.F;
     for (int i = 0; i <= 500; ++i) {
@@ -640,7 +590,7 @@ void draw_camera_path_panel(App& app) {
             }
         }
     }
-    ImGui::SetNextWindowSize({850.F, 290.F}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({1100.F, 360.F}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints({430.F, 170.F}, {FLT_MAX, FLT_MAX});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.F, 12.F});
     const bool open = ImGui::Begin(i18n::id("Camera Path", "###CameraPath"), &app.show_camera_path);
@@ -724,70 +674,127 @@ void draw_camera_path_panel(App& app) {
         }
         ImGui::End(); return;
     }
-    const float available_h = ImGui::GetContentRegionAvail().y;
-    // Treat the card as one 16:9 size. Never clamp its height independently:
-    // a shallow dock must not turn the storyboard into a cropped film strip.
-    const float preferred_w = std::clamp((width - 30.F) / 4.F, 160.F, 224.F);
-    const float card_h = std::clamp(std::min(preferred_w * 9.F / 16.F, available_h - 103.F), 90.F, 126.F);
-    const float card_w = card_h * 16.F / 9.F;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##storyboard", {0.F, card_h + 17.F}, false, ImGuiWindowFlags_HorizontalScrollbar);
-    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
-        if (i) ImGui::SameLine(0.F, 10.F);
-        draw_card(app, i, {card_w, card_h});
-    }
-    ImGui::EndChild(); ImGui::PopStyleColor();
     timeline(app);
     ImGui::Separator();
+    ImGui::Spacing();
     const int selected = app.camera_key_selected;
     if (selected >= 0 && selected < static_cast<int>(keys.size())) {
         Key& k = keys[selected];
+        const float inspector_width = ImGui::GetContentRegionAvail().x;
+        const bool wide = inspector_width >= 1040.F;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14.F, 10.F});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.F);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8.F, 5.F});
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8.F, 3.F});
+        ImGui::BeginChild("##key_properties_compact", {0.F, 0.F}, ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::AlignTextToFramePadding();
-        icons::inline_icon(icons::Icon::camera, theme::u32(theme::text_muted), 15.F);
-        ImGui::SameLine(0.F, 6.F); ImGui::Text("%s %02d", tr("View"), selected + 1);
-        ImGui::SameLine(0.F, 18.F); icons::inline_icon(icons::Icon::clock, theme::u32(theme::text_faint), 14.F);
-        ImGui::SameLine(0.F, 5.F); ImGui::Text("%.2f s", k.time);
-        if (width >= 480.F) {
-            ImGui::SameLine(0.F, 18.F); ImGui::TextDisabled("%.0f° FOV", k.fov_degrees);
+        icons::inline_icon(icons::Icon::camera, theme::u32(theme::accent), 16.F);
+        ImGui::SameLine(0.F, 8.F);
+        ImGui::Text("%s %02d", tr("Keyframe"), selected + 1);
+        ImGui::SameLine(0.F, 10.F);
+        ImGui::TextDisabled("/ %zu", keys.size());
+        ImGui::SameLine(0.F, 12.F);
+        if (icons::ghost_button("##delete", icons::Icon::trash, {24.F, 24.F}, false, true, tr("Delete keyframe")))
+            app.camera_key_delete_pending = selected;
+        const float update_width = std::max(126.F, ImGui::CalcTextSize(tr("Update pose")).x + 36.F);
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.F, ImGui::GetWindowContentRegionMax().x - update_width));
+        if (icons::labeled_button("##update", icons::Icon::camera, tr("Update pose"), {update_width, 26.F})) {
+            const int interpolation = k.interpolation;
+            k = capture(app.camera, k.time);
+            k.interpolation = interpolation;
+            app.camera_path_playing = false;
+            app.camera_thumbnail_pending = selected;
         }
-        if (width >= 600.F) {
-            ImGui::SameLine(0.F, 18.F); ImGui::TextDisabled("%s", tr("Smooth"));
-        }
-        const float edit_width = std::max(74.F, ImGui::CalcTextSize(tr("Edit")).x + 40.F);
-        const float edit_x = std::max(ImGui::GetCursorPosX() + 8.F, ImGui::GetWindowContentRegionMax().x - edit_width);
-        ImGui::SameLine(edit_x);
-        if (icons::labeled_button("##edit", icons::Icon::edit, tr("Edit"), {edit_width, 28.F}))
-            app.camera_path_edit = true;
-        if (app.camera_path_edit) { ImGui::OpenPopup("##edit_view"); app.camera_path_edit = false; }
-        ImGui::SetNextWindowSize({320.F, 0.F}, ImGuiCond_Appearing);
-        if (ImGui::BeginPopup("##edit_view")) {
-            ImGui::Text("%s %02d", tr("View"), selected + 1);
-            ImGui::Separator(); ImGui::Spacing();
-            ImGui::TextUnformatted(tr("Time (s)"));
-            ImGui::SetNextItemWidth(-1.F);
-            float t = k.time;
-            if (ImGui::DragFloat("##keytime", &t, 0.02F, 0.F, 36000.F, "%.2f")) {
-                k.time = camera_timeline::bounded_time(keys, static_cast<std::size_t>(selected), t);
-                app.camera_path_time = k.time; app.camera_path_playing = false;
+        ImGui::Spacing();
+        bool changed = false;
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {10.F, 2.F});
+        if (ImGui::BeginTable("##inspector", wide ? 2 : 1, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+            ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthFixed, wide ? 680.F : 410.F);
+            if (wide) ImGui::TableSetupColumn("TransitionPreview", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableNextColumn();
+            // One compact label column keeps numeric controls aligned rather than stretched.
+            if (ImGui::BeginTable("##pose_fields", wide ? 4 : 2, ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 90.F);
+                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, wide ? 155.F : 290.F);
+                if (wide) {
+                    ImGui::TableSetupColumn("PoseLabel", ImGuiTableColumnFlags_WidthFixed, 70.F);
+                    ImGui::TableSetupColumn("PoseValue", ImGuiTableColumnFlags_WidthFixed, 275.F);
+                }
+                const auto row = [](const char* label) {
+                    ImGui::TableNextColumn();
+                    ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("%s", tr(label));
+                    ImGui::TableNextColumn(); ImGui::SetNextItemWidth(110.F);
+                };
+                row("Time (s)");
+                ImGui::SetNextItemWidth(110.F);
+                float t = k.time;
+                if (ImGui::DragFloat("##keytime", &t, .02F, 0.F, 36000.F, "%.2f s", ImGuiSliderFlags_AlwaysClamp)) {
+                    k.time = camera_timeline::bounded_time(keys, static_cast<std::size_t>(selected), t);
+                    app.camera_path_time = k.time; app.camera_path_playing = false;
+                }
+                row("Target");
+                ImGui::SetNextItemWidth(268.F);
+                changed |= ImGui::DragFloat3("##target", k.target, .01F, 0.F, 0.F, "%.3f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("X / Y / Z");
+                row("Field of view");
+                changed |= ImGui::DragFloat("##fov", &k.fov_degrees, .1F, 1.F, 179.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
+                row("Orbit");
+                float orbit[]{k.yaw * 57.2957795F, k.pitch * 57.2957795F, k.distance};
+                ImGui::PushMultiItemsWidths(3, 268.F);
+                if (ImGui::DragFloat("##yaw", &orbit[0], .1F, 0.F, 0.F, "%.1f°")) {
+                    k.yaw = orbit[0] / 57.2957795F; changed = true;
+                }
+                ImGui::PopItemWidth(); ImGui::SameLine();
+                if (ImGui::DragFloat("##pitch", &orbit[1], .1F, -89.9F, 89.9F, "%.1f°", ImGuiSliderFlags_AlwaysClamp)) {
+                    k.pitch = orbit[1] / 57.2957795F; changed = true;
+                }
+                ImGui::PopItemWidth(); ImGui::SameLine();
+                changed |= ImGui::DragFloat("##distance", &k.distance, .01F, .001F, 1e6F, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::PopItemWidth();
+                ImGui::EndTable();
             }
-            ImGui::TextUnformatted("FOV"); ImGui::SetNextItemWidth(-1.F);
-            if (ImGui::DragFloat("##fov", &k.fov_degrees, 0.1F, 1.F, 179.F, "%.1f°")) {
-                apply(app, k); app.camera_path_playing = false;
+            if (changed) {
+                apply(app, k); app.camera_path_time = k.time; app.camera_path_playing = false;
                 k.thumbnail_rgb.clear(); k.thumbnail_width = k.thumbnail_height = 0;
                 app.camera_thumbnail_pending = selected;
             }
-            ImGui::Spacing();
-            const float update_width = std::max(145.F, ImGui::CalcTextSize(tr("Update pose")).x + 40.F);
-            if (icons::labeled_button("##update", icons::Icon::camera, tr("Update pose"), {update_width, 30.F})) {
-                k = capture(app.camera, k.time); app.camera_path_playing = false;
-                app.camera_thumbnail_pending = selected;
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("%s", tr("Interpolation"));
+            ImGui::SameLine(0.F, 14.F);
+            ImGui::SetNextItemWidth(150.F);
+            const char* methods[]{tr("Smooth"), tr("Linear"), tr("Hold")};
+            if (ImGui::Combo("##interpolation", &k.interpolation, methods, 3)) {
+                app.camera_path_playing = false;
+                seek(app);
             }
-            ImGui::SameLine();
-            if (icons::button("##delete", icons::Icon::trash, {30.F, 30.F}, false, true, tr("Delete keyframe"))) {
-                app.camera_key_delete_pending = selected; ImGui::CloseCurrentPopup();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Transition to the next keyframe"));
+            if (wide) {
+                const ImVec2 pos = ImGui::GetCursorScreenPos();
+                const ImVec2 size{144.F, 81.F};
+                auto* d = ImGui::GetWindowDrawList();
+                d->AddRectFilled(pos, {pos.x + size.x, pos.y + size.y}, theme::u32(theme::viewport_bg), 5.F);
+                const auto& thumb = app.camera_thumbnails[selected].texture;
+                if (!changed && thumb.descriptor && thumb.width && thumb.height) {
+                    const float scale = std::min(size.x / thumb.width, size.y / thumb.height);
+                    const ImVec2 offset{(size.x - thumb.width * scale) * .5F, (size.y - thumb.height * scale) * .5F};
+                    d->AddImageRounded(reinterpret_cast<ImTextureID>(thumb.descriptor),
+                        {pos.x + offset.x, pos.y + offset.y},
+                        {pos.x + size.x - offset.x, pos.y + size.y - offset.y},
+                        {0.F, 0.F}, {1.F, 1.F}, IM_COL32_WHITE, 5.F);
+                } else {
+                    const char* label = tr("No preview");
+                    d->AddText({pos.x + (size.x - ImGui::CalcTextSize(label).x) * .5F, pos.y + 32.F},
+                        theme::u32(theme::text_faint), label);
+                }
+                d->AddRect(pos, {pos.x + size.x, pos.y + size.y}, theme::u32(theme::border), 5.F);
+                ImGui::Dummy(size);
             }
-            ImGui::EndPopup();
+            ImGui::EndTable();
         }
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(4);
+        app.camera_path_edit = false;
     } else ImGui::TextDisabled("%s", tr("Select a view to edit"));
     ImGui::End();
 }
