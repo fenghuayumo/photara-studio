@@ -421,7 +421,8 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.constrain_scale_range);
     hash.append(options.geometry_epsilon);
     hash.append(options.filter_mode);
-    hash.append(options.rasterization.sort_by_camera_z);
+    // Preserve the checkpoint hash for the former default radial policy.
+    hash.append(false);
     hash.append(options.rasterization.alpha_clip);
     hash.append(options.rasterization.near_plane);
     hash.append(options.rasterization.pixel_center_offset);

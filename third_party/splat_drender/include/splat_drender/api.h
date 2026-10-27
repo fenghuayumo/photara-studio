@@ -19,7 +19,6 @@ enum class Primitive : int { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 struct CameraView {
     float alpha_clip = 0.99f;
     float near_plane = 0.2f;
-    bool sort_by_camera_z = false;
     bool compensate_2d = true;
     int width = 0, height = 0;
     float fx = 1.f, fy = 1.f, cx = 0.f, cy = 0.f;

@@ -32,7 +32,6 @@ struct CameraIntrinsics {
     float k1 = 0.f, k2 = 0.f, k3 = 0.f, k4 = 0.f;
     float alpha_clip = 0.99f;
     float near_plane = 0.2f;
-    bool sort_by_camera_z = false;
     bool compensate_2d = true;
 };
 

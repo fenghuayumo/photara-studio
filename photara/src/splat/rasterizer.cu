@@ -184,7 +184,6 @@ splat_drender::CameraView camera_view_of(
     view.cy = camera.cy - options.rasterization.pixel_center_offset;
     view.alpha_clip = options.rasterization.alpha_clip;
     view.near_plane = options.rasterization.near_plane;
-    view.sort_by_camera_z = options.rasterization.sort_by_camera_z;
     view.compensate_2d = options.rasterization.compensate_2d;
     view.mode = camera_mode_of(camera);
     view.k1 = camera.k1;

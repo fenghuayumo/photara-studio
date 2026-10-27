@@ -921,9 +921,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-filter-mode", "Filtering: classic, mip2d or mip3d; mip is a combined-filter ablation",
          cxxopts::value<std::string>()->default_value("classic"))
-        ("splat-raster-profile", "Raster numerics preset: standard or mip-splatting (camera-Z, 0.999, 0.01, half-pixel)",
+        ("splat-raster-profile", "Raster numerics preset: standard or mip-splatting (0.999, 0.01, half-pixel)",
          cxxopts::value<std::string>()->default_value("standard"))
-        ("splat-depth-sort", "Override sort metric: radial or z", cxxopts::value<std::string>())
         ("splat-alpha-clip", "Override per-splat alpha ceiling (0,1)", cxxopts::value<float>())
         ("splat-near-plane", "Override pinhole near plane in scene units", cxxopts::value<float>())
         ("splat-pixel-center", "Override pixel sample offset: 0 or 0.5", cxxopts::value<float>())
@@ -1631,13 +1630,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     else if (filter_mode == "mip") cli.splat_filter_mode = Filter::mip;
     else throw std::invalid_argument("Invalid --splat-filter-mode");
     const auto profile = result["splat-raster-profile"].as<std::string>();
-    if (profile == "mip-splatting") cli.splat_rasterization = {true, 0.999F, 0.01F, 0.5F, true};
+    if (profile == "mip-splatting") cli.splat_rasterization = {0.999F, 0.01F, 0.5F, true};
     else if (profile != "standard") throw std::invalid_argument("Invalid --splat-raster-profile");
-    if (result.count("splat-depth-sort")) {
-        const auto sort = result["splat-depth-sort"].as<std::string>();
-        if (sort != "z" && sort != "radial") throw std::invalid_argument("Invalid --splat-depth-sort");
-        cli.splat_rasterization.sort_by_camera_z = sort == "z";
-    }
     if (result.count("splat-alpha-clip")) cli.splat_rasterization.alpha_clip = result["splat-alpha-clip"].as<float>();
     if (result.count("splat-near-plane")) cli.splat_rasterization.near_plane = result["splat-near-plane"].as<float>();
     if (result.count("splat-pixel-center")) cli.splat_rasterization.pixel_center_offset = result["splat-pixel-center"].as<float>();
@@ -3983,7 +3977,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " screen_space_kernel=", effective_raster.kernel_size,
         " compensate_2d=", effective_raster.rasterization.compensate_2d,
         " filter_mode=", static_cast<int>(options.filter_mode),
-        " sort_z=", options.rasterization.sort_by_camera_z,
+        " depth_sort=radial",
         " alpha_clip=", options.rasterization.alpha_clip,
         " near_plane=", options.rasterization.near_plane,
         " pixel_center=", options.rasterization.pixel_center_offset,

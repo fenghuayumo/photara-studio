@@ -11,7 +11,6 @@ VARIANTS = {
     'classic': ('standard', 'classic', ['--splat-filter-mode', 'classic']),
     'mip2d': ('standard', 'mip2d', ['--splat-filter-mode', 'mip2d']),
     'mip3d': ('standard', 'mip3d', ['--splat-filter-mode', 'mip3d']),
-    'sort_z': ('z', 'classic', ['--splat-depth-sort', 'z']),
     'alpha_999': ('alpha', 'classic', ['--splat-alpha-clip', '0.999']),
     'near_001': ('near', 'classic', ['--splat-near-plane', '0.01']),
     'pixel_half': ('pixel', 'classic', ['--splat-pixel-center', '0.5']),

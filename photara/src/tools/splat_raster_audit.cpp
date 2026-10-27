@@ -32,16 +32,14 @@ int main(int argc, char** argv) {
         options.ignore_undistortion_border = true;
         options.use_mask = false;
         const std::string profile(argv[5]), filter(argv[6]);
-        if (profile == "mip-splatting" || profile == "preset-no-z" ||
+        if (profile == "mip-splatting" ||
             profile == "preset-no-alpha" || profile == "preset-no-near" ||
             profile == "preset-no-pixel") {
-            options.rasterization = {true, .999F, .01F, .5F, true};
-            if (profile == "preset-no-z") options.rasterization.sort_by_camera_z = false;
+            options.rasterization = {.999F, .01F, .5F, true};
             if (profile == "preset-no-alpha") options.rasterization.alpha_clip = .99F;
             if (profile == "preset-no-near") options.rasterization.near_plane = .2F;
             if (profile == "preset-no-pixel") options.rasterization.pixel_center_offset = 0.F;
         }
-        else if (profile == "z") options.rasterization.sort_by_camera_z = true;
         else if (profile == "alpha") options.rasterization.alpha_clip = .999F;
         else if (profile == "near") options.rasterization.near_plane = .01F;
         else if (profile == "pixel") options.rasterization.pixel_center_offset = .5F;

@@ -1092,7 +1092,6 @@ public:
                     std::equal(camera.center.begin(), camera.center.end(), last_center_.begin()) &&
                     settings.alpha_clip == policy_settings_.alpha_clip &&
                     settings.near_plane == policy_settings_.near_plane &&
-                    settings.sort_by_camera_z == policy_settings_.sort_by_camera_z &&
                     settings.compensate_2d == policy_settings_.compensate_2d &&
                     settings.kernel_size == last_kernel_size_ &&
                     settings.scale_modifier == last_scale_modifier_,
@@ -3014,7 +3013,7 @@ private:
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
-        push.u[23] = policy_settings_.sort_by_camera_z;
+        push.u[23] = 0;  // Reserved push-constant slot.
         if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
         std::vector<photara::vk::BufferBinding> bindings(infos.size());
@@ -3114,7 +3113,7 @@ private:
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
-        push.u[23] = policy_settings_.sort_by_camera_z;
+        push.u[23] = 0;  // Reserved push-constant slot.
         std::vector<photara::vk::BufferBinding> bindings;
         bindings.reserve(buffers.size());
         for (const Buffer* buffer : buffers) bindings.push_back(to_binding(*buffer));

@@ -92,7 +92,11 @@ __global__ void preprocess_gaussians(
     }
 
     st.mean2d[i] = make_float2(p.pixel_x, p.pixel_y);
-    st.depth_key[i] = depth_bits(K.sort_by_camera_z && !is_equirect(K.mode) ? t.z : norm3df(t.x, t.y, t.z));
+    // Standard 3DGS sorts by camera-space Z. In the ori_img 30k-step
+    // meshing comparison, Z produced more visible sheet artifacts; use
+    // radial distance for training and depth-based mesh extraction.
+    // st.depth_key[i] = depth_bits(t.z); // Original 3DGS camera-Z order.
+    st.depth_key[i] = depth_bits(norm3df(t.x, t.y, t.z));
     if constexpr (GEOMETRY) {
         st.ray_plane[i] = splat.ray_plane;
         st.normal[i] = splat.normal;

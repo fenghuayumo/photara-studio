@@ -21,12 +21,11 @@ int main(int argc, char** argv) {
         struct Configuration { const char* name; RasterizationPolicy policy; SplatFilterMode filter; };
         std::vector<Configuration> configurations{
             {"classic",{},SplatFilterMode::classic},
-            {"sort_z",{true,.99F,.2F,0.F,true},SplatFilterMode::classic},
-            {"alpha_999",{false,.999F,.2F,0.F,true},SplatFilterMode::classic},
-            {"near_001",{false,.99F,.01F,0.F,true},SplatFilterMode::classic},
-            {"pixel_half",{false,.99F,.2F,.5F,true},SplatFilterMode::classic},
-            {"mip_splatting_classic",{true,.999F,.01F,.5F,true},SplatFilterMode::classic},
-            {"mip_splatting_mip2d",{true,.999F,.01F,.5F,true},SplatFilterMode::mip_2d}};
+            {"alpha_999",{.999F,.2F,0.F,true},SplatFilterMode::classic},
+            {"near_001",{.99F,.01F,0.F,true},SplatFilterMode::classic},
+            {"pixel_half",{.99F,.2F,.5F,true},SplatFilterMode::classic},
+            {"mip_splatting_classic",{.999F,.01F,.5F,true},SplatFilterMode::classic},
+            {"mip_splatting_mip2d",{.999F,.01F,.5F,true},SplatFilterMode::mip_2d}};
         std::mt19937 random(20261026);
         Rasterizer renderer;
         Json results={{"model",argv[1]},{"gaussians",model.size()},{"measurements",Json::array()}};

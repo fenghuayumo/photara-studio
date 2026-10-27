@@ -41,7 +41,7 @@ struct PushConstants {
     uint u20; // alpha clip
     uint u21; // near plane
     uint u22; // 2D energy compensation
-    uint u23; // camera-Z sorting
+    uint u23; // reserved (push-constant layout)
 #ifdef SPLAT_FUSED_SH_ADAM
     float dc_lr, rest_lr, beta1, beta2, correction1, correction2, epsilon, regularization;
 #endif

@@ -74,10 +74,6 @@ inline void test_raster_policy(tinytensor::Device device) {
     auto radial = rasterizer.forward(model, camera, options).color.to_vector();
     close(radial[center], .4F*a, "Radial sorting did not place the blue Gaussian first");
     close(radial[2*32*32+center], .6F, "Radial sort compositing differs from oracle");
-    options.rasterization.sort_by_camera_z = true;
-    auto z_sorted = rasterizer.forward(model, camera, options).color.to_vector();
-    close(z_sorted[center], a, "Camera-Z sorting did not place the red Gaussian first");
-    close(z_sorted[2*32*32+center], (1-a)*.6F, "Camera-Z compositing differs from oracle");
     Camera second = camera;
     camera.fx = camera.fy = 100.F;
     second.fx = second.fy = 1000.F;
@@ -114,8 +110,7 @@ inline void test_filter_mode_resolution() {
         require(raster.kernel_size == (mip2d ? .1F : .3F) &&
                 raster.rasterization.compensate_2d == mip2d,
                 "Explicit filter mode has inconsistent 2D settings");
-        require(!raster.rasterization.sort_by_camera_z &&
-                raster.rasterization.alpha_clip == .99F &&
+        require(raster.rasterization.alpha_clip == .99F &&
                 raster.rasterization.near_plane == .2F &&
                 raster.rasterization.pixel_center_offset == 0.F,
                 "Filter mode unexpectedly changed the standard raster policy");

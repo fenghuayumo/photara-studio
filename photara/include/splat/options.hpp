@@ -25,7 +25,6 @@ inline constexpr const char* filter_mode_name(SplatFilterMode mode) noexcept {
 }
 
 struct RasterizationPolicy {
-    bool sort_by_camera_z{false};
     float alpha_clip{0.99F};
     float near_plane{0.2F};
     float pixel_center_offset{0.F};

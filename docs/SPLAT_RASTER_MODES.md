@@ -8,22 +8,20 @@ do not select or execute the Brush application.
 
 | Control | Standard | Mip Splatting numerical preset |
 |---|---|---|
-| Sort key | Camera-center Euclidean distance | Camera-space Z |
+| Sort key | Camera-center Euclidean distance | Camera-center Euclidean distance |
 | Per-contributor alpha ceiling | 0.99 | 0.999 |
 | Pinhole near plane | 0.2 scene units | 0.01 scene units |
 | Pixel sample location | Integer | Half-integer |
 
-Select the preset with `--splat-raster-profile mip-splatting`. Each control can be
-overridden independently with `--splat-depth-sort radial|z`,
+Select the preset with `--splat-raster-profile mip-splatting`. Alpha ceiling, near plane and pixel sample location can be overridden with
 `--splat-alpha-clip`, `--splat-near-plane`, and `--splat-pixel-center 0|0.5`.
+All profiles use radial sorting.
 The preset is experimental; filter modes do not select it. Compare filter
 modes under the default standard raster policy before attributing changes to
 filtering. The benchmark defaults to `classic mip2d mip3d`; select
 `mip_splatting_*` variants explicitly to study the experimental preset.
 The near plane is expressed in the SfM scene's units, not metres.
-Equirectangular rendering retains radial sorting because camera Z is not a
-valid ordering over the full sphere. Native fisheye retains its existing
-projection visibility gate.
+Native fisheye retains its existing projection visibility gate.
 
 The implementation uses integer kernel pixel indices and subtracts the sample
 offset from the principal point. Projection, ray construction, backward,
@@ -40,7 +38,13 @@ as outside even though its forward render contains the surface. Treat near
 plane changes on Vulkan geometry supervision as incomplete until that query
 path is corrected; the ORI raster and mesh benchmark uses CUDA.
 
-In an 8,000-step, single-seed room-scene diagnosis, individual held-out
+A 30,000-step paired ori_img geometry-training experiment using Classic and
+TSDF found more visible sheet artifacts with camera-Z sorting; its radial
+counterpart had a cleaner mesh. This single-scene, single-seed observation
+is the reason the renderer keeps radial ordering, not a universal quality
+claim. The Z-sort CLI and implementation have been retired.
+
+In an earlier 8,000-step, single-seed room-scene diagnosis, individual held-out
 views showed strong sensitivity to the preset even when mean PSNR changed
 little. On one fixed Classic model, changing the near plane from 0.01 to 0.2
 improved view 104 by 7.51 dB; on a different model, switching from Z to radial
@@ -93,8 +97,8 @@ ones; the Mip Splatting numerical preset is not a claim of complete bitwise pari
 ## Validation and experiments
 
 `photara_splat_test --raster-policy-only` checks CUDA and Vulkan against
-independent analytic Gaussian/compositing oracles. Tests distinguish the two
-sort orders, sample positions and near planes, check both alpha ceilings,
+independent analytic Gaussian/compositing oracles. Tests check radial sorting,
+sample positions and near planes, both alpha ceilings,
 Classic opacity backward, 2D/3D compensation, and mixed-focal 3D radii.
 
 `scripts/benchmark_raster_policy.py` records immutable input/model executable
