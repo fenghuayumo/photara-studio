@@ -538,6 +538,16 @@ int main() {
                options.opacity_decay == 0.F && options.scale_decay == 0.F &&
                options.mean_noise_weight == 0.F && !options.constrain_scale_range,
             "fast mode suppresses geometry, correction and optimizer priors");
+        photara::splat::enforce_training_loss_mode(options, photara::splat::TrainingMode::fast, true);
+        expect(options.use_depth_normal_loss && options.depth_normal_weight == 0.05F &&
+               options.multi_view_geo_weight == 0.02F && options.multi_view_ncc_weight == 0.6F,
+            "fast mesh training enables surface and multi-view supervision");
+        expect(!options.use_normal_field && !options.use_ppisp &&
+               options.scale_regularization_weight == 0.F,
+            "fast mesh training keeps unrelated constraints disabled");
+        expect(photara::splat::training_preset(photara::splat::TrainingMode::fast)
+                   .multi_view_tail_interval == 2,
+            "fast training retains interval-two multi-view tail supervision");
     }
     for (int mode : {0, 1, 2}) {
         const auto preset = photara::splat::training_preset(

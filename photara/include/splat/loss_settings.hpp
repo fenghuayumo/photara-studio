@@ -197,7 +197,8 @@ inline void apply_training_loss_preset(TrainingLossSettings& settings, TrainingM
 }
 
 // Apply last, after user overrides and automatic mesh/strategy setup.
-inline void enforce_training_loss_mode(TrainingOptions& options, TrainingMode mode) {
+inline void enforce_training_loss_mode(TrainingOptions& options, TrainingMode mode,
+                                       bool build_mesh = false) {
     if (mode != TrainingMode::fast) return;
     for (const auto& field : k_training_loss_fields)
         if (!is_rgb_loss(field) && field.minimum == 0.F) options.*field.training_value = 0.F;
@@ -214,6 +215,13 @@ inline void enforce_training_loss_mode(TrainingOptions& options, TrainingMode mo
     options.scale_decay = 0.F;
     options.mean_noise_weight = 0.F;
     options.constrain_scale_range = false;
+    if (build_mesh) {
+        const TrainingLossSettings defaults;
+        options.depth_normal_weight = defaults.depth_normal_weight;
+        options.use_depth_normal_loss = true;
+        options.multi_view_geo_weight = defaults.multi_view_geo_weight;
+        options.multi_view_ncc_weight = defaults.multi_view_ncc_weight;
+    }
 }
 
 inline constexpr std::size_t k_training_loss_payload_bytes =

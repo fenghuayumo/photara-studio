@@ -175,7 +175,7 @@ void draw_training_objective(App& app) {
         settings.normal_field = false;
         settings.ppisp_layout = 0;
         settings.bilateral_grid = false;
-        objective_note("Fast mode uses RGB image fitting (L1 + SSIM) only. Switch to Standard or High quality to enable constraints.");
+        objective_note("Fast uses L1 + SSIM. Build Mesh from 3DGS also enables depth-normal (0.05), multi-view geometry (0.02) and NCC (0.6); tail interval is 2.");
         objective_fields(settings, LossGroup::image, false);
         settings.sanitize();
         ImGui::TreePop();
@@ -924,7 +924,7 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, no pruning.\n"
                     "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
                     "High quality: 50,000 steps, 5M Gaussians, no pruning."),
-                    tr("Fast keeps RGB loss only. Standard and High quality default to scale 0.01 and needle suppression 0.001. Selecting a mode resets loss settings."));
+                    tr("Fast uses RGB loss plus geometry supervision when building a 3DGS mesh. Standard and High quality also enable scale and needle suppression. Selecting a mode resets loss settings."));
             inspector_field("Capture type");
             ImGui::SetNextItemWidth(-1.F);
             const char* capture[] = {tr("Object"), tr("Scene")};

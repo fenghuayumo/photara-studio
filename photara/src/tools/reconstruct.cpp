@@ -3894,13 +3894,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.multi_view_pixel_noise_threshold =
         cli.splat_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.splat_geometry_from_iter;
+    photara::splat::enforce_training_loss_mode(options, cli.splat_mode, cli.mesh);
     // Keep structural parameters trainable while GGGS geometry supervision is
     // active, starting at step 7000 by default as in GaussianWrapping.
     if ((options.use_depth_normal_loss ||
          options.multi_view_geo_weight > 0.F ||
          options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
-    photara::splat::enforce_training_loss_mode(options, cli.splat_mode);
     photara::splat::enforce_render_method_constraints(options);
     if ((options.lambda_d > 0.F || options.lambda_n > 0.F) && !cli.splat_prior_model.empty()) {
 #if defined(PHOTARA_HAS_INFERENCE)
