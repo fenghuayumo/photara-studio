@@ -51,6 +51,7 @@ GaussianModel select_model_rows(
             model.normal_features.index_select(0, indices);
     selected.sh_degree = model.sh_degree;
     selected.render_method = model.render_method;
+    selected.filter_mode = model.filter_mode;
     return selected;
 }
 

@@ -535,6 +535,7 @@ void test_vulkan_geometry_trainer() {
         model.filter_3d.device() == tinytensor::Device::Vulkan,
         "Vulkan filter was not recomputed after densification");
     require_finite(model.means,"Non-finite Vulkan trained means");
+    require(model.filter_mode == SplatFilterMode::mip_3d, "Vulkan densification lost the 3D filter mode");
     require_finite(model.filter_3d,"Non-finite Vulkan final 3D filter");
     require_finite(model.normal_features,"Non-finite Vulkan trained normal field");
     const auto feature_values=model.normal_features.to_vector();

@@ -88,6 +88,8 @@ int main(int argc, char** argv) {
         options.live_subject_bounds_file = root / "bounds.txt";
         mvs::save_subject_bounds(scene.subject_bounds, options.live_subject_bounds_file);
         const auto uninterrupted = splat::Trainer(options).train(scene);
+        require(uninterrupted.filter_mode == splat::SplatFilterMode::mip_3d,
+            "Densification lost the 3D filter mode");
         compare(uninterrupted, splat::Trainer(options).train(scene));
         auto light = options;
         const auto light_cache = root / "light_cache";
