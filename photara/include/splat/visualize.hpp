@@ -72,13 +72,14 @@ inline bool write_visualization_sidecar(
     if (!output) return false;
     output << std::setprecision(9);
     output << revision << '\n'
-           << visualization_mode_name(options.mode) << '\n'
+           << visualization_mode_name(options.mode) << "+near" << '\n'
            << options.point_size_px << '\n'
            << options.ring_scale << '\n'
            << static_cast<unsigned>(options.channel) << ' '
            << options.automatic_depth << ' ' << options.grayscale_depth << ' '
            << options.world_normals << ' ' << options.depth_near << ' '
-           << options.depth_far << '\n';
+           << options.depth_far << '\n'
+           << options.rasterization.near_plane << '\n';
     return static_cast<bool>(output);
 }
 
@@ -93,6 +94,10 @@ inline bool load_visualization_sidecar(
     float point_size = options.point_size_px;
     float ring_scale = options.ring_scale;
     input >> parsed_revision >> mode_text >> point_size >> ring_scale;
+    constexpr std::string_view near_suffix = "+near";
+    const bool has_clip = mode_text.size() >= near_suffix.size() &&
+        mode_text.compare(mode_text.size() - near_suffix.size(), near_suffix.size(), near_suffix) == 0;
+    if (has_clip) mode_text.resize(mode_text.size() - near_suffix.size());
     VisualizationMode mode = options.mode;
     if (!input || !parse_visualization_mode(mode_text, mode)) return false;
     VisualizeOptions parsed = options;
@@ -105,7 +110,9 @@ inline bool load_visualization_sidecar(
     bool automatic{}, grayscale{}, world{};
     float near_depth{}, far_depth{};
     input >> std::ws;
-    if (input.peek() != std::char_traits<char>::eof()) {
+    const bool has_diagnostics = input.peek() != std::char_traits<char>::eof();
+    if (has_clip && !has_diagnostics) return false;
+    if (has_diagnostics) {
         if (!(input >> channel >> automatic >> grayscale >> world >> near_depth >> far_depth))
             return false;
         if (channel > 2 || !std::isfinite(near_depth) || !std::isfinite(far_depth) ||
@@ -117,6 +124,17 @@ inline bool load_visualization_sidecar(
         parsed.world_normals = world;
         parsed.depth_near = near_depth;
         parsed.depth_far = far_depth;
+        // The clip distance was appended to the existing diagnostic fields.
+        // Legacy sidecars retain the caller's rasterization policy.
+        input >> std::ws;
+        const bool has_near_value = input.peek() != std::char_traits<char>::eof();
+        if (has_clip && !has_near_value) return false;
+        if (has_near_value) {
+            float near_clip{};
+            if (!(input >> near_clip) || !std::isfinite(near_clip) || near_clip <= 0.F)
+                return false;
+            parsed.rasterization.near_plane = near_clip;
+        }
     }
     revision = parsed_revision;
     options = parsed;

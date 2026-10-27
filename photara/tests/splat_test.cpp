@@ -8264,6 +8264,10 @@ int main(int argc, char** argv) {
             std::cout<<"CUDA geometry audit tests passed\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--vulkan-live-near-only") {
+            test_vulkan_live_near_clip();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--vulkan-rings-only") {
             test_vulkan_rings_preview();
             return 0;

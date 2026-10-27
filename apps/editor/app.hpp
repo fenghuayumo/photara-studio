@@ -169,6 +169,8 @@ struct App {
     bool mesh_gpu_uploaded{};
     bool mesh_gpu_failed{};
     OrbitCamera camera;
+    // Viewport-only distance in scene units; does not affect training rays.
+    float navigation_near_clip{0.01F};
     std::vector<photara::project::CameraKeyframe> camera_keyframes;
     int camera_key_selected{-1};
     float camera_path_time{};

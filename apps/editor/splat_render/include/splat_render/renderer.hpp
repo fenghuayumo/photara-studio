@@ -29,6 +29,8 @@ enum class RenderMethod : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 
 enum class FilterMode : int { classic = 1, mip_2d, mip_3d, mip };
 
 struct DisplayOptions {
+    // Near clipping for perspective and orthographic viewport rendering.
+    float near_clip{0.2F};
     bool automatic_depth{true};
     bool grayscale_depth{};
     bool world_normals{true};

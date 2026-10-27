@@ -1562,6 +1562,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_RUNTIME_DLLS:photara_splat_gut_test>
                     $<TARGET_FILE_DIR:photara_splat_gut_test> COMMAND_EXPAND_LISTS)
         endif()
+        add_executable(photara_preview_sidecar_test tests/preview_sidecar_test.cpp)
+        target_link_libraries(photara_preview_sidecar_test PRIVATE Photara::Splat)
+        target_compile_features(photara_preview_sidecar_test PRIVATE cxx_std_20)
+        add_test(NAME photara.splat.preview_sidecar COMMAND photara_preview_sidecar_test)
+        photara_exclude_from_default(photara_preview_sidecar_test)
+        add_dependencies(photara_tests photara_preview_sidecar_test)
         add_executable(photara_splat_test tests/splat_test.cpp)
         add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
         target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)
@@ -1649,6 +1655,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                 COMMAND photara_splat_test --pam-vulkan-only)
             add_test(NAME photara.splat.vulkan_rings_preview
                 COMMAND photara_splat_test --vulkan-rings-only)
+            add_test(NAME photara.splat.vulkan_live_near
+                COMMAND photara_splat_test --vulkan-live-near-only)
         endif()
         if(TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.

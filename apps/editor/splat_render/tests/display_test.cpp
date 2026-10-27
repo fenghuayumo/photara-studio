@@ -57,6 +57,15 @@ int main() {
             options.selection_depth_enabled = false;
             draw(shading); require(center() == original, "Disabling depth cue must restore colour without model changes");
         }
+        // The view-only near clip must invalidate the cached frame in both
+        // Gaussian and rings modes and restore the original image when reset.
+        for (const auto shading : {splat_render::Shading::gaussian, splat_render::Shading::rings}) {
+            options.near_clip = 0.01F; draw(shading); const auto visible = center();
+            options.near_clip = 4.F; draw(shading); const auto clipped = center();
+            require(clipped != visible, "Near clip must remove an in-front Gaussian");
+            options.near_clip = 0.01F; draw(shading);
+            require(center() == visible, "Reducing near clip must restore the Gaussian");
+        }
         draw(splat_render::Shading::depth);
         const auto depth = center();
         require(color != depth, "depth must differ from RGB");
@@ -128,6 +137,17 @@ int main() {
             draw(splat_render::Shading::rings);
             draw(splat_render::Shading::gaussian);
             require(center() == color, "preview failed after clear/reload");
+        }
+        // Reproduce the reported case: a splat at z=0.1 used to disappear
+        // behind the fixed 0.2 near plane even though it is in front of camera.
+        const float nearby[]{0.F, 0.F, 0.1F};
+        const float small_scales[]{std::log(0.01F), std::log(0.01F), std::log(0.003F)};
+        cloud.means = nearby; cloud.log_scales = small_scales;
+        if (!renderer.upload(cloud, "near-clip-test")) throw std::runtime_error(renderer.failure());
+        for (const auto shading : {splat_render::Shading::gaussian, splat_render::Shading::rings}) {
+            options.near_clip = 0.2F; draw(shading); const auto clipped = center();
+            options.near_clip = 0.01F; draw(shading);
+            require(center() != clipped, "nearby Gaussian should reappear with a smaller near clip");
         }
         std::cout << "RGB, depth, normal, display settings and frame cache passed\n";
         std::cout << "Repeated preview clear/reload passed\n";

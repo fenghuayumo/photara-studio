@@ -1443,7 +1443,10 @@ bool draw_splat_image(
         if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
     }
     auto display = orbit ? app.display_options : image_qa_display_options(app);
-    if (orbit) app.splat_edit.apply_depth_preview(display);
+    if (orbit) {
+        display.near_clip = app.navigation_near_clip;
+        app.splat_edit.apply_depth_preview(display);
+    }
     if (!app.splat_renderer->draw(camera, target, shading, display))
         return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);

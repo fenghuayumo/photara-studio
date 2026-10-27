@@ -250,6 +250,20 @@ void draw_view_settings(App& app) {
         }
         if (app.camera.projection == EditorProjection::panorama)
             theme::caption("Full 360° × 180° spherical view around the camera.");
+        theme::caption("Near clip");
+        ImGui::SetNextItemWidth(-1.F);
+        const bool clip_supported = app.camera.projection == EditorProjection::perspective ||
+                                    app.camera.projection == EditorProjection::orthographic;
+        ImGui::BeginDisabled(!clip_supported);
+        if (ImGui::SliderFloat("##navigation_near_clip", &app.navigation_near_clip,
+                0.0001F, 100.F, "%.4f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+            publish_preview_vis(app);
+        if (ImGui::IsItemDeactivatedAfterEdit()) store_editor_preferences(app);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr(clip_supported
+                ? "Nearest visible 3DGS distance in scene units. Affects the viewport preview only."
+                : "Near clip is available for perspective and orthographic 3DGS views."));
         theme::caption("Fly speed");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderFloat(

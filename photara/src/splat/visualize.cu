@@ -113,7 +113,7 @@ __device__ bool project_overlay_pixel(
     const float x, const float y, const float z, const int width,
     const int height, const float fx, const float fy, const float cx,
     const float cy, const int model, const float k1, const float k2,
-    const float k3, const float k4, float& u, float& v) {
+    const float k3, const float k4, const float near_clip, float& u, float& v) {
     if (model == static_cast<int>(photara::CameraModel::equirectangular)) {
         const auto pixel = project_equirectangular_camera(
             x, y, z, width, height);
@@ -130,7 +130,7 @@ __device__ bool project_overlay_pixel(
         v = static_cast<float>(pixel.v);
         return true;
     }
-    if (z <= k_near) return false;
+    if (z <= near_clip) return false;
     if (model == 4) {
         u = fx * x + cx;
         v = fy * y + cy;
@@ -187,7 +187,7 @@ __global__ void visualize_points_kernel(
     const int bases, const int sh_degree, const float fx, const float fy,
     const float cx, const float cy, const int model, const float k1,
     const float k2, const float k3, const float k4, const float camx,
-    const float camy, const float camz, const float point_size) {
+    const float camy, const float camz, const float point_size, const float near_clip) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float mx = means[3 * index];
@@ -197,7 +197,7 @@ __global__ void visualize_points_kernel(
     camera_point(w2c, mx, my, mz, x, y, z);
     float u = 0.F, v = 0.F;
     if (!project_overlay_pixel(
-            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, u,
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u,
             v))
         return;
     const int radius = max(1, static_cast<int>(ceilf(point_size)));
@@ -234,7 +234,8 @@ __global__ void visualize_rings_kernel(
     const int sh_degree, const float fx, const float fy, const float cx,
     const float cy, const int model, const float k1, const float k2,
     const float k3, const float k4, const float camx, const float camy,
-    const float camz, const float scale_modifier, const float ring_scale) {
+    const float camz, const float scale_modifier, const float ring_scale,
+    const float near_clip) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float opacity = opacities[index];
@@ -246,7 +247,7 @@ __global__ void visualize_rings_kernel(
     camera_point(w2c, mx, my, mz, x, y, z);
     float u = 0.F, v = 0.F;
     if (!project_overlay_pixel(
-            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, u,
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u,
             v))
         return;
     if (z <= k_near) z = k_near;
@@ -410,7 +411,7 @@ tinytensor::Tensor render_debug_overlay(
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
             camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
             camera.k3, camera.k4, camera.position[0], camera.position[1],
-            camera.position[2], options.point_size_px);
+            camera.position[2], options.point_size_px, options.rasterization.near_plane);
     } else {
         visualize_rings_kernel<<<blocks, k_threads>>>(
             model.means.ptr<float>(), activated.scales.ptr<float>(),
@@ -420,7 +421,8 @@ tinytensor::Tensor render_debug_overlay(
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
             camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
             camera.k3, camera.k4, camera.position[0], camera.position[1],
-            camera.position[2], options.scale_modifier, options.ring_scale);
+            camera.position[2], options.scale_modifier, options.ring_scale,
+            options.rasterization.near_plane);
     }
     check_cuda(cudaGetLastError(), "launch overlay kernel");
     const int composite_blocks = (pixels + k_threads - 1) / k_threads;

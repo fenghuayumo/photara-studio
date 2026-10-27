@@ -800,6 +800,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     frame.selection_depth[0] = display.selection_depth_enabled ? 1.F : 0.F;
     frame.selection_depth[1] = display.selection_depth_near;
     frame.selection_depth[2] = display.selection_depth_far;
+    frame.selection_depth[3] = display.near_clip;
     if (cache_valid_ && display_ >= 0 && cached_generation_ == generation_ &&
         frames_[display_].width == width && frames_[display_].height == height &&
         std::memcmp(&cached_, &frame, sizeof(frame)) == 0 &&
@@ -1014,6 +1015,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         default: trained.mode = 0; break;
         }
         splat_drender::vulkan::SplatSettings settings;
+        settings.near_plane = display_options_.near_clip;
         const bool mip2d = filter_mode_ == FilterMode::mip_2d || filter_mode_ == FilterMode::mip;
         settings.kernel_size = mip2d ? 0.1F : 0.3F;
         settings.compensate_2d = mip2d;

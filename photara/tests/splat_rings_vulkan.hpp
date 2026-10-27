@@ -146,3 +146,68 @@ void test_vulkan_rings_preview() {
             loaded.channel==VisualizationChannel::color,"Legacy sidecar must restore color");
     std::cout << "Vulkan Rings, Depth, Normal and live training channel switches passed\n";
 }
+
+// Verify the sidecar affects live preview without changing the training policy.
+void test_vulkan_live_near_clip() {
+    using namespace photara::splat;
+    const auto root = std::filesystem::temp_directory_path()/"photara_vulkan_live_near_test";
+    std::filesystem::create_directories(root);
+    photara::mvs::MvsScene scene;
+    photara::io::RgbImage image{32,32,std::vector<std::uint8_t>(3*32*32,128)};
+    photara::mvs::MvsView view;
+    view.id=0; view.path=root/"input.png";
+    photara::io::save_rgb_png(image,view.path);
+    view.width=view.src_width=view.height=view.src_height=32;
+    view.fx=view.fy=view.src_fx=view.src_fy=40;
+    view.cx=view.cy=view.src_cx=view.src_cy=15.5F;
+    scene.views.push_back(view);
+    for(float x : {-.2F,.2F}) for(float y : {-.2F,.2F}) {
+        photara::mvs::DensePoint point;
+        point.position={x,y,2.F}; point.normal=photara::mvs::Vec3f::UnitZ();
+        point.color=photara::mvs::Vec3f::Constant(.5F); point.views={0};
+        scene.dense_cloud.points.push_back(point);
+    }
+    TrainingOptions options;
+    options.backend=TrainingBackend::vulkan; options.iterations=3; options.sh_degree=0;
+    options.initial_opacity=.8F; options.initialize_scale_from_knn=true;
+    options.initial_scale=.3F; options.max_image_dimension=32;
+    options.constrain_scale_range=false; options.mean_noise_weight=0; options.refine_start_iter=100;
+    options.log_interval=1; options.preview_interval=1; options.preview_vis_file=root/"preview.vis";
+    VisualizeOptions vis; vis.rasterization.near_plane=.01F;
+    require(write_visualization_sidecar(options.preview_vis_file,vis,1), "Write initial near clip");
+    std::vector<float> maxima;
+    std::vector<double> changed_losses;
+    const auto trained = Trainer(options).train(scene,[&](const TrainingProgress& progress) {
+        require(std::isfinite(progress.loss), "Near clip preview must not break training loss");
+        changed_losses.push_back(progress.loss);
+        vis.rasterization.near_plane=progress.iteration==2 ? 10.F : .01F;
+        require(write_visualization_sidecar(options.preview_vis_file,vis,progress.iteration+1), "Update near clip");
+        return true;
+    }, {}, {}, [&](unsigned, std::size_t, const Camera&, const tinytensor::Tensor& image) {
+        const auto pixels=image.to_vector();
+        maxima.push_back(*std::max_element(pixels.begin(),pixels.end()));
+    });
+    require(trained.size()==4 && maxima.size()==3, "Training and preview must complete");
+    require(std::any_of(maxima.begin(),maxima.end(),[](float x){return x>0.01F;}) &&
+            std::any_of(maxima.begin(),maxima.end(),[](float x){return x<1e-6F;}),
+            "Live preview must react to the near clip sidecar");
+    require(options.rasterization.near_plane==0.2F, "Preview clip must not mutate training policy");
+    auto baseline_options=options;
+    baseline_options.preview_vis_file=root/"baseline.vis";
+    vis.rasterization.near_plane=.01F;
+    require(write_visualization_sidecar(baseline_options.preview_vis_file,vis,1), "Write baseline preview");
+    std::vector<double> baseline_losses;
+    const auto baseline=Trainer(baseline_options).train(scene,[&](const TrainingProgress& progress) {
+        baseline_losses.push_back(progress.loss);
+        return true;
+    }, {}, {}, [](unsigned, std::size_t, const Camera&, const tinytensor::Tensor&) {});
+    require(changed_losses.size()==baseline_losses.size(), "Preview clip must not change training iterations");
+    for(std::size_t i=0;i<baseline_losses.size();++i)
+        require(std::abs(changed_losses[i]-baseline_losses[i]) < 1e-5,
+                "Preview clip must not change training losses");
+    const auto changed_means=trained.means.to_vector(), baseline_means=baseline.means.to_vector();
+    require(changed_means.size()==baseline_means.size(), "Preview clip must not change model size");
+    for(std::size_t i=0;i<changed_means.size();++i)
+        require(std::abs(changed_means[i]-baseline_means[i]) < 1e-5F,
+                "Preview clip must not change optimized positions");
+}

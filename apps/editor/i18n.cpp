@@ -29,6 +29,9 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Near clip", "近裁剪距离", "近クリップ距離", "근접 클리핑 거리"},
+    {"Nearest visible 3DGS distance in scene units. Affects the viewport preview only.", "3DGS 可见的最近距离，单位为场景单位。仅影响视口预览。", "3DGS の可視範囲の最短距離（シーン単位）。ビューポートのプレビューのみに適用されます。", "3DGS의 최소 표시 거리(장면 단위)입니다. 뷰포트 미리보기에만 적용됩니다."},
+    {"Near clip is available for perspective and orthographic 3DGS views.", "近裁剪距离适用于透视和正交 3DGS 视图。", "近クリップは透視・正投影の 3DGS ビューで使用できます。", "근접 클리핑은 원근 및 직교 3DGS 뷰에서 사용할 수 있습니다."},
     {"More options", "更多选项", "その他のオプション", "추가 옵션"},
     {"Create your first view", "创建第一个视角", "最初の視点を作成", "첫 시점 만들기"},
     {"Frame the scene, then choose Add view.", "调整场景视角，然后点击「添加视角」。", "構図を決めて「視点を追加」を選択します。", "구도를 잡고 시점 추가를 선택하세요."},

@@ -112,7 +112,6 @@ float3 sh_color(
 // Same screen covariance as splat_drender's configured filter mode.
 // The ellipse edge is the alpha = 1/255 contour of that covariance, which is
 // the footprint the EWA forward can paint.
-static const float k_near = 0.2;
 static const float k_alpha_floor = 1.0 / 255.0;
 
 uint camera_model(SplatFrame f) { return (uint)(f.eye.w + 0.5); }
@@ -127,7 +126,7 @@ bool camera_in_front(SplatFrame f, float3 camera) {
     uint model = camera_model(f);
     if (model == k_model_equirect) return length(camera) > 1.0e-6;
     if (model == k_model_fisheye) return camera.z > 1.0e-6;
-    return camera.z > k_near;
+    return camera.z > f.selection_depth.w;
 }
 
 // Pixel matches project_pinhole / project_ortho / project_fisheye / project_equirect.
@@ -143,14 +142,14 @@ bool screen_jacobian(SplatFrame f, float3 t, out float2 pixel, out float3 du, ou
     float cy = f.intrinsics.w;
     uint model = camera_model(f);
     if (model == k_model_ortho) {
-        if (!(t.z > k_near)) return false;
+        if (!(t.z > f.selection_depth.w)) return false;
         pixel = float2(t.x * fx + cx, t.y * fy + cy);
         du = float3(fx, 0.0, 0.0);
         dv = float3(0.0, fy, 0.0);
         return true;
     }
     if (model == k_model_pinhole) {
-        if (!(t.z > k_near)) return false;
+        if (!(t.z > f.selection_depth.w)) return false;
         float iz = 1.0 / t.z;
         pixel = float2(t.x * iz * fx + cx, t.y * iz * fy + cy);
         float limx = 1.3 * resolution.x / (2.0 * fx);

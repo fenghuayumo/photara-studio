@@ -1283,6 +1283,12 @@ void load_editor_preferences(App& app) {
                 if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
                     shortcuts::valid(binding)) entry->binding = binding;
             }
+        } else if (key == "navigation_near_clip") {
+            float near_clip{};
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), near_clip);
+            if (result.ec == std::errc{} && result.ptr == value.data() + value.size() &&
+                std::isfinite(near_clip) && near_clip >= 0.0001F && near_clip <= 100.F)
+                app.navigation_near_clip = near_clip;
         } else if (key == "training_autosave_seconds") {
             int seconds{};
             const auto result = std::from_chars(value.data(), value.data() + value.size(), seconds);
@@ -1330,7 +1336,8 @@ void store_editor_preferences(const App& app) {
     output << "training=" << training << '\n'
            << "alignment=" << alignment << '\n'
            << "sam=" << sam << '\n'
-           << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n';
+           << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n'
+           << "navigation_near_clip=" << app.navigation_near_clip << '\n';
     for (const auto& entry : shortcuts::entries)
         output << "shortcut." << entry.id << '='
                << (static_cast<int>(entry.binding.key) * 16 + entry.binding.modifiers) << '\n';
@@ -2948,6 +2955,8 @@ photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
         : app.view_mode == VisualizationMode::rings
             ? photara::splat::VisualizationMode::rings
             : photara::splat::VisualizationMode::splat;
+    if (app.workspace == ViewportWorkspace::scene_3d)
+        options.rasterization.near_plane = app.navigation_near_clip;
     options.point_size_px = app.view_options.point_size;
     options.ring_scale = app.view_options.ring_scale;
     if (app.workspace == ViewportWorkspace::scene_3d && app.view_mode == VisualizationMode::splat) {
