@@ -441,6 +441,7 @@ photara::project::Settings collect_project_settings(const App& app) {
                 source.path = entry.path; source.name = entry.name; source.visible = entry.visible;
                 std::copy_n(entry.offset, 3, source.offset);
                 source.scale = entry.scale;
+                std::copy_n(entry.rotation_degrees, 3, source.rotation_degrees);
                 settings.gaussian_models.push_back(std::move(source));
             }
         }
@@ -565,6 +566,7 @@ void apply_project_settings(
         entry.path = source.path; entry.name = source.name; entry.visible = source.visible;
         std::copy_n(source.offset, 3, entry.offset);
         entry.scale = source.scale;
+        std::copy_n(source.rotation_degrees, 3, entry.rotation_degrees);
         app.gaussian_models.push_back(std::move(entry));
     }
     store_path_field(app.settings.video_frames_dir, settings.video_frames_dir);
@@ -1656,6 +1658,7 @@ photara::splat::GaussianTransform gaussian_entry_transform(
     photara::splat::GaussianTransform transform;
     transform.translation = {entry.offset[0], entry.offset[1], entry.offset[2]};
     transform.scale = std::max(entry.scale, 1e-6F);
+    transform.rotation_degrees = {entry.rotation_degrees[0], entry.rotation_degrees[1], entry.rotation_degrees[2]};
     return transform;
 }
 

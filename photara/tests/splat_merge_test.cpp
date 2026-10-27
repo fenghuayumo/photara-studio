@@ -45,6 +45,47 @@ void near(
         require(std::abs(actual[index] - expected[index]) <= tolerance, message);
 }
 
+std::array<double,16> test_sh_basis(double x, double y, double z) {
+    const double xx=x*x, yy=y*y, zz=z*z;
+    return {0.28209479177387814,-0.4886025119029199*y,0.4886025119029199*z,-0.4886025119029199*x,
+        1.0925484305920792*x*y,-1.0925484305920792*y*z,0.31539156525252005*(2*zz-xx-yy),
+        -1.0925484305920792*x*z,0.5462742152960396*(xx-yy),-0.5900435899266435*y*(3*xx-yy),
+        2.890611442640554*x*y*z,-0.4570457994644658*y*(4*zz-xx-yy),
+        0.3731763325901154*z*(2*zz-3*xx-3*yy),-0.4570457994644658*x*(4*zz-xx-yy),
+        1.445305721320277*z*(xx-yy),-0.5900435899266435*x*(xx-3*yy)};
+}
+
+void test_rotation_preserves_sh_appearance() {
+    const auto model=fixture(1,3,{1.F,2.F,3.F});
+    GaussianTransform turn; turn.rotation_degrees={0.F,0.F,90.F};
+    const auto transformed=transform_gaussians(model,turn);
+    const auto original=model.sh.to_vector(), rotated=transformed.sh.to_vector();
+    for (const auto& direction : std::array<std::array<double,3>,4>{{
+            {1.,0.,0.}, {0.,1.,0.}, {0.,0.,1.}, {0.2672612419,0.5345224838,0.8017837257}}}) {
+        const auto world=test_sh_basis(direction[0],direction[1],direction[2]);
+        const auto local=test_sh_basis(direction[1],-direction[0],direction[2]);
+        for (int c=0;c<3;++c) {
+            double a=0,b=0;
+            for (int i=0;i<16;++i) { a+=world[i]*rotated[3*i+c]; b+=local[i]*original[3*i+c]; }
+            require(std::abs(a-b)<1e-5, "SH appearance must follow 3D rotation through degree three");
+        }
+    }
+    turn.rotation_degrees={30.F,-22.F,87.F};
+    const auto arbitrary=transform_gaussians(model,turn).sh.to_vector();
+    constexpr double pi=3.14159265358979323846;
+    const double a=30.*pi/180., b=-22.*pi/180., c=87.*pi/180.;
+    const double x=.2672612419, y=.5345224838, z=.8017837257;
+    const double zx=std::cos(c)*x+std::sin(c)*y, zy=-std::sin(c)*x+std::cos(c)*y;
+    const double yx=std::cos(b)*zx-std::sin(b)*z, yz=std::sin(b)*zx+std::cos(b)*z;
+    const auto world=test_sh_basis(x,y,z);
+    const auto local=test_sh_basis(yx,std::cos(a)*zy+std::sin(a)*yz,-std::sin(a)*zy+std::cos(a)*yz);
+    for (int channel=0;channel<3;++channel) {
+        double actual=0, expected=0;
+        for(int i=0;i<16;++i) { actual+=world[i]*arbitrary[3*i+channel]; expected+=local[i]*original[3*i+channel]; }
+        require(std::abs(actual-expected)<1e-5, "Arbitrary rotation must preserve directional appearance");
+    }
+}
+
 void test_transform_and_merge() {
     // Degree-0 model (2 gaussians) merged after a scaled, translated
     // degree-1 model (3 gaussians).
@@ -77,6 +118,25 @@ void test_transform_and_merge() {
                 second.means.to_vector(),
             "Identity transform copied instead of returning the model");
 
+    test_rotation_preserves_sh_appearance();
+    // A rigid rotation applies to positions, ellipsoid orientation, normal
+    // features and view-dependent SH together; colour should rotate with the object.
+    GaussianModel oriented = fixture(1, 1, {1.F, 0.F, 0.F});
+    oriented.normal_features = tinytensor::Tensor::from_vector({1.F,0.F,0.F,0.7F}, {1U,4U}, cpu);
+    GaussianTransform turn; turn.rotation_degrees = {0.F, 0.F, 90.F};
+    const auto turned = transform_gaussians(oriented, turn);
+    near(turned.means.to_vector(), {0.F, 1.F, 0.F}, 1e-5F, "Rotation must move Gaussian centres");
+    const float h=std::sqrt(0.5F);
+    near(turned.quaternions.to_vector(), {h,0.F,0.F,h}, 1e-5F, "Rotation must rotate Gaussian ellipsoids");
+    near(turned.normal_features.to_vector(), {0.F,1.F,0.F,0.7F}, 1e-5F, "Rotation must rotate stored normals");
+    const auto before_sh=oriented.sh.to_vector(), after_sh=turned.sh.to_vector();
+    for (int c=0; c<3; ++c) {
+        require(std::abs(after_sh[c]-before_sh[c])<1e-6F, "DC colour must stay unchanged");
+        require(std::abs(after_sh[3+c]-before_sh[9+c])<1e-5F &&
+                std::abs(after_sh[6+c]-before_sh[6+c])<1e-5F &&
+                std::abs(after_sh[9+c]+before_sh[3+c])<1e-5F,
+                "View-dependent colour must rotate with the model");
+    }
     const GaussianModel merged = merge_gaussians({first, placed});
     require(merged.size() == 5, "Merged Gaussian count is wrong");
     require(merged.sh_degree == 1, "Merged SH degree is wrong");

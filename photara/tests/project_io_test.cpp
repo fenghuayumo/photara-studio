@@ -326,6 +326,25 @@ int main() {
         catch (const std::exception&) { rejected = true; }
         expect(rejected, "out-of-range camera keyframe times are rejected");
     }
+    {
+        Settings project;
+        GaussianSource model; model.name = "rotated"; model.offset[0] = 2.F;
+        model.scale = 1.5F; model.rotation_degrees[0] = 15.F; model.rotation_degrees[2] = 90.F;
+        project.gaussian_models.push_back(model);
+        const auto bytes = encode_settings(project, ascan_path);
+        const auto restored = decode_settings(bytes, ascan_path);
+        expect(restored.gaussian_models.size() == 1 && restored.gaussian_models[0].offset[0] == 2.F &&
+               restored.gaussian_models[0].scale == 1.5F && restored.gaussian_models[0].rotation_degrees[0] == 15.F &&
+               restored.gaussian_models[0].rotation_degrees[2] == 90.F, "Gaussian transform survives project round trip");
+        auto legacy = bytes;
+        legacy.resize(legacy.size() - 3 * sizeof(float));
+        const std::uint32_t version = 24, min_reader = 1;
+        std::memcpy(legacy.data(), &version, sizeof(version));
+        std::memcpy(legacy.data() + sizeof(version), &min_reader, sizeof(min_reader));
+        const auto old = decode_settings(legacy, ascan_path);
+        expect(old.gaussian_models.size() == 1 && old.gaussian_models[0].rotation_degrees[0] == 0.F &&
+               old.gaussian_models[0].rotation_degrees[2] == 0.F, "Older project defaults to no Gaussian rotation");
+    }
     settings.name = "demo";
     settings.image_directory = dir / "images";
     settings.dataset_source = dir / "colmap";

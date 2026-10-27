@@ -7,6 +7,9 @@
 #include "sog_vulkan.hpp"
 #include "splat/trainer.hpp"
 
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
 #include <webp/decode.h>
 #include <webp/encode.h>
 #include <zlib.h>
@@ -1463,6 +1466,48 @@ void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
         throw std::runtime_error("Failed to truncate spherical harmonics");
 }
 
+namespace {
+// Real SH basis used by the renderer (degree 0..3), including its signs.
+std::array<double, 16> placement_sh_basis(const Eigen::Vector3d& d) {
+    const double x=d.x(), y=d.y(), z=d.z();
+    const double xx=x*x, yy=y*y, zz=z*z;
+    return {0.28209479177387814, -0.4886025119029199*y, 0.4886025119029199*z, -0.4886025119029199*x,
+        1.0925484305920792*x*y, -1.0925484305920792*y*z, 0.31539156525252005*(2*zz-xx-yy),
+        -1.0925484305920792*x*z, 0.5462742152960396*(xx-yy),
+        -0.5900435899266435*y*(3*xx-yy), 2.890611442640554*x*y*z,
+        -0.4570457994644658*y*(4*zz-xx-yy), 0.3731763325901154*z*(2*zz-3*xx-3*yy),
+        -0.4570457994644658*x*(4*zz-xx-yy), 1.445305721320277*z*(xx-yy),
+        -0.5900435899266435*x*(xx-3*yy)};
+}
+
+// Integrate products of two degree <=3 SH bases. Four Gauss-Legendre
+// latitudes and 16 azimuths integrate the degree-six product exactly.
+std::array<std::array<float,16>,16> placement_sh_rotation(const Eigen::Matrix3d& rotation) {
+    constexpr double z[] = {-0.8611363115940526, -0.3399810435848563,
+                             0.3399810435848563, 0.8611363115940526};
+    constexpr double w[] = {0.3478548451374539, 0.6521451548625461,
+                             0.6521451548625461, 0.3478548451374539};
+    std::array<std::array<double,16>,16> sum{};
+    for (int lat=0; lat<4; ++lat) for (int lon=0; lon<16; ++lon) {
+        const double phi=2.0*std::numbers::pi*lon/16.0;
+        const double radial=std::sqrt(1.0-z[lat]*z[lat]);
+        const Eigen::Vector3d d(radial*std::cos(phi), radial*std::sin(phi), z[lat]);
+        const auto world=placement_sh_basis(d);
+        const auto local=placement_sh_basis(rotation.transpose()*d);
+        const double weight=w[lat]*2.0*std::numbers::pi/16.0;
+        for (int band=1; band<=3; ++band)
+            for (int i=band*band; i<(band+1)*(band+1); ++i)
+                for (int j=band*band; j<(band+1)*(band+1); ++j)
+                    sum[i][j]+=weight*world[i]*local[j];
+    }
+    std::array<std::array<float,16>,16> result{};
+    result[0][0]=1.F;
+    for (int i=1; i<16; ++i) for (int j=1; j<16; ++j)
+        result[i][j]=static_cast<float>(sum[i][j]);
+    return result;
+}
+} // namespace
+
 GaussianModel transform_gaussians(
     const GaussianModel& model, const GaussianTransform& transform) {
     if (!(transform.scale > 0.F) || !std::isfinite(transform.scale))
@@ -1474,22 +1519,70 @@ GaussianModel transform_gaussians(
     auto scales = model.log_scales.to_vector();
     if (means.size() != count * 3U || scales.size() != count * 3U)
         throw std::runtime_error("Gaussian model has an unexpected layout");
+    for (const float value : transform.translation)
+        if (!std::isfinite(value)) throw std::runtime_error("Invalid Gaussian translation");
+    for (const float value : transform.rotation_degrees)
+        if (!std::isfinite(value)) throw std::runtime_error("Invalid Gaussian rotation");
+    const bool rotated = transform.rotation_degrees != std::array<float,3>{};
+    constexpr float radians = std::numbers::pi_v<float> / 180.F;
+    const Eigen::Quaternionf rotation = Eigen::AngleAxisf(transform.rotation_degrees[2]*radians, Eigen::Vector3f::UnitZ()) *
+        Eigen::AngleAxisf(transform.rotation_degrees[1]*radians, Eigen::Vector3f::UnitY()) *
+        Eigen::AngleAxisf(transform.rotation_degrees[0]*radians, Eigen::Vector3f::UnitX());
+    const Eigen::Matrix3f matrix = rotation.toRotationMatrix();
+    const Eigen::Vector3f translation(transform.translation[0], transform.translation[1], transform.translation[2]);
     const float log_scale = std::log(transform.scale);
-    for (float& value : means) value *= transform.scale;
+    for (std::size_t index = 0; index < count; ++index) {
+        const Eigen::Vector3f p(means[3*index], means[3*index+1], means[3*index+2]);
+        const Eigen::Vector3f result = matrix * (transform.scale * p) + translation;
+        for (int axis=0; axis<3; ++axis) means[3*index+axis]=result[axis];
+    }
     for (float& value : scales) value += log_scale;
-    for (std::size_t index = 0; index < count; ++index)
-        for (std::size_t axis = 0; axis < 3U; ++axis)
-            means[index * 3U + axis] += transform.translation[axis];
 
     GaussianModel placed;
-    placed.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, device);
-    placed.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, device);
+    placed.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
+    placed.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3U}, device);
     placed.quaternions = model.quaternions;
+    if (rotated) {
+        auto quaternions = model.quaternions.to_vector();
+        if (quaternions.size() != count * 4U) throw std::runtime_error("Invalid Gaussian quaternion layout");
+        for (std::size_t i=0; i<count; ++i) {
+            const Eigen::Quaternionf q(quaternions[4*i],quaternions[4*i+1],quaternions[4*i+2],quaternions[4*i+3]);
+            const Eigen::Quaternionf r = rotation * q;
+            quaternions[4*i]=r.w(); quaternions[4*i+1]=r.x(); quaternions[4*i+2]=r.y(); quaternions[4*i+3]=r.z();
+        }
+        placed.quaternions = tinytensor::Tensor::from_vector(quaternions, {count,4U}, device);
+    }
     placed.opacity_logits = model.opacity_logits;
     placed.sh = model.sh;
     placed.normal_features = model.normal_features;
+    if (rotated && model.sh.is_valid()) {
+        if (model.sh.shape().rank() != 3 || model.sh.shape()[0] != count || model.sh.shape()[2] != 3 || model.sh.shape()[1] > 16)
+            throw std::runtime_error("Invalid Gaussian spherical harmonics layout");
+        const std::size_t bases=model.sh.shape()[1];
+        const auto source=model.sh.to_vector();
+        auto sh=source;
+        const auto rot=placement_sh_rotation(matrix.cast<double>());
+        for (std::size_t n=0; n<count; ++n) for (std::size_t i=1; i<bases; ++i) {
+            const std::size_t band=static_cast<std::size_t>(std::sqrt(static_cast<double>(i)));
+            const std::size_t first=band*band, last=std::min(bases,(band+1)*(band+1));
+            for (std::size_t c=0; c<3; ++c) {
+                float value=0.F;
+                for (std::size_t j=first; j<last; ++j) value+=rot[i][j]*source[(n*bases+j)*3+c];
+                sh[(n*bases+i)*3+c]=value;
+            }
+        }
+        placed.sh=tinytensor::Tensor::from_vector(sh, {count,bases,3U}, device);
+    }
+    if (rotated && model.normal_features.is_valid()) {
+        auto normals=model.normal_features.to_vector();
+        if (normals.size()!=count*4U) throw std::runtime_error("Invalid Gaussian normal layout");
+        for (std::size_t i=0; i<count; ++i) {
+            const Eigen::Vector3f n(normals[4*i],normals[4*i+1],normals[4*i+2]);
+            const Eigen::Vector3f result=matrix*n;
+            for (int axis=0; axis<3; ++axis) normals[4*i+axis]=result[axis];
+        }
+        placed.normal_features=tinytensor::Tensor::from_vector(normals, {count,4U}, device);
+    }
     placed.sh_degree = model.sh_degree;
     placed.render_method = model.render_method;
     placed.filter_mode = model.filter_mode;

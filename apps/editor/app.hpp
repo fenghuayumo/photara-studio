@@ -91,6 +91,7 @@ struct GaussianModelEntry {
     bool visible{true};
     float offset[3]{};
     float scale{1.F};
+    float rotation_degrees[3]{};
     std::shared_ptr<const std::vector<std::uint8_t>> embedded;
     std::shared_ptr<const photara::splat::GaussianModel> cached_model;
     std::string cached_key;

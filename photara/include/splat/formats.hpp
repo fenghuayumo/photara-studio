@@ -41,10 +41,14 @@ void restrict_sh_degree(GaussianModel& model, unsigned degree);
 struct GaussianTransform {
     std::array<float, 3> translation{};
     float scale{1.F};
+    // Euler XYZ angles in degrees, applied X then Y then Z about the origin.
+    std::array<float, 3> rotation_degrees{};
 
     [[nodiscard]] bool identity() const noexcept {
         return translation[0] == 0.F && translation[1] == 0.F &&
-               translation[2] == 0.F && scale == 1.F;
+               translation[2] == 0.F && scale == 1.F &&
+               rotation_degrees[0] == 0.F && rotation_degrees[1] == 0.F &&
+               rotation_degrees[2] == 0.F;
     }
 };
 

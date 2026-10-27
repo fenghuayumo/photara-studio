@@ -64,7 +64,10 @@ std::vector<std::uint8_t> encode_settings(
     const auto base = project_directory(project_file);
     BufferWriter writer;
     writer.value(k_settings_version);
-    writer.value(!settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    const bool has_rotation = std::any_of(settings.gaussian_models.begin(), settings.gaussian_models.end(), [](const auto& model) {
+        return model.rotation_degrees[0] != 0.F || model.rotation_degrees[1] != 0.F || model.rotation_degrees[2] != 0.F;
+    });
+    writer.value(has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -199,6 +202,11 @@ std::vector<std::uint8_t> encode_settings(
         writer.value(key.thumbnail_width); writer.value(key.thumbnail_height);
         writer.bytes(key.thumbnail_rgb.data(), key.thumbnail_rgb.size());
     }
+    for (const auto& model : settings.gaussian_models)
+        for (float value : model.rotation_degrees) {
+            if (!std::isfinite(value)) throw std::invalid_argument("Invalid Gaussian rotation");
+            writer.value(value);
+        }
     return writer.take();
 }
 
@@ -525,6 +533,12 @@ Settings decode_settings(
         }
         std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
             [](const auto& a, const auto& b) { return a.time < b.time; });
+    }
+    if (version >= 25) {
+        for (auto& model : settings.gaussian_models) for (float& value : model.rotation_degrees) {
+            value = reader.value<float>();
+            if (!std::isfinite(value)) throw std::invalid_argument("Invalid Gaussian rotation");
+        }
     }
     settings.sanitize();
     return settings;

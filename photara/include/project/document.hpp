@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 24;
+inline constexpr std::uint32_t k_settings_version = 25;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -24,6 +24,7 @@ struct GaussianSource {
     bool visible{true};
     float offset[3]{};
     float scale{1.F};
+    float rotation_degrees[3]{};
 };
 
 struct CameraKeyframe {
