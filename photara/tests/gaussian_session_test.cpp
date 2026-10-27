@@ -24,12 +24,22 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 void wait_load(editor::App& app) {
+    editor::process_gaussian_composition_refresh(app);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (app.loading_scene) {
         editor::poll_scene_load(app);
         require(std::chrono::steady_clock::now() < deadline, "composition load timed out");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+}
+void wait_gpu_load(editor::App& app) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!editor::ensure_splat_renderer(app)) {
+        editor::poll_splat_model_load(app);
+        require(std::chrono::steady_clock::now() < deadline, "GPU model preparation timed out");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    require(app.splat_renderer->set_model_transforms(app.gaussian_placements), "GPU placement table rejected");
 }
 photara::splat::GaussianModel model(float x) {
     using tinytensor::Tensor;
@@ -94,19 +104,28 @@ int test_gpu_session(const std::filesystem::path& folder,
         editor::store_path_field(gpu.settings.project_dir, folder / "models.ascan");
         editor::refresh_artifacts(gpu);
         editor::request_gaussian_scene_load(gpu); wait_load(gpu);
-        require(editor::ensure_splat_renderer(gpu), "composition GPU upload");
+        wait_gpu_load(gpu);
         const auto epoch = gpu.splat_renderer->frames_epoch();
         const auto key = gpu.splat_renderer->source_key();
         const auto source = gpu.gaussian_models[0].cached_model;
+        const auto upload = gpu.splat_renderer->model_upload_revision();
         for (int i = 0; i < 20; ++i) {
             gpu.gaussian_models[0].offset[0] += 0.05F;
+            editor::refresh_gaussian_transform(gpu);
+            require(gpu.splat_renderer->set_model_transforms(gpu.gaussian_placements), "GPU drag placement");
             require(editor::ensure_splat_renderer(gpu), "live drag GPU preview");
-            require(gpu.splat_renderer->frames_epoch() == epoch && gpu.splat_renderer->source_key() == key,
+            require(gpu.splat_renderer->frames_epoch() == epoch && gpu.splat_renderer->source_key() == key &&
+                    gpu.splat_renderer->model_upload_revision() == upload,
                     "live drag re-uploaded the composition");
         }
-        editor::refresh_gaussian_composition(gpu); wait_load(gpu);
-        require(editor::ensure_splat_renderer(gpu) && gpu.splat_renderer->source_key() != key &&
-                gpu.gaussian_models[0].cached_model == source, "committed drag GPU refresh/cache reuse");
+        require(gpu.gaussian_models[0].cached_model == source && !gpu.loading_scene,
+                "GPU placement invalidated source cache or rebuilt scene");
+        editor::prepare_gaussian_editing(gpu);
+        photara::splat::GaussianModel editable;
+        require(gpu.splat_edit.copy_model(editable), "world-space editing model missing");
+        const auto expected = editor::load_export_model(gpu, tinytensor::Device::CPU);
+        require(editable.means.to_vector() == expected.means.to_vector(), "picking/editing placement differs from export");
+        require(gpu.splat_renderer->model_upload_revision() == upload, "opening editing reuploaded the GPU cloud");
         gpu.splat_edit.replace_from_model(gpu, model(17.F), false);
         require(gpu.splat_edit.dirty(), "edit fixture did not bind to composed cloud");
         const auto project = folder / "edited.ascan";
@@ -125,7 +144,7 @@ int test_gpu_session(const std::filesystem::path& folder,
         editor::export_trained_model(restored);
         require(photara::splat::load_gaussians(exported, tinytensor::Device::CPU).means.to_vector()[0] == 17.F,
                 "embedded model export copied a stale working file");
-        require(editor::ensure_splat_renderer(restored), "edited close GPU preview");
+        wait_gpu_load(restored);
         restored.splat_edit.replace_from_model(restored, model(23.F), false);
         require(restored.splat_edit.dirty(), "close fixture has no edits");
         editor::export_trained_model(restored);
@@ -283,9 +302,12 @@ int main(int argc, char** argv) {
         const auto preview = app.composed_model;
         app.gaussian_models[0].offset[0] = 7.F; app.gaussian_models[0].scale = 2.F;
         require(app.composed_model == preview, "live drag changed committed composition");
-        editor::refresh_gaussian_composition(app); wait_load(app);
+        editor::refresh_gaussian_transform(app);
         require(app.gaussian_models[0].cached_model == source, "placement reloaded source data");
-        require(app.composed_model->means.to_vector()[0] == 9.F, "committed placement not applied");
+        require(app.composed_model == preview && app.composed_model->means.to_vector()[0] == 1.F,
+                "GPU placement modified uploaded source attributes");
+        require(editor::load_export_model(app, tinytensor::Device::CPU).means.to_vector()[0] == 9.F &&
+                    app.scene.world_point(0).x == 9.F, "preview/export placement not applied");
         app.gaussian_models[1].visible = false;
         editor::refresh_gaussian_composition(app); wait_load(app);
         const auto project = folder / "models.ascan";
@@ -298,7 +320,7 @@ int main(int argc, char** argv) {
                 "model list/visibility not restored");
         require(restored.gaussian_models[0].scale == 2.F && restored.gaussian_models[0].offset[0] == 7.F,
                 "placement not restored");
-        require(restored.composed_model && restored.composed_model->means.to_vector()[0] == 9.F,
+        require(restored.composed_model && editor::load_export_model(restored, tinytensor::Device::CPU).means.to_vector()[0] == 9.F,
                 "embedded source restore depended on deleted files");
         restored.gaussian_models[1].visible = true;
         editor::refresh_gaussian_composition(restored); wait_load(restored);
@@ -356,6 +378,12 @@ int main(int argc, char** argv) {
         for (auto& entry : reopened.gaussian_models) entry.visible = true;
         editor::refresh_gaussian_composition(reopened); wait_load(reopened);
         require(reopened.has_model && reopened.composed_model->size() == 2, "show restored hidden models");
+        reopened.gaussian_models[1].scale = .75F;
+        reopened.gaussian_models[1].rotation_degrees[2] = 90.F;
+        reopened.gaussian_models[1].offset[1] = -1.F;
+        reopened.gaussian_models[1].offset[2] = 2.F;
+        editor::refresh_gaussian_transform(reopened);
+        const auto before_merge = editor::load_export_model(reopened, tinytensor::Device::CPU).means.to_vector();
         const auto merged = folder / "merged.ply";
         editor::start_gaussian_merge(reopened, merged);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -368,6 +396,14 @@ int main(int argc, char** argv) {
         require(reopened.gaussian_models.size() == 1 && reopened.composed_model &&
                 reopened.composed_model->size() == 2 && std::filesystem::exists(merged),
                 "merge did not use embedded sources");
+        const auto after_merge = reopened.composed_model->means.to_vector();
+        require(after_merge.size() == before_merge.size(), "merge changed Gaussian count");
+        for (std::size_t i = 0; i < before_merge.size(); ++i)
+            require(std::abs(after_merge[i] - before_merge[i]) < 1e-5F, "merge lost or reapplied model placement");
+        require(reopened.gaussian_models[0].scale == 1.F &&
+                    reopened.gaussian_models[0].offset[0] == 0.F &&
+                    reopened.gaussian_models[0].rotation_degrees[2] == 0.F,
+                "merged model retained baked placement parameters");
         std::filesystem::remove_all(folder);
         std::cout << "Gaussian session checks passed\n";
         return 0;

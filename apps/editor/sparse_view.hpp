@@ -5,6 +5,7 @@
 
 #include "sfm/scene.hpp"
 #include "splat/types.hpp"
+#include "splat_render/include/splat_render/model_transform.hpp"
 
 #include <array>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <span>
 #include <vector>
 
 namespace editor {
@@ -106,6 +108,17 @@ struct SparseScene {
     std::vector<std::uint32_t> colours;
     // Populated only when the cloud came from a trained Gaussian model.
     std::vector<GaussianPrimitive> gaussians;
+    // Preview points are sampled from the unplaced uploaded cloud.
+    std::size_t gaussian_sample_stride{1};
+    struct Placement {
+        splat_render::ModelTransform transform;
+        Vec3 local_center;
+        float local_radius{};
+    };
+    std::vector<Placement> placements;
+    void set_model_transforms(std::span<const splat_render::ModelTransform> transforms);
+    [[nodiscard]] Vec3 world_point(std::size_t index) const;
+    [[nodiscard]] GaussianPrimitive world_gaussian(std::size_t index) const;
     std::vector<ViewPose> views;
     Vec3 centroid;
     float radius{1.F};

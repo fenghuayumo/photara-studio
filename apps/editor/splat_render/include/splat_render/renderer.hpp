@@ -2,6 +2,7 @@
 
 #include <vulkan/vulkan.h>
 #include "splat_render/display_color.hpp"
+#include "splat_render/model_transform.hpp"
 
 #include "photara_vk/photara_vk.hpp"
 
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 namespace splat_render {
@@ -101,6 +103,10 @@ public:
     bool upload(const GaussianCloud& cloud, std::string_view source_key);
     // Replaces world positions. `centers` is xyzw, and w is the activated opacity.
     bool update_centers(const float* centers, std::uint32_t count);
+    // Updates only per-model forward parameters; no Gaussian buffer upload.
+    bool set_model_transforms(std::span<const ModelTransform> transforms);
+    [[nodiscard]] const std::vector<ModelTransform>& model_transforms() const { return model_transforms_; }
+    [[nodiscard]] std::uint64_t model_upload_revision() const { return model_upload_revision_; }
     void clear_model();
 
     // Composites the selected primitive. An unchanged camera and shading reuse the last image.
@@ -147,6 +153,7 @@ private:
         std::uint32_t bases{};
         std::uint32_t reserved{};  // Shading: 0 gaussian, 1 rings
         float selection_depth[4]{};
+        std::uint32_t placement[4]{};
     };
 
     bool ensure_runtime();
@@ -184,6 +191,8 @@ private:
     FilterMode filter_mode_{FilterMode::classic};
     std::uint64_t generation_{1};
     std::uint64_t frames_epoch_{1};
+    std::uint64_t model_upload_revision_{};
+    std::vector<ModelTransform> model_transforms_;
 
     VkDescriptorSetLayout set_layout_{};
     VkPipelineLayout pipeline_layout_{};
@@ -224,6 +233,7 @@ private:
     Storage totals_{};
     Storage bin_start_{};
     Storage dummy_{};
+    Storage transforms_{};
 
     static constexpr int k_frames = 3;
     Frame frames_[k_frames]{};

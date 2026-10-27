@@ -60,7 +60,19 @@ struct SplatGaussians {
 
 enum class SplatPrimitive : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
+// Editor forward-only placement of a contiguous range in the uploaded cloud.
+// Ranges are ordered by end_index, and the last one covers the whole cloud.
+struct SplatPreviewTransform {
+    std::uint32_t end_index{};
+    std::array<float, 3> translation{};
+    float scale{1.F};
+    // Unit quaternion, scalar first.
+    std::array<float, 4> rotation{1.F, 0.F, 0.F, 0.F};
+};
+
 struct SplatSettings {
+    // Preview-only: training leaves this empty and uses the original model.
+    std::span<const SplatPreviewTransform> preview_transforms;
     float alpha_clip = 0.99F;
     float near_plane = 0.2F;
     float pixel_center_offset = 0.F;

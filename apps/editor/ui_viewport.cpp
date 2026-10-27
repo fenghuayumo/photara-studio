@@ -989,6 +989,8 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     app.splat_edit.note_view(ring_edit, app.view_options.ring_scale);
     splat_render::Camera ring_camera{};
     if (ring_edit) {
+        if (app.splat_edit.tools_open() || app.splat_edit.selected_count() > 0)
+            prepare_gaussian_editing(app);
         const auto view_w = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(std::lround(max.x - min.x)));
         const auto view_h = std::max<std::uint32_t>(
@@ -1422,6 +1424,13 @@ bool draw_splat_image(
     const OrbitCamera* orbit = nullptr, const bool rings = false) {
     texture = ImTextureID{};
     if (!ensure_splat_renderer(app)) return false;
+    if (!app.gaussian_models.empty()) {
+        if (app.splat_edit.tools_open() || app.splat_edit.selected_count() > 0)
+            prepare_gaussian_editing(app);
+        if (!app.splat_renderer->set_model_transforms(app.gaussian_preview_baked
+                ? std::span<const splat_render::ModelTransform>{}
+                : std::span<const splat_render::ModelTransform>{app.gaussian_placements})) return false;
+    }
     splat_render::Camera camera = orbit == nullptr
         ? preview_camera_from(preview)
         : preview_camera_for_orbit(preview, *orbit);

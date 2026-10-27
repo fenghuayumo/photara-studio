@@ -633,6 +633,31 @@ void SplatEdit::push_undo(Snapshot snapshot) {
     redo_.clear();
 }
 
+void SplatEdit::sync_preview_world(const photara::splat::GaussianModel& model) {
+    if (!synced_ || dirty_) return;
+    const auto key = key_;
+    auto selected = std::move(selected_);
+    const bool open = tools_open_, rings = rings_hit_, hit = hit_chosen_;
+    const auto tool = tool_;
+    Host host;
+    host.count = static_cast<std::uint32_t>(model.size());
+    host.sh_degree = model.sh_degree;
+    host.render_method = static_cast<int>(model.render_method);
+    host.filter_mode = static_cast<int>(model.filter_mode);
+    host.sh_bases = model.sh.is_valid() ? static_cast<std::uint32_t>(model.sh.shape()[1]) : 1;
+    host.means = model.means.ptr<float>();
+    host.log_scales = model.log_scales.ptr<float>();
+    host.quaternions = model.quaternions.ptr<float>();
+    host.opacity_logits = model.opacity_logits.ptr<float>();
+    host.sh = model.sh.is_valid() ? model.sh.ptr<float>() : nullptr;
+    host.normals = model.normal_features.is_valid() ? model.normal_features.ptr<float>() : nullptr;
+    host.filter_3d = model.filter_3d.is_valid() ? model.filter_3d.ptr<float>() : nullptr;
+    key_.clear();
+    sync(key, host);
+    if (selected.size() == count_) { selected_ = std::move(selected); recount(); }
+    tools_open_ = open; tool_ = tool; rings_hit_ = rings; hit_chosen_ = hit;
+}
+
 void SplatEdit::restore(App& app, const Snapshot& snapshot) {
     if (snapshot.selected.size() == selected_.size()) {
         selected_ = snapshot.selected;
@@ -655,6 +680,12 @@ void SplatEdit::restore(App& app, const Snapshot& snapshot) {
 
 void SplatEdit::upload(App& app) {
     if (count_ == 0) return;
+    dirty_ = true;
+    ++edit_revision_;
+    if (!app.gaussian_models.empty() && !app.gaussian_preview_baked) {
+        upload_model(app);
+        return;
+    }
     app.splat_renderer->update_centers(centers_.data(), count_);
 }
 
@@ -1145,6 +1176,7 @@ void SplatEdit::apply_region(
 }
 
 void SplatEdit::focus_selection(App& app) const {
+    prepare_gaussian_editing(app);
     if (count_ == 0) return;
     double sx = 0, sy = 0, sz = 0;
     std::uint32_t used = 0;
@@ -1272,6 +1304,8 @@ void SplatEdit::redo(App& app) {
 }
 
 void SplatEdit::upload_model(App& app) {
+    // Individual Gaussian edits use a materialized world-space model. Object
+    // placement remains GPU-only until the first actual geometry edit.
     std::vector<float> means(static_cast<std::size_t>(count_) * 3U);
     for (std::uint32_t index = 0; index < count_; ++index) {
         means[static_cast<std::size_t>(index) * 3U] =
@@ -1296,7 +1330,7 @@ void SplatEdit::upload_model(App& app) {
     if (!app.splat_renderer->upload(cloud, key_)) {
         if (!app.splat_renderer->failure().empty())
             set_message(app, app.splat_renderer->failure(), theme::danger);
-    }
+    } else app.gaussian_preview_baked = !app.gaussian_models.empty();
 }
 
 void SplatEdit::reinsert(const Snapshot& snapshot) {
@@ -1455,6 +1489,7 @@ void SplatEdit::replace_from_model(
 
 void SplatEdit::delete_selected(App& app) {
     if (!synced_ || count_ == 0 || selected_count_ == 0 || stroking_) return;
+    prepare_gaussian_editing(app);
     Snapshot step;
     step.kind = Snapshot::Kind::deletion;
     step.selected = selected_;
@@ -1571,6 +1606,7 @@ void SplatEdit::abort_stroke(App& app) {
 }
 
 void SplatEdit::set_tool(App& app, const Tool tool) {
+    if (tool != Tool::none) prepare_gaussian_editing(app);
     if (stroking_) {
         if (tool_ == Tool::brush || tool_ == Tool::move) end_stroke(app);
         else abort_stroke(app);
@@ -1591,6 +1627,7 @@ void SplatEdit::set_tool(App& app, const Tool tool) {
 
 void SplatEdit::set_tools_open(App& app, const bool open) {
     if (open == tools_open_) return;
+    if (open) prepare_gaussian_editing(app);
     if (!open) {
         if (stroking_) abort_stroke(app);
         polygon_.clear();
@@ -1855,6 +1892,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
                              const splat_render::Camera& camera) {
     toolbar_visible_ = false;
     if (!synced_ || !tools_open_) return false;
+    prepare_gaussian_editing(app);
     struct Item {
         icons::Icon icon;
         const char* id;
@@ -2190,6 +2228,7 @@ void SplatEdit::handle_pointer(
     const splat_render::Camera& camera, const bool viewport_hot,
     const bool over_toolbar) {
     if (!synced_) return;
+    if (tools_open_ || selected_count_ > 0) prepare_gaussian_editing(app);
     const ImGuiIO& io = ImGui::GetIO();
     const bool keys_hot = viewport_hot && !io.WantTextInput;
     const bool hot = keys_hot && !over_toolbar;

@@ -533,6 +533,9 @@ public:
         const bool depth_query_only = false,
         const bool reuse_projection = false) {
         policy_settings_ = settings;
+        // The caller owns this per-frame span. The retained training policy
+        // never keeps a pointer into preview-side temporary storage.
+        policy_settings_.preview_transforms = {};
         auto camera = source_camera;
         camera.cx -= settings.pixel_center_offset;
         camera.cy -= settings.pixel_center_offset;
@@ -570,6 +573,9 @@ public:
                 "Rings is a forward-only preview and cannot record training geometry or snapshots");
         require(!settings.preview_rings || std::isfinite(settings.preview_ring_scale),
                 "Rings preview scale must be finite");
+        require(settings.preview_transforms.empty() ||
+                    (!settings.pixel_snapshots && !reuse_projection && !depth_query_only),
+                "Model placement is available only for forward preview rendering");
         require(camera.width > 0 && camera.height > 0, "camera width and height must be positive");
         require(camera.mode == 0 || camera.mode == 1 || camera.mode == 3 || camera.mode == 4,
                 "camera mode must be pinhole, fisheye, equirectangular, or orthographic");
@@ -593,21 +599,52 @@ public:
         // the camera for this frame into the same memory would race with them.
         camera_slot_ ^= 1U;
         frame_camera_ = &camera_[camera_slot_];
-        Buffer& camera_buffer =
-            grow(*frame_camera_, 22 * sizeof(float), BufferMemory::host_visible);
+        const auto transform_count = settings.preview_transforms.size();
+        require(transform_count <= count, "Too many preview transforms");
+        std::uint32_t previous_end = 0;
+        for (const auto& transform : settings.preview_transforms) {
+            require(transform.end_index > previous_end && transform.end_index <= count,
+                    "Invalid preview transform range");
+            require(std::isfinite(transform.scale) && transform.scale > 0.F,
+                    "Invalid preview transform scale");
+            float norm = 0.F;
+            for (const auto value : transform.rotation) norm += value * value;
+            require(std::isfinite(norm) && std::abs(norm - 1.F) < 1e-4F &&
+                        std::all_of(transform.translation.begin(), transform.translation.end(),
+                            [](float value) { return std::isfinite(value); }),
+                    "Invalid preview transform rotation or translation");
+            previous_end = transform.end_index;
+        }
+        require(transform_count == 0 || (previous_end == count && has_scales),
+                "Preview transforms require scales and full model coverage");
+        Buffer& camera_buffer = grow(*frame_camera_,
+            (23 + transform_count * 9) * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
         const std::uint32_t grid_y = div_up(camera.height, k_tile);
         const std::uint32_t tiles = grid_x * grid_y;
         const std::uint32_t tile_bits = tiles > 1 ? 32u - static_cast<std::uint32_t>(std::countl_zero(tiles - 1)) : 0u;
         const auto pixels = static_cast<std::uint32_t>(static_cast<std::uint64_t>(camera.width) * camera.height);
         const int wrap_width = camera.mode == 3 ? static_cast<int>(camera.width) : 0;
-        float camera_pack[22]{};
+        std::array<float, 23> default_camera_pack{};
+        std::vector<float> placed_camera_pack;
+        if (transform_count != 0) placed_camera_pack.resize(23 + transform_count * 9, 0.F);
+        float* camera_pack = transform_count == 0 ? default_camera_pack.data() : placed_camera_pack.data();
         std::memcpy(camera_pack, camera.world_to_camera.data(), 16 * sizeof(float));
         std::memcpy(camera_pack + 16, camera.center.data(), 3 * sizeof(float));
         camera_pack[19] = settings.preview_selection_depth ? 1.F : 0.F;
         camera_pack[20] = settings.preview_selection_near;
         camera_pack[21] = settings.preview_selection_far;
-        camera_buffer.upload(camera_pack, sizeof(camera_pack));
+        const auto packed_count = static_cast<std::uint32_t>(transform_count);
+        std::memcpy(&camera_pack[22], &packed_count, sizeof(packed_count));
+        for (std::size_t i = 0; i < transform_count; ++i) {
+            const auto& transform = settings.preview_transforms[i];
+            const auto base = 23 + i * 9;
+            std::memcpy(&camera_pack[base], &transform.end_index, sizeof(transform.end_index));
+            std::copy(transform.translation.begin(), transform.translation.end(), camera_pack + base + 1);
+            camera_pack[base + 4] = transform.scale;
+            std::copy(transform.rotation.begin(), transform.rotation.end(), camera_pack + base + 5);
+        }
+        camera_buffer.upload(camera_pack, (23 + transform_count * 9) * sizeof(float));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
         // GUT uses seven float4 slots for UT bounds, color and ray transforms,

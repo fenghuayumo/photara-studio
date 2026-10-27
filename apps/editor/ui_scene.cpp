@@ -75,6 +75,7 @@ void draw_gaussian_models_panel(App& app) {
     // the composition now would silently discard them.
     const bool edits_locked = app.splat_edit.dirty();
     bool composition_changed = false;
+    bool transform_changed = false;
     for (std::size_t index = 0; index < app.gaussian_models.size(); ++index) {
         GaussianModelEntry& entry = app.gaussian_models[index];
         ImGui::PushID(static_cast<int>(index));
@@ -118,20 +119,15 @@ void draw_gaussian_models_panel(App& app) {
         if (open) {
             ImGui::Indent(16.F);
             ImGui::BeginDisabled(merge_busy || edits_locked);
-            ImGui::DragFloat3(
+            transform_changed |= ImGui::DragFloat3(
                 tr("Position"), entry.offset, 0.05F, -100000.F, 100000.F,
                 "%.2f");
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                composition_changed = true;
-            ImGui::DragFloat(
+            transform_changed |= ImGui::DragFloat(
                 tr("Scale"), &entry.scale, 0.005F, 0.01F, 1000.F, "%.3f",
-                ImGuiSliderFlags_Logarithmic);
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                composition_changed = true;
-            ImGui::DragFloat3(tr("Rotation"), entry.rotation_degrees, 0.5F, -36000.F, 36000.F, "%.1f°");
-            if (ImGui::IsItemDeactivatedAfterEdit()) composition_changed = true;
+                ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+            transform_changed |= ImGui::DragFloat3(tr("Rotation"), entry.rotation_degrees, 0.5F, -36000.F, 36000.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tr("Rotation in degrees around the model origin. Preview updates when editing ends."));
+                ImGui::SetTooltip("%s", tr("Rotation in degrees around the model origin."));
             ImGui::EndDisabled();
             ImGui::Unindent(16.F);
             ImGui::TreePop();
@@ -140,6 +136,7 @@ void draw_gaussian_models_panel(App& app) {
     }
 
     if (composition_changed) refresh_gaussian_composition(app);
+    else if (transform_changed) refresh_gaussian_transform(app);
 
     ImGui::Dummy({0, 2.F});
     ImGui::SetCursorPosX(10.F);
@@ -284,22 +281,19 @@ void draw_model_properties(App& app) {
                 ImGui::TableNextRow(); ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(tr("Position"));
                 ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat3("##offset", entry.offset, .05F);
-                changed = ImGui::IsItemDeactivatedAfterEdit();
+                changed |= ImGui::DragFloat3("##offset", entry.offset, .05F);
                 ImGui::TableNextRow(); ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(tr("Scale"));
                 ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat("##scale", &entry.scale, .005F, .01F, 1000.F);
-                changed |= ImGui::IsItemDeactivatedAfterEdit();
+                changed |= ImGui::DragFloat("##scale", &entry.scale, .005F, .01F, 1000.F, "%.3f", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::TableNextRow(); ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(tr("Rotation"));
                 ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F);
-                ImGui::DragFloat3("##rotation", entry.rotation_degrees, .5F, -36000.F, 36000.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
-                changed |= ImGui::IsItemDeactivatedAfterEdit();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Rotation in degrees around the model origin. Preview updates when editing ends."));
+                changed |= ImGui::DragFloat3("##rotation", entry.rotation_degrees, .5F, -36000.F, 36000.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Rotation in degrees around the model origin."));
                 ImGui::EndTable();
             }
-            if (changed) refresh_gaussian_composition(app);
+            if (changed) refresh_gaussian_transform(app);
             ImGui::EndDisabled();
         }
         if (ImGui::CollapsingHeader(tr("File information"))) ImGui::TextWrapped("%s", path_to_utf8(entry.path).c_str());

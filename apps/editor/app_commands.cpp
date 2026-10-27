@@ -40,6 +40,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <Eigen/Geometry>
 
 namespace editor {
 using i18n::tr;
@@ -848,10 +849,6 @@ void request_ascan_scene_load(App& app) {
         });
 }
 
-// Composes visible imported models into one; defined with the export flow.
-photara::splat::GaussianModel load_export_model(
-    const App& app, tinytensor::Device device);
-
 bool has_unsaved_project_changes(const App& app) {
     const bool has_content = !app.camera_keyframes.empty() || app.settings.images_dir[0] || app.settings.dataset_source[0] ||
         has_reconstruction_result(app) || !app.gaussian_models.empty() || !app.imported_mesh_source.empty();
@@ -1102,6 +1099,7 @@ void clear_viewport_scene(App& app) {
     ++app.scene_load_generation;
     app.loading_scene = false;
     app.gaussian_composition_reload = false;
+    app.gaussian_composition_refresh_pending = false;
 }
 
 void clear_loaded_result(App& app) {
@@ -1110,6 +1108,9 @@ void clear_loaded_result(App& app) {
     app.gaussian_models.clear();
     app.composed_model.reset();
     app.composed_model_key.clear();
+    app.gaussian_placements.clear();
+    app.gaussian_preview_baked = false;
+    app.gaussian_edit_placement_dirty = false;
     // A running merge cannot be interrupted without blocking the UI thread;
     // mark its result for discard and let poll_gaussian_merge finish it.
     if (app.gaussian_merge.running) {
@@ -1662,6 +1663,42 @@ photara::splat::GaussianTransform gaussian_entry_transform(
     return transform;
 }
 
+void refresh_gaussian_transform(App& app) {
+    if (app.splat_edit.dirty() || app.gaussian_preview_baked) return;
+    std::vector<splat_render::ModelTransform> transforms;
+    std::uint32_t end = 0;
+    constexpr float radians = 3.14159265358979323846F / 180.F;
+    for (const auto& entry : app.gaussian_models) {
+        if (!entry.visible) continue;
+        if (!entry.cached_model) return; // The initial source load is still in flight.
+        end += static_cast<std::uint32_t>(entry.cached_model->size());
+        const Eigen::Quaternionf q = Eigen::AngleAxisf(entry.rotation_degrees[2]*radians, Eigen::Vector3f::UnitZ()) *
+            Eigen::AngleAxisf(entry.rotation_degrees[1]*radians, Eigen::Vector3f::UnitY()) *
+            Eigen::AngleAxisf(entry.rotation_degrees[0]*radians, Eigen::Vector3f::UnitX());
+        transforms.push_back({end, {entry.offset[0], entry.offset[1], entry.offset[2]},
+            std::max(entry.scale, 1e-6F), {q.w(), q.x(), q.y(), q.z()}});
+    }
+    if (transforms == app.gaussian_placements) return;
+    app.gaussian_placements = std::move(transforms);
+    app.gaussian_edit_placement_dirty = true;
+    // Geometry for selection is materialized lazily when editing is opened.
+    // A Transform drag itself only updates the small per-model tables.
+    app.splat_edit.set_tools_open(app, false);
+    app.splat_edit.clear_selection();
+    app.scene.set_model_transforms(app.gaussian_placements);
+    app.image_qa.metrics_dirty = true;
+    app.splat_simplify.has_baseline = false;
+}
+
+void prepare_gaussian_editing(App& app) {
+    if (!app.gaussian_edit_placement_dirty || app.gaussian_preview_baked ||
+        app.gaussian_models.empty() || !app.composed_model ||
+        !app.splat_edit.bound_to(app.composed_model_key)) return;
+    const auto model = load_export_model(app, tinytensor::Device::CPU);
+    app.splat_edit.sync_preview_world(model);
+    app.gaussian_edit_placement_dirty = false;
+}
+
 std::filesystem::path normalized_model_key(const std::filesystem::path& path) {
     std::error_code error;
     auto key = std::filesystem::absolute(path, error);
@@ -1687,8 +1724,6 @@ std::shared_ptr<const photara::splat::GaussianModel> gaussian_source_model(const
     return std::make_shared<const photara::splat::GaussianModel>(std::move(model));
 }
 
-// Cache key of the composed preview: every visible source file, its stamp,
-// and its placement. Any change reloads the merged cloud.
 // The legacy single-model field follows the first list entry so project
 // settings, exports, and save keep working with one source of truth.
 void sync_gaussian_model_settings(App& app) {
@@ -1708,6 +1743,9 @@ void reset_gaussian_preview(App& app) {
     app.pending_load = {};
     app.composed_model.reset();
     app.composed_model_key.clear();
+    app.gaussian_placements.clear();
+    app.gaussian_preview_baked = false;
+    app.gaussian_edit_placement_dirty = false;
     app.scene.clear();
     ++app.scene_load_generation;
     app.loading_scene = false;
@@ -1852,7 +1890,8 @@ void remove_gaussian_model(App& app, const std::size_t index) {
     }
 }
 
-// Rebuilds the composed preview after a visibility or placement change.
+// Rebuilds the uploaded cloud after a structural/visibility change. Model
+// placement uses refresh_gaussian_transform and never enters this path.
 void refresh_gaussian_composition(App& app) {
     if (app.gaussian_models.empty()) return;
     if (app.splat_edit.dirty()) {
@@ -1862,14 +1901,29 @@ void refresh_gaussian_composition(App& app) {
             theme::warning);
         return;
     }
+    app.gaussian_composition_refresh_pending = true;
+}
+
+void process_gaussian_composition_refresh(App& app) {
+    if (!app.gaussian_composition_refresh_pending) return;
+    app.gaussian_composition_refresh_pending = false;
+    if (app.gaussian_models.empty() || app.splat_edit.dirty()) return;
     cancel_splat_model_load(app);
     app.final_splat_ready = false;
     app.final_splat_source.clear();
+    // The current ImGui frame may have sampled these descriptors. This runs
+    // after present, and release waits for the submitted frame before freeing
+    // the descriptor sets and their underlying image views.
+    release_splat_preview_sets(app);
+    app.splat_frames_epoch = 0;
     app.splat_renderer->clear_model();
     app.splat_edit.clear();
     app.splat_load_failed_key.clear();
     app.composed_model.reset();
     app.composed_model_key.clear();
+    app.gaussian_placements.clear();
+    app.gaussian_preview_baked = false;
+    app.gaussian_edit_placement_dirty = false;
     ++app.scene_load_generation;
     if (app.loading_scene) {
         // Invalidate the in-flight result and retry once it lands; dropping
@@ -1936,11 +1990,10 @@ void request_gaussian_scene_load(App& app) {
                         if (!entry.visible) continue;
                         loaded.source_keys[i] = gaussian_source_cache_key(entry);
                         loaded.source_models[i] = gaussian_source_model(entry);
-                        parts.push_back(photara::splat::transform_gaussians(
-                            *loaded.source_models[i], gaussian_entry_transform(entry)));
+                        parts.push_back(*loaded.source_models[i]);
                     }
                     loaded.composed_model = std::make_shared<const photara::splat::GaussianModel>(
-                        photara::splat::merge_gaussians(parts));
+                        parts.size() == 1 ? std::move(parts.front()) : photara::splat::merge_gaussians(parts));
                     auto scene = gaussian_scene_from_model(*loaded.composed_model, poses);
                     loaded.scene = std::move(scene.scene);
                     loaded.ok = scene.ok; loaded.error = std::move(scene.error);
@@ -2185,6 +2238,7 @@ bool browse_splat_export_path(App& app) {
 void start_splat_simplify(App& app) {
     if (app.splat_simplify.running || app.job.running()) return;
     if (!ensure_splat_renderer(app)) return;
+    prepare_gaussian_editing(app);
     if (!app.splat_simplify.has_baseline) {
         if (!app.splat_edit.copy_model(app.splat_simplify.baseline) ||
             app.splat_simplify.baseline.size() == 0) {
@@ -2427,7 +2481,7 @@ void write_sparse_ply(
         output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
     output << "end_header\n";
     for (std::size_t i = 0; i < scene.points.size(); ++i) {
-        const Vec3& point = scene.points[i];
+        const Vec3 point = scene.world_point(i);
         output << point.x << ' ' << point.y << ' ' << point.z;
         if (has_colour) {
             const std::uint32_t colour = scene.colours[i];
@@ -2500,12 +2554,11 @@ void poll_splat_export(App& app) {
 // the viewport shows, so exported files always match the preview.
 photara::splat::GaussianModel load_export_model(
     const App& app, const tinytensor::Device device) {
-    if (app.final_splat_ready) {
+    if (app.final_splat_ready && !gaussian_models_managed(app)) {
         photara::splat::GaussianModel model;
         if (app.splat_edit.copy_model(model)) return model;
     }
     if (gaussian_models_managed(app)) {
-        if (app.composed_model) return *app.composed_model;
         std::vector<photara::splat::GaussianModel> parts;
         for (const GaussianModelEntry& entry : app.gaussian_models) {
             if (!entry.visible) continue;
@@ -3583,6 +3636,7 @@ void poll_scene_load(App& app) {
     app.image_qa_session.clear();
     app.qa_preview_view = ~0U;
     app.qa_camera_valid = false;
+    const bool composed_scene = static_cast<bool>(loaded.composed_model);
     if (loaded.composed_model) {
         app.composed_model = std::move(loaded.composed_model);
         app.composed_model_key = std::move(loaded.composed_key);
@@ -3594,6 +3648,11 @@ void poll_scene_load(App& app) {
         }
     }
     app.scene = std::move(loaded.scene);
+    if (composed_scene) {
+        app.gaussian_preview_baked = false;
+        app.gaussian_placements.clear();
+        refresh_gaussian_transform(app);
+    }
     invalidate_reconstruction_box(app.reconstruction_box);
     app.alignment_preview_seen = false;
     // When an internal SfM or Gaussian scene replaces the imported cameras,

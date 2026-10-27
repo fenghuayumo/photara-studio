@@ -745,7 +745,7 @@ std::size_t draw_gaussian_rings(
     for (std::size_t i = 0; i < count; i += stride) {
         ProjectedRing ring;
         if (!project_gaussian_ring(
-                frame, scene.points[i], scene.gaussians[i], options.ring_scale,
+                frame, scene.world_point(i), scene.world_gaussian(i), options.ring_scale,
                 ring))
             continue;
         if (ring.centre.x + ring.radius.x < min.x ||
@@ -1945,6 +1945,78 @@ SceneLoad sparse_scene_from_dataset(
     return loaded;
 }
 
+Vec3 SparseScene::world_point(const std::size_t index) const {
+    const auto& point = points[index];
+    if (placements.empty()) return point;
+    const auto found = std::upper_bound(placements.begin(), placements.end(), index,
+        [](std::size_t value, const Placement& p) { return value < p.transform.end_index; });
+    if (found == placements.end()) return point;
+    const auto world = splat_render::transform_point(found->transform, {point.x, point.y, point.z});
+    return {world[0], world[1], world[2]};
+}
+
+GaussianPrimitive SparseScene::world_gaussian(const std::size_t index) const {
+    auto result = gaussians[index];
+    if (placements.empty()) return result;
+    const auto found = std::upper_bound(placements.begin(), placements.end(), index,
+        [](std::size_t value, const Placement& p) { return value < p.transform.end_index; });
+    if (found == placements.end()) return result;
+    result.scale = result.scale * found->transform.scale;
+    const auto p = found->transform.rotation, q = result.rotation;
+    result.rotation = {p[0]*q[0]-p[1]*q[1]-p[2]*q[2]-p[3]*q[3],
+        p[0]*q[1]+p[1]*q[0]+p[2]*q[3]-p[3]*q[2],
+        p[0]*q[2]-p[1]*q[3]+p[2]*q[0]+p[3]*q[1],
+        p[0]*q[3]+p[1]*q[2]-p[2]*q[1]+p[3]*q[0]};
+    return result;
+}
+
+void SparseScene::set_model_transforms(std::span<const splat_render::ModelTransform> transforms) {
+    std::vector<Placement> next;
+    std::size_t begin = 0;
+    for (const auto& transform : transforms) {
+        auto sampled = transform;
+        sampled.end_index = static_cast<std::uint32_t>(std::min(points.size(),
+            (std::size_t(transform.end_index) + gaussian_sample_stride - 1) / gaussian_sample_stride));
+        if (sampled.end_index <= begin) continue;
+        Placement placement;
+        placement.transform = sampled;
+        const std::size_t slot = next.size();
+        if (slot < placements.size() && placements[slot].transform.end_index == sampled.end_index) {
+            placement.local_center = placements[slot].local_center;
+            placement.local_radius = placements[slot].local_radius;
+        } else {
+            for (std::size_t i = begin; i < sampled.end_index; ++i)
+                placement.local_center = placement.local_center + points[i];
+            placement.local_center = placement.local_center * (1.F / float(sampled.end_index - begin));
+            std::vector<float> distances;
+            distances.reserve(sampled.end_index - begin);
+            for (std::size_t i = begin; i < sampled.end_index; ++i) {
+                const auto d = points[i] - placement.local_center;
+                distances.push_back(std::sqrt(dot(d, d)));
+            }
+            const auto rank = std::min(distances.size() - 1, std::size_t(distances.size() * .95));
+            std::nth_element(distances.begin(), distances.begin() + rank, distances.end());
+            placement.local_radius = std::max(1e-3F, distances[rank]);
+        }
+        next.push_back(placement);
+        begin = sampled.end_index;
+    }
+    placements = std::move(next);
+    if (placements.empty()) return;
+    centroid = {};
+    for (const auto& p : placements) {
+        const auto c = splat_render::transform_point(p.transform, {p.local_center.x, p.local_center.y, p.local_center.z});
+        centroid = centroid + Vec3{c[0], c[1], c[2]};
+    }
+    centroid = centroid * (1.F / float(placements.size()));
+    radius = 1e-3F;
+    for (const auto& p : placements) {
+        const auto c = splat_render::transform_point(p.transform, {p.local_center.x, p.local_center.y, p.local_center.z});
+        const auto d = Vec3{c[0], c[1], c[2]} - centroid;
+        radius = std::max(radius, std::sqrt(dot(d, d)) + p.local_radius * p.transform.scale);
+    }
+}
+
 void SparseScene::compute_bounds() {
     if (points.empty()) {
         Vec3 sum;
@@ -2023,6 +2095,7 @@ SceneLoad gaussian_scene_from_model(
         const std::size_t stride = std::max<std::size_t>(
             1, (count + k_max_loaded_points - 1U) / k_max_loaded_points);
         const std::size_t visible_count = (count + stride - 1U) / stride;
+        result.scene.gaussian_sample_stride = stride;
         result.scene.points.reserve(visible_count);
         result.scene.colours.reserve(visible_count);
         result.scene.gaussians.reserve(visible_count);
@@ -2335,7 +2408,7 @@ bool pick_orbit_focus_point(
     const ImVec2 max, const ImVec2 mouse, Vec3& out_point,
     const PreviewMesh* mesh) {
     const ViewFrame frame = build_frame(camera, min, max);
-    const auto pick_points = [&](const std::vector<Vec3>& points) {
+    const auto pick_points = [&](const std::vector<Vec3>& points, bool placed) {
         const std::size_t count = points.size();
         constexpr std::size_t k_pick_budget = 500'000;
         const std::size_t stride =
@@ -2348,7 +2421,8 @@ bool pick_orbit_focus_point(
         for (std::size_t i = 0; i < count; i += stride) {
             ImVec2 screen;
             float depth{};
-            if (!project(frame, points[i], screen, depth)) continue;
+            const auto point = placed ? scene.world_point(i) : points[i];
+            if (!project(frame, point, screen, depth)) continue;
             if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
                 screen.y > max.y)
                 continue;
@@ -2358,14 +2432,14 @@ bool pick_orbit_focus_point(
             if (!found || depth < best_depth) {
                 found = true;
                 best_depth = depth;
-                best = points[i];
+                best = point;
             }
         }
         if (found) out_point = best;
         return found;
     };
-    if (mesh && mesh->has() && pick_points(mesh->vertices)) return true;
-    if (scene.has_points() && pick_points(scene.points)) return true;
+    if (mesh && mesh->has() && pick_points(mesh->vertices, false)) return true;
+    if (scene.has_points() && pick_points(scene.points, true)) return true;
 
     // No reconstructed point under the cursor: pivot on the current look-at
     // plane so a live splat pixel still focuses the orbit without a CPU hit.
@@ -2646,7 +2720,7 @@ SceneDrawStats SceneRenderer::draw(
         for (std::size_t i = 0; i < count; i += stride) {
             ImVec2 screen;
             float depth{};
-            if (!project(frame, scene.points[i], screen, depth)) continue;
+            if (!project(frame, scene.world_point(i), screen, depth)) continue;
             if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
                 screen.y > max.y)
                 continue;

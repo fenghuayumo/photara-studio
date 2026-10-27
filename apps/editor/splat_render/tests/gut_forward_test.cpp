@@ -423,6 +423,80 @@ void ray_tests(bool validation) {
                  "and empty frames passed\n";
 }
 
+void placement_tests(bool validation) {
+    photara::vk::DeviceRequest request;
+    request.want.graphics = true;
+    request.validation = validation;
+    request.synchronization_validation = validation;
+    auto device = photara::vk::Device::create(request);
+    splat_drender::vulkan::ContextOptions options;
+    options.external_device.physical_device = device.physical();
+    options.external_device.device = device.handle();
+    options.external_device.queue = device.queue();
+    options.external_device.queue_family = device.queue_family();
+    Context context(options);
+    SplatRasterizer raster(context);
+    Scene local, baked;
+    std::array<SplatPreviewTransform, 2> transforms;
+    transforms[0] = {1, {.3F, -.15F, .2F}, 1.3F, {std::cos(.2F), 0.F, 0.F, std::sin(.2F)}};
+    transforms[1] = {2, {-.25F, .2F, .1F}, .8F, {std::cos(.15F), 0.F, std::sin(.15F), 0.F}};
+    // Degree-one SH: the directional term is a linear function of the local
+    // view direction. Rotate that linear function independently on the CPU.
+    std::vector<float> sh(2 * 4 * 3), baked_sh(sh.size());
+    for (std::size_t i = 0; i < sh.size(); ++i) sh[i] = .2F * std::sin(float(i + 1));
+    baked_sh = sh;
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& p = transforms[i];
+        splat_render::ModelTransform placement{p.end_index, p.translation, p.scale, p.rotation};
+        const auto center = splat_render::transform_point(placement,
+            {local.means[3*i], local.means[3*i+1], local.means[3*i+2]});
+        for (int axis = 0; axis < 3; ++axis) {
+            baked.means[3*i+axis] = center[axis];
+            baked.scales[3*i+axis] *= p.scale;
+        }
+        const auto& a = p.rotation;
+        const float* b = local.rotations.data() + 4*i;
+        baked.rotations[4*i] = a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3];
+        baked.rotations[4*i+1] = a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2];
+        baked.rotations[4*i+2] = a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1];
+        baked.rotations[4*i+3] = a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0];
+        for (int c = 0; c < 3; ++c) {
+            const auto v = splat_render::rotate_vector(a, {-sh[i*12+9+c], -sh[i*12+3+c], sh[i*12+6+c]});
+            baked_sh[i*12+9+c] = -v[0]; baked_sh[i*12+3+c] = -v[1]; baked_sh[i*12+6+c] = v[2];
+        }
+    }
+    for (const auto primitive : {SplatPrimitive::gaussian_3dgs, SplatPrimitive::gaussian_3dgut})
+        for (unsigned mode : {0u, 1u, 3u, 4u}) {
+            const auto camera = local.camera(mode);
+            auto source = local.gaussians();
+            source.colors = {}; source.sh = sh; source.sh_degree = 1; source.sh_bases = 4;
+            raster.upload_model(source);
+            SplatSettings settings;
+            settings.primitive = primitive;
+            settings.preview_transforms = transforms;
+            const auto gpu = raster.render(camera, settings);
+            settings.preview_transforms = {};
+            auto target = baked.gaussians();
+            target.colors = {}; target.sh = baked_sh; target.sh_degree = 1; target.sh_bases = 4;
+            raster.upload_model(target);
+            const auto cpu = raster.render(camera, settings);
+            close(gpu.color, cpu.color, 2e-4, "GPU placement RGB/SH");
+            close(gpu.alpha, cpu.alpha, 2e-4, "GPU placement alpha");
+            close(gpu.normal, cpu.normal, 2e-4, "GPU placement normal");
+            close(gpu.median_depth, cpu.median_depth, 2e-4, "GPU placement depth");
+        }
+    // A default forward after a placed forward still uses the original cloud.
+    raster.upload_model(local.gaussians());
+    SplatSettings settings;
+    const auto identity = raster.render(local.camera(0), settings);
+    settings.preview_transforms = transforms;
+    (void)raster.render(local.camera(0), settings);
+    settings.preview_transforms = {};
+    close(raster.render(local.camera(0), settings).color, identity.color, 0., "preview placement leaked into default forward");
+    require(device.validation_error_count() == 0, "Placement Vulkan validation errors");
+    std::cout << "GPU multi-model placement, SH, GS/GUT geometry and default-forward isolation passed\n";
+}
+
 void viewport_tests(bool validation) {
     photara::vk::DeviceRequest request;
     request.want.graphics = true;
@@ -492,6 +566,32 @@ void viewport_tests(bool validation) {
     cloud.render_method = splat_render::RenderMethod::gaussian_3dgs;
     require(renderer.upload(cloud, "same-model"), "GS switch back failed");
     require(draw(splat_render::Shading::gaussian) == gs, "GS switch back did not restore EWA");
+    const splat_render::ModelTransform placement{1, {.15F, -.1F, .2F}, 1.15F,
+        {std::cos(.2F), 0.F, 0.F, std::sin(.2F)}};
+    const auto placed_mean = splat_render::transform_point(placement, {means[0], means[1], means[2]});
+    const float placed_logs[]{logs[0]+std::log(placement.scale), logs[1]+std::log(placement.scale), logs[2]+std::log(placement.scale)};
+    for (const auto method : {splat_render::RenderMethod::gaussian_3dgs, splat_render::RenderMethod::gaussian_3dgut}) {
+        cloud.render_method = method;
+        cloud.means = means; cloud.log_scales = logs; cloud.quaternions = q;
+        require(renderer.upload(cloud, "local"), "local upload failed");
+        const auto revision = renderer.model_upload_revision();
+        const auto epoch = renderer.frames_epoch();
+        require(renderer.set_model_transforms(std::span(&placement, 1)), "placement table rejected");
+        std::array<std::vector<std::uint8_t>, 4> images;
+        const splat_render::Shading modes[]{splat_render::Shading::gaussian, splat_render::Shading::rings,
+            splat_render::Shading::depth, splat_render::Shading::normal};
+        for (int i = 0; i < 4; ++i) images[i] = draw(modes[i]);
+        require(renderer.model_upload_revision() == revision && renderer.frames_epoch() == epoch,
+                "Transform reuploaded the cloud or recreated frame images");
+        cloud.means = placed_mean.data(); cloud.log_scales = placed_logs; cloud.quaternions = placement.rotation.data();
+        require(renderer.upload(cloud, "baked"), "baked upload failed");
+        for (int i = 0; i < 4; ++i) {
+            const auto expected = draw(modes[i]);
+            require(images[i].size() == expected.size(), "placement image extent mismatch");
+            for (std::size_t p = 0; p < expected.size(); ++p)
+                require(std::abs(int(images[i][p])-int(expected[p])) <= 1, "viewport placement differs from baked geometry");
+        }
+    }
     renderer.reset();
     require(device.validation_error_count() == 0, "Viewport Vulkan validation errors");
     std::cout
@@ -501,6 +601,7 @@ void viewport_tests(bool validation) {
 int main(int argc, char** argv) {
     try {
         const bool validation = argc == 2 && std::string_view(argv[1]) == "--validation";
+        placement_tests(validation);
         ray_tests(validation);
         viewport_tests(validation);
         return 0;

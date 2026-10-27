@@ -82,8 +82,8 @@ enum class Action {
 };
 
 // One imported 3DGS file in the editor's multi-model list. Placement is a
-// uniform scale plus translation applied when the composed preview is built
-// and when models are merged to disk.
+// uniform scale, rotation and translation applied by the preview shaders and
+// baked only when models are exported, merged to disk, or individually edited.
 struct GaussianModelEntry {
     std::filesystem::path path;
     std::string name;
@@ -148,8 +148,12 @@ struct App {
     std::filesystem::path final_splat_source;
     SplatEdit splat_edit;
     std::vector<GaussianModelEntry> gaussian_models;
+    // Concatenated model-space attributes. Placement does not change this cloud.
     std::shared_ptr<const photara::splat::GaussianModel> composed_model;
     std::string composed_model_key;
+    std::vector<splat_render::ModelTransform> gaussian_placements;
+    bool gaussian_edit_placement_dirty{};
+    bool gaussian_preview_baked{};
     struct GaussianMergeState {
         bool running{};
         bool discard{};
@@ -211,9 +215,12 @@ struct App {
     bool loading_scene{};
     std::string scene_source;
     std::string dataset_scene_key;
-    // A visibility/placement change arrived while a scene load was in
+    // A source/visibility change arrived while a scene load was in
     // flight; reload the composed model once that load is discarded.
     bool gaussian_composition_reload{};
+    // Structural changes can arrive after the viewport queued its image.
+    // Retire those resources only after that draw list has been submitted.
+    bool gaussian_composition_refresh_pending{};
 
     bool has_sparse{};
     bool has_asfm{};
@@ -464,6 +471,10 @@ void import_gaussian_models(
     bool announce = true);
 void remove_gaussian_model(App& app, std::size_t index);
 void refresh_gaussian_composition(App& app);
+void refresh_gaussian_transform(App& app);
+void prepare_gaussian_editing(App& app);
+photara::splat::GaussianModel load_export_model(const App& app, tinytensor::Device device);
+void process_gaussian_composition_refresh(App& app);
 void start_gaussian_merge(App& app, const std::filesystem::path& output);
 void poll_gaussian_merge(App& app);
 

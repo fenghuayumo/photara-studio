@@ -8,7 +8,7 @@ Projection gut_project(float3 t, uint mode, int width, int height,
 }
 
 void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
-                    float4 rotation, float opacity) {
+                    float4 rotation, float opacity, float3 sh_mean, float3 sh_eye) {
     uint mode = pc.u16;
     int width = int(pc.u4), height = int(pc.u5);
     float fx = asfloat(pc.u8), fy = asfloat(pc.u9);
@@ -61,7 +61,7 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f;
     float3 rgb;
     if ((pc.u3 & 1u) != 0u)
-        rgb = evaluate_sh(pc.u1, mean, eye, color_src, index*pc.u2*3u, c0, c1, c2);
+        rgb = evaluate_sh(pc.u1, sh_mean, sh_eye, color_src, index*pc.u2*3u, c0, c1, c2);
     else rgb = float3(color_src[3u*index], color_src[3u*index+1u], color_src[3u*index+2u]);
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > 0.5f && (selection_depth < camera[20] || selection_depth > camera[21])) rgb *= 0.18f;

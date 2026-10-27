@@ -62,6 +62,7 @@ int main(const int argc, char** argv) {
 #endif
     const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
     const bool transition_smoke = smoke_arg == "--project-transition-smoke";
+    const bool transform_smoke = smoke_arg == "--gaussian-transform-smoke";
     const bool mesh_smoke = smoke_arg == "--interop-mesh-smoke";
     const bool stop_smoke = smoke_arg == "--interop-stop-smoke" ||
                             smoke_arg == "--interop-stop-smoke-vulkan";
@@ -69,7 +70,7 @@ int main(const int argc, char** argv) {
                                smoke_arg == "--interop-retrain-smoke-vulkan";
     app.smoke_mode = smoke_arg == "--interop-smoke" ||
                      smoke_arg == "--interop-smoke-vulkan" || stop_smoke ||
-                     retrain_smoke || mesh_smoke || transition_smoke;
+                     retrain_smoke || mesh_smoke || transition_smoke || transform_smoke;
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
@@ -78,7 +79,7 @@ int main(const int argc, char** argv) {
     if (!app.smoke_mode) editor::load_welcome_state(app);
     else app.show_welcome = false;
 
-    if (app.smoke_mode && !transition_smoke) {
+    if (app.smoke_mode && !transition_smoke && !transform_smoke) {
         // The interop smoke harness needs a fixed dataset so runs stay
         // comparable, but developer-machine paths do not belong in the
         // source. Point PHOTARA_SMOKE_IMAGES at the COLMAP images directory;
@@ -118,7 +119,7 @@ int main(const int argc, char** argv) {
     });
     if (!glfwInit() || !glfwVulkanSupported()) return 1;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    if (transition_smoke) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    if (transition_smoke || transform_smoke) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow* window = glfwCreateWindow(
         1600, 940, tr("Photara Studio"), nullptr, nullptr);
     editor::apply_studio_window_icon(window);
@@ -234,6 +235,19 @@ int main(const int argc, char** argv) {
     bool retrain_pending = false;
     bool retrain_requested = false;
     int transition_smoke_step = 0;
+    int transform_smoke_step = 0;
+    std::uint64_t transform_smoke_upload = 0;
+    unsigned transform_smoke_generation = 0;
+    const splat_render::Renderer* transform_smoke_renderer = nullptr;
+    double transform_smoke_max_update_ms = 0.;
+    if (transform_smoke) {
+        const char* model_path = std::getenv("PHOTARA_TRANSFORM_MODEL");
+        if (!model_path || !model_path[0]) {
+            std::fprintf(stderr, "PHOTARA_TRANSFORM_MODEL is required\n");
+            return 2;
+        }
+        editor::import_gaussian_models(app, {editor::path_from_utf8_field(model_path)}, false);
+    }
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -261,7 +275,7 @@ int main(const int argc, char** argv) {
         control_bus.pump_main_thread(app);
 #endif
 
-        if (app.smoke_mode && !transition_smoke) {
+        if (app.smoke_mode && !transition_smoke && !transform_smoke) {
             if (!app.smoke_started && !app.job.running()) {
                 app.smoke_started = true;
                 editor::start_train(app, true);
@@ -502,6 +516,60 @@ int main(const int argc, char** argv) {
             ImGui::EndPopup();
         }
         editor::draw_project_lifecycle_modals(app);
+        if (transform_smoke && std::chrono::steady_clock::now() - smoke_begin > std::chrono::seconds(60)) {
+            std::fprintf(stderr, "Gaussian transform smoke timed out at step %d: %s\n", transform_smoke_step, app.message.c_str());
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        if (transform_smoke && !app.loading_scene && !app.pending_splat_model.valid() &&
+            !app.gaussian_models.empty() && app.splat_renderer->splat_count() > 0 &&
+            app.splat_renderer->source_key() == app.composed_model_key &&
+            std::any_of(app.splat_preview_sets.begin(), app.splat_preview_sets.end(), [](auto set) { return set != VK_NULL_HANDLE; })) {
+            if (transform_smoke_step == 0) {
+                transform_smoke_upload = app.splat_renderer->model_upload_revision();
+                transform_smoke_generation = app.scene_load_generation;
+                transform_smoke_renderer = app.splat_renderer.get();
+            }
+            if (transform_smoke_step < 90) {
+                auto& model = app.gaussian_models.front();
+                if (transform_smoke_step < 30) model.offset[0] = .5F * float(transform_smoke_step + 1) / 30.F;
+                else if (transform_smoke_step < 60) model.scale = 1.F + .2F * float(transform_smoke_step - 29) / 30.F;
+                else model.rotation_degrees[2] = 25.F * float(transform_smoke_step - 59) / 30.F;
+                ++transform_smoke_step;
+                const auto update_begin = std::chrono::steady_clock::now();
+                editor::refresh_gaussian_transform(app);
+                transform_smoke_max_update_ms = std::max(transform_smoke_max_update_ms,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - update_begin).count());
+            } else {
+                // Interactive edits keep the same GPU model and scene. Only
+                // explicit export creates transformed Gaussian attributes.
+                const auto& source = app.gaussian_models.front().cached_model;
+                const auto exported = editor::load_export_model(app, tinytensor::Device::CPU);
+                if (!source || !app.composed_model) {
+                    std::fprintf(stderr, "Gaussian transform smoke is missing model data\n");
+                } else {
+                    const auto original = source->means.to_vector();
+                    const auto actual = exported.means.to_vector();
+                    constexpr float angle = 25.F * 3.14159265358979323846F / 180.F;
+                    if (original.size() >= 3 && actual.size() == original.size()) {
+                        const float expected[3] = {
+                            0.5F + 1.2F * (std::cos(angle) * original[0] - std::sin(angle) * original[1]),
+                            1.2F * (std::sin(angle) * original[0] + std::cos(angle) * original[1]),
+                            1.2F * original[2]};
+                        app.smoke_success = app.splat_renderer.get() == transform_smoke_renderer &&
+                            app.splat_renderer->model_upload_revision() == transform_smoke_upload &&
+                            app.scene_load_generation == transform_smoke_generation &&
+                            app.splat_renderer->model_transforms() == app.gaussian_placements &&
+                            !app.gaussian_composition_refresh_pending;
+                        for (int axis = 0; axis < 3; ++axis)
+                            if (std::abs(actual[axis] - expected[axis]) > 1e-4F * std::max(1.F, std::abs(expected[axis])))
+                                app.smoke_success = false;
+                    }
+                    if (app.smoke_success) std::fprintf(stdout, "Gaussian transform preview smoke passed; 90 GPU-only updates, max parameter update %.3f ms\n", transform_smoke_max_update_ms);
+                    else std::fprintf(stderr, "Gaussian transform preview did not use transformed coordinates\n");
+                }
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+        }
         if (transition_smoke) {
             // Keep an actual Vulkan texture in this frame's draw list while
             // exercising discard, cancellation, and the prompt-free path.
@@ -541,6 +609,7 @@ int main(const int argc, char** argv) {
         // Project switches release photo/QA/splat textures referenced by this
         // frame. Execute only once its draw list has been submitted.
         editor::process_project_transition(app);
+        editor::process_gaussian_composition_refresh(app);
         if (transition_smoke && !glfwWindowShouldClose(window)) {
             const bool cancelled = transition_smoke_step == 1;
             const bool retained = app.atlas_preview.descriptor && app.settings.dataset_source[0];

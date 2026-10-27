@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -136,6 +137,7 @@ void Renderer::attach(const photara::vk::Device& runtime) {
 }
 
 void Renderer::reset() {
+    model_transforms_.clear();
 #if SPLAT_DRENDER_HAS_VULKAN
     delete ewa_;
 #endif
@@ -166,6 +168,7 @@ void Renderer::reset() {
     destroy_storage(totals_);
     destroy_storage(bin_start_);
     destroy_storage(dummy_);
+    destroy_storage(transforms_);
     destroy_storage(rgba_staging_);
     if (frame_mapped_) {
         vkUnmapMemory(device_, frame_ubo_.memory);
@@ -346,10 +349,10 @@ void Renderer::write_descriptors() {
     const Storage bindings[] = {
         frame_ubo_, centers_, scales_, rotations_, harmonics_, quads_,
         keys0_, keys1_, vals0_, vals1_, wg_counts_, wg_offsets_, ranks_,
-        totals_, bin_start_};
-    VkDescriptorBufferInfo infos[15]{};
-    VkWriteDescriptorSet writes[15]{};
-    for (std::uint32_t index = 0; index < 15; ++index) {
+        totals_, bin_start_, transforms_};
+    VkDescriptorBufferInfo infos[16]{};
+    VkWriteDescriptorSet writes[16]{};
+    for (std::uint32_t index = 0; index < 16; ++index) {
         const Storage& storage = bindings[index].buffer ? bindings[index] : dummy_;
         infos[index].buffer = storage.buffer;
         infos[index].offset = 0;
@@ -363,7 +366,7 @@ void Renderer::write_descriptors() {
             : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[index].pBufferInfo = &infos[index];
     }
-    vkUpdateDescriptorSets(device_, 15, writes, 0, nullptr);
+    vkUpdateDescriptorSets(device_, 16, writes, 0, nullptr);
 }
 
 bool Renderer::ensure_runtime() { return runtime_.valid(); }
@@ -393,8 +396,8 @@ bool Renderer::ensure_device() {
         return false;
     }
 
-    VkDescriptorSetLayoutBinding layout_bindings[15]{};
-    for (std::uint32_t index = 0; index < 15; ++index) {
+    VkDescriptorSetLayoutBinding layout_bindings[16]{};
+    for (std::uint32_t index = 0; index < 16; ++index) {
         layout_bindings[index].binding = index;
         layout_bindings[index].descriptorType = index == 0
             ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
@@ -406,7 +409,7 @@ bool Renderer::ensure_device() {
     }
     VkDescriptorSetLayoutCreateInfo layout_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layout_info.bindingCount = 15;
+    layout_info.bindingCount = 16;
     layout_info.pBindings = layout_bindings;
     check(vkCreateDescriptorSetLayout(device_, &layout_info, nullptr, &set_layout_),
           "vkCreateDescriptorSetLayout");
@@ -426,7 +429,7 @@ bool Renderer::ensure_device() {
 
     const VkDescriptorPoolSize pool_sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 15},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = 1;
@@ -549,9 +552,6 @@ void Renderer::clear_model() {
 bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_key) {
     failure_.clear();
     if (!ensure_device()) return false;
-    if (!source_key.empty() && source_key == source_key_ && count_ == cloud.count &&
-        render_method_ == cloud.render_method && filter_mode_ == cloud.filter_mode)
-        return true;
     if (cloud.count > 16'000'000U) {
         failure_ = "Too many Gaussians for the Vulkan preview";
         return false;
@@ -607,6 +607,8 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     }
 
     wait_gpu();
+    model_transforms_.clear();
+    ++model_upload_revision_;
     const std::uint32_t groups = count == 0 ? 1U : static_cast<std::uint32_t>((count + 255U) / 256U);
     const VkDeviceSize sort_bytes = std::max<VkDeviceSize>(count, 1) * sizeof(std::uint32_t);
     const VkDeviceSize group_bytes =
@@ -656,6 +658,33 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
         failure_ = error.what();
         return false;
     }
+    return true;
+}
+
+bool Renderer::set_model_transforms(std::span<const ModelTransform> transforms) {
+    if (std::equal(transforms.begin(), transforms.end(), model_transforms_.begin(), model_transforms_.end()))
+        return true;
+    std::uint32_t previous = 0;
+    for (const auto& transform : transforms) {
+        const float norm = std::inner_product(transform.rotation.begin(), transform.rotation.end(),
+                                               transform.rotation.begin(), 0.F);
+        if (transform.end_index <= previous || transform.end_index > count_ ||
+            !std::isfinite(transform.scale) || transform.scale <= 0.F ||
+            !std::isfinite(norm) || std::abs(norm - 1.F) > 1e-4F ||
+            !std::all_of(transform.translation.begin(), transform.translation.end(),
+                         [](float value) { return std::isfinite(value); })) {
+            failure_ = "Invalid preview model transform";
+            return false;
+        }
+        previous = transform.end_index;
+    }
+    if (!transforms.empty() && previous != count_) {
+        failure_ = "Preview transforms do not cover the Gaussian model";
+        return false;
+    }
+    model_transforms_.assign(transforms.begin(), transforms.end());
+    cache_valid_ = false;
+    ++generation_;
     return true;
 }
 
@@ -769,7 +798,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
                     const DisplayOptions& display) {
     target = {};
     if (!ensure_device()) return false;
-    static_assert(sizeof(FrameData) == 160);
+    static_assert(sizeof(FrameData) == 176);
     static_assert(offsetof(FrameData, sh_degree) == 128);
     const std::uint32_t width = std::max(1U, camera.width);
     const std::uint32_t height = std::max(1U, camera.height);
@@ -801,6 +830,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     frame.selection_depth[1] = display.selection_depth_near;
     frame.selection_depth[2] = display.selection_depth_far;
     frame.selection_depth[3] = display.near_clip;
+    frame.placement[0] = static_cast<std::uint32_t>(model_transforms_.size());
     if (cache_valid_ && display_ >= 0 && cached_generation_ == generation_ &&
         frames_[display_].width == width && frames_[display_].height == height &&
         std::memcmp(&cached_, &frame, sizeof(frame)) == 0 &&
@@ -819,6 +849,28 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
         return draw_ewa(camera, frame, target);
 
     wait_gpu();
+    if (!model_transforms_.empty()) {
+        // The ring pass shares a small placement table. Wait only for this
+        // renderer's previous submission before updating its host-visible data.
+        std::vector<float> packed(model_transforms_.size() * 12, 0.F);
+        for (std::size_t i = 0; i < model_transforms_.size(); ++i) {
+            const auto& transform = model_transforms_[i];
+            std::memcpy(&packed[12 * i], &transform.end_index, sizeof(transform.end_index));
+            packed[12 * i + 1] = transform.scale;
+            std::copy(transform.translation.begin(), transform.translation.end(), packed.begin() + 12 * i + 4);
+            std::copy(transform.rotation.begin(), transform.rotation.end(), packed.begin() + 12 * i + 8);
+        }
+        const auto bytes = packed.size() * sizeof(float);
+        if (transforms_.size < bytes) {
+            create_storage(transforms_, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            write_descriptors();
+        }
+        void* mapped{};
+        check(vkMapMemory(device_, transforms_.memory, 0, bytes, 0, &mapped), "vkMapMemory");
+        std::memcpy(mapped, packed.data(), bytes);
+        vkUnmapMemory(device_, transforms_.memory);
+    }
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
     check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1015,6 +1067,11 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         default: trained.mode = 0; break;
         }
         splat_drender::vulkan::SplatSettings settings;
+        std::vector<splat_drender::vulkan::SplatPreviewTransform> placements;
+        placements.reserve(model_transforms_.size());
+        for (const auto& transform : model_transforms_)
+            placements.push_back({transform.end_index, transform.translation, transform.scale, transform.rotation});
+        settings.preview_transforms = placements;
         settings.near_plane = display_options_.near_clip;
         const bool mip2d = filter_mode_ == FilterMode::mip_2d || filter_mode_ == FilterMode::mip;
         settings.kernel_size = mip2d ? 0.1F : 0.3F;

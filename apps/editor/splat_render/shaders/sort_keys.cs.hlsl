@@ -21,7 +21,7 @@ PushConstants push;
 void main(uint3 tid : SV_DispatchThreadID) {
     uint index = tid.x;
     if (index >= push.count) return;
-    float3 camera = transform_point(frame, centers[index].xyz);
+    float3 camera = transform_point(frame, placement_point(model_placement(frame, index), centers[index].xyz));
     uint key = 0xffffffffu;
     if (camera_in_front(frame, camera)) {
         // Camera-space Z matches 3DGS; panoramic views use radial distance.

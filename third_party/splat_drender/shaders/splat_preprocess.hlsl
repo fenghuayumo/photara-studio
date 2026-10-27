@@ -16,6 +16,10 @@
 #include "splat_enum.hlsli"
 #include "splat_gut.hlsli"
 
+float3 preview_rotate(float4 q, float3 v) {
+    return v + 2.0f * cross(q.yzw, cross(q.yzw, v) + q.x * v);
+}
+
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint count = pc.u0;
@@ -58,6 +62,25 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool raw_parameters = (flags & 32u) != 0;
 
     float3 mean = float3(means[3 * index], means[3 * index + 1], means[3 * index + 2]);
+    float3 sh_mean = mean;
+    float3 sh_eye = float3(camera[16], camera[17], camera[18]);
+    float4 placement_rotation = float4(1.0f, 0.0f, 0.0f, 0.0f);
+    float placement_scale = 1.0f;
+    uint transform_count = asuint(camera[22]);
+    if (transform_count != 0u) {
+        uint lo = 0u, hi = transform_count;
+        while (lo < hi) {
+            uint mid = (lo + hi) / 2u;
+            if (index < asuint(camera[23u + 9u * mid])) hi = mid;
+            else lo = mid + 1u;
+        }
+        uint base = 23u + 9u * lo;
+        float3 translation = float3(camera[base + 1u], camera[base + 2u], camera[base + 3u]);
+        placement_scale = camera[base + 4u];
+        placement_rotation = float4(camera[base + 5u], camera[base + 6u], camera[base + 7u], camera[base + 8u]);
+        mean = preview_rotate(placement_rotation, mean * placement_scale) + translation;
+        sh_eye = preview_rotate(float4(placement_rotation.x, -placement_rotation.yzw), sh_eye - translation) / placement_scale;
+    }
     float3 t = xform_point(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
                            camera[8], camera[9], camera[10], camera[12], camera[13], camera[14]);
     if (!camera_visible(t, mode)) return;
@@ -96,8 +119,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         c5 = covariances[base + 5];
     }
 
+    if (transform_count != 0u) {
+        scale *= placement_scale;
+        float4 q = placement_rotation;
+        rotation = float4(q.x * rotation.x - dot(q.yzw, rotation.yzw),
+                          q.x * rotation.yzw + rotation.x * q.yzw + cross(q.yzw, rotation.yzw));
+    }
+
     if ((flags & 256u) != 0u) {
-        gut_preprocess(index, mean, t, scale, rotation, opacity);
+        gut_preprocess(index, mean, t, scale, rotation, opacity, sh_mean, sh_eye);
         return;
     }
 
@@ -141,7 +171,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 rgb;
     if (has_sh) {
         uint bases = pc.u2;
-        rgb = evaluate_sh(pc.u1, mean, float3(camera[16], camera[17], camera[18]), color_src, index * bases * 3,
+        rgb = evaluate_sh(pc.u1, sh_mean, sh_eye, color_src, index * bases * 3,
                           clamped0, clamped1, clamped2);
     } else {
         rgb = float3(color_src[3 * index], color_src[3 * index + 1], color_src[3 * index + 2]);

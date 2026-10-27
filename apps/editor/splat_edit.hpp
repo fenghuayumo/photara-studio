@@ -40,6 +40,8 @@ public:
 
     void clear();
     void sync(const std::string& key, const Host& host);
+    // Lazy CPU world-space copy for picking/editing. Does not upload the model.
+    void sync_preview_world(const photara::splat::GaussianModel& model);
     // True after a model is loaded, including after every Gaussian is deleted.
     [[nodiscard]] bool bound_to(const std::string& key) const noexcept {
         return synced_ && key_ == key;

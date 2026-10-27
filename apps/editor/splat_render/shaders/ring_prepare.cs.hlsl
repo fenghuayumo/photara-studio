@@ -49,12 +49,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
         store_hidden(slot);
         return;
     }
-    float3 center = center_opacity.xyz;
-    float3 scale = max(scales[id].xyz, 1e-8);
+    ModelPlacement placement = model_placement(frame, id);
+    float3 center = placement_point(placement, center_opacity.xyz);
+    float3 scale = max(scales[id].xyz, 1e-8) * asfloat(placement.meta.y);
     float4 q = rotations[id];
     float qn = length(q);
     if (qn < 1e-8) q = float4(1.0, 0.0, 0.0, 0.0);
     else q /= qn;
+    float4 p = placement.rotation;
+    q = float4(p.x * q.x - dot(p.yzw, q.yzw), p.x * q.yzw + q.x * p.yzw + cross(p.yzw, q.yzw));
     float r = q.x;
     float x = q.y;
     float y = q.z;
@@ -87,8 +90,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
+    float3 local_eye = placement_rotate(float4(p.x, -p.yzw), frame.eye.xyz - placement.translation.xyz) / asfloat(placement.meta.y);
     float3 rgb = sh_color(
-        harmonics, id, center, frame.meta.x, frame.meta.z, frame.eye.xyz);
+        harmonics, id, center_opacity.xyz, frame.meta.x, frame.meta.z, local_eye);
     float3 camera_point = transform_point(frame, center);
     float selection_depth = uint(frame.eye.w + .5) == k_model_equirect
         ? length(camera_point) : camera_point.z;

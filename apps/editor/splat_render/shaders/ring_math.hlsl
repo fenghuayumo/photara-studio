@@ -10,7 +10,34 @@ struct SplatFrame {
     [[vk::offset(112)]] float4 viewport;
     [[vk::offset(128)]] uint4 meta;
     [[vk::offset(144)]] float4 selection_depth;
+    [[vk::offset(160)]] uint4 placement;
 };
+
+struct ModelPlacement { uint4 meta; float4 translation; float4 rotation; };
+StructuredBuffer<ModelPlacement> model_placements : register(t15);
+
+float3 placement_rotate(float4 q, float3 v) {
+    return v + 2.0 * cross(q.yzw, cross(q.yzw, v) + q.x * v);
+}
+
+ModelPlacement model_placement(SplatFrame f, uint index) {
+    ModelPlacement result;
+    result.meta = uint4(0, asuint(1.0), 0, 0);
+    result.translation = 0.0;
+    result.rotation = float4(1.0, 0.0, 0.0, 0.0);
+    if (f.placement.x == 0) return result;
+    uint lo = 0, hi = f.placement.x;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2;
+        if (index < model_placements[mid].meta.x) hi = mid;
+        else lo = mid + 1;
+    }
+    return model_placements[lo];
+}
+
+float3 placement_point(ModelPlacement p, float3 local) {
+    return placement_rotate(p.rotation, local * asfloat(p.meta.y)) + p.translation.xyz;
+}
 
 static const float k_pi = 3.14159265;
 static const float k_sh_c0 = 0.28209479177387814;
