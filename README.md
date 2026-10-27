@@ -78,7 +78,6 @@ For Linux, other build configurations, and more CLI examples, see the
 - [Pipeline overview](docs/PIPELINE.md) — reconstruction stages and artifacts.
 - [Python API](docs/api/python.md) · [C++ API](docs/api/cpp.md) · [API index](docs/api/README.md).
 - [Windows packaging](docs/PACKAGING_WINDOWS.md) · [Agent control](docs/AGENT_CONTROL.md).
-- [3DGS and mesh viewer](docs/model-viewer.md).
 - [SfM](docs/SFM_ARCHITECTURE.md) · [MVS](docs/MVS_ARCHITECTURE.md) · [Gaussian Splatting](docs/SPLAT_CPP.md) · [Feature backends](docs/FEATURES_BACKENDS.md).
 
 ## License
