@@ -695,8 +695,11 @@ __global__ void multi_view_raw_kernel(
                 terms + 4,
                 static_cast<float>(__popc(active_lanes)));
     }
-    const float projected_x = reference.fx * rx / rz + reference.cx;
-    const float projected_y = reference.fy * ry / rz + reference.cy;
+    // Keep each projection operation rounded separately, as in the Vulkan
+    // shader. Fused multiply-add near a zero residual can otherwise turn
+    // tiny projection differences into a visible normalized gradient.
+    const float projected_x = __fadd_rn(__fdiv_rn(__fmul_rn(reference.fx, rx), rz), reference.cx);
+    const float projected_y = __fadd_rn(__fdiv_rn(__fmul_rn(reference.fy, ry), rz), reference.cy);
     const float du = projected_x - static_cast<float>(x);
     const float dv = projected_y - static_cast<float>(y);
     const float noise = sqrtf(du * du + dv * dv + 1e-12F);

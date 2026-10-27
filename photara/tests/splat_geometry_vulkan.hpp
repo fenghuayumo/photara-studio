@@ -181,7 +181,7 @@ void test_vulkan_geometry_chain() {
     compare(detail::compute_3d_filter(means,{panorama,camera}),
         detail::compute_3d_filter(means.to(Device::Vulkan),{panorama,camera}),2e-5F,"Vulkan panorama filter parity");
 
-    struct Chain { ModelGradients total, sample; Tensor points; detail::MultiViewLoss loss; Tensor stability; };
+    struct Chain { ModelGradients total, sample; Tensor points, depth, normal, sampled, inside, upstream; detail::MultiViewLoss loss; Tensor stability; };
     const auto run = [&](Device device, bool merge_sample, float photometric_weight = 0.F, bool collect_terms = true) {
         std::cout << "MV chain backend=" << (device == Device::CUDA ? "CUDA" : "Vulkan") << std::endl;
         auto model = make_model(device);
@@ -202,9 +202,14 @@ void test_vulkan_geometry_chain() {
         auto sampled = rasterizer.sample_depth(model,world,neighbour_camera,ro);
         Tensor upstream;
         Chain result;
+        result.depth = rendered.median_depth;
+        result.normal = rendered.normal;
+        result.sampled = sampled.camera_points;
+        result.inside = sampled.inside;
         result.stability = Tensor::zeros({3},device);
         result.loss = detail::add_multi_view_loss(sampled.camera_points,sampled.inside,rendered,
             ref,near,options,image_gradient,upstream,collect_terms,&result.stability);
+        result.upstream = upstream;
         require(!collect_terms || (result.loss.geometry_pixels > 0 && result.loss.ncc_pixels > 0),
             "Vulkan geometry chain must have actual MV/NCC support");
         auto sample_grad = rasterizer.sample_depth_backward(model,sampled,upstream);
@@ -222,6 +227,21 @@ void test_vulkan_geometry_chain() {
     require(cuda.loss.geometry_pixels == vk.loss.geometry_pixels && cuda.loss.ncc_pixels == vk.loss.ncc_pixels,
         "Vulkan full geometry chain changed accepted-pixel counts");
     compare(cuda.stability,vk.stability,1e-6F,"Vulkan stability accumulator");
+    // Hold all inputs fixed to distinguish loss arithmetic from forward-render roundoff.
+    {
+        RenderResult same;
+        same.median_depth = cuda.depth.to(Device::Vulkan);
+        same.normal = cuda.normal.to(Device::Vulkan);
+        auto ref = make_view(Device::Vulkan,camera,0.F), near = make_view(Device::Vulkan,neighbour_camera,2.F);
+        const auto mask = cuda.inside.to_vector_bool();
+        std::vector<std::int32_t> flags(mask.size());
+        for (std::size_t i = 0; i < mask.size(); ++i) flags[i] = mask[i] ? 1 : 0;
+        const auto inside = Tensor::from_vector(flags,{flags.size()},Device::Vulkan);
+        TrainingOptions opts; opts.multi_view_geo_weight = .02F; opts.multi_view_ncc_weight = .6F;
+        detail::LossGradients grads; Tensor upstream;
+        detail::add_multi_view_loss(cuda.sampled.to(Device::Vulkan),inside,same,ref,near,opts,grads,upstream,true);
+        compare(cuda.upstream,upstream,1e-4F,"Vulkan multi-view gradient with identical inputs");
+    }
     compare(cuda.points,vk.points,.003F,"Vulkan query point gradient");
     compare(cuda.sample.means,vk.sample.means,.001F,"Vulkan sample mean gradient");
     compare(cuda.sample.log_scales,vk.sample.log_scales,.001F,"Vulkan sample scale gradient");
@@ -485,6 +505,7 @@ void test_vulkan_geometry_trainer() {
     }
     TrainingOptions o;
     o.backend = TrainingBackend::vulkan; o.iterations = 10;
+    o.filter_mode = SplatFilterMode::mip_3d;
     o.sh_degree = 0; o.input_is_dense = false;
     o.initial_opacity = .9F;
     o.initialize_scale_from_knn = true; o.initial_scale = .3F;

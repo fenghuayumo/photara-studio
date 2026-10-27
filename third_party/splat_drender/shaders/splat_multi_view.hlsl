@@ -257,8 +257,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID,
     round_trip.z = transform_buffer[2] * delta.x + transform_buffer[5] * delta.y + transform_buffer[8] * delta.z;
     if (!(round_trip.z > 0.2f)) return;
     store_float(terms_base + 5u + 5u*pixel + 4u, 1.0f);
-    float projected_x = reference_fx * round_trip.x / round_trip.z + reference_cx;
-    float projected_y = reference_fy * round_trip.y / round_trip.z + reference_cy;
+    // Match CUDA's separately rounded projection near zero residual.
+    precise float projected_x = reference_fx * round_trip.x / round_trip.z + reference_cx;
+    precise float projected_y = reference_fy * round_trip.y / round_trip.z + reference_cy;
     float du = projected_x - (float)x;
     float dv = projected_y - (float)y;
     float noise = sqrt(du * du + dv * dv + 1.0e-12f);
