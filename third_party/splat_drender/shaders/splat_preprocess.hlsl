@@ -150,10 +150,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > .5f && (selection_depth < camera[20] || selection_depth > camera[21]))
         rgb *= .18f;
-    // Keep the CUDA radial order: camera-Z produced more mesh artifacts
-    // in the ori_img 30k-step geometry comparison.
-    // float depth = t.z; // Original 3DGS camera-Z order.
-    float depth = sqrt(dot(t, t));
+    // Camera-space Z for 3DGS; panoramas need radial distance.
+    float depth = mode == kModeEquirect ? length(t) : t.z;
     uint depth_key = asuint(depth);
     uint gaussian_slots = geometry ? 7u : 5u;
     uint gaussian_base = index * gaussian_slots;

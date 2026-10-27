@@ -71,9 +71,9 @@ inline void test_raster_policy(tinytensor::Device device) {
     options.colors_precomp = Tensor::from_vector(
         std::vector<float>{1,0,0, 0,0,1}, {2,3}, device);
     const float a = .6F * std::exp(-.5F * 15.F*15.F / 625.F);
-    auto radial = rasterizer.forward(model, camera, options).color.to_vector();
-    close(radial[center], .4F*a, "Radial sorting did not place the blue Gaussian first");
-    close(radial[2*32*32+center], .6F, "Radial sort compositing differs from oracle");
+    const auto z_sorted = rasterizer.forward(model, camera, options).color.to_vector();
+    close(z_sorted[center], a, "Camera-Z sorting did not place the red Gaussian first");
+    close(z_sorted[2*32*32+center], (1-a)*.6F, "Camera-Z compositing differs from oracle");
     Camera second = camera;
     camera.fx = camera.fy = 100.F;
     second.fx = second.fy = 1000.F;

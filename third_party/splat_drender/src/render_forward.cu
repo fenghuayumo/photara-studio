@@ -92,11 +92,9 @@ __global__ void preprocess_gaussians(
     }
 
     st.mean2d[i] = make_float2(p.pixel_x, p.pixel_y);
-    // Standard 3DGS sorts by camera-space Z. In the ori_img 30k-step
-    // meshing comparison, Z produced more visible sheet artifacts; use
-    // radial distance for training and depth-based mesh extraction.
-    // st.depth_key[i] = depth_bits(t.z); // Original 3DGS camera-Z order.
-    st.depth_key[i] = depth_bits(norm3df(t.x, t.y, t.z));
+    // Camera-space Z matches standard 3DGS. A panoramic camera uses radial
+    // distance because points behind its camera plane remain visible.
+    st.depth_key[i] = depth_bits(is_equirect(K.mode) ? norm3df(t.x, t.y, t.z) : t.z);
     if constexpr (GEOMETRY) {
         st.ray_plane[i] = splat.ray_plane;
         st.normal[i] = splat.normal;

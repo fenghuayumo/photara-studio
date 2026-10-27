@@ -8,14 +8,15 @@ do not select or execute the Brush application.
 
 | Control | Standard | Mip Splatting numerical preset |
 |---|---|---|
-| Sort key | Camera-center Euclidean distance | Camera-center Euclidean distance |
+| 3DGS sort key | Camera-space Z | Camera-space Z |
 | Per-contributor alpha ceiling | 0.99 | 0.999 |
 | Pinhole near plane | 0.2 scene units | 0.01 scene units |
 | Pixel sample location | Integer | Half-integer |
 
 Select the preset with `--splat-raster-profile mip-splatting`. Alpha ceiling, near plane and pixel sample location can be overridden with
 `--splat-alpha-clip`, `--splat-near-plane`, and `--splat-pixel-center 0|0.5`.
-All profiles use radial sorting.
+3DGS uses camera-space Z except for equirectangular cameras, which use radial
+distance. 3DGUT retains radial sorting.
 The preset is experimental; filter modes do not select it. Compare filter
 modes under the default standard raster policy before attributing changes to
 filtering. The benchmark defaults to `classic mip2d mip3d`; select
@@ -38,11 +39,11 @@ as outside even though its forward render contains the surface. Treat near
 plane changes on Vulkan geometry supervision as incomplete until that query
 path is corrected; the ORI raster and mesh benchmark uses CUDA.
 
-A 30,000-step paired ori_img geometry-training experiment using Classic and
-TSDF found more visible sheet artifacts with camera-Z sorting; its radial
-counterpart had a cleaner mesh. This single-scene, single-seed observation
-is the reason the renderer keeps radial ordering, not a universal quality
-claim. The Z-sort CLI and implementation have been retired.
+A 30,000-step ori_img comparison using Classic and TSDF produced different
+artifacts across sorting choices, but a repeated radial run also showed
+severe artifacts. Two paired Mip3D runs produced similar meshes with both
+orders. These observations do not establish a general quality advantage;
+camera-space Z is the default for 3DGS, as in the original implementation.
 
 In an earlier 8,000-step, single-seed room-scene diagnosis, individual held-out
 views showed strong sensitivity to the preset even when mean PSNR changed
@@ -97,7 +98,7 @@ ones; the Mip Splatting numerical preset is not a claim of complete bitwise pari
 ## Validation and experiments
 
 `photara_splat_test --raster-policy-only` checks CUDA and Vulkan against
-independent analytic Gaussian/compositing oracles. Tests check radial sorting,
+independent analytic Gaussian/compositing oracles. Tests check camera-Z sorting,
 sample positions and near planes, both alpha ceilings,
 Classic opacity backward, 2D/3D compensation, and mixed-focal 3D radii.
 

@@ -3977,7 +3977,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " screen_space_kernel=", effective_raster.kernel_size,
         " compensate_2d=", effective_raster.rasterization.compensate_2d,
         " filter_mode=", static_cast<int>(options.filter_mode),
-        " depth_sort=radial",
+        " depth_sort=", options.render_method == photara::splat::RenderMethod::gaussian_3dgs
+            ? "camera_z (equirectangular radial)" : "radial (3DGUT)",
         " alpha_clip=", options.rasterization.alpha_clip,
         " near_plane=", options.rasterization.near_plane,
         " pixel_center=", options.rasterization.pixel_center_offset,

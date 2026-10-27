@@ -421,8 +421,9 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.constrain_scale_range);
     hash.append(options.geometry_epsilon);
     hash.append(options.filter_mode);
-    // Preserve the checkpoint hash for the former default radial policy.
-    hash.append(false);
+    // Reject radial 3DGS checkpoints: resuming with a different order changes
+    // the optimized image. 3DGUT retains its prior radial sorting policy.
+    hash.append(options.render_method == RenderMethod::gaussian_3dgs);
     hash.append(options.rasterization.alpha_clip);
     hash.append(options.rasterization.near_plane);
     hash.append(options.rasterization.pixel_center_offset);
