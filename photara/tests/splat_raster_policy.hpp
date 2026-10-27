@@ -31,7 +31,7 @@ inline void test_raster_policy(tinytensor::Device device) {
           "Legacy alpha ceiling changed");
     options.rasterization.alpha_clip = .999F;
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], .999F,
-          "Brush alpha ceiling was not applied");
+          "Mip Splatting preset alpha ceiling was not applied");
     options.rasterization.pixel_center_offset = .5F;
     const float expected_half = .9999F * std::exp(-.5F * (.25F+.25F) / .16F);
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], expected_half,
@@ -42,7 +42,7 @@ inline void test_raster_policy(tinytensor::Device device) {
           "Legacy near plane failed to cull a near Gaussian");
     options.rasterization.near_plane = .01F;
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], .6F,
-          "Brush near plane still uses the old projection culling threshold");
+          "Mip Splatting preset near plane still uses the old projection culling threshold");
     model = make({0,0,2}, .04F, .6F);
     options.kernel_size = .3F;
     options.rasterization.compensate_2d = false;

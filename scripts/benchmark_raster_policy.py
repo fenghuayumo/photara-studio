@@ -13,11 +13,11 @@ VARIANTS = {
     'alpha_999': ('alpha', 'legacy', ['--splat-alpha-clip', '0.999']),
     'near_001': ('near', 'legacy', ['--splat-near-plane', '0.01']),
     'pixel_half': ('pixel', 'legacy', ['--splat-pixel-center', '0.5']),
-    'brush_legacy': ('brush', 'legacy', ['--splat-raster-profile', 'brush']),
-    'brush_classic': ('brush', 'classic', ['--splat-raster-profile', 'brush', '--splat-filter-mode', 'classic']),
-    'brush_mip2d': ('brush', 'mip2d', ['--splat-raster-profile', 'brush', '--splat-filter-mode', 'mip2d']),
-    'brush_mip3d': ('brush', 'mip3d', ['--splat-raster-profile', 'brush', '--splat-filter-mode', 'mip3d']),
-    'brush_mip': ('brush', 'mip', ['--splat-raster-profile', 'brush', '--splat-filter-mode', 'mip']),
+    'mip_splatting_legacy': ('mip-splatting', 'legacy', ['--splat-raster-profile', 'mip-splatting']),
+    'mip_splatting_classic': ('mip-splatting', 'classic', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'classic']),
+    'mip_splatting_mip2d': ('mip-splatting', 'mip2d', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'mip2d']),
+    'mip_splatting_mip3d': ('mip-splatting', 'mip3d', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'mip3d']),
+    'mip_splatting_mip': ('mip-splatting', 'mip', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'mip']),
 }
 
 
@@ -47,7 +47,7 @@ def main():
     parser.add_argument('--progressive-interval', type=int, default=1000)
     parser.add_argument('--seeds', type=int, nargs='+', default=[42])
     parser.add_argument('--variants', nargs='+', choices=list(VARIANTS),
-                        default=[name for name in VARIANTS if name != 'brush_mip'])
+                        default=[name for name in VARIANTS if name != 'mip_splatting_mip'])
     parser.add_argument('--mesh', action='store_true')
     parser.add_argument('--geometry', action='store_true')
     parser.add_argument('--common-audit', action='store_true')

@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
         const auto profile=audit["profile"].get<std::string>();
         const auto filter=audit["filter"].get<std::string>();
         TrainingOptions training;
-        if (profile=="brush") training.rasterization={true,.999F,.01F,.5F,true};
+        if (profile=="mip-splatting") training.rasterization={true,.999F,.01F,.5F,true};
         else if (profile=="z") training.rasterization.sort_by_camera_z=true;
         else if (profile=="alpha") training.rasterization.alpha_clip=.999F;
         else if (profile=="near") training.rasterization.near_plane=.01F;

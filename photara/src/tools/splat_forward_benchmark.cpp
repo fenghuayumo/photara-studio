@@ -25,9 +25,9 @@ int main(int argc, char** argv) {
             {"alpha_999",{false,.999F,.2F,0.F,true},SplatFilterMode::legacy},
             {"near_001",{false,.99F,.01F,0.F,true},SplatFilterMode::legacy},
             {"pixel_half",{false,.99F,.2F,.5F,true},SplatFilterMode::legacy},
-            {"brush_legacy",{true,.999F,.01F,.5F,true},SplatFilterMode::legacy},
-            {"brush_classic",{true,.999F,.01F,.5F,true},SplatFilterMode::classic},
-            {"brush_mip2d",{true,.999F,.01F,.5F,true},SplatFilterMode::mip_2d}};
+            {"mip_splatting_legacy",{true,.999F,.01F,.5F,true},SplatFilterMode::legacy},
+            {"mip_splatting_classic",{true,.999F,.01F,.5F,true},SplatFilterMode::classic},
+            {"mip_splatting_mip2d",{true,.999F,.01F,.5F,true},SplatFilterMode::mip_2d}};
         std::mt19937 random(20261026);
         Rasterizer renderer;
         Json results={{"model",argv[1]},{"gaussians",model.size()},{"measurements",Json::array()}};

@@ -925,7 +925,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-filter-mode", "Filtering: legacy, classic, mip2d or mip3d; mip is a combined-filter ablation",
          cxxopts::value<std::string>()->default_value("legacy"))
-        ("splat-raster-profile", "Raster numerics preset: legacy or brush (camera-Z, 0.999, 0.01, half-pixel)",
+        ("splat-raster-profile", "Raster numerics preset: legacy or mip-splatting (camera-Z, 0.999, 0.01, half-pixel)",
          cxxopts::value<std::string>()->default_value("legacy"))
         ("splat-depth-sort", "Override sort metric: radial or z", cxxopts::value<std::string>())
         ("splat-alpha-clip", "Override per-splat alpha ceiling (0,1)", cxxopts::value<float>())
@@ -1644,7 +1644,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (filter_mode != "legacy" && (result.count("splat-kernel-size") || result["splat-filter-3d"].as<std::string>() != "auto"))
         throw std::invalid_argument("Explicit filter mode cannot be combined with --splat-kernel-size or --splat-filter-3d");
     const auto profile = result["splat-raster-profile"].as<std::string>();
-    if (profile == "brush") cli.splat_rasterization = {true, 0.999F, 0.01F, 0.5F, true};
+    if (profile == "mip-splatting") cli.splat_rasterization = {true, 0.999F, 0.01F, 0.5F, true};
     else if (profile != "legacy") throw std::invalid_argument("Invalid --splat-raster-profile");
     if (result.count("splat-depth-sort")) {
         const auto sort = result["splat-depth-sort"].as<std::string>();

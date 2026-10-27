@@ -6,14 +6,14 @@ do not select or execute the Brush application.
 
 ## Raster policy
 
-| Control | Legacy | Brush numerical preset |
+| Control | Legacy | Mip Splatting numerical preset |
 |---|---|---|
 | Sort key | Camera-center Euclidean distance | Camera-space Z |
 | Per-contributor alpha ceiling | 0.99 | 0.999 |
 | Pinhole near plane | 0.2 scene units | 0.01 scene units |
 | Pixel sample location | Integer | Half-integer |
 
-Select the preset with `--splat-raster-profile brush`. Each control can be
+Select the preset with `--splat-raster-profile mip-splatting`. Each control can be
 overridden independently with `--splat-depth-sort radial|z`,
 `--splat-alpha-clip`, `--splat-near-plane`, and `--splat-pixel-center 0|0.5`.
 The near plane is expressed in the SfM scene's units, not metres.
@@ -30,7 +30,7 @@ does not otherwise replace Photara's gradient-clipping approximations with
 Brush's complete backward implementation.
 
 Near-plane clipping is tested for the forward rasterizer on CUDA and Vulkan.
-CUDA depth-point queries also accept a sample just beyond the Brush near plane.
+CUDA depth-point queries also accept a sample just beyond the preset near plane.
 The current Vulkan median-depth query still reports that same synthetic sample
 as outside even though its forward render contains the surface. Treat near
 plane changes on Vulkan geometry supervision as incomplete until that query
@@ -71,7 +71,7 @@ Native non-pinhole training retains the pre-existing 3D-filter restriction.
 The ordinary pinhole 2D Mip opacity compensation remains detached from the
 covariance gradient. Native fisheye differentiates its exact compensation.
 Determinant guards and other numerical safeguards remain Photara's existing
-ones; the Brush numerical preset is not a claim of complete bitwise parity.
+ones; the Mip Splatting numerical preset is not a claim of complete bitwise parity.
 
 ## Validation and experiments
 
@@ -94,5 +94,5 @@ accuracy. Shared SfM calibration and sparse initialization can include held-out
 images. The split therefore measures appearance generalization with shared
 initialization, not an independently reconstructed test scene.
 
-Brush reference used for the numerical preset:
+Brush reference used to derive the numerical preset:
 [`1388f74`](https://github.com/ArthurBrussee/brush/tree/1388f74c6fe0236f68ee4915564bf00e9d2e3747).

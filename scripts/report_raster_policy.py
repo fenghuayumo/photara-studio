@@ -7,9 +7,9 @@ from PIL import Image, ImageDraw, ImageFont
 LANCZOS = getattr(Image, 'Resampling', Image).LANCZOS
 
 LABELS = {'legacy':'Legacy','sort_z':'Z sort','alpha_999':'Alpha .999',
-          'near_001':'Near .01','pixel_half':'Half pixel','brush_legacy':'Brush numerics',
-          'brush_classic':'Brush + Classic','brush_mip2d':'Brush + Mip 2D',
-          'brush_mip3d':'Brush + Mip 3D','brush_mip':'2D+3D (extra ablation)'}
+          'near_001':'Near .01','pixel_half':'Half pixel','mip_splatting_legacy':'Mip Splatting numerics',
+          'mip_splatting_classic':'Mip Splatting + Classic','mip_splatting_mip2d':'Mip Splatting + Mip 2D',
+          'mip_splatting_mip3d':'Mip Splatting + Mip 3D','mip_splatting_mip':'2D+3D (extra ablation)'}
 
 
 def table(rows, columns):
@@ -50,7 +50,7 @@ def figures(rows, output):
     if not long: return
     # One seed per qualitative sheet; repeated seeds remain in the numerical table.
     long=[r for r in long if r['seed']==min(v['seed'] for v in long)]
-    preferred=['legacy','brush_classic','brush_mip2d','brush_mip3d']
+    preferred=['legacy','mip_splatting_classic','mip_splatting_mip2d','mip_splatting_mip3d']
     chosen=[r for name in preferred for r in long if r['variant']==name]
     chosen=chosen[:5]
     font_path=Path('C:/Windows/Fonts/arial.ttf')
@@ -93,7 +93,7 @@ def main():
            '硬件：RTX 3060 Laptop 6GB。短程为 8000 步、每 1000 步升一级分辨率；'
            '长程为 30000 步、每 3000 步升一级。最终均为原生 1000×1000。'
            '训练不启用深度法线/多视图几何损失；TSDF 提取单独运行。Speedy 剪枝关闭。', '',
-           '这些是 Photara 内部对齐 Brush 指定数值的消融，不是两个软件的速度比赛。'
+           '这些是 Photara 内部采用 Mip Splatting 光栅预设的消融，不是两个软件的速度比赛。'
            'Classic=0.3 方差且不补偿，Mip2D=0.1 方差且补偿，Mip3D 使用逐相机距离/焦距下限。'
            'Mip3D-only 保留 Classic 的 0.3 屏幕膨胀。Legacy 保留旧的零核/自动 3D 策略。', '',
            '有效区 PSNR、SSIM 排除去畸变后没有源图像的像素；LPIPS 是 SqueezeNet 空间图在有效区的均值。'

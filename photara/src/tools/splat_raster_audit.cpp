@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         options.ignore_undistortion_border = true;
         options.use_mask = false;
         const std::string profile(argv[5]), filter(argv[6]);
-        if (profile == "brush") options.rasterization = {true, .999F, .01F, .5F, true};
+        if (profile == "mip-splatting") options.rasterization = {true, .999F, .01F, .5F, true};
         else if (profile == "z") options.rasterization.sort_by_camera_z = true;
         else if (profile == "alpha") options.rasterization.alpha_clip = .999F;
         else if (profile == "near") options.rasterization.near_plane = .01F;
