@@ -1,11 +1,12 @@
 # 3DGUT rasterization
 
 Select **Rendering method → 3DGUT** in advanced training settings, or
-pass `--backend cuda --splat-render-method 3dgut` to the `photara` CLI.
+pass `--backend vulkan --splat-render-method 3dgut` to the `photara` CLI
+(use `--backend cuda` for CUDA training).
 The default remains `--splat-render-method 3dgs`.
 
 `TrainingOptions::render_method` selects the reconstruction method. The method
-then belongs to `GaussianModel`, so CUDA rasterization, training previews,
+then belongs to `GaussianModel`, so CUDA/Vulkan rasterization, training previews,
 evaluation, densification, cloning, transformations and PLY reloads use the
 model's method. A resumed checkpoint must use the same method.
 
@@ -73,9 +74,13 @@ Project settings v21 preserve the method selection; older settings default to
 
 ## Current scope and checks
 
-Training currently targets CUDA. 3DGUT uses appearance-only optimization: depth,
+Training supports CUDA and Vulkan (`--backend vulkan`). 3DGUT uses appearance-only optimization: depth,
 normal, multi-view and AI geometry supervision are disabled even if requested.
 TSDF/PAM extraction rejects GUT models and recommends training with 3DGS.
+
+Vulkan uses a 32-lane subgroup backward with optional native float atomics,
+and retains portable replay for other subgroup widths. See
+[measured performance and reproduction](3dgut-vulkan-performance.md).
 
 Training and display methods remain separate from backend selection. The editor
 viewport renders GUT models using
@@ -83,8 +88,8 @@ Vulkan 3DGUT forward, including RGB, depth, normal and rings shading. The
 rendering method follows the loaded model (including PLY metadata and embedded
 models), and is preserved after edits, undo/redo, reload and diagnostic shading
 changes. Selecting a training method does not alter the selected training
-backend. Vulkan GUT training, point-depth queries, occupancy queries and Speedy
-pruning are unsupported. GUT training logs that geometry losses are disabled.
+backend. Point-depth queries, occupancy queries and Speedy pruning remain
+unsupported for GUT. GUT training logs that geometry losses are disabled.
 Occupancy/PAM extraction and point-depth queries report an explicit error for
 a GUT model.
 
@@ -98,15 +103,19 @@ Gaussians cover partial tiles, multiple warp buckets and shared-memory batches.
 A separate 1e-8-scale stress case checks finite outputs and gradients; it does
 not assert finite-difference or original-path agreement at that condition number.
 
-The main project's `photara_splat_gut_test` exercises CUDA training with fused
-Adam, densification and GS/GUT PLY/archive roundtrips, plus legacy PLY loading
-and rejection of Vulkan GUT training. `photara_project_io_test` covers project
+The main project's `photara_splat_gut_test` exercises CUDA and Vulkan training with fused
+Adam, densification and GS/GUT PLY/archive roundtrips, plus legacy PLY loading.
+It compares RGB/alpha, masked and unmasked L1/SSIM losses, image gradients,
+all five raw model-gradient groups and ADC weights across four camera models,
+transformed cameras and optional 3D filtering. Directional finite differences
+independently check Vulkan parameter gradients. `photara_project_io_test` covers project
 settings persistence and legacy versions.
 
 `splat_render::GaussianCloud::render_method` selects the viewport method.
 The shared Vulkan renderer accepts
-`SplatSettings::primitive = SplatPrimitive::gaussian_3dgut` for forward-only
-rendering; recording backward snapshots and point queries is rejected. Its
+`SplatSettings::primitive = SplatPrimitive::gaussian_3dgut` for rendering and
+appearance training. Training uses `pixel_snapshots=true` and `need_depth=false`;
+geometry supervision and point queries are rejected. Its
 seven-point UT and ray response match CUDA, including panorama seam wrapping,
 orthographic ray origins, SH/precomputed colors, optional 3D scale filtering,
 alpha compositing, peak median depth and camera-facing normals. Projected

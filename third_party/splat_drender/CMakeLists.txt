@@ -86,6 +86,9 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_ranges_indirect.hlsl
             shaders/splat_blend.hlsl
             shaders/splat_blend_gut.hlsl
+            shaders/splat_blend_gut_backward.hlsl
+            shaders/splat_blend_gut_backward_subgroup.hlsl
+            shaders/splat_blend_gut_backward_atomic.hlsl
             shaders/splat_blend_gut_rgba.hlsl
             shaders/splat_blend_no_geometry.hlsl
             shaders/splat_blend_training.hlsl
@@ -151,6 +154,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_gut.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_gut_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_gut_backward_subgroup.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward_structure_adam.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"

@@ -1065,6 +1065,81 @@ int run_cuda_method_benchmark(int argc, char** argv) {
         }
         return 0;
     }
+    if (std::string(argv[1]) == "--bench-gut-backends") {
+        std::array<std::vector<float>,7> reference;
+        std::ofstream csv(output/"gut_backends.csv");
+        csv << "backend,gaussians,width,height,instances,forward_ms,backward_ms,loss_backward_ms,inference_ms\n";
+        model.render_method = photara::splat::RenderMethod::gaussian_3dgut;
+        for (const auto device : {tinytensor::Device::CUDA, tinytensor::Device::Vulkan}) {
+            const bool vk = device == tinytensor::Device::Vulkan;
+            auto resident = model;
+            resident.means=model.means.to(device); resident.log_scales=model.log_scales.to(device);
+            resident.quaternions=model.quaternions.to(device); resident.opacity_logits=model.opacity_logits.to(device);
+            resident.sh=model.sh.to(device);
+            if(model.filter_3d.is_valid()) resident.filter_3d=model.filter_3d.to(device);
+            const auto color_gradient=dc.to(device),alpha_gradient=da.to(device),image=target.rgb.to(device);
+            photara::splat::Rasterizer rasterizer;
+            photara::splat::RasterizeOptions raster;
+            raster.active_sh_degree=model.sh_degree;raster.require_depth=false;
+            raster.copy_attachments=!vk;raster.defer_visibility=vk;
+            const auto synchronize=[&] {
+                if(vk) tinytensor::vulkan::synchronize();
+                else require(cudaDeviceSynchronize()==cudaSuccess,"GUT benchmark CUDA synchronize");
+            };
+            auto frame=rasterizer.forward(resident,camera,raster);
+            synchronize();
+            const auto instances=frame.rendered_instances;
+            const double forward=time_ms([&] {
+                frame=rasterizer.forward(resident,camera,raster);synchronize();
+            },3,iterations);
+            const double backward=time_ms([&] {
+                auto gradients=rasterizer.backward(resident,frame,color_gradient,alpha_gradient,{},{});
+                synchronize();
+            },3,iterations);
+            auto photo_gradient=tinytensor::Tensor::zeros({3U,camera.height,camera.width},device);
+            const auto mask=tinytensor::Tensor::ones({camera.height,camera.width},device);
+            const double loss_backward=time_ms([&] {
+                if(vk) rasterizer.photometric_loss(frame,image,{},false,.2F,1.F,false,&photo_gradient);
+                else {
+                    photo_gradient.zero_();
+                    photara::splat::detail::photometric_loss(frame.color,image,mask,false,
+                        photo_gradient,nullptr,camera.width,camera.height);
+                }
+                auto gradients=rasterizer.backward(resident,frame,photo_gradient,
+                    vk ? tinytensor::Tensor{} : alpha_gradient,{},{});
+                synchronize();
+            },3,iterations);
+            frame={};raster.record_backward_state=false;
+            const double inference=time_ms([&] {
+                auto rendered=rasterizer.forward(resident,camera,raster);synchronize();
+            },3,iterations);
+            raster.record_backward_state=true;raster.copy_attachments=true;
+            auto checked_frame=rasterizer.forward(resident,camera,raster);
+            auto checked_gradients=rasterizer.backward(resident,checked_frame,color_gradient,alpha_gradient,{},{});
+            std::array<std::vector<float>,7> actual{
+                checked_frame.color.to_vector(),checked_frame.alpha.to_vector(),
+                checked_gradients.means.to_vector(),checked_gradients.log_scales.to_vector(),
+                checked_gradients.quaternions.to_vector(),checked_gradients.opacity_logits.to_vector(),
+                checked_gradients.sh.to_vector()};
+            if(!vk) reference=std::move(actual);
+            else {
+                const char* names[]{"RGB","alpha","means","scales","rotations","opacity","SH"};
+                for(std::size_t k=0;k<actual.size();++k) {
+                    const double error=relative_l2(actual[k],reference[k]);
+                    std::cout<<"real_scene_parity "<<names[k]<<" relative_l2="<<error<<std::endl;
+                    require(std::isfinite(error) && error<(k<2 ? .001 : .005),
+                        "real-scene CUDA/Vulkan GUT numerical comparison failed");
+                }
+            }
+            const char* name=vk ? "vulkan" : "cuda";
+            csv<<name<<','<<resident.size()<<','<<camera.width<<','<<camera.height<<','<<instances<<','
+                <<forward<<','<<backward<<','<<loss_backward<<','<<inference<<'\n';csv.flush();
+            std::cout<<"3dgut backend="<<name<<" gaussians="<<resident.size()<<" image="<<camera.width<<'x'<<camera.height
+                <<" instances="<<instances<<" forward_ms="<<forward<<" backward_ms="<<backward
+                <<" loss_backward_ms="<<loss_backward<<" inference_ms="<<inference<<std::endl;
+        }
+        return 0;
+    }
     std::ofstream csv(output/"cuda_methods.csv");
     csv << "method,gaussians,width,height,instances,forward_ms,backward_ms,inference_ms\n";
     for (const auto method : {photara::splat::RenderMethod::gaussian_3dgs,
@@ -1105,6 +1180,7 @@ int run_cuda_method_benchmark(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && (std::string(argv[1]) == "--bench-cuda-methods" ||
+                        std::string(argv[1]) == "--bench-gut-backends" ||
                         std::string(argv[1]) == "--compare-gut-paths"))
             return run_cuda_method_benchmark(argc, argv);
         if (argc > 1 && (std::string(argv[1]) == "--bench" ||

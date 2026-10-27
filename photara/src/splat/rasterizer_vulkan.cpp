@@ -212,9 +212,13 @@ splat_drender::vulkan::SplatDeviceGaussians device_gaussians(
     return gaussians;
 }
 
-splat_drender::vulkan::SplatSettings raster_settings(const RasterizeOptions& requested_options) {
+splat_drender::vulkan::SplatSettings raster_settings(
+    const GaussianModel& model, const RasterizeOptions& requested_options) {
 
     splat_drender::vulkan::SplatSettings settings;
+    settings.primitive = model.render_method == RenderMethod::gaussian_3dgut
+        ? splat_drender::vulkan::SplatPrimitive::gaussian_3dgut
+        : splat_drender::vulkan::SplatPrimitive::gaussian_3dgs;
     std::copy(
         requested_options.background.begin(),
         requested_options.background.end(), settings.background);
@@ -249,7 +253,7 @@ RenderResult vulkan_raster_forward(
     context->backend = backend;
     context->colors_precomp = requested_options.colors_precomp;
     const auto gaussians = device_gaussians(backend, model, requested_options);
-    const auto settings = raster_settings(requested_options);
+    const auto settings = raster_settings(model, requested_options);
 
     RenderResult result;
     if (requested_options.copy_attachments) {
@@ -334,7 +338,7 @@ tinytensor::Tensor vulkan_pruning_scores(
     backend->rasterizer.bind_model_device(gaussians);
     // Keep all frame attachments internal; scoring never needs owned copies of
     // images, radii or visibility, nor a training context for backward.
-    const auto frame = backend->rasterizer.render_device(camera_view(camera), raster_settings(options));
+    const auto frame = backend->rasterizer.render_device(camera_view(camera), raster_settings(model, options));
     (void)frame;
     backend->rasterizer.pruning_scores_device(buffer_view(scores));
     return scores;
@@ -541,7 +545,7 @@ OccupancyResult vulkan_occupancy(
         if (!reuse_prepared_view)
             backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
         backend->rasterizer.occupancy_device(buffer_view(points),
-            static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(options),
+            static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(model, options),
             buffer_view(result.occupancy),buffer_view(inside),reuse_prepared_view);
     }
     result.inside=inside.gt(0);
@@ -570,7 +574,7 @@ DepthSampleResult vulkan_sample_depth(
     tinytensor::vulkan::submit_async();
     backend->rasterizer.bind_model_device(device_gaussians(backend, model, options));
     backend->rasterizer.sample_depth_device(buffer_view(points),
-        static_cast<std::uint32_t>(points.shape()[0]), camera_view(camera), raster_settings(options),
+        static_cast<std::uint32_t>(points.shape()[0]), camera_view(camera), raster_settings(model, options),
         buffer_view(result.camera_points), buffer_view(result.inside));
     result.backend_impl = context;
     backend->latest_sample = context;

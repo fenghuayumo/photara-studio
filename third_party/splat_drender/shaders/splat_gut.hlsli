@@ -91,6 +91,11 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     gauss_f[base+4u] = float4(A.m[1][0], A.m[1][1], A.m[1][2], origin.y);
     gauss_f[base+5u] = float4(A.m[2][0], A.m[2][1], A.m[2][2], origin.z);
     gauss_f[base+6u] = float4(normal, 0.0f);
+    // Appearance training uses this slot for the same ADC screen-space
+    // derivative conversion as CUDA. Inference retains its surface normal.
+    if ((pc.u3 & 8u) != 0u)
+        gauss_f[base+6u] = float4(1.0f/(abs(center.du0)+1.0e-6f),
+                                 1.0f/(abs(center.dv1)+1.0e-6f), 0.0f, 0.0f);
     // Cache the support test itself, not only the source transform. Count and
     // emit must make bit-identical discrete decisions across shader variants.
     if ((pc.u3 & 512u)!=0u) {

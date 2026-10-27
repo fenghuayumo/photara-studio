@@ -322,19 +322,60 @@ void ray_tests(bool validation) {
             raster.upload_model(sh_model);
             close(raster.render(camera, settings).color, expected.color, 8e-5, "SH colors");
             settings.pixel_snapshots = true;
+            settings.need_depth = true;
             bool rejected = false;
             try {
                 (void)raster.render(camera, settings);
             } catch (const std::invalid_argument &) {
                 rejected = true;
             }
-            require(rejected, "Vulkan GUT backward was silently accepted");
+            require(rejected, "Vulkan GUT geometry training was silently accepted");
+            settings.need_depth = false;
+            raster.upload_model(scene.gaussians());
+            const auto training = raster.render(camera, settings);
+            std::vector<float> dc(training.color.size(), 0.F), da(training.alpha.size(), 0.F);
+            for(unsigned y=camera.height/2-1;y<=camera.height/2+1;++y)
+                for(unsigned x=camera.width/2-1;x<=camera.width/2+1;++x) {
+                    const unsigned pixel=y*camera.width+x;
+                    da[pixel]=.002F;
+                    for(unsigned channel=0;channel<3;++channel) dc[channel*pixels+pixel]=.001F;
+                }
+            const auto gradient = raster.backward(dc, da);
+            const auto objective = [&] {
+                raster.upload_model(scene.gaussians());
+                const auto frame = raster.render(camera, settings);
+                double value=0;
+                for(std::size_t k=0;k<dc.size();++k) value+=double(frame.color[k])*dc[k];
+                for(std::size_t k=0;k<da.size();++k) value+=double(frame.alpha[k])*da[k];
+                return value;
+            };
+            const float mean = scene.means[0], epsilon = .001F;
+            scene.means[0] = mean + epsilon;
+            const double upper = objective();
+            scene.means[0] = mean - epsilon;
+            const double lower = objective();
+            scene.means[0] = mean;
+            const double numeric = (upper-lower)/(2*epsilon);
+            if (std::abs(gradient.means[0]-numeric)>=2e-4+.02*std::abs(numeric))
+                std::cerr<<"host GUT mode="<<mode<<" count="<<scene.opacity.size()
+                    <<" analytic="<<gradient.means[0]<<" numeric="<<numeric<<std::endl;
+            require(std::abs(gradient.means[0]-numeric)<2e-4+.02*std::abs(numeric),
+                    "Vulkan GUT host backward differs from finite difference");
+            settings.need_depth = true;
             settings.pixel_snapshots = false;
             scene.opacity.assign(scene.opacity.size(),0.F);
             raster.update_means_and_opacities(scene.means, scene.opacity);
             const auto empty = raster.render(camera, settings);
             for (float alpha : empty.alpha)
                 require(alpha == 0, "all-culled frame retained stale alpha");
+            settings.need_depth = false;
+            settings.pixel_snapshots = true;
+            (void)raster.render(camera, settings);
+            const auto empty_gradient = raster.backward(dc, da);
+            for (const auto* values : {&empty_gradient.means,&empty_gradient.scales,
+                    &empty_gradient.rotations,&empty_gradient.opacities,&empty_gradient.colors})
+                for (float value : *values)
+                    require(value == 0.F, "all-culled GUT backward retained stale gradients");
         }
     // Large supports crossing z=0 and the old z=0.2 projection guard,
     // eye inside the ellipsoid, offscreen centers, and strongly tilted axes.

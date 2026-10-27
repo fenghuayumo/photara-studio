@@ -151,7 +151,7 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
     auto r =
         response(p, origin, dir, ray_z, cam.world_to_camera, s.scale_modifier);
     const float raw = g.opacities[i] * r.weight;
-    const float alpha = fminf(cfg::kAlphaClip, raw);
+    const float alpha = fminf(cam.alpha_clip, raw);
     if (!(alpha >= cfg::kAlphaFloor))
       continue;
     const float next = T * (1.f - alpha);
@@ -185,7 +185,7 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
         dp[k] = Dual::variable(p[k], k);
       const auto dr = response(dp, origin, dir, ray_z, cam.world_to_camera,
                                s.scale_modifier);
-      const float dw = raw < cfg::kAlphaClip ? da * g.opacities[i] : 0.f;
+      const float dw = raw < cam.alpha_clip ? da * g.opacities[i] : 0.f;
       float derivatives[10];
       for (int k = 0; k < 10; ++k) {
         float d = dw * dr.weight.d[k];
@@ -206,7 +206,7 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
       for (int c = 0; c < 4; ++c)
         atomicAdd(reinterpret_cast<float *>(grad.d_ray_plane) + 4 * i + c,
                   derivatives[6 + c]);
-      if (raw < cfg::kAlphaClip)
+      if (raw < cam.alpha_clip)
         atomicAdd(&grad.d_conic[i].w, da * r.weight);
       if (model_grad.refine_weight) {
         const auto proj =
@@ -335,7 +335,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
           make_float3(o.x + peak * d.x, o.y + peak * d.y, o.z + peak * d.z);
       const float response = expf(-.5f * mat::dot3(q, q));
       const float4 rgb = colors[j];
-      const float raw = rgb.w * response, alpha = fminf(cfg::kAlphaClip, raw);
+      const float raw = rgb.w * response, alpha = fminf(cam.alpha_clip, raw);
       if (!(alpha >= cfg::kAlphaFloor))
         continue;
       const float next = T * (1.f - alpha);
@@ -538,7 +538,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     const float3 q =
         make_float3(o.x + peak * d.x, o.y + peak * d.y, o.z + peak * d.z);
     const float response = expf(-.5f * mat::dot3(q, q));
-    const float raw = rgb.w * response, alpha = fminf(cfg::kAlphaClip, raw);
+    const float raw = rgb.w * response, alpha = fminf(cam.alpha_clip, raw);
     if (!(alpha >= cfg::kAlphaFloor))
       continue;
     const float weight = T * alpha;
@@ -548,7 +548,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     const float da =
         T * (gx * rgb.x + gy * rgb.y + gz * rgb.z) -
         (gx * rx + gy * ry + gz * rz + final_T * dfinal) / (1.f - alpha);
-    const float factor = raw < cfg::kAlphaClip ? -da * raw : 0.f;
+    const float factor = raw < cam.alpha_clip ? -da * raw : 0.f;
     // Retain the floating-point orthogonality residual. Dropping this
     // term is exact algebraically, but destabilizes very thin Gaussians.
     const float h = factor * mat::dot3(q, d) / dd;
@@ -571,7 +571,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     acc_rows[6] += go.z * v.x - h * q.z * dx;
     acc_rows[7] += go.z * v.y - h * q.z * dy;
     acc_rows[8] += go.z * v.z - h * q.z * dz;
-    if (raw < cfg::kAlphaClip)
+    if (raw < cam.alpha_clip)
       acc_opacity += da * response;
     if (mg.refine_weight) {
       const float3 dm = make_float3(-a.x * go.x - b.x * go.y - c.x * go.z,

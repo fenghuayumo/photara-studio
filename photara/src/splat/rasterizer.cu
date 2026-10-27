@@ -311,11 +311,11 @@ void validate_model(
 RenderResult Rasterizer::forward(
     const GaussianModel& model, const Camera& camera,
     const RasterizeOptions& requested_options) const {
-    if (model.render_method == RenderMethod::gaussian_3dgut && model.means.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("3DGUT currently requires the CUDA backend");
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_raster_forward(
             backend_, model, camera, requested_options);
+    if (model.render_method == RenderMethod::gaussian_3dgut && model.means.device() != tinytensor::Device::CUDA)
+        throw std::invalid_argument("3DGUT requires a CUDA or Vulkan backend");
     validate_model(model, requested_options);
     if (camera.width == 0 || camera.height == 0)
         throw std::invalid_argument("Splat camera dimensions must be positive");

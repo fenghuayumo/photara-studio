@@ -1,7 +1,7 @@
 #pragma once
 
 // Vulkan backend of splat_drender: CUDA-equivalent 3DGS/3DGUT forward, complete
-// 3DGS geometry/RGB backward, and multi-view sampling/loss compute
+// 3DGS geometry/RGB and 3DGUT appearance backward, and multi-view sampling/loss compute
 // passes. It also renders a trained model without a CUDA context. Per-Gaussian
 // state, sorted instances and pixel snapshots stay alive on the device.
 
@@ -84,7 +84,8 @@ struct SplatSettings {
     float preview_selection_far = 100.F;
     float point_depth_bracket = 0.0F;
     float point_depth_tolerance = 0.0F;
-    // 3DGUT currently supports forward rendering only on Vulkan.
+    // 3DGUT training supports appearance objectives (RGB and alpha).
+    // Geometry attachments are available for inference only.
     SplatPrimitive primitive = SplatPrimitive::gaussian_3dgs;
 };
 
@@ -107,6 +108,8 @@ struct SplatForwardOutput {
 // These are the inputs to the projection/SH parameter backward pass: mean2d
 // is [N,3] (xy gradient plus the densification magnitude), conic_opacity is
 // [N,4], and colors is [N,3].
+// For 3DGUT the geometry slots contain local-origin and camera-to-principal
+// transform derivatives; backward() converts them to model parameters.
 struct SplatBlendGradients {
     std::vector<float> mean2d;
     std::vector<float> conic_opacity;

@@ -13,8 +13,10 @@ void require(bool ok, const char *message) {
   if (!ok)
     throw std::runtime_error(message);
 }
+#include "splat_gut_vulkan.hpp"
 int main() {
   try {
+    gut_validation::run();
     const auto root =
         std::filesystem::temp_directory_path() / "photara_3dgut_test";
     std::filesystem::create_directories(root);
@@ -41,9 +43,52 @@ int main() {
       point.views = {0, 1};
       scene.dense_cloud.points.push_back(point);
     }
+    // Identical seed/data and fixed topology isolate loss, backward and fused
+    // optimizer differences from the discrete ADC topology decisions below.
+    GaussianModel trained[2];
+    std::vector<float> training_losses[2];
+    for(unsigned backend=0;backend<2;++backend) {
+      TrainingOptions options;
+      options.backend=backend==0 ? TrainingBackend::cuda : TrainingBackend::vulkan;
+      options.render_method=RenderMethod::gaussian_3dgut;
+      options.iterations=12;options.log_interval=1;
+      options.sh_degree=1;options.sh_degree_interval=1;
+      options.input_is_dense=false;
+      options.enable_densification=false;
+      options.mean_noise_weight=0.F;
+      options.maximum_scale_fraction=1.F;
+      trained[backend]=Trainer(options).train(scene,[&](const TrainingProgress& p) {
+        training_losses[backend].push_back(p.loss);
+        return true;
+      });
+    }
+    require(training_losses[0].size()==12 && training_losses[1].size()==12,
+            "GUT parity training did not complete");
+    gut_validation::compare("training loss trajectory",training_losses[0],training_losses[1],.003,2e-5);
+    gut_validation::compare("trained means",trained[0].means.to_vector(),trained[1].means.to_vector(),.003,2e-5);
+    gut_validation::compare("trained scales",trained[0].log_scales.to_vector(),trained[1].log_scales.to_vector(),.003,2e-5);
+    gut_validation::compare("trained opacity",trained[0].opacity_logits.to_vector(),trained[1].opacity_logits.to_vector(),.003,2e-5);
+    gut_validation::compare("trained SH",trained[0].sh.to_vector(),trained[1].sh.to_vector(),.003,2e-5);
+    // Initial scales are isotropic: orientation is initially unobservable,
+    // and Adam with epsilon=1e-15 can amplify tiny roundoff into different
+    // quaternion representatives. Compare the resulting images; anisotropic
+    // quaternion derivatives are checked directly in gut_validation::run().
+    for(const auto& view : scene.views) {
+      Rasterizer cuda_raster,vulkan_raster;
+      RasterizeOptions raster_options;raster_options.require_depth=false;
+      raster_options.record_backward_state=false;raster_options.active_sh_degree=1;
+      auto camera=camera_from_mvs_view(view);
+      auto cuda_frame=cuda_raster.forward(trained[0],camera,raster_options);
+      auto vulkan_frame=vulkan_raster.forward(trained[1],camera,raster_options);
+      gut_validation::compare("trained RGB",cuda_frame.color.to_vector(),vulkan_frame.color.to_vector(),.003,2e-5);
+      gut_validation::compare("trained alpha",cuda_frame.alpha.to_vector(),vulkan_frame.alpha.to_vector(),.003,2e-5);
+    }
+    require(training_losses[1].back()<training_losses[1].front(),"GUT Vulkan training did not decrease loss");
+    for (const auto backend : {TrainingBackend::cuda, TrainingBackend::vulkan})
     for (const auto method :
          {RenderMethod::gaussian_3dgs, RenderMethod::gaussian_3dgut}) {
       TrainingOptions options;
+      options.backend = backend;
       options.render_method = method;
       options.iterations = 8;
       options.sh_degree = 3;
@@ -160,14 +205,15 @@ int main() {
     TrainingOptions invalid;
     invalid.render_method = RenderMethod::gaussian_3dgut;
     invalid.backend = TrainingBackend::vulkan;
+    invalid.speedy_pruning = true;
     bool rejected = false;
     try {
       Trainer trainer(invalid);
     } catch (const std::invalid_argument &) {
       rejected = true;
     }
-    require(rejected, "3DGUT Vulkan training was silently accepted");
-    std::cout << "3DGUT CUDA training, densification, PLY and archive "
+    require(rejected, "3DGUT Speedy pruning was silently accepted");
+    std::cout << "3DGUT CUDA/Vulkan training, densification, PLY and archive "
                  "roundtrips passed\n";
     return 0;
   } catch (const std::exception &e) {

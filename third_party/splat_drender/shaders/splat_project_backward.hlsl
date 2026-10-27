@@ -554,7 +554,7 @@ void project_backward(uint3 dispatch_id) {
         camera[8], camera[9], camera[10]);
     DualProjection dual = projection_jacobian_dual(
         t, mode, int(width), int(height), fx, fy, k1, k2, k3, k4);
-    if (!dual.valid) return;
+    if (!dual.valid && pc.u23 == 0u) return;
     Mat3 J = mat_zero();
     J.m[0][0] = dual.j00.v;
     J.m[0][1] = dual.j10.v;
@@ -613,6 +613,49 @@ void project_backward(uint3 dispatch_id) {
         V.m[2][1] = cv4;
         V.m[2][2] = cv5;
     }
+    if (pc.u23 != 0u) {
+        // The blend pass differentiates camera-space ray transforms A=B*W
+        // and local origins B*(eye-mean). Convert once per Gaussian into the
+        // activated geometry, then use the shared SH and activation chain.
+        float3 go = float3(blend_grad[3u*index],blend_grad[3u*index+1u],blend_grad[3u*index+2u]);
+        Mat3 dA = mat_zero();
+        [unroll] for (uint axis=0u;axis<3u;++axis) {
+            dA.m[0][axis]=blend_grad[3u*count+4u*index+axis];
+            dA.m[1][axis]=blend_grad[10u*count+4u*index+axis];
+            dA.m[2][axis]=blend_grad[14u*count+3u*index+axis];
+        }
+        Mat3 B=mat_mul(mat_diag(1.0f/scale_local.x,1.0f/scale_local.y,1.0f/scale_local.z),R);
+        float3 eye=float3(camera[16],camera[17],camera[18]);
+        Mat3 D=mat_add(mat_mul(dA,mat_transpose(W)),mat_outer(go,eye-mean));
+        float3 gs;
+        [unroll] for (uint row=0u;row<3u;++row) {
+            gs[row]=-dot(float3(D.m[row][0],D.m[row][1],D.m[row][2]),
+                         float3(B.m[row][0],B.m[row][1],B.m[row][2]))/scale[row];
+            [unroll] for(uint col=0u;col<3u;++col) D.m[row][col]/=scale_local[row];
+        }
+        float w=rotation.x,x=rotation.y,y=rotation.z,z=rotation.w;
+        float4 gr=float4(
+            2.0f*(z*(D.m[0][1]-D.m[1][0])+y*(D.m[2][0]-D.m[0][2])+x*(D.m[1][2]-D.m[2][1])),
+            2.0f*(y*(D.m[0][1]+D.m[1][0])+z*(D.m[0][2]+D.m[2][0])+w*(D.m[1][2]-D.m[2][1]))-4.0f*x*(D.m[1][1]+D.m[2][2]),
+            2.0f*(x*(D.m[0][1]+D.m[1][0])+w*(D.m[2][0]-D.m[0][2])+z*(D.m[1][2]+D.m[2][1]))-4.0f*y*(D.m[0][0]+D.m[2][2]),
+            2.0f*(w*(D.m[0][1]-D.m[1][0])+x*(D.m[2][0]+D.m[0][2])+y*(D.m[1][2]+D.m[2][1]))-4.0f*z*(D.m[0][0]+D.m[1][1]));
+        float3 gm=-mat_mul_vec(mat_transpose(B),go);
+        float3 gcolor=float3(blend_grad[7u*count+3u*index],blend_grad[7u*count+3u*index+1u],blend_grad[7u*count+3u*index+2u]);
+        if (has_sh) {
+            float c0,c1,c2;
+            evaluate_sh(degree,mean,eye,color_src,index*bases*3u,c0,c1,c2);
+            gm+=sh_backward(index,degree,bases,mean,eye,gcolor,float3(c0,c1,c2),feature_base);
+        } else {
+            [unroll] for(uint channel=0u;channel<3u;++channel)
+                model_grad[feature_base+3u*index+channel]=gcolor[channel];
+        }
+        [unroll] for(uint axis=0u;axis<3u;++axis) {
+            model_grad[3u*gradient_index+axis]=gm[axis];
+            model_grad[scale_base+3u*gradient_index+axis]=gs[axis];
+        }
+        [unroll] for(uint qi=0u;qi<4u;++qi) model_grad[rotation_base+4u*gradient_index+qi]=gr[qi];
+        model_grad[opacity_base+gradient_index]=blend_grad[3u*count+4u*index+3u];
+    } else {
     Mat3 cov = mat_mul(mat_transpose(T), mat_mul(V, T));
     uint conic_base = 3u * count + 4u * index;
     float4 gc = float4(
@@ -825,6 +868,7 @@ void project_backward(uint3 dispatch_id) {
                     (2.0f * eps);
             }
         }
+    }
     }
     if (raw_chain && has_scales) {
         float f = filter_3d[index];

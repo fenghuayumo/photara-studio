@@ -13,6 +13,9 @@
 
 #include "splat_blend.hlsl.embedded.hpp"
 #include "splat_blend_gut.hlsl.embedded.hpp"
+#include "splat_blend_gut_backward.hlsl.embedded.hpp"
+#include "splat_blend_gut_backward_subgroup.hlsl.embedded.hpp"
+#include "splat_blend_gut_backward_atomic.hlsl.embedded.hpp"
 #include "splat_blend_gut_rgba.hlsl.embedded.hpp"
 #include "splat_blend_no_geometry.hlsl.embedded.hpp"
 #include "splat_blend_rings.hlsl.embedded.hpp"
@@ -200,6 +203,15 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_blend_gut.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_gut_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_gut_backward.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_gut_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_gut_backward_subgroup.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_gut_backward_subgroup_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_gut_backward_atomic.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_gut_backward_atomic_hlsl_spv});
     }
     if (shader_name == "splat_blend_no_geometry.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_no_geometry_hlsl_spv});

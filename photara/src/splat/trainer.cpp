@@ -1116,8 +1116,6 @@ Trainer::Trainer(TrainingOptions options)
           std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F && raster.pixel_center_offset <= 0.5F))
         throw std::invalid_argument("Invalid rasterization policy");
     enforce_render_method_constraints(options_);
-    if (options_.render_method == RenderMethod::gaussian_3dgut && options_.backend != TrainingBackend::cuda)
-        throw std::invalid_argument("3DGUT training currently requires CUDA");
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.speedy_pruning)
         throw std::invalid_argument("3DGUT does not yet support Speedy pruning");
     if (!std::isfinite(options_.scale_regularization_weight) || options_.scale_regularization_weight < 0.F ||

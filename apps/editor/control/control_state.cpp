@@ -452,7 +452,7 @@ json describe_schema() {
             "iterations", "int", "Total 3DGS training iterations.",
             1, 1000000, 30000));
         fields.push_back(setting_spec(
-            "render_method", "enum", "Gaussian rendering method. 3DGUT training currently requires CUDA; viewport rendering uses Vulkan.",
+            "render_method", "enum", "Gaussian rendering method. 3DGUT supports appearance-only training on CUDA and Vulkan; use 3DGS for mesh extraction.",
             nullptr, nullptr, 0, json::array({"3dgs", "3dgut"})));
         fields.push_back(setting_spec(
             "filter_mode", "enum", "Gaussian training filter mode.",

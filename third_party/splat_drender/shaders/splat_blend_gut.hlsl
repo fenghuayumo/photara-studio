@@ -5,7 +5,7 @@
 [[vk::binding(2, 0)]] StructuredBuffer<float4> gauss_f;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float> out_f;
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint> out_u;
-// Same bindings as the existing forward blender; no backward state is used.
+// Bucket snapshots are shared with the appearance-only training backward.
 [[vk::binding(5, 0)]] StructuredBuffer<uint> bucket_offset;
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> snap;
 
@@ -25,6 +25,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     bool geometry = (pc.u3 & 4u) != 0u;
     bool stats = (pc.u3 & 16u) != 0u;
     bool rings = (pc.u3 & 64u) != 0u;
+    bool snapshots = (pc.u3 & 8u) != 0u;
     uint mode = pc.u4;
     float fx = asfloat(pc.u6), fy = asfloat(pc.u7), cx = asfloat(pc.u8), cy = asfloat(pc.u9);
     float3 direction = mode == kModeOrtho ? float3(0.0f, 0.0f, 1.0f)
@@ -33,6 +34,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     float3 offset = mode == kModeOrtho ? float3((float(xy.x)-cx)/fx, (float(xy.y)-cy)/fy, 0.0f) : 0.0f;
     uint tile = group.y*pc.u2 + group.x;
     uint begin = ranges[2u*tile], end = ranges[2u*tile+1u];
+    uint bucket_base = snapshots && tile > 0u ? bucket_offset[tile-1u] : 0u;
+    if (snapshots) {
+        for (uint bucket = rank; bucket < (end-begin+31u)/32u; bucket += 256u)
+            out_u[pc.u17+pixels+pc.u2*((height+15u)/16u)+bucket_base+bucket] = tile;
+    }
     float T = 1.0f, depth = 0.0f;
     float3 rgb = 0.0f, normal = 0.0f;
     uint last = 0u;
@@ -53,7 +59,10 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
             normals[rank] = gauss_f[g+6u].xyz;
         }
         GroupMemoryBarrierWithGroupSync();
-        [loop] for (uint j = 0u; j < batch && !done; ++j) {
+        [loop] for (uint j = 0u; j < batch; ++j) {
+            if (snapshots && inside && (j & 31u) == 0u)
+                snap[(bucket_base+(base+j-begin)/32u)*256u+rank] = float4(rgb,T);
+            if (done) continue;
             float4 a = rows0[j], b = rows1[j], c = rows2[j];
             float3 o = float3(a.w, b.w, c.w) + float3(dot(a.xyz, offset), dot(b.xyz, offset), dot(c.xyz, offset));
             float3 d = float3(dot(a.xyz, direction), dot(b.xyz, direction), dot(c.xyz, direction));
@@ -103,6 +112,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
         }
         if (stats) {
             out_u[pc.u17+pix] = last;
+            if (snapshots) InterlockedMax(out_u[pc.u17+pixels+tile], last);
             uint output_base = (geometry ? 8u : 4u)*pixels;
             out_f[output_base+pix] = rgb.x;
             out_f[output_base+pixels+pix] = rgb.y;

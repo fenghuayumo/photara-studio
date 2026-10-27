@@ -7577,6 +7577,9 @@ void test_densification_strategies_and_dense_bypass() {
     options.use_normal_field = true;
     options.normal_field_from_iter = 1;
     options.multi_view_geo_weight = 0.02F;
+    // Filtering is explicitly selected; geometry supervision alone keeps
+    // the current Classic default and does not enable Mip3D.
+    options.filter_mode = splat::SplatFilterMode::mip_3d;
     options.profile_cuda = true;
     options.cuda_profile_interval = 2;
     const auto geometry_dense_model = splat::Trainer(options).train(scene,
@@ -7589,7 +7592,7 @@ void test_densification_strategies_and_dense_bypass() {
         });
     require(
         geometry_dense_model.filter_3d.is_valid(),
-        "depth-normal mesh training did not enable filter_3d");
+        "explicit Mip3D mesh training did not enable filter_3d");
     require_finite(
         geometry_dense_model.normal_features,
         "normal-field training produced non-finite features");

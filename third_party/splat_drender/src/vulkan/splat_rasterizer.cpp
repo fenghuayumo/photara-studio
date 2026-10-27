@@ -156,6 +156,7 @@ public:
           pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
           median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
           blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
+          blend_gut_backward_(context.create_pipeline("splat_blend_gut_backward.hlsl.spv", 12, sizeof(Push))),
           blend_backward_no_geometry_(
               context.create_pipeline(
                   "splat_blend_backward_no_geometry.hlsl.spv", 12, sizeof(Push))),
@@ -184,6 +185,9 @@ public:
               photara::vk::BarrierPolicy::after_compute_indirect) {
         clear_buffer(dummy_);
         query_subgroup_properties();
+        if (subgroup_backward_supported_ && subgroup_shuffle_supported_ && subgroup_size_ == 32u)
+            blend_gut_backward_subgroup_ = context.create_pipeline(
+                "splat_blend_gut_backward_subgroup.hlsl.spv",12,sizeof(Push));
         if (subgroup_vote_supported_ && subgroup_backward_supported_)
             blend_gut_rgba_ = context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 7, sizeof(Push));
         if (subgroup_backward_supported_ && subgroup_size_ == 32u)
@@ -193,6 +197,9 @@ public:
             !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
             color_correction_atomic_ = context.create_pipeline(
                 "splat_color_correction_atomic.hlsl.spv", 6, sizeof(Push));
+            if (subgroup_backward_supported_ && subgroup_shuffle_supported_ && subgroup_size_ == 32u)
+                blend_gut_backward_atomic_ = context.create_pipeline(
+                    "splat_blend_gut_backward_atomic.hlsl.spv",12,sizeof(Push));
             blend_backward_no_geometry_atomic_ = context.create_pipeline(
                 "splat_blend_backward_no_geometry_atomic.hlsl.spv",
                 12, sizeof(Push));
@@ -482,6 +489,13 @@ public:
     // which under per-Gaussian contention costs far more than the blend math
     // itself; the subgroup CAS and portable forms stay as fallbacks.
     const ComputePipeline& backward_blend_pipeline() const {
+        if (last_primitive_ == SplatPrimitive::gaussian_3dgut) {
+            if (!environment_flag("SPLAT_DRENDER_GUT_BACKWARD_REFERENCE")) {
+                if (blend_gut_backward_atomic_.valid()) return blend_gut_backward_atomic_;
+                if (blend_gut_backward_subgroup_.valid()) return blend_gut_backward_subgroup_;
+            }
+            return blend_gut_backward_;
+        }
         if (last_frame_has_geometry_) {
             if (subgroup_backward_supported_ && subgroup_size_ == 32u)
                 return blend_backward_geometry_atomic_.valid()
@@ -494,6 +508,19 @@ public:
                 : blend_backward_no_geometry_subgroup_;
         }
         return blend_backward_no_geometry_;
+    }
+
+    void configure_gut_backward(Push& push) const {
+        if (last_primitive_ != SplatPrimitive::gaussian_3dgut) return;
+        set_float(push, 9, last_fx_);
+        set_float(push, 10, last_fy_);
+        set_float(push, 11, last_cx_);
+        set_float(push, 12, last_cy_);
+        set_float(push, 14, last_k1_);
+        set_float(push, 15, last_k2_);
+        set_float(push, 16, last_k3_);
+        set_float(push, 17, last_k4_);
+        push.u[19] = last_gauss_slots_;
     }
 
     // Everything the frame computes, up to the blended image. `pack_rgba` adds
@@ -528,8 +555,10 @@ public:
         };
         require(settings.primitive == SplatPrimitive::gaussian_3dgs || gut,
                 "unknown Vulkan Gaussian primitive");
-        require(!gut || (!settings.pixel_snapshots && !depth_query_only && !reuse_projection),
-                "Vulkan 3DGUT supports forward rendering only; backward and point queries are not implemented");
+        require(!gut || (!depth_query_only && !reuse_projection),
+                "Vulkan 3DGUT point queries and projection reuse are not implemented");
+        require(!gut || !settings.pixel_snapshots || !settings.need_depth,
+                "Vulkan 3DGUT training is appearance-only; disable depth and normal attachments");
         require(!gut || has_scales_, "Vulkan 3DGUT requires scales and rotations");
         occupancy_prepared_ = false;
         sample_live_ = false;
@@ -617,6 +646,7 @@ public:
             prep.u[3] = (has_sh ? k_flag_sh : 0) |
                         (has_scales ? k_flag_scales : 0) |
                         (settings.need_depth ? k_flag_geometry : 0) |
+                        (settings.pixel_snapshots ? k_flag_snapshot : 0) |
                         (device_model_bound_ ? k_flag_raw_parameters : 0) |
                         (gut ? k_flag_gut : 0u) | (gut_candidates ? 512u : 0u);
             if (settings.preview_rings)
@@ -980,6 +1010,7 @@ public:
         submit_batch(forward_profile_enabled_);
         collect_forward_timestamps();
         last_primitive_ = settings.primitive;
+        last_gauss_slots_ = gauss_slots;
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
         last_frame_has_stats_ = !pack_rgba && !depth_query_only;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
@@ -1271,6 +1302,7 @@ public:
         set_float(push, 11, last_background_[2]);
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         push.u[13] = !dL_alpha.empty() ? 1u : 0u;
+        configure_gut_backward(push);
         dispatch(
             backward_blend_pipeline(),
             {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
@@ -1332,6 +1364,7 @@ public:
         set_float(push, 14, last_k4_);
         set_float(push, 15, last_kernel_size_);
         set_float(push, 16, last_scale_modifier_);
+        push.u[23] = last_primitive_ == SplatPrimitive::gaussian_3dgut ? last_gauss_slots_ : 0u;
         dispatch_infos(
             project_backward_,
             {model_means(), model_opacities(), model_scales(),
@@ -1450,11 +1483,14 @@ public:
         set_float(push, 11, last_background_[2]);
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
+        configure_gut_backward(push);
         std::vector<VkDescriptorBufferInfo> infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
-            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes},
+            dL_alpha.buffer != VK_NULL_HANDLE
+                ? VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes}
+                : descriptor(dummy_),
             normal_info, descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
         dispatch_infos(
@@ -2384,6 +2420,7 @@ public:
         set_float(blend_push, 11, last_background_[2]);
         blend_push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         blend_push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
+        configure_gut_backward(blend_push);
         std::vector<VkDescriptorBufferInfo> blend_infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
@@ -2416,6 +2453,7 @@ public:
         set_float(project_push, 14, last_k4_);
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
+        project_push.u[23] = last_primitive_ == SplatPrimitive::gaussian_3dgut ? last_gauss_slots_ : 0u;
         std::vector<VkDescriptorBufferInfo> project_infos{
             model_means(), model_opacities(), model_scales(), model_rotations(),
             model_covariances(), model_colors(), descriptor(*frame_camera_), descriptor(gauss_f_),
@@ -2589,6 +2627,8 @@ private:
         subgroup_backward_supported_ =
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+        subgroup_shuffle_supported_ =
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
         subgroup_backward_supported_ &=
             !environment_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD");
     }
@@ -3013,7 +3053,6 @@ private:
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
-        push.u[23] = 0;  // Reserved push-constant slot.
         if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
         std::vector<photara::vk::BufferBinding> bindings(infos.size());
@@ -3113,7 +3152,6 @@ private:
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
-        push.u[23] = 0;  // Reserved push-constant slot.
         std::vector<photara::vk::BufferBinding> bindings;
         bindings.reserve(buffers.size());
         for (const Buffer* buffer : buffers) bindings.push_back(to_binding(*buffer));
@@ -3254,6 +3292,7 @@ private:
     ComputePipeline blend_gut_rgba_;
     const bool gut_reference_ = environment_flag("SPLAT_DRENDER_GUT_REFERENCE");
     SplatPrimitive last_primitive_{SplatPrimitive::gaussian_3dgs};
+    std::uint32_t last_gauss_slots_{};
     ComputePipeline blend_rings_;
     ComputePipeline blend_training_;
     ComputePipeline pruning_scores_;
@@ -3261,6 +3300,9 @@ private:
     ComputePipeline pruning_scores_atomic_;
     ComputePipeline median_backward_;
     ComputePipeline blend_backward_;
+    ComputePipeline blend_gut_backward_;
+    ComputePipeline blend_gut_backward_subgroup_;
+    ComputePipeline blend_gut_backward_atomic_;
     ComputePipeline blend_backward_geometry_subgroup_;
     ComputePipeline blend_backward_geometry_atomic_;
     ComputePipeline blend_backward_no_geometry_;
@@ -3295,6 +3337,7 @@ private:
     bool backward_profile_enabled_{};
     bool subgroup_vote_supported_{};
     bool subgroup_backward_supported_{};
+    bool subgroup_shuffle_supported_{};
     std::uint32_t subgroup_size_{};
     std::uint32_t backward_profile_interval_{100};
     std::uint32_t backward_profile_samples_{};

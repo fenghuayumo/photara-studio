@@ -519,7 +519,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-ppisp=BOOL  PPISP exposure/white-balance correction "
                  "(default false)\n"
               << "  --splat-ppisp-type TYPE  no_crf_no_vig (default), no_crf, or original\n"
-              << "  --splat-render-method 3dgs|3dgut (3dgut requires CUDA)\n"
+              << "  --splat-render-method 3dgs|3dgut (CUDA or Vulkan)\n"
               << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-speedy-pruning=BOOL  opt-in sensitivity pruning (all modes default false)\n"
@@ -1044,7 +1044,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-ppisp-before-bilagrid",
          "Run PPISP before the bilateral grid when both are enabled",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-render-method", "Gaussian rendering: 3dgs or 3dgut (CUDA)",
+        ("splat-render-method", "Gaussian rendering: 3dgs or 3dgut (CUDA or Vulkan)",
          cxxopts::value<std::string>()->default_value("3dgs"))
         ("splat-strategy", "Densification: adc_plus, adc_igs",
          cxxopts::value<std::string>()->default_value("adc_igs"))
