@@ -30,6 +30,10 @@ and textured assets through **Photara Studio** or the `photara` CLI.
 - **Designed for fast training** — GPU-accelerated rasterization and optimized
   training pipelines reduce work per iteration. Performance depends on hardware,
   scene, and settings.
+- **Flexible 3DGS editing** — edit Gaussian scenes in Studio, manage and
+  combine multiple models, and export the result.
+- **3DGS and mesh viewer** — open and inspect Gaussian and mesh models directly
+  in the viewport, without running reconstruction.
 - **From images to 3D assets** — reconstruct cameras and geometry with SfM and
   MVS, train Gaussians, extract meshes, and bake textures.
 - **Flexible workflows** — use SAM 3 masks, optional learned feature matching,
@@ -74,6 +78,7 @@ For Linux, other build configurations, and more CLI examples, see the
 - [Pipeline overview](docs/PIPELINE.md) — reconstruction stages and artifacts.
 - [Python API](docs/api/python.md) · [C++ API](docs/api/cpp.md) · [API index](docs/api/README.md).
 - [Windows packaging](docs/PACKAGING_WINDOWS.md) · [Agent control](docs/AGENT_CONTROL.md).
+- [3DGS and mesh viewer](docs/model-viewer.md).
 - [SfM](docs/SFM_ARCHITECTURE.md) · [MVS](docs/MVS_ARCHITECTURE.md) · [Gaussian Splatting](docs/SPLAT_CPP.md) · [Feature backends](docs/FEATURES_BACKENDS.md).
 
 ## License
