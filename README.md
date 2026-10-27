@@ -17,9 +17,9 @@ and textured assets through **Photara Studio** or the `photara` CLI.
   · <a href="https://github.com/fenghuayumo/photara-studio/issues">Report an issue</a>
 </p>
 
-[![Photara video preview — click to watch](docs/media/teaser-preview.gif)](docs/media/teaser.mp4)
-
-<p align="center"><a href="docs/media/teaser.mp4">▶ Watch the full video</a></p>
+<p align="center">
+  <img src="docs/media/teaser-preview.gif" alt="Photara Studio training preview">
+</p>
 
 ## Features
 
