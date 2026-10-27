@@ -221,6 +221,14 @@ int main(int argc, char** argv) {
         command = editor::build_train_command("photara.exe", settings, layout, {});
         require(command.find("--refine-weak-cameras") != std::string::npos,
                 "training-triggered alignment uses the same refinement policy");
+        for (int mode = 0; mode != 3; ++mode) {
+            settings.filter_mode = mode;
+            const char* flags[] = {"classic", "mip2d", "mip3d"};
+            const auto filtered = editor::build_train_command("photara.exe", settings, layout, {});
+            require(filtered.find(std::string("--splat-filter-mode ") + flags[mode]) != std::string::npos,
+                    "Studio did not forward the selected filter mode");
+        }
+        settings.filter_mode = 0;
         settings.refine_weak_cameras = false;
         settings.reuse_cache = true;
         command = editor::build_align_command("photara.exe", settings, layout);

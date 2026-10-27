@@ -1656,6 +1656,10 @@ std::string build_train_command(
                     << quote(layout.working_subject_bounds);
     }
     command << " --splat-render-method " << (settings.render_method == 1 ? "3dgut" : "3dgs");
+    if (settings.filter_mode < 0 || settings.filter_mode > 2)
+        throw std::invalid_argument("Editor filter mode is invalid");
+    const char* filter_modes[] = {"classic", "mip2d", "mip3d"};
+    command << " --splat-filter-mode " << filter_modes[settings.filter_mode];
     command << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-mode "
             << (settings.training_mode == 0 ? "fast" :

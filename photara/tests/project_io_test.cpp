@@ -30,6 +30,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.extractor_model.clear(); settings.lightglue_model.clear();
     settings.sam_detector_model.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::int32_t)); // v22 filter mode.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v21 rendering method.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
     bytes.resize(bytes.size() - sizeof(std::int32_t) - sizeof(std::uint64_t) - sizeof(float));
@@ -713,9 +714,16 @@ int main() {
         expect(decode_settings(encode_settings(gut, ascan_path), ascan_path).render_method == 1,
                "3DGUT project rendering method round trip");
     }
+    for (int mode = 0; mode != 3; ++mode) {
+        auto filtered = updated;
+        filtered.filter_mode = mode;
+        expect(decode_settings(encode_settings(filtered, ascan_path), ascan_path).filter_mode == mode,
+               "Project filter mode round trip");
+    }
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto v17 = encode_settings(settings, ascan_path);
+        v17.resize(v17.size() - sizeof(std::int32_t)); // v22 filter mode.
         v17.resize(v17.size() - sizeof(std::int32_t)); // v21 rendering method.
         v17.resize(v17.size() - sizeof(std::int32_t) - sizeof(float)); // v20 UV settings.
         v17.resize(v17.size() - sizeof(std::uint8_t) - sizeof(std::int32_t) -

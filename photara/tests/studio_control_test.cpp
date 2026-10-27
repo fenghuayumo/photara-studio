@@ -47,6 +47,10 @@ int main() {
             return future.get();
         };
         const int iterations = app.settings.iterations;
+        require(ok(call("studio.params.patch", {{"patch", {{"filter_mode", "mip3d"}}}})) &&
+            app.settings.filter_mode == 2, "filter mode patch failed");
+        require(!ok(call("studio.params.patch", {{"patch", {{"filter_mode", "mip"}}}})),
+            "unsupported combined filter mode accepted");
         require(!ok(call("studio.params.patch", {{"patch", {{"iterations", 17}, {"strategy", "invalid"}}}})), "invalid patch accepted");
         require(app.settings.iterations == iterations, "failed patch partially modified settings");
         require(ok(call("studio.params.patch", {{"patch", {{"iterations", 17}}}}, "patch-1")), "valid patch failed");

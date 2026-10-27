@@ -64,7 +64,7 @@ std::vector<std::uint8_t> encode_settings(
     const auto base = project_directory(project_file);
     BufferWriter writer;
     writer.value(k_settings_version);
-    writer.value(settings.render_method == 1 ? k_settings_version : k_settings_min_reader);
+    writer.value(settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -182,6 +182,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.uv_parallel_partitions));
     writer.value(settings.uv_max_stretch);
     writer.value(static_cast<std::int32_t>(settings.render_method));
+    writer.value(static_cast<std::int32_t>(settings.filter_mode));
     return writer.take();
 }
 
@@ -469,6 +470,11 @@ Settings decode_settings(
         settings.render_method = reader.value<std::int32_t>();
         if (settings.render_method < 0 || settings.render_method > 1)
             throw std::invalid_argument("Invalid project rendering method");
+    }
+    if (version >= 22) {
+        settings.filter_mode = reader.value<std::int32_t>();
+        if (settings.filter_mode < 0 || settings.filter_mode > 2)
+            throw std::invalid_argument("Invalid project filter mode");
     }
     settings.sanitize();
     return settings;

@@ -338,6 +338,7 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int sh_degree = 3;
     int preview_interval = 50;
     int render_method = 0; // 0=3dgs, 1=3dgut (training backend checked separately)
+    int filter_mode = 0; // 0 Classic, 1 Mip2D, 2 Mip3D.
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive
     int max_resolution = 1'920;
     bool progressive_resolution = true;

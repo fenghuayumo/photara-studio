@@ -489,6 +489,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
     settings.render_method = app.settings.render_method;
+    settings.filter_mode = app.settings.filter_mode;
     static_cast<photara::splat::TrainingLossSettings&>(settings) = app.settings;
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
@@ -609,6 +610,7 @@ void apply_project_settings(
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
     app.settings.render_method = settings.render_method;
+    app.settings.filter_mode = settings.filter_mode;
     static_cast<photara::splat::TrainingLossSettings&>(app.settings) = settings;
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;

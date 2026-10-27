@@ -15,7 +15,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 21;
+inline constexpr std::uint32_t k_settings_version = 22;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -79,6 +79,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.
     int strategy = 0;
     int render_method = 0;
+    int filter_mode = 0; // 0 Classic, 1 Mip2D, 2 Mip3D.
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;

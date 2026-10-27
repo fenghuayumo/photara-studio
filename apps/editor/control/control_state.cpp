@@ -129,6 +129,7 @@ json settings_json(const ProjectSettings& settings) {
         {"iterations", settings.iterations},
         {"strategy", settings.strategy},
         {"render_method", settings.render_method},
+        {"filter_mode", settings.filter_mode},
         {"training_mode", settings.training_mode},
         {"sh_degree", settings.sh_degree},
         {"densification_cap", settings.densification_cap},
@@ -454,6 +455,9 @@ json describe_schema() {
             "render_method", "enum", "Gaussian rendering method. 3DGUT training currently requires CUDA; viewport rendering uses Vulkan.",
             nullptr, nullptr, 0, json::array({"3dgs", "3dgut"})));
         fields.push_back(setting_spec(
+            "filter_mode", "enum", "Gaussian training filter mode.",
+            nullptr, nullptr, 0, json::array({"classic", "mip2d", "mip3d"})));
+        fields.push_back(setting_spec(
             "strategy", "enum", "Gaussian densification strategy.",
             nullptr, nullptr, 0,
             json::array({"adc_igs", "adc_plus", "dense_adaptive"})));
@@ -701,6 +705,13 @@ json apply_parameter_patch(App& app, const json& patch) {
             return invalid(message);
         settings.render_method = value;
         note("render_method");
+    }
+    if (patch.contains("filter_mode")) {
+        int value = 0;
+        if (!read_choice(patch["filter_mode"], "filter_mode", {"classic", "mip2d", "mip3d"}, value, message))
+            return invalid(message);
+        settings.filter_mode = value;
+        note("filter_mode");
     }
     if (patch.contains("strategy")) {
         int value{};

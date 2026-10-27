@@ -935,6 +935,14 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip("%s", tr(
                     "Object captures a bounded subject; Scene keeps distant\n"
                     "background geometry."));
+            inspector_field("Rendering method");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* render_methods[] = {"3DGS", "3DGUT"};
+            ImGui::Combo("##render_method", &app.settings.render_method, render_methods, 2);
+            inspector_field("Filter mode");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* filter_modes[] = {"Classic", "Mip2D", "Mip3D"};
+            ImGui::Combo("##filter_mode", &app.settings.filter_mode, filter_modes, 3);
             inspector_field("Iterations");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
@@ -958,6 +966,8 @@ Action draw_inspector(App& app) {
                     "Requires full training resolution."));
             ImGui::EndTable();
         }
+        if (app.settings.render_method == 1)
+            ImGui::TextWrapped("%s", tr(photara::splat::k_3dgut_mesh_guidance));
         if (ImGui::Checkbox(
                 tr("Focus Region"), &app.settings.focus_region) &&
             app.settings.focus_region)
@@ -970,12 +980,6 @@ Action draw_inspector(App& app) {
                 "the display and never disables the training constraint."));
         if (ImGui::TreeNodeEx(tr("Advanced training settings"),
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
-            theme::caption("Rendering method");
-            ImGui::SetNextItemWidth(-1.F);
-            const char* render_methods[] = {"3DGS", "3DGUT"};
-            ImGui::Combo("##render_method", &app.settings.render_method, render_methods, 2);
-            if (app.settings.render_method == 1)
-                ImGui::TextWrapped("%s", tr(photara::splat::k_3dgut_mesh_guidance));
             theme::caption("Densification strategy");
             ImGui::SetNextItemWidth(-1.F);
             const char* strategies[] = {
