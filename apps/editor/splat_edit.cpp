@@ -557,6 +557,7 @@ void SplatEdit::clear() {
     selected_count_ = 0;
     sh_degree_ = 0;
     render_method_ = 0;
+    filter_mode_ = 1;
     sh_bases_ = 1;
     // Clearing the model must return its host storage, not retain capacities
     // alongside the next training process's image/model allocations.
@@ -598,6 +599,7 @@ void SplatEdit::sync(const std::string& key, const Host& host) {
     count_ = count;
     sh_degree_ = host.sh == nullptr ? 0U : host.sh_degree;
     render_method_ = host.render_method;
+    filter_mode_ = host.filter_mode;
     sh_bases_ = host.sh == nullptr ? 1U : bases;
     centers_.resize(static_cast<std::size_t>(count) * 4U);
     log_scales_.assign(
@@ -1284,6 +1286,7 @@ void SplatEdit::upload_model(App& app) {
     cloud.sh_degree = sh_.empty() ? 0U : sh_degree_;
     cloud.sh_bases = sh_.empty() ? 1U : sh_bases_;
     cloud.render_method = static_cast<splat_render::RenderMethod>(render_method_);
+    cloud.filter_mode = static_cast<splat_render::FilterMode>(filter_mode_);
     cloud.means = count_ == 0 ? nullptr : means.data();
     cloud.log_scales = count_ == 0 ? nullptr : log_scales_.data();
     cloud.quaternions = count_ == 0 ? nullptr : quaternions_.data();
@@ -1349,6 +1352,7 @@ void SplatEdit::capture_replace(Snapshot& snap) const {
     snap.count = count_;
     snap.sh_degree = sh_degree_;
     snap.render_method = render_method_;
+    snap.filter_mode = filter_mode_;
     snap.sh_bases = sh_bases_;
     snap.removed_centers = centers_;
     snap.removed_scales = log_scales_;
@@ -1363,6 +1367,7 @@ void SplatEdit::apply_replace(const Snapshot& snap) {
     count_ = snap.count;
     sh_degree_ = snap.sh_degree;
     render_method_ = snap.render_method;
+    filter_mode_ = snap.filter_mode;
     sh_bases_ = std::max(1U, snap.sh_bases);
     centers_ = snap.removed_centers;
     log_scales_ = snap.removed_scales;
@@ -1396,6 +1401,7 @@ void SplatEdit::replace_from_model(
     count_ = count;
     sh_degree_ = model.sh_degree;
     render_method_ = static_cast<int>(model.render_method);
+    filter_mode_ = static_cast<int>(model.filter_mode);
     sh_bases_ = std::max(1U, bases);
     centers_.assign(static_cast<std::size_t>(count) * 4U, 0.F);
     log_scales_ = scales;
@@ -1506,6 +1512,7 @@ bool SplatEdit::copy_model(photara::splat::GaussianModel& model) const {
     model = {};
     model.sh_degree = sh_degree_;
     model.render_method = static_cast<photara::splat::RenderMethod>(render_method_);
+    model.filter_mode = static_cast<photara::splat::SplatFilterMode>(filter_mode_);
     const std::size_t count = count_;
     std::vector<float> means(count * 3U);
     for (std::uint32_t index = 0; index < count_; ++index) {

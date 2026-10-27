@@ -35,6 +35,7 @@ struct Camera {
 
 struct GaussianModel {
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
+    SplatFilterMode filter_mode{SplatFilterMode::classic};
     tinytensor::Tensor means;           // [N,3], world space
     tinytensor::Tensor log_scales;      // [N,3]
     tinytensor::Tensor quaternions;     // [N,4], scalar-first

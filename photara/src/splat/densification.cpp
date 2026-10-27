@@ -154,6 +154,7 @@ GaussianModel clone_model(const GaussianModel& model) {
         cloned.filter_3d = model.filter_3d.clone();
     cloned.sh_degree = model.sh_degree;
     cloned.render_method = model.render_method;
+    cloned.filter_mode = model.filter_mode;
     return cloned;
 }
 

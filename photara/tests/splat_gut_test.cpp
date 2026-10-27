@@ -111,11 +111,24 @@ int main() {
       save_gaussians_ply(model, ply);
       const auto loaded = load_gaussians_ply(ply, tinytensor::Device::CUDA);
       require(loaded.render_method == method, "PLY lost rendering method");
+      require(loaded.filter_mode == model.filter_mode, "PLY lost filter mode");
       require(loaded.size() == model.size(), "PLY lost model rows");
       const auto decoded =
           decode_gaussians(encode_gaussians(model), tinytensor::Device::CPU);
       require(decoded.render_method == method,
               "project model chunk lost rendering method");
+      require(decoded.filter_mode == model.filter_mode,
+              "project model chunk lost filter mode");
+      for (const auto mode : {SplatFilterMode::classic, SplatFilterMode::mip_2d,
+                              SplatFilterMode::mip_3d, SplatFilterMode::mip}) {
+        auto tagged_model = model;
+        tagged_model.filter_mode = mode;
+        save_gaussians_ply(tagged_model, ply);
+        require(load_gaussians_ply(ply, tinytensor::Device::CPU).filter_mode == mode,
+                "PLY filter mode round trip failed");
+        require(decode_gaussians(encode_gaussians(tagged_model), tinytensor::Device::CPU).filter_mode == mode,
+                "project filter mode round trip failed");
+      }
       std::ifstream file(ply, std::ios::binary);
       std::string line;
       bool tagged = false;
@@ -130,7 +143,8 @@ int main() {
     std::ofstream legacy(root / "legacy.ply", std::ios::binary);
     std::string line;
     while (std::getline(original, line)) {
-      if (line.rfind("comment photara_render_method", 0) != 0)
+      if (line.rfind("comment photara_render_method", 0) != 0 &&
+          line.rfind("comment photara_filter_mode", 0) != 0)
         legacy << line << '\n';
       if (line == "end_header")
         break;
@@ -140,6 +154,9 @@ int main() {
     require(load_gaussians_ply(root / "legacy.ply", tinytensor::Device::CPU)
                     .render_method == RenderMethod::gaussian_3dgs,
             "legacy PLY method changed");
+    require(load_gaussians_ply(root / "legacy.ply", tinytensor::Device::CPU)
+                    .filter_mode == SplatFilterMode::classic,
+            "untagged PLY must default to Classic");
     TrainingOptions invalid;
     invalid.render_method = RenderMethod::gaussian_3dgut;
     invalid.backend = TrainingBackend::vulkan;

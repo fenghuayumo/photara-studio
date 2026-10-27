@@ -28,7 +28,7 @@ inline void test_raster_policy(tinytensor::Device device) {
     options.require_depth = false;
     auto model = make({0,0,2}, .04F, .9999F);
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], .99F,
-          "Legacy alpha ceiling changed");
+          "Standard alpha ceiling changed");
     options.rasterization.alpha_clip = .999F;
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], .999F,
           "Mip Splatting preset alpha ceiling was not applied");
@@ -39,7 +39,7 @@ inline void test_raster_policy(tinytensor::Device device) {
     options.rasterization.pixel_center_offset = 0.F;
     model = make({0,0,.05F}, .001F, .6F);
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], 0.F,
-          "Legacy near plane failed to cull a near Gaussian");
+          "Standard near plane failed to cull a near Gaussian");
     options.rasterization.near_plane = .01F;
     close(rasterizer.forward(model, camera, options).alpha.to_vector()[center], .6F,
           "Mip Splatting preset near plane still uses the old projection culling threshold");
@@ -83,7 +83,7 @@ inline void test_raster_policy(tinytensor::Device device) {
     second.fx = second.fy = 1000.F;
     second.world_to_camera[14] = 9.F;
     const auto point = Tensor::from_vector(std::vector<float>{0,0,1}, {1,3}, device);
-    const auto floor = detail::compute_3d_filter(point, {camera,second}, .1F, true, true).to_vector()[0];
+    const auto floor = detail::compute_3d_filter(point, {camera,second}, .1F).to_vector()[0];
     close(floor, std::sqrt(.1F)*.01F,
           "3D filter combined a distance with a different camera's focal length");
     camera.fx = camera.fy = 20.F;
@@ -114,5 +114,10 @@ inline void test_filter_mode_resolution() {
         require(raster.kernel_size == (mip2d ? .1F : .3F) &&
                 raster.rasterization.compensate_2d == mip2d,
                 "Explicit filter mode has inconsistent 2D settings");
+        require(!raster.rasterization.sort_by_camera_z &&
+                raster.rasterization.alpha_clip == .99F &&
+                raster.rasterization.near_plane == .2F &&
+                raster.rasterization.pixel_center_offset == 0.F,
+                "Filter mode unexpectedly changed the standard raster policy");
     }
 }

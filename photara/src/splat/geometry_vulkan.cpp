@@ -255,32 +255,25 @@ void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& tar
 }
 
 Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& cameras,
-    float minimum_scale_factor, bool all_camera_euclidean, bool per_camera_focal) {
+    float minimum_scale_factor) {
     if (means.dtype() != tinytensor::DataType::Float32 || means.shape().rank() != 2 ||
         means.shape()[1] != 3 || cameras.empty())
         throw std::invalid_argument("Vulkan 3D filter requires float32 [N,3] means and cameras");
     auto result = Tensor::empty({means.shape()[0], std::size_t{1}}, device);
     if (means.shape()[0] == 0) return result;
-    std::vector<float> packed(cameras.size() * 27);
-    float focal = 0.F;
+    std::vector<float> packed(cameras.size() * 17);
     for (std::size_t i = 0; i < cameras.size(); ++i) {
-        const auto& c = cameras[i]; const auto b = 27 * i;
-        std::copy(c.world_to_camera.begin(), c.world_to_camera.end(), packed.begin() + b);
-        packed[b+16] = c.fx; packed[b+17] = c.fy;
-        packed[b+18] = static_cast<float>(c.width); packed[b+19] = static_cast<float>(c.height);
-        packed[b+20] = static_cast<float>(c.model); packed[b+21] = c.cx; packed[b+22] = c.cy;
-        packed[b+23] = c.k1; packed[b+24] = c.k2; packed[b+25] = c.k3; packed[b+26] = c.k4;
-        const bool panorama = c.model == CameraModel::equirectangular;
-        all_camera_euclidean = all_camera_euclidean || panorama;
-        focal = std::max(focal, panorama ? c.width / (2.F * 3.14159265358979323846F) : c.fx);
+        const auto& camera = cameras[i];
+        const auto base = 17 * i;
+        std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(), packed.begin() + base);
+        packed[base + 16] = camera.fx;
     }
     auto camera_tensor = Tensor::from_vector(packed, {packed.size()}, device);
     auto maximum = Tensor::zeros({1}, device);
     Push push;
     push.mode = 1; push.count = static_cast<std::uint32_t>(means.shape()[0]);
     push.camera_count = static_cast<std::uint32_t>(cameras.size());
-    push.euclidean = (all_camera_euclidean || per_camera_focal ? 1u : 0u) | (per_camera_focal ? 2u : 0u);
-    push.focal = per_camera_focal ? 1.F : std::max(focal, 1e-6F);
+    push.focal = 1.F;
     push.weight = std::sqrt(std::max(minimum_scale_factor, 0.F));
     launch(push, {means, {}, camera_tensor, result, {}, maximum});
     push.mode = 2;

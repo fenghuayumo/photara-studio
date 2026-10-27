@@ -198,8 +198,7 @@ struct ReconstructCli {
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
     bool splat_undistort{false};
-    float splat_kernel_size{0.F};
-    photara::splat::SplatFilterMode splat_filter_mode{photara::splat::SplatFilterMode::legacy};
+    photara::splat::SplatFilterMode splat_filter_mode{photara::splat::SplatFilterMode::classic};
     photara::splat::RasterizationPolicy splat_rasterization;
     bool splat_progressive_resolution{true};
     unsigned splat_progressive_interval{3'000};
@@ -224,7 +223,6 @@ struct ReconstructCli {
     float splat_ppisp_lr{2e-3F};
     bool splat_ppisp_before_bilagrid{true};
     std::string splat_alpha_mode{"masked"};
-    std::string splat_filter_3d{"auto"};
     bool splat_normal_field{false};
     unsigned splat_normal_field_from_iter{20'001};
     float splat_multi_view_depth_bracket{0.F};
@@ -485,8 +483,7 @@ void print_help(const cxxopts::Options& options) {
         << "  --splat-prefetch-adaptive BOOL  grow the prefetch lookahead from the measured\n"
         << "                              host-load/iteration times (default true)\n"
               << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
-              << "  --splat-kernel-size V  screen covariance low-pass variance; "
-                 "0 disables, 0.1 matches Brush Mip\n"
+              << "  --splat-filter-mode classic|mip2d|mip3d (default classic)\n"
               << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
               << "  --splat-progressive-interval N  iterations per resolution level (default 3000)\n"
               << "  --splat-eval-split-every N  hold out every Nth view for PSNR/SSIM (default 0 = every view trains; metrics then come from three training views)\n"
@@ -497,7 +494,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
               << "  --splat-scale-reg W  per-Gaussian actual-scale prior (default 0)\n"
               << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
-              << "  --splat-filter-3d MODE  independent 3D filter: auto, on, off (default auto)\n"
               << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
               << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
               << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
@@ -923,17 +919,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-undistort",
          "Resample OpenCV fisheye views onto a pinhole camera before splat training",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat-filter-mode", "Filtering: legacy, classic, mip2d or mip3d; mip is a combined-filter ablation",
-         cxxopts::value<std::string>()->default_value("legacy"))
-        ("splat-raster-profile", "Raster numerics preset: legacy or mip-splatting (camera-Z, 0.999, 0.01, half-pixel)",
-         cxxopts::value<std::string>()->default_value("legacy"))
+        ("splat-filter-mode", "Filtering: classic, mip2d or mip3d; mip is a combined-filter ablation",
+         cxxopts::value<std::string>()->default_value("classic"))
+        ("splat-raster-profile", "Raster numerics preset: standard or mip-splatting (camera-Z, 0.999, 0.01, half-pixel)",
+         cxxopts::value<std::string>()->default_value("standard"))
         ("splat-depth-sort", "Override sort metric: radial or z", cxxopts::value<std::string>())
         ("splat-alpha-clip", "Override per-splat alpha ceiling (0,1)", cxxopts::value<float>())
         ("splat-near-plane", "Override pinhole near plane in scene units", cxxopts::value<float>())
         ("splat-pixel-center", "Override pixel sample offset: 0 or 0.5", cxxopts::value<float>())
-        ("splat-kernel-size",
-         "Screen covariance low-pass variance (0 disables; Brush Mip uses 0.1)",
-         cxxopts::value<float>()->default_value("0"))
         ("splat-progressive-resolution",
          "Enable 1/4 -> 1/2 -> full coarse-to-fine splat training",
          cxxopts::value<bool>()->default_value("true")
@@ -973,8 +966,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-alpha-mode",
          "Mask semantics: masked ignores invalid rays; transparent trains output alpha",
          cxxopts::value<std::string>()->default_value("masked"))
-        ("splat-filter-3d", "3D filter independently of geometry losses: auto/on/off",
-         cxxopts::value<std::string>()->default_value("auto"))
         ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -1632,20 +1623,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_max_resolution =
         result["splat-max-resolution"].as<unsigned>();
     cli.splat_undistort = result["splat-undistort"].as<bool>();
-    cli.splat_kernel_size = result["splat-kernel-size"].as<float>();
     const auto filter_mode = result["splat-filter-mode"].as<std::string>();
     using Filter = photara::splat::SplatFilterMode;
-    if (filter_mode == "legacy") cli.splat_filter_mode = Filter::legacy;
-    else if (filter_mode == "classic") cli.splat_filter_mode = Filter::classic;
+    if (filter_mode == "classic") cli.splat_filter_mode = Filter::classic;
     else if (filter_mode == "mip2d") cli.splat_filter_mode = Filter::mip_2d;
     else if (filter_mode == "mip3d") cli.splat_filter_mode = Filter::mip_3d;
     else if (filter_mode == "mip") cli.splat_filter_mode = Filter::mip;
     else throw std::invalid_argument("Invalid --splat-filter-mode");
-    if (filter_mode != "legacy" && (result.count("splat-kernel-size") || result["splat-filter-3d"].as<std::string>() != "auto"))
-        throw std::invalid_argument("Explicit filter mode cannot be combined with --splat-kernel-size or --splat-filter-3d");
     const auto profile = result["splat-raster-profile"].as<std::string>();
     if (profile == "mip-splatting") cli.splat_rasterization = {true, 0.999F, 0.01F, 0.5F, true};
-    else if (profile != "legacy") throw std::invalid_argument("Invalid --splat-raster-profile");
+    else if (profile != "standard") throw std::invalid_argument("Invalid --splat-raster-profile");
     if (result.count("splat-depth-sort")) {
         const auto sort = result["splat-depth-sort"].as<std::string>();
         if (sort != "z" && sort != "radial") throw std::invalid_argument("Invalid --splat-depth-sort");
@@ -1683,10 +1670,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-eval-split-every"].as<unsigned>();
     cli.splat_use_mask = result["splat-use-mask"].as<bool>();
     cli.splat_alpha_mode = result["splat-alpha-mode"].as<std::string>();
-    cli.splat_filter_3d = result["splat-filter-3d"].as<std::string>();
-    if (cli.splat_filter_3d != "auto" && cli.splat_filter_3d != "on" &&
-        cli.splat_filter_3d != "off")
-        throw std::invalid_argument("--splat-filter-3d must be auto, on or off");
     cli.splat_multi_view_depth_bracket =
         result["splat-mv-depth-bracket"].as<float>();
     cli.splat_multi_view_depth_tolerance =
@@ -2046,10 +2029,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_view && cli.splat_preview_camera_file.empty())
         throw std::invalid_argument(
             "--splat-view requires --splat-preview-camera-file");
-    if (!std::isfinite(cli.splat_kernel_size) ||
-        cli.splat_kernel_size < 0.F)
-        throw std::invalid_argument(
-            "--splat-kernel-size must be finite and non-negative");
     if (cli.splat_alpha_mode != "masked" &&
         cli.splat_alpha_mode != "transparent")
         throw std::invalid_argument(
@@ -2444,7 +2423,7 @@ void run_splat_view(
             const tinytensor::Tensor& color) {
             vulkan_preview->submit(color, camera.width, camera.height);
         },
-        cli.splat_kernel_size, cli.splat_preview_vis_file);
+        cli.splat_preview_vis_file);
 }
 
 photara::splat::GaussianModel load_trained_gaussians(
@@ -3686,7 +3665,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.lambda_d = cli.splat_lambda_d;
     options.lambda_n = cli.splat_lambda_n;
     options.prior_directory = cli.splat_prior_directory;
-    options.kernel_size = cli.splat_kernel_size;
     options.filter_mode = cli.splat_filter_mode;
     options.rasterization = cli.splat_rasterization;
     options.progressive_resolution = cli.splat_progressive_resolution;
@@ -3885,10 +3863,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.use_depth_normal_loss = geometry_objective &&
         cli.loss_settings.depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.loss_settings.depth_normal_weight;
-    if (cli.splat_filter_3d != "auto")
-        options.use_3d_filter = cli.splat_filter_3d == "on";
-    if (options.filter_mode != photara::splat::SplatFilterMode::legacy)
-        options.use_3d_filter = options.filter_mode == photara::splat::SplatFilterMode::mip_3d || options.filter_mode == photara::splat::SplatFilterMode::mip;
     options.multi_view_geo_weight = geometry_objective
         ? cli.loss_settings.multi_view_geo_weight
         : 0.F;
@@ -4038,10 +4012,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " normal_field_weight=", options.normal_field_weight,
         " normal_field_depth_ratio=", options.normal_field_depth_ratio,
         " normal_field_from_iter=", options.normal_field_from_iter,
-        " filter_3d=", options.use_3d_filter.value_or(
-            (options.use_depth_normal_loss && options.depth_normal_weight > 0.F) ||
-            (options.use_normal_field && options.normal_field_weight > 0.F) ||
-            options.multi_view_geo_weight > 0.F || options.multi_view_ncc_weight > 0.F),
+        " filter_3d=", options.filter_mode == photara::splat::SplatFilterMode::mip_3d ||
+                          options.filter_mode == photara::splat::SplatFilterMode::mip,
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_depth_bracket=", options.multi_view_depth_bracket,

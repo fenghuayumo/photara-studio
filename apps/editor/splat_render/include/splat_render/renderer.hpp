@@ -26,6 +26,7 @@ inline constexpr std::uint32_t k_camera_equirectangular = 3;
 // footprint (EWA screen covariance for 3DGS, 3D ray response for 3DGUT).
 enum class Shading : std::uint32_t { gaussian = 0, rings = 1, depth = 2, normal = 3 };
 enum class RenderMethod : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 };
+enum class FilterMode : int { classic = 1, mip_2d, mip_3d, mip };
 
 struct DisplayOptions {
     bool automatic_depth{true};
@@ -72,6 +73,7 @@ struct GaussianCloud {
     const float* sh{};
     const float* filter_3d{};
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
+    FilterMode filter_mode{FilterMode::classic};
 };
 
 struct FrameTarget {
@@ -177,6 +179,7 @@ private:
     std::uint32_t sh_degree_{};
     std::uint32_t sh_bases_{1};
     RenderMethod render_method_{RenderMethod::gaussian_3dgs};
+    FilterMode filter_mode_{FilterMode::classic};
     std::uint64_t generation_{1};
     std::uint64_t frames_epoch_{1};
 

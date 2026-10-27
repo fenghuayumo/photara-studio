@@ -4,16 +4,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <optional>
 #include <vector>
 
 namespace photara::splat {
 
 enum class RenderMethod { gaussian_3dgs = 0, gaussian_3dgut = 1 };
 
-// Legacy preserves existing experiments. Classic uses the original 0.3px²
-// dilation without energy compensation; Mip separates its 2D and 3D filters.
-enum class SplatFilterMode { legacy, classic, mip_2d, mip_3d, mip };
+// Classic uses 0.3px² dilation without energy compensation; Mip separates
+// its 2D and 3D filters.
+enum class SplatFilterMode { classic = 1, mip_2d, mip_3d, mip };
+
+inline constexpr const char* filter_mode_name(SplatFilterMode mode) noexcept {
+    switch (mode) {
+    case SplatFilterMode::classic: return "classic";
+    case SplatFilterMode::mip_2d: return "mip2d";
+    case SplatFilterMode::mip_3d: return "mip3d";
+    case SplatFilterMode::mip: return "mip";
+    }
+    return "unknown";
+}
 
 struct RasterizationPolicy {
     bool sort_by_camera_z{false};
@@ -84,7 +93,7 @@ struct TrainingOptions {
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
-    SplatFilterMode filter_mode{SplatFilterMode::legacy};
+    SplatFilterMode filter_mode{SplatFilterMode::classic};
     RasterizationPolicy rasterization;
     unsigned iterations{30'000};
     unsigned sh_degree{3};
@@ -279,10 +288,6 @@ struct TrainingOptions {
     // the rasterized Gaussian normal and the normal differentiated from the
     // rendered median-depth map.
     bool use_depth_normal_loss{false};
-    // nullopt enables filtering for DN, multi-view, or normal-field objectives. Unfiltered thin
-    // splats can make implicit median-depth gradients ill-conditioned.
-    // Explicit on/off separates filtering from losses for controlled runs.
-    std::optional<bool> use_3d_filter;
     float depth_normal_weight{0.05F};
     // Shared start iteration for DN, AI depth/normal priors and multi-view losses.
     unsigned depth_normal_from_iter{7'000};
@@ -348,9 +353,6 @@ struct TrainingOptions {
     float maximum_scale_fraction{0.002F};
     bool constrain_scale_range{true};
     float geometry_epsilon{1e-3F};
-    // Classic rasterization. A positive kernel enables antialiasing and must
-    // be selected explicitly.
-    float kernel_size{0.F};
     float scale_modifier{1.F};
     // Photometric training baseline. Geometry supervision is opt-in and can
     // be added after fixed-model L1+SSIM convergence is verified.

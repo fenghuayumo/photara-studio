@@ -109,7 +109,7 @@ float3 sh_color(
     return max(rgb + 0.5, 0.0);
 }
 
-// Same screen covariance as splat_drender's project_splat with kernel 0.
+// Same screen covariance as splat_drender's configured filter mode.
 // The ellipse edge is the alpha = 1/255 contour of that covariance, which is
 // the footprint the EWA forward can paint.
 static const float k_near = 0.2;
@@ -222,12 +222,12 @@ bool project_pixel(SplatFrame f, float3 world, out float2 pixel) {
 }
 
 bool ellipse_from_axes(
-    float2 p0, float2 p1, float2 p2, float cutoff, out float2 axis1, out float2 axis2) {
+    float2 p0, float2 p1, float2 p2, float cutoff, float kernel, out float2 axis1, out float2 axis2) {
     axis1 = 0.0;
     axis2 = 0.0;
-    float a = dot(float3(p0.x, p1.x, p2.x), float3(p0.x, p1.x, p2.x));
+    float a = dot(float3(p0.x, p1.x, p2.x), float3(p0.x, p1.x, p2.x)) + kernel;
     float b = p0.x * p0.y + p1.x * p1.y + p2.x * p2.y;
-    float c = dot(float3(p0.y, p1.y, p2.y), float3(p0.y, p1.y, p2.y));
+    float c = dot(float3(p0.y, p1.y, p2.y), float3(p0.y, p1.y, p2.y)) + kernel;
     float mid = 0.5 * (a + c);
     float radius = length(float2(0.5 * (a - c), b));
     float lambda1 = max(mid + radius, 0.0);
@@ -253,16 +253,22 @@ bool project_axes(
     float3 du;
     float3 dv;
     if (!screen_jacobian(f, camera, pixel, du, dv)) return false;
-    float cutoff = 2.0 * log(opacity / k_alpha_floor);
-    if (!(cutoff > 0.0)) return false;
-    cutoff = sqrt(cutoff);
     float3 world_axis[3] = {scale.x * row0, scale.y * row1, scale.z * row2};
     float2 projected[3];
     [unroll] for (int i = 0; i < 3; ++i) {
         float3 cam = transform_vector(f, world_axis[i]);
         projected[i] = float2(dot(du, cam), dot(dv, cam));
     }
-    return ellipse_from_axes(projected[0], projected[1], projected[2], cutoff, axis1, axis2);
+    float kernel = abs(f.viewport.w);
+    if (f.viewport.w < 0.0) {
+        float a = dot(float3(projected[0].x, projected[1].x, projected[2].x), float3(projected[0].x, projected[1].x, projected[2].x));
+        float b = projected[0].x * projected[0].y + projected[1].x * projected[1].y + projected[2].x * projected[2].y;
+        float c = dot(float3(projected[0].y, projected[1].y, projected[2].y), float3(projected[0].y, projected[1].y, projected[2].y));
+        opacity *= sqrt(max(a * c - b * b, 1.0e-6) / max((a + kernel) * (c + kernel) - b * b, 1.0e-6));
+    }
+    float cutoff = 2.0 * log(opacity / k_alpha_floor);
+    if (!(cutoff > 0.0)) return false;
+    return ellipse_from_axes(projected[0], projected[1], projected[2], sqrt(cutoff), kernel, axis1, axis2);
 }
 
 #endif

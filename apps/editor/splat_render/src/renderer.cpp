@@ -550,7 +550,7 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     failure_.clear();
     if (!ensure_device()) return false;
     if (!source_key.empty() && source_key == source_key_ && count_ == cloud.count &&
-        render_method_ == cloud.render_method)
+        render_method_ == cloud.render_method && filter_mode_ == cloud.filter_mode)
         return true;
     if (cloud.count > 16'000'000U) {
         failure_ = "Too many Gaussians for the Vulkan preview";
@@ -558,6 +558,10 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     }
     if (cloud.render_method != RenderMethod::gaussian_3dgs && cloud.render_method != RenderMethod::gaussian_3dgut) {
         failure_ = "Unknown Gaussian rendering method";
+        return false;
+    }
+    if (cloud.filter_mode < FilterMode::classic || cloud.filter_mode > FilterMode::mip) {
+        failure_ = "Unknown Gaussian filter mode";
         return false;
     }
     if (cloud.count > 0 &&
@@ -641,6 +645,7 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     sh_degree_ = degree;
     sh_bases_ = bases;
     render_method_ = cloud.render_method;
+    filter_mode_ = cloud.filter_mode;
     source_key_ = std::string(source_key);
     cache_valid_ = false;
     ++generation_;
@@ -784,6 +789,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     frame.distortion[3] = camera.k4;
     frame.viewport[0] = static_cast<float>(width);
     frame.viewport[1] = static_cast<float>(height);
+    frame.viewport[3] = (filter_mode_ == FilterMode::mip_2d || filter_mode_ == FilterMode::mip) ? -0.1F : 0.3F;
     frame.viewport[2] = shading == Shading::rings
         ? (camera.ring_sigma > 0.F ? camera.ring_sigma : 2.828427F)
         : 0.F;
@@ -1008,6 +1014,9 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         default: trained.mode = 0; break;
         }
         splat_drender::vulkan::SplatSettings settings;
+        const bool mip2d = filter_mode_ == FilterMode::mip_2d || filter_mode_ == FilterMode::mip;
+        settings.kernel_size = mip2d ? 0.1F : 0.3F;
+        settings.compensate_2d = mip2d;
         const bool geometry = frame.reserved == static_cast<std::uint32_t>(Shading::depth) ||
                               frame.reserved == static_cast<std::uint32_t>(Shading::normal);
         settings.need_depth = geometry;

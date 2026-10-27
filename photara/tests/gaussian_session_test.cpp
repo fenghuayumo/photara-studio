@@ -3,6 +3,7 @@
 #include "imgui_internal.h"
 #include "splat/trainer.hpp"
 #include "splat/formats.hpp"
+#include "splat/model_handoff.hpp"
 #include "project/document.hpp"
 #include "studio_lasso_test.hpp"
 #include "studio_view_shortcuts_test.hpp"
@@ -264,6 +265,14 @@ int main(int argc, char** argv) {
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(folder);
     try {
+        {
+            auto tagged = model(1.F);
+            tagged.filter_mode = photara::splat::SplatFilterMode::mip_2d;
+            const auto ready = folder / "filter_handoff.ready";
+            photara::splat::ModelHandoff publisher(tagged, ready);
+            const auto received = photara::splat::receive_model_handoff(ready);
+            require(received.filter_mode == tagged.filter_mode, "model handoff lost filter mode");
+        }
         const auto first = folder / "first.ply", second = folder / "second.ply";
         photara::splat::save_gaussians(model(1.F), first);
         photara::splat::save_gaussians(model(3.F), second);
@@ -308,7 +317,12 @@ int main(int argc, char** argv) {
         host.means = means; host.log_scales = scales;
         host.quaternions = quats; host.opacity_logits = opacity;
         host.sh = sh; host.count = 1;
+        host.filter_mode = static_cast<int>(photara::splat::SplatFilterMode::mip_2d);
         restored.splat_edit.sync("edited-close-test", host);
+        photara::splat::GaussianModel edited_model;
+        require(restored.splat_edit.copy_model(edited_model) &&
+                    edited_model.filter_mode == photara::splat::SplatFilterMode::mip_2d,
+                "Gaussian editor lost filter mode");
         restored.splat_edit.replace_from_model(restored, model(23.F), false);
         require(restored.splat_edit.dirty(), "multi-source close fixture has no edits");
         const auto extra = folder / "extra.ply";

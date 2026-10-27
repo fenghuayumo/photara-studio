@@ -6,8 +6,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 LANCZOS = getattr(Image, 'Resampling', Image).LANCZOS
 
-LABELS = {'legacy':'Legacy','sort_z':'Z sort','alpha_999':'Alpha .999',
-          'near_001':'Near .01','pixel_half':'Half pixel','mip_splatting_legacy':'Mip Splatting numerics',
+LABELS = {'classic':'Standard raster + Classic',
+          'mip2d':'Standard raster + Mip 2D','mip3d':'Standard raster + Mip 3D',
+          'sort_z':'Z sort','alpha_999':'Alpha .999',
+          'near_001':'Near .01','pixel_half':'Half pixel',
           'mip_splatting_classic':'Mip Splatting + Classic','mip_splatting_mip2d':'Mip Splatting + Mip 2D',
           'mip_splatting_mip3d':'Mip Splatting + Mip 3D','mip_splatting_mip':'2D+3D (extra ablation)'}
 
@@ -36,7 +38,7 @@ def figures(rows, output):
         for ax,key,title in [(axes[0],'audit_valid_psnr','Held-out valid-region PSNR (higher is better)'),
                              (axes[1],'lpips_squeeze_valid','Spatial LPIPS-Squeeze (lower is better)')]:
             values=[r[key] for r in subset]
-            ax.bar(x,values,color=['#233b53' if r['variant']=='legacy' else '#3b928d' for r in subset])
+            ax.bar(x,values,color=['#233b53' if r['variant']=='classic' else '#3b928d' for r in subset])
             ax.axhline(values[0],color='#d07b44',linestyle='--',linewidth=1)
             ax.set_xticks(x,[LABELS[r['variant']] for r in subset],rotation=35,ha='right',fontsize=9)
             ax.set_title(title,fontsize=11)
@@ -50,7 +52,8 @@ def figures(rows, output):
     if not long: return
     # One seed per qualitative sheet; repeated seeds remain in the numerical table.
     long=[r for r in long if r['seed']==min(v['seed'] for v in long)]
-    preferred=['legacy','mip_splatting_classic','mip_splatting_mip2d','mip_splatting_mip3d']
+    preferred=['classic','mip2d','mip3d',
+               'mip_splatting_classic','mip_splatting_mip2d','mip_splatting_mip3d']
     chosen=[r for name in preferred for r in long if r['variant']==name]
     chosen=chosen[:5]
     font_path=Path('C:/Windows/Fonts/arial.ttf')
@@ -93,9 +96,9 @@ def main():
            '硬件：RTX 3060 Laptop 6GB。短程为 8000 步、每 1000 步升一级分辨率；'
            '长程为 30000 步、每 3000 步升一级。最终均为原生 1000×1000。'
            '训练不启用深度法线/多视图几何损失；TSDF 提取单独运行。Speedy 剪枝关闭。', '',
-           '这些是 Photara 内部采用 Mip Splatting 光栅预设的消融，不是两个软件的速度比赛。'
+           '这些是 Photara 内部消融；光栅预设与过滤模式分别由配置列标识。'
            'Classic=0.3 方差且不补偿，Mip2D=0.1 方差且补偿，Mip3D 使用逐相机距离/焦距下限。'
-           'Mip3D-only 保留 Classic 的 0.3 屏幕膨胀。Legacy 保留旧的零核/自动 3D 策略。', '',
+           'Mip3D-only 保留 Classic 的 0.3 屏幕膨胀。', '',
            '有效区 PSNR、SSIM 排除去畸变后没有源图像的像素；LPIPS 是 SqueezeNet 空间图在有效区的均值。'
            '相机和稀疏点由完整图像集得到，因此是共享 SfM 初始化下的留出评测。没有真值网格。', '']
     for experiment in dict.fromkeys(r['experiment'] for r in rows):
@@ -135,7 +138,7 @@ def main():
     common=[dict(r,label=LABELS[r['variant']]) for r in rows if r['renderer']=='audit_common']
     if common:
         lines+=['## 统一渲染器复核','',
-                '以下将所有模型改用同一个 Legacy 屏幕渲染器，保留模型文件中的 3D floor。'
+                '以下将所有模型改用同一个 Classic 屏幕过滤器，保留模型文件中的 3D floor。'
                 '用于区分训练得到的表示变化与展示时的 2D/排序设置变化；不代表 Mip 模型的推荐展示方式。','']
         lines+=table(common,[('配置','label',''),('有效区 PSNR','audit_valid_psnr','.3f'),
                              ('SSIM','audit_ssim','.5f'),('LPIPS','lpips_squeeze_valid','.5f')])
@@ -160,7 +163,7 @@ def main():
                 row[key]=float(np.median([m['median_ms'] for m in subset]))
             timing.append(row)
         lines+=['','## 固定模型光栅化耗时','',
-                f"固定长程 Legacy 模型（{fixed['gaussians']} 个 Gaussian），比较各开关的直接开销。"
+                f"固定长程 Classic 模型（{fixed['gaussians']} 个 Gaussian），比较各开关的直接开销。"
                 '两轮随机配置顺序、三个相机，每组预热 20 次、同步测量 50 次；表格为六组中位数的中位数。'
                 'Mip3D 需要训练时构建 floor，未对这个无 floor 的固定模型伪造 3D 结果。','']
         lines+=table(timing,[('配置','label',''),('RGB ms','rgb','.3f'),('几何 ms','geometry','.3f')])

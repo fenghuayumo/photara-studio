@@ -418,6 +418,11 @@ void viewport_tests(bool validation) {
     };
     require(renderer.upload(cloud, "same-model"), "GS upload failed");
     const auto gs = draw(splat_render::Shading::gaussian);
+    cloud.filter_mode = splat_render::FilterMode::mip_2d;
+    require(renderer.upload(cloud, "same-model"), "Mip2D upload failed");
+    require(draw(splat_render::Shading::gaussian) != gs,
+            "same-key filter switch retained the Classic image");
+    cloud.filter_mode = splat_render::FilterMode::classic;
     cloud.render_method = splat_render::RenderMethod::gaussian_3dgut;
     require(renderer.upload(cloud, "same-model"), "GUT upload failed");
     const auto gut = draw(splat_render::Shading::gaussian);

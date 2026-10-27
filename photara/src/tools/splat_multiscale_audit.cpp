@@ -23,12 +23,12 @@ int main(int argc, char** argv) {
         else if (profile=="alpha") training.rasterization.alpha_clip=.999F;
         else if (profile=="near") training.rasterization.near_plane=.01F;
         else if (profile=="pixel") training.rasterization.pixel_center_offset=.5F;
-        else if (profile!="legacy") throw std::runtime_error("Unknown raster profile");
+        else if (profile!="standard") throw std::runtime_error("Unknown raster profile");
         if (filter=="classic") training.filter_mode=SplatFilterMode::classic;
         else if (filter=="mip2d") training.filter_mode=SplatFilterMode::mip_2d;
         else if (filter=="mip3d") training.filter_mode=SplatFilterMode::mip_3d;
         else if (filter=="mip") training.filter_mode=SplatFilterMode::mip;
-        else if (filter!="legacy") throw std::runtime_error("Unknown filter mode");
+        else throw std::runtime_error("Unknown filter mode");
         const std::filesystem::path output(argv[3]);
         std::filesystem::create_directories(output);
         RasterizeOptions raster;

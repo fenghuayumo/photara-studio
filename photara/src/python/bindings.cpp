@@ -259,6 +259,12 @@ NB_MODULE(photara, module) {
         .value("MASKED", splat::AlphaMode::masked)
         .value("TRANSPARENT", splat::AlphaMode::transparent);
 
+    nb::enum_<splat::SplatFilterMode>(module, "SplatFilterMode")
+        .value("CLASSIC", splat::SplatFilterMode::classic)
+        .value("MIP2D", splat::SplatFilterMode::mip_2d)
+        .value("MIP3D", splat::SplatFilterMode::mip_3d)
+        .value("MIP", splat::SplatFilterMode::mip);
+
     nb::enum_<splat::PpispParamType>(module, "PpispParamType")
         .value("NO_CRF_NO_VIG", splat::PpispParamType::no_crf_no_vig)
         .value("NO_CRF", splat::PpispParamType::no_crf)
@@ -1207,7 +1213,7 @@ NB_MODULE(photara, module) {
         .def_rw("multi_view_ncc_sharpness", &splat::TrainingOptions::multi_view_ncc_sharpness)
         .def_rw("multi_view_ncc_min_weight", &splat::TrainingOptions::multi_view_ncc_min_weight)
         .def_rw("geometry_epsilon", &splat::TrainingOptions::geometry_epsilon)
-        .def_rw("kernel_size", &splat::TrainingOptions::kernel_size)
+        .def_rw("filter_mode", &splat::TrainingOptions::filter_mode)
         .def_rw("scale_modifier", &splat::TrainingOptions::scale_modifier)
         .def_rw("use_mvs_depth", &splat::TrainingOptions::use_mvs_depth)
         .def_rw("lambda_d", &splat::TrainingOptions::lambda_d)

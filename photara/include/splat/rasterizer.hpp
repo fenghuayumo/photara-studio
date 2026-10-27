@@ -53,13 +53,10 @@ struct RasterizeOptions {
 template <typename RenderOptions>
 inline void configure_rasterization(RenderOptions& raster, const TrainingOptions& training) {
     raster.rasterization = training.rasterization;
-    raster.kernel_size = training.kernel_size;
-    if (training.filter_mode != SplatFilterMode::legacy) {
-        const bool mip2d = training.filter_mode == SplatFilterMode::mip_2d ||
-                           training.filter_mode == SplatFilterMode::mip;
-        raster.kernel_size = mip2d ? 0.1F : 0.3F;
-        raster.rasterization.compensate_2d = mip2d;
-    }
+    const bool mip2d = training.filter_mode == SplatFilterMode::mip_2d ||
+                       training.filter_mode == SplatFilterMode::mip;
+    raster.kernel_size = mip2d ? 0.1F : 0.3F;
+    raster.rasterization.compensate_2d = mip2d;
 }
 
 // Geometry consumers use integer pixel indices. Match the rays sampled by

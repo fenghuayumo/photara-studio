@@ -20,12 +20,11 @@ int main(int argc, char** argv) {
         const auto audit=Json::parse(std::ifstream(argv[2]));
         struct Configuration { const char* name; RasterizationPolicy policy; SplatFilterMode filter; };
         std::vector<Configuration> configurations{
-            {"legacy",{},SplatFilterMode::legacy},
-            {"sort_z",{true,.99F,.2F,0.F,true},SplatFilterMode::legacy},
-            {"alpha_999",{false,.999F,.2F,0.F,true},SplatFilterMode::legacy},
-            {"near_001",{false,.99F,.01F,0.F,true},SplatFilterMode::legacy},
-            {"pixel_half",{false,.99F,.2F,.5F,true},SplatFilterMode::legacy},
-            {"mip_splatting_legacy",{true,.999F,.01F,.5F,true},SplatFilterMode::legacy},
+            {"classic",{},SplatFilterMode::classic},
+            {"sort_z",{true,.99F,.2F,0.F,true},SplatFilterMode::classic},
+            {"alpha_999",{false,.999F,.2F,0.F,true},SplatFilterMode::classic},
+            {"near_001",{false,.99F,.01F,0.F,true},SplatFilterMode::classic},
+            {"pixel_half",{false,.99F,.2F,.5F,true},SplatFilterMode::classic},
             {"mip_splatting_classic",{true,.999F,.01F,.5F,true},SplatFilterMode::classic},
             {"mip_splatting_mip2d",{true,.999F,.01F,.5F,true},SplatFilterMode::mip_2d}};
         std::mt19937 random(20261026);
@@ -50,9 +49,9 @@ int main(int argc, char** argv) {
                     camera.width=view["width"]; camera.height=view["height"];
                     camera.fx=view["fx"]; camera.fy=view["fy"];
                     // Audit stores sample-space intrinsics. The benchmark's
-                    // source is a Legacy audit (offset zero), checked below.
+                    // Source is a standard-profile audit (offset zero).
                     camera.cx=view["cx"]; camera.cy=view["cy"];
-                    if (audit["profile"]!="legacy") throw std::runtime_error("Use Legacy audit cameras for a common convention");
+                    if (audit["profile"]!="standard") throw std::runtime_error("Use standard audit cameras for a common convention");
                     for (bool geometry : {false,true}) {
                         raster.require_depth=geometry;
                         std::vector<double> times;

@@ -762,7 +762,7 @@ C++: `splat::TrainingOptions`. Construct with `photara.TrainingOptions()`.
 | `multi_view_ncc_sharpness` | read/write | `float` | `{12.F}` |  [source](../../photara/include/splat/options.hpp#L308) |
 | `multi_view_ncc_min_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L309) |
 | `geometry_epsilon` | read/write | `float` | `{1e-3F}` |  [source](../../photara/include/splat/options.hpp#L321) |
-| `kernel_size` | read/write | `float` | `{0.F}` | Classic rasterization. A positive kernel enables antialiasing and must be selected explicitly. [source](../../photara/include/splat/options.hpp#L324) |
+| `filter_mode` | read/write | `SplatFilterMode` | `classic` | Select Classic, Mip2D, Mip3D or the combined Mip ablation. [source](../../photara/include/splat/options.hpp#L87) |
 | `scale_modifier` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L325) |
 | `use_mvs_depth` | read/write | `bool` | `{false}` | Photometric training baseline. Geometry supervision is opt-in and can be added after fixed-model L1+SSIM convergence is verified. [source](../../photara/include/splat/options.hpp#L328) |
 | `use_mvs_normals` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L329) |

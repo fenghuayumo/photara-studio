@@ -8,12 +8,13 @@ import time
 from pathlib import Path
 
 VARIANTS = {
-    'legacy': ('legacy', 'legacy', []),
-    'sort_z': ('z', 'legacy', ['--splat-depth-sort', 'z']),
-    'alpha_999': ('alpha', 'legacy', ['--splat-alpha-clip', '0.999']),
-    'near_001': ('near', 'legacy', ['--splat-near-plane', '0.01']),
-    'pixel_half': ('pixel', 'legacy', ['--splat-pixel-center', '0.5']),
-    'mip_splatting_legacy': ('mip-splatting', 'legacy', ['--splat-raster-profile', 'mip-splatting']),
+    'classic': ('standard', 'classic', ['--splat-filter-mode', 'classic']),
+    'mip2d': ('standard', 'mip2d', ['--splat-filter-mode', 'mip2d']),
+    'mip3d': ('standard', 'mip3d', ['--splat-filter-mode', 'mip3d']),
+    'sort_z': ('z', 'classic', ['--splat-depth-sort', 'z']),
+    'alpha_999': ('alpha', 'classic', ['--splat-alpha-clip', '0.999']),
+    'near_001': ('near', 'classic', ['--splat-near-plane', '0.01']),
+    'pixel_half': ('pixel', 'classic', ['--splat-pixel-center', '0.5']),
     'mip_splatting_classic': ('mip-splatting', 'classic', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'classic']),
     'mip_splatting_mip2d': ('mip-splatting', 'mip2d', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'mip2d']),
     'mip_splatting_mip3d': ('mip-splatting', 'mip3d', ['--splat-raster-profile', 'mip-splatting', '--splat-filter-mode', 'mip3d']),
@@ -47,7 +48,8 @@ def main():
     parser.add_argument('--progressive-interval', type=int, default=1000)
     parser.add_argument('--seeds', type=int, nargs='+', default=[42])
     parser.add_argument('--variants', nargs='+', choices=list(VARIANTS),
-                        default=[name for name in VARIANTS if name != 'mip_splatting_mip'])
+                        default=['classic', 'mip2d', 'mip3d'],
+                        help='Default compares filters with the standard raster profile; select preset variants explicitly')
     parser.add_argument('--mesh', action='store_true')
     parser.add_argument('--geometry', action='store_true')
     parser.add_argument('--common-audit', action='store_true')
@@ -136,7 +138,7 @@ def main():
             if args.common_audit:
                 common = audit[:]
                 common[4] = str((folder/'audit_common').resolve())
-                common[5:7] = ['legacy', 'legacy']
+                common[5:7] = ['standard', 'classic']
                 write(folder/'audit-common-command.json', common)
                 code, seconds = run(common, folder/'audit-common.log')
                 if code: raise RuntimeError('Common audit failed: '+str(folder/'audit-common.log'))

@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         options.mean_noise_weight = 0.F;
         options.progressive_resolution = true; options.progressive_resolution_interval = 3;
         options.progressive_initial_scale = 0.5F;
-        options.use_3d_filter = true; options.filter_3d_update_interval = 3;
+        options.filter_mode = splat::SplatFilterMode::mip_3d; options.filter_3d_update_interval = 3;
         options.training_async_upload = false;
         scene.subject_bounds.valid = true;
         scene.subject_bounds.center = {0.F, 0.F, 2.F};

@@ -32,17 +32,25 @@ int main(int argc, char** argv) {
         options.ignore_undistortion_border = true;
         options.use_mask = false;
         const std::string profile(argv[5]), filter(argv[6]);
-        if (profile == "mip-splatting") options.rasterization = {true, .999F, .01F, .5F, true};
+        if (profile == "mip-splatting" || profile == "preset-no-z" ||
+            profile == "preset-no-alpha" || profile == "preset-no-near" ||
+            profile == "preset-no-pixel") {
+            options.rasterization = {true, .999F, .01F, .5F, true};
+            if (profile == "preset-no-z") options.rasterization.sort_by_camera_z = false;
+            if (profile == "preset-no-alpha") options.rasterization.alpha_clip = .99F;
+            if (profile == "preset-no-near") options.rasterization.near_plane = .2F;
+            if (profile == "preset-no-pixel") options.rasterization.pixel_center_offset = 0.F;
+        }
         else if (profile == "z") options.rasterization.sort_by_camera_z = true;
         else if (profile == "alpha") options.rasterization.alpha_clip = .999F;
         else if (profile == "near") options.rasterization.near_plane = .01F;
         else if (profile == "pixel") options.rasterization.pixel_center_offset = .5F;
-        else if (profile != "legacy") throw std::runtime_error("Unknown profile");
+        else if (profile != "standard") throw std::runtime_error("Unknown profile");
         if (filter == "classic") options.filter_mode = SplatFilterMode::classic;
         else if (filter == "mip2d") options.filter_mode = SplatFilterMode::mip_2d;
         else if (filter == "mip3d") options.filter_mode = SplatFilterMode::mip_3d;
         else if (filter == "mip") options.filter_mode = SplatFilterMode::mip;
-        else if (filter != "legacy") throw std::runtime_error("Unknown filter");
+        else throw std::runtime_error("Unknown filter");
         DatasetLoadRequest request;
         request.source = argv[1]; request.image_directory = argv[2];
         auto scene = load_splat_dataset(request).scene;

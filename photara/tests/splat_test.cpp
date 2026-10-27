@@ -184,34 +184,16 @@ void test_gggs_3d_filter() {
                            100.F, 0.F, 1.F},
         {3, 3}, tinytensor::Device::CUDA);
     const auto filter = detail::compute_3d_filter(means, {camera}).to_vector();
-    const float unit = std::sqrt(0.2F) / 50.F;
-    require(
-        filter.size() == 3 && std::abs(filter[0] - 2.F * unit) < 1e-6F &&
+    const float unit = std::sqrt(0.1F) / 50.F;
+    require(filter.size() == 3 && std::abs(filter[0] - 2.F * unit) < 1e-6F &&
             std::abs(filter[1] - 4.F * unit) < 1e-6F &&
-            std::abs(filter[2] - 4.F * unit) < 1e-6F,
-        "GGGS 3D filter differs from pygsplat visibility/focal formula");
-    const auto invisible = tinytensor::Tensor::from_vector(
+            std::abs(filter[2] - std::sqrt(10001.F) * unit) < 1e-5F,
+            "3D filter must use Euclidean distance to each camera");
+    const auto behind = tinytensor::Tensor::from_vector(
         std::vector<float>{0.F, 0.F, -2.F}, {1, 3}, tinytensor::Device::CUDA);
-    require(std::abs(detail::compute_3d_filter(invisible, {camera}).to_vector()[0] -
-                     unit) < 1e-6F,
-            "GPU filter maximum lost the all-invisible fallback");
-
-    // The outer 15% margin is admitted, including off-center intrinsics.
-    Camera edge_camera = camera;
-    edge_camera.fx = edge_camera.fy = 100.F;
-    const auto edge_means = tinytensor::Tensor::from_vector(
-        std::vector<float>{1.2F,0.F,2.F, 0.F,0.F,4.F},
-        {2,3}, tinytensor::Device::CUDA);
-    const auto edge_filter = detail::compute_3d_filter(edge_means,{edge_camera}).to_vector();
-    require(std::abs(edge_filter[0]-2.F*std::sqrt(.2F)/100.F)<1e-6F,
-            "3D filter rejected the 15% screen margin");
-    edge_camera.cx = 20.F;
-    const auto offset_means = tinytensor::Tensor::from_vector(
-        std::vector<float>{-.8F,0.F,2.F, 0.F,0.F,4.F},
-        {2,3}, tinytensor::Device::CUDA);
-    const auto offset_filter = detail::compute_3d_filter(offset_means,{edge_camera}).to_vector();
-    require(std::abs(offset_filter[0]-4.F*std::sqrt(.2F)/100.F)<1e-6F,
-            "3D filter ignored the calibrated principal point");
+    require(std::abs(detail::compute_3d_filter(behind, {camera}).to_vector()[0] -
+                     2.F * unit) < 1e-6F,
+            "3D filter must include cameras behind the Gaussian");
 
     GaussianModel model;
     model.means = means;
@@ -1250,11 +1232,9 @@ void test_fisheye_filter_and_supervision() {
     camera.fx=camera.fy=30.F;camera.cx=camera.cy=63.5F;
     const auto means=tinytensor::Tensor::from_vector(
         std::vector<float>{2.F,0.F,.1F}, {1,3},tinytensor::Device::CUDA);
-    const auto filtered=detail::compute_3d_filter(means,{camera},.2F,false).to_vector();
-    // For an equidistant camera, tangential angular magnification is f*theta/r.
-    // This is larger than the radial magnification f/length at this test point.
-    const float expected=std::sqrt(.2F)*2.F/(30.F*std::atan2(2.F,.1F));
-    require(std::abs(filtered[0]-expected)<1e-5F,"Fisheye filter ignored the local projection scale");
+    const auto filtered=detail::compute_3d_filter(means,{camera},.2F).to_vector();
+    const float expected=std::sqrt(.2F)*std::sqrt(4.F+.01F)/30.F;
+    require(std::abs(filtered[0]-expected)<1e-5F,"3D filter did not use camera distance and focal length");
     mvs::MvsView view;
     view.path=std::filesystem::temp_directory_path()/
         ("photara_fisheye_supervision_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
@@ -1283,6 +1263,7 @@ void test_fisheye_filter_and_supervision() {
     options.enable_densification = false;
     options.progressive_resolution = false;
     options.use_depth_normal_loss = true;
+    options.filter_mode = SplatFilterMode::mip_3d;
     options.depth_normal_from_iter = 1;
     options.undistort_to_pinhole = false;
     const auto native_model = Trainer(options).train(scene);

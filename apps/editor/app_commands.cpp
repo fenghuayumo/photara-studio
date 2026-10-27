@@ -4751,6 +4751,7 @@ void queue_splat_model_load(
             cloud.count = static_cast<std::uint32_t>(count);
             cloud.sh_degree = model.sh_degree;
             cloud.render_method = static_cast<splat_render::RenderMethod>(model.render_method);
+            cloud.filter_mode = static_cast<splat_render::FilterMode>(model.filter_mode);
             cloud.sh_bases = model.sh.is_valid()
                 ? static_cast<std::uint32_t>(model.sh.shape()[1]) : 1U;
             cloud.means = model.means.ptr<float>();
@@ -4764,6 +4765,7 @@ void queue_splat_model_load(
             host.count = cloud.count;
             host.sh_degree = cloud.sh_degree;
             host.render_method = static_cast<int>(model.render_method);
+            host.filter_mode = static_cast<int>(model.filter_mode);
             host.sh_bases = cloud.sh_bases;
             host.means = cloud.means;
             host.log_scales = cloud.log_scales;

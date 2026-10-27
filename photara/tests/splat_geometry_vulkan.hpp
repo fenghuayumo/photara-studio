@@ -150,21 +150,19 @@ void test_vulkan_geometry_chain() {
         compare(cuda.model.quaternions,vk.model.quaternions,.003F,"Vulkan chunked query rotation gradients");
         compare(cuda.model.opacity_logits,vk.model.opacity_logits,.003F,"Vulkan chunked query opacity gradients");
     }
-    // Visible, behind-camera, off-screen, and all-invisible fallback radii.
+    // Compare world-distance filtering for visible, off-screen and behind-camera points.
     auto means = Tensor::from_vector(std::vector<float>{0,0,2, .1F,.2F,3, 100,0,2, 0,0,-2}, {4,3}, Device::CUDA);
-    for (bool euclidean : {false,true}) {
-        const auto a = detail::compute_3d_filter(means,{camera,neighbour_camera},.2F,euclidean);
-        const auto b = detail::compute_3d_filter(means.to(Device::Vulkan),{camera,neighbour_camera},.2F,euclidean);
-        compare(a,b,2e-5F,"Vulkan 3D filter parity");
-    }
+    compare(detail::compute_3d_filter(means,{camera,neighbour_camera}),
+            detail::compute_3d_filter(means.to(Device::Vulkan),{camera,neighbour_camera}),
+            2e-5F,"Vulkan 3D filter parity");
     auto invisible = Tensor::from_vector(std::vector<float>{0,0,-2,100,0,2}, {2,3}, Device::CUDA);
     compare(detail::compute_3d_filter(invisible,{camera}),
-        detail::compute_3d_filter(invisible.to(Device::Vulkan),{camera}),2e-5F,"Vulkan invisible filter fallback");
+        detail::compute_3d_filter(invisible.to(Device::Vulkan),{camera}),2e-5F,"Vulkan behind-camera filter parity");
     auto margin_means = Tensor::from_vector(
         std::vector<float>{1.F,0.F,2.F, 0.F,0.F,4.F}, {2,3}, Device::CUDA);
     compare(detail::compute_3d_filter(margin_means,{camera}),
         detail::compute_3d_filter(margin_means.to(Device::Vulkan),{camera}),
-        2e-5F,"Vulkan 15-percent filter margin parity");
+        2e-5F,"Vulkan off-screen filter parity");
     auto offset_camera = camera;
     offset_camera.cx = 6.F;
     auto offset_means = Tensor::from_vector(
@@ -190,6 +188,8 @@ void test_vulkan_geometry_chain() {
         model.filter_3d = detail::compute_3d_filter(model.means,{camera,neighbour_camera});
         auto ref = make_view(device,camera,0.F), near = make_view(device,neighbour_camera,2.F);
         RasterizeOptions ro; ro.require_depth = true;
+        ro.kernel_size = .3F;
+        ro.rasterization.compensate_2d = false;
         ro.point_depth_bracket = .2F; ro.point_depth_tolerance = 0.F;
         Rasterizer rasterizer;
         auto rendered = rasterizer.forward(model,camera,ro);

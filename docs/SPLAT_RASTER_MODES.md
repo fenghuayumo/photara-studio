@@ -1,12 +1,12 @@
 # Rasterization and filtering ablations
 
-The existing defaults remain `--splat-raster-profile legacy` and
-`--splat-filter-mode legacy`. These controls change Photara's rasterizer; they
+The defaults are `--splat-raster-profile standard` and
+`--splat-filter-mode classic`. These controls change Photara's rasterizer; they
 do not select or execute the Brush application.
 
 ## Raster policy
 
-| Control | Legacy | Mip Splatting numerical preset |
+| Control | Standard | Mip Splatting numerical preset |
 |---|---|---|
 | Sort key | Camera-center Euclidean distance | Camera-space Z |
 | Per-contributor alpha ceiling | 0.99 | 0.999 |
@@ -16,6 +16,10 @@ do not select or execute the Brush application.
 Select the preset with `--splat-raster-profile mip-splatting`. Each control can be
 overridden independently with `--splat-depth-sort radial|z`,
 `--splat-alpha-clip`, `--splat-near-plane`, and `--splat-pixel-center 0|0.5`.
+The preset is experimental; filter modes do not select it. Compare filter
+modes under the default standard raster policy before attributing changes to
+filtering. The benchmark defaults to `classic mip2d mip3d`; select
+`mip_splatting_*` variants explicitly to study the experimental preset.
 The near plane is expressed in the SfM scene's units, not metres.
 Equirectangular rendering retains radial sorting because camera Z is not a
 valid ordering over the full sphere. Native fisheye retains its existing
@@ -36,6 +40,15 @@ as outside even though its forward render contains the surface. Treat near
 plane changes on Vulkan geometry supervision as incomplete until that query
 path is corrected; the ORI raster and mesh benchmark uses CUDA.
 
+In an 8,000-step, single-seed room-scene diagnosis, individual held-out
+views showed strong sensitivity to the preset even when mean PSNR changed
+little. On one fixed Classic model, changing the near plane from 0.01 to 0.2
+improved view 104 by 7.51 dB; on a different model, switching from Z to radial
+sorting improved view 224 by 4.60 dB. These are fixed-model interventions, not
+evidence that either setting is universally better after retraining. Inspect
+per-view results and near-camera Gaussian occlusion, and investigate sorting
+artifacts before changing default raster settings.
+
 ## Primary filter modes: choose 2D or 3D
 
 The 2D Mip filter is distinct from Classic's covariance dilation. Classic's
@@ -44,7 +57,6 @@ compensation**, not the absence of the Classic footprint.
 
 | `--splat-filter-mode` | Screen covariance variance | 2D opacity compensation | 3D filter |
 |---|---:|---|---|
-| `legacy` | Existing `--splat-kernel-size` (default 0) | Existing behavior | Existing auto/on/off policy |
 | `classic` | 0.3 px² | Off | Off |
 | `mip2d` | 0.1 px² | On | Off |
 | `mip3d` | 0.3 px² | Off | On |
@@ -55,9 +67,9 @@ both compensations) is retained only for the completed combined-filter
 ablation and reproducibility; it is not a recommended primary mode and is
 excluded from the benchmark script's default variant list.
 
-Explicit modes cannot be combined with `--splat-kernel-size` or a non-auto
-`--splat-filter-3d`. Legacy preserves the old controls and strategy-dependent
-3D filter. Explicit 3D modes use strength 0.1 and
+The selected mode controls both the screen kernel and the 3D filter. The old
+independent kernel and 3D-filter CLI controls are no longer available.
+Explicit 3D modes use strength 0.1 and
 `sqrt(0.1) * min_camera(distance / that_camera_fx)` over training cameras.
 The radius is frozen between refreshes, never optimized. It expands each
 scale to `sqrt(scale² + radius²)` and compensates opacity by the product of
@@ -67,6 +79,11 @@ Photara continues to keep the 3D floor separate, refresh after refinement and
 resolution changes, periodically refresh after growth ends, and serialize
 `filter_3D`. This is **not** Brush's bake-before-refine/export lifecycle.
 Native non-pinhole training retains the pre-existing 3D-filter restriction.
+
+PLY and project model data store the filter mode; untagged models use Classic.
+Studio uses the stored screen kernel and 2D compensation. Non-Classic modes
+require PLY export to preserve the mode. Third-party readers must support
+`filter_3D` to reproduce the 3D floor.
 
 The ordinary pinhole 2D Mip opacity compensation remains detached from the
 covariance gradient. Native fisheye differentiates its exact compensation.

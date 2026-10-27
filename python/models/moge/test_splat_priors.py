@@ -122,7 +122,7 @@ def main():
             "--splat-eval-split-every", "8", "--splat-densification=true", "--splat-init-point-budget", "100000",
             "--splat-densification-cap", "300000", "--splat-ppisp=false", "--splat-bilateral-grid=false",
             "--splat-checkpoint-seconds", "0", "--splat-seed", str(args.seed), "--splat-geometry-loss=false",
-            "--splat-normal-field=false", "--splat-filter-3d=off",
+            "--splat-normal-field=false", "--splat-filter-mode=classic",
             "--splat-lambda-d", str(depth), "--splat-lambda-n", str(normal)]
         if depth > 0 or normal > 0:
             command += ["--splat-prior-dir", str(prior_dir)]

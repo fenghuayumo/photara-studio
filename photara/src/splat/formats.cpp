@@ -1443,6 +1443,8 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
 void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
     if (model.render_method == RenderMethod::gaussian_3dgut)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
+    if (model.filter_mode != SplatFilterMode::classic)
+        throw std::invalid_argument("Non-Classic filter modes require PLY to preserve rendering metadata");
     const auto files = read_sog_zip(save_sog(model));
     std::filesystem::create_directories(directory);
     for (const auto& [name, bytes] : files) write_file(directory / name, bytes);
@@ -1490,6 +1492,7 @@ GaussianModel transform_gaussians(
     placed.normal_features = model.normal_features;
     placed.sh_degree = model.sh_degree;
     placed.render_method = model.render_method;
+    placed.filter_mode = model.filter_mode;
     // filter_3d is a world-space Mip-Splatting radius, so it grows with the
     // uniform scale like every other spatial quantity.
     if (model.filter_3d.is_valid() && model.filter_3d.numel() == count) {
@@ -1512,6 +1515,8 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
     for (const GaussianModel& model : models) {
         if (model.render_method != models.front().render_method)
             throw std::invalid_argument("Cannot merge 3DGS and 3DGUT models");
+        if (model.filter_mode != models.front().filter_mode)
+            throw std::invalid_argument("Cannot merge Gaussian models with different filter modes");
         const auto count = model.size();
         if (count == 0)
             throw std::runtime_error("Cannot merge an empty Gaussian model");
@@ -1593,6 +1598,7 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         sh, {total, max_bases, 3U}, device);
     merged.sh_degree = degree;
     merged.render_method = models.front().render_method;
+    merged.filter_mode = models.front().filter_mode;
     if (all_normals)
         merged.normal_features = tinytensor::Tensor::from_vector(
             normals, {total, 4U}, device);
@@ -1607,6 +1613,8 @@ void save_gaussians(
     GaussianFormat format) {
     if (format == GaussianFormat::auto_detect)
         format = gaussian_format_from_path(path);
+    if (model.filter_mode != SplatFilterMode::classic && format != GaussianFormat::ply)
+        throw std::invalid_argument("Non-Classic filter modes require PLY to preserve rendering metadata");
     if (model.render_method == RenderMethod::gaussian_3dgut && format != GaussianFormat::ply)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
     switch (format) {

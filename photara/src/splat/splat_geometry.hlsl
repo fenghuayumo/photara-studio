@@ -141,43 +141,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 world = float3(input0[3u*i], input0[3u*i+1u], input0[3u*i+2u]);
         float distance = asfloat(0x7f7fffffu);
         for (uint v = 0u; v < pc.camera_count; ++v) {
-            uint b = 27u * v;
+            uint b = 17u * v;
             float3 p = float3(
                 camera_data[b]*world.x + camera_data[b+4u]*world.y + camera_data[b+8u]*world.z + camera_data[b+12u],
                 camera_data[b+1u]*world.x + camera_data[b+5u]*world.y + camera_data[b+9u]*world.z + camera_data[b+13u],
                 camera_data[b+2u]*world.x + camera_data[b+6u]*world.y + camera_data[b+10u]*world.z + camera_data[b+14u]);
-            if ((pc.euclidean & 1u) != 0u) {
-                float focal = (pc.euclidean & 2u) != 0u ? max(camera_data[b+16u], 1.0e-6f) : 1.0f;
-                distance = min(distance, length(p) / focal); continue;
-            }
-            float fx = camera_data[b+16u], fy = camera_data[b+17u];
-            float w = camera_data[b+18u], h = camera_data[b+19u];
-            if ((uint)camera_data[b+20u] == 1u) {
-                if (!(p.z > 1.0e-6f)) continue;
-                float2 q = p.xy / p.z;
-                float r = length(q), theta = atan(r), t2 = theta * theta;
-                float k1 = camera_data[b+23u], k2 = camera_data[b+24u];
-                float k3 = camera_data[b+25u], k4 = camera_data[b+26u];
-                float poly = 1.0f + t2*(k1+t2*(k2+t2*(k3+t2*k4)));
-                float a = r > 1.0e-8f ? theta * poly / r : 1.0f;
-                float2 pixel = float2(fx,fy) * a * q + float2(camera_data[b+21u],camera_data[b+22u]);
-                if (pixel.x < -0.15f*w || pixel.x > 1.15f*w || pixel.y < -0.15f*h || pixel.y > 1.15f*h) continue;
-                float derivative = (1.0f+t2*(3.0f*k1+t2*(5.0f*k2+t2*(7.0f*k3+9.0f*k4*t2)))) / (1.0f+r*r);
-                float bq = r > 1.0e-8f ? (derivative-a)/(r*r) : 2.0f*(k1-1.0f/3.0f);
-                float j00 = a+bq*q.x*q.x, j01 = bq*q.x*q.y, j11 = a+bq*q.y*q.y;
-                float3 j0 = fx / p.z * float3(j00,j01,-dot(float2(j00,j01),q));
-                float3 j1 = fy / p.z * float3(j01,j11,-dot(float2(j01,j11),q));
-                float aa = dot(j0,j0), bb = dot(j0,j1), cc = dot(j1,j1);
-                float sigma = sqrt(0.5f*(aa+cc+sqrt((aa-cc)*(aa-cc)+4.0f*bb*bb)));
-                if (sigma > 0.0f && !isinf(sigma)) distance = min(distance, pc.focal/sigma);
-            } else {
-                if (!(p.z > 0.2f)) continue;
-                float2 pixel = float2(fx,fy) * p.xy/p.z +
-                    float2(camera_data[b+21u],camera_data[b+22u]);
-                if (pixel.x < -0.15f*w || pixel.x > 1.15f*w ||
-                    pixel.y < -0.15f*h || pixel.y > 1.15f*h) continue;
-                distance = min(distance, p.z);
-            }
+            float focal = max(camera_data[b+16u], 1.0e-6f);
+            distance = min(distance, length(p) / focal);
         }
         output0.Store(4u*i, asuint(distance));
         if (distance < asfloat(0x7f7fffffu)) {

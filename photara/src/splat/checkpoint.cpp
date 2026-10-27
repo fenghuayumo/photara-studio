@@ -420,7 +420,6 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.maximum_scale_fraction);
     hash.append(options.constrain_scale_range);
     hash.append(options.geometry_epsilon);
-    hash.append(options.kernel_size);
     hash.append(options.filter_mode);
     hash.append(options.rasterization.sort_by_camera_z);
     hash.append(options.rasterization.alpha_clip);
@@ -438,8 +437,6 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     hash.append(options.progressive_resolution_interval);
     hash.append(options.progressive_initial_scale);
     hash.append(options.evaluation_split_every);
-    hash.append(options.use_3d_filter.has_value());
-    hash.append(options.use_3d_filter.value_or(false));
     std::vector<std::filesystem::path> paths;
     for (const auto& view : scene.views) {
         paths.push_back(view.path);

@@ -74,7 +74,9 @@ ModelHandoff::ModelHandoff(const GaussianModel& model, const std::filesystem::pa
     };
     const std::uint32_t version = k_gaussian_chunk_version;
     const std::uint64_t stored_count = count;
-    const std::uint32_t flags = (filter ? 1U : 0U) | (normals ? 2U : 0U);
+    const std::uint32_t flags = (filter ? 1U : 0U) | (normals ? 2U : 0U) |
+        (s.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) |
+        (static_cast<std::uint32_t>(s.filter_mode) << 3U);
     append(&version, 4); append(&stored_count, 8); append(&s.sh_degree, 4); append(&flags, 4);
     const auto tensor = [&](const tinytensor::Tensor& t) {
         const auto* data = t.ptr<float>();
@@ -122,7 +124,7 @@ GaussianModel receive_model_handoff(const std::filesystem::path& ready) {
     std::memcpy(&version, data, 4); std::memcpy(&count, data + 4, 8);
     std::memcpy(&degree, data + 12, 4); std::memcpy(&flags, data + 16, 4);
     if (version != k_gaussian_chunk_version || count == 0 || count > 50'000'000 ||
-        degree > 3 || (flags & ~3U) != 0)
+        degree > 3 || (flags & ~63U) != 0 || ((flags >> 3U) & 7U) < 1U || ((flags >> 3U) & 7U) > 4U)
         throw std::runtime_error("Invalid final-model handoff header");
     const auto expected = kHeader + count *
         (11U + (degree + 1U) * (degree + 1U) * 3U +

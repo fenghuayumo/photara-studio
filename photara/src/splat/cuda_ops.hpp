@@ -149,9 +149,7 @@ PruneMasks prune_masks(
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means,
     const std::vector<Camera>& cameras,
-    float minimum_scale_factor = 0.2F,
-    bool all_camera_euclidean = false,
-    bool per_camera_focal = false);
+    float minimum_scale_factor = 0.1F);
 
 MultiViewLoss add_multi_view_loss(
     const tinytensor::Tensor& sampled_neighbour_points,

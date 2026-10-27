@@ -1090,6 +1090,7 @@ GaussianModel initialize_from_dense_cloud(
     const tinytensor::Device device = training_device(options);
     GaussianModel model;
     model.render_method = options.render_method;
+    model.filter_mode = options.filter_mode;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
@@ -1114,8 +1115,6 @@ Trainer::Trainer(TrainingOptions options)
           std::isfinite(raster.near_plane) && raster.near_plane > 0.F &&
           std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F && raster.pixel_center_offset <= 0.5F))
         throw std::invalid_argument("Invalid rasterization policy");
-    if (options_.filter_mode != SplatFilterMode::legacy)
-        options_.use_3d_filter = options_.filter_mode == SplatFilterMode::mip_3d || options_.filter_mode == SplatFilterMode::mip;
     enforce_render_method_constraints(options_);
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.backend != TrainingBackend::cuda)
         throw std::invalid_argument("3DGUT training currently requires CUDA");
@@ -1206,6 +1205,7 @@ GaussianModel Trainer::train(
     if (warm_start && model.render_method != options_.render_method)
         throw std::runtime_error("Checkpoint rendering method does not match requested method");
     model.render_method = options_.render_method;
+    model.filter_mode = options_.filter_mode;
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1257,11 +1257,7 @@ GaussianModel Trainer::train(
     // their geometry-only Mip filter disabled as well: otherwise every
     // refresh scans all Gaussian/camera pairs without active supervision.
     const bool use_3d_filter = !native_non_pinhole &&
-        options_.use_3d_filter.value_or(
-            (options_.use_depth_normal_loss && options_.depth_normal_weight > 0.F) ||
-            (options_.use_normal_field && options_.normal_field_weight > 0.F) ||
-            options_.multi_view_geo_weight > 0.F ||
-            options_.multi_view_ncc_weight > 0.F);
+        (options_.filter_mode == SplatFilterMode::mip_3d || options_.filter_mode == SplatFilterMode::mip);
     std::vector<Camera> filter_cameras;
     std::vector<Camera> full_resolution_filter_cameras;
     if (use_3d_filter) {
@@ -1273,20 +1269,14 @@ GaussianModel Trainer::train(
                 data::training_camera(scene.views[index], options_, 1.F));
         }
     }
-    const float filter_3d_factor =
-        (options_.filter_mode != SplatFilterMode::legacy || options_.densification_strategy ==
-                DensificationStrategy::adc_plus)
-            ? 0.1F
-            : 0.2F;
-    const bool splat_filter = options_.filter_mode != SplatFilterMode::legacy || options_.densification_strategy ==
-                DensificationStrategy::adc_plus;
+    const float filter_3d_factor = 0.1F;
     // Keep the Mip-Splatting floor separate from the canonical parameters.
     // The filter is applied only while rasterizing and recomputed after
     // topology changes; repeatedly baking it into scale/opacity causes a
     // cumulative opacity loss.
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras, filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+            model.means, filter_cameras, filter_3d_factor);
     if (native_non_pinhole) {
         // Panorama and fisheye training rasterize the source projection
         // directly; state which models are in play so a run that silently fell
@@ -1350,7 +1340,7 @@ GaussianModel Trainer::train(
             if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
                     snapshot.means, full_resolution_filter_cameras,
-                    filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+                    filter_3d_factor);
             // The Vulkan path shares one logical device/queue and has stateful
             // process-wide tensor and raster runtime state. An evaluation
             // thread can therefore race the next training submission even when
@@ -1439,7 +1429,7 @@ GaussianModel Trainer::train(
         refine::gpu_detail::select_training_rows_gpu(model, keep, adam_states);
         if (use_3d_filter)
             model.filter_3d = detail::compute_3d_filter(
-                model.means, filter_cameras, filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+                model.means, filter_cameras, filter_3d_factor);
         if (densification_enabled)
             densification_stats = detail::make_densification_stats(
                 model.size(), model.means.device());
@@ -1466,7 +1456,7 @@ GaussianModel Trainer::train(
             if (use_3d_filter)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras,
-                    filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+                    filter_3d_factor);
             if (densification_enabled)
                 densification_stats = detail::make_densification_stats(
                     model.size(), model.means.device());
@@ -1687,8 +1677,7 @@ GaussianModel Trainer::train(
                 for (const std::size_t index : view_indices)
                     filter_cameras.push_back(all_cameras[index]);
                 model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras, filter_3d_factor,
-                    splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+                    model.means, filter_cameras, filter_3d_factor);
             }
         }
         const bool report_progress = progress &&
@@ -2663,8 +2652,7 @@ GaussianModel Trainer::train(
             filter_refreshed = refinement_happened || periodic_refresh;
             if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras, filter_3d_factor,
-                    splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+                    model.means, filter_cameras, filter_3d_factor);
         }
         cuda_profiler.mark(CudaTrainingStage::filter_3d);
         cuda_profiler.end_iteration(
@@ -2794,7 +2782,7 @@ GaussianModel Trainer::train(
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, full_resolution_filter_cameras,
-            filter_3d_factor, splat_filter, options_.filter_mode != SplatFilterMode::legacy);
+            filter_3d_factor);
     return model;
 }
 
@@ -2956,6 +2944,7 @@ void save_gaussians_ply(
            << "comment Photara splat (GGGS-derived geometry; 3DGS-compatible SH layout)\n"
            << "comment photara_render_method "
            << (model.render_method == RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs") << '\n'
+           << "comment photara_filter_mode " << filter_mode_name(model.filter_mode) << '\n'
            << "element vertex " << count << '\n'
            << "property float x\nproperty float y\nproperty float z\n"
            << "property float nx\nproperty float ny\nproperty float nz\n"
@@ -3025,6 +3014,7 @@ GaussianModel load_gaussians_ply(
     std::size_t count = 0;
     bool binary_little_endian = false;
     RenderMethod render_method = RenderMethod::gaussian_3dgs;
+    SplatFilterMode filter_mode = SplatFilterMode::classic;
     bool reading_vertices = false;
     std::vector<std::string> properties;
     while (std::getline(input, line)) {
@@ -3039,6 +3029,12 @@ GaussianModel load_gaussians_ply(
                 if (method == "3dgut") render_method = RenderMethod::gaussian_3dgut;
                 else if (method == "3dgs") render_method = RenderMethod::gaussian_3dgs;
                 else throw std::runtime_error("Unknown Gaussian PLY rendering method: " + method);
+            } else if (key == "photara_filter_mode") {
+                if (method == "classic") filter_mode = SplatFilterMode::classic;
+                else if (method == "mip2d") filter_mode = SplatFilterMode::mip_2d;
+                else if (method == "mip3d") filter_mode = SplatFilterMode::mip_3d;
+                else if (method == "mip") filter_mode = SplatFilterMode::mip;
+                else throw std::runtime_error("Unknown Gaussian PLY filter mode: " + method);
             }
         } else if (keyword == "format") {
             std::string format;
@@ -3226,6 +3222,7 @@ GaussianModel load_gaussians_ply(
 
     GaussianModel model;
     model.render_method = render_method;
+    model.filter_mode = filter_mode;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3U}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
@@ -3252,10 +3249,10 @@ GaussianModel load_gaussians_ply(
 std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     const std::size_t count = model.size();
     if (count == 0) {
-        const std::uint32_t version = model.render_method == RenderMethod::gaussian_3dgut ? 2U : 1U;
+        const std::uint32_t version = k_gaussian_chunk_version;
         const std::uint64_t stored_count = 0;
         const std::uint32_t sh_degree = model.sh_degree;
-        const std::uint32_t flags = model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U;
+        const std::uint32_t flags = (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) | (static_cast<std::uint32_t>(model.filter_mode) << 3U);
         std::vector<std::uint8_t> bytes(4 + 8 + 4 + 4);
         std::memcpy(bytes.data(), &version, 4);
         std::memcpy(bytes.data() + 4, &stored_count, 8);
@@ -3281,10 +3278,10 @@ std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     const auto filter_3d = has_filter
         ? download<float>(model.filter_3d)
         : std::vector<float>{};
-    std::uint32_t flags = model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U;
+    std::uint32_t flags = (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) | (static_cast<std::uint32_t>(model.filter_mode) << 3U);
     if (has_filter) flags |= 1U;
     if (has_normal_features) flags |= 2U;
-    const std::uint32_t version = model.render_method == RenderMethod::gaussian_3dgut ? 2U : 1U;
+    const std::uint32_t version = k_gaussian_chunk_version;
     const std::uint64_t stored_count = count;
     const std::uint32_t sh_degree = model.sh_degree;
     std::vector<std::uint8_t> bytes(
@@ -3368,6 +3365,12 @@ GaussianModel decode_gaussians(
 
     GaussianModel model;
     model.render_method = version >= 2 && (flags & 4U) ? RenderMethod::gaussian_3dgut : RenderMethod::gaussian_3dgs;
+    if (version >= 3) {
+        const auto filter = (flags >> 3U) & 7U;
+        if (filter < 1U || filter > 4U)
+            throw std::runtime_error("Gaussian chunk filter mode is invalid");
+        model.filter_mode = static_cast<SplatFilterMode>(filter);
+    }
     if (count == 0) return model;
     model.means = tinytensor::Tensor::from_vector(
         means, {count, 3U}, device);
@@ -3393,7 +3396,6 @@ void run_orbit_preview(
     const GaussianModel& model,
     const std::filesystem::path& camera_file,
     DevicePreviewCallback device_preview,
-    const float kernel_size,
     const std::filesystem::path& vis_file) {
     if (model.size() == 0)
         throw std::runtime_error("Orbit preview requires a trained Gaussian model");
@@ -3409,7 +3411,9 @@ void run_orbit_preview(
         std::uint64_t revision = 0;
         VisualizeOptions vis;
         vis.active_sh_degree = model.sh_degree;
-        vis.kernel_size = kernel_size;
+        const bool mip2d = model.filter_mode == SplatFilterMode::mip_2d || model.filter_mode == SplatFilterMode::mip;
+        vis.kernel_size = mip2d ? 0.1F : 0.3F;
+        vis.rasterization.compensate_2d = mip2d;
         std::uint64_t vis_revision = last_vis_revision;
         load_visualization_sidecar(vis_file, vis, vis_revision);
         if (load_preview_camera_file(camera_file, next, revision, &vis) &&
