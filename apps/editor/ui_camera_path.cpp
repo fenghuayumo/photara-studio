@@ -2,6 +2,7 @@
 #include "camera_timeline.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "shortcuts.hpp"
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
 #include "file_dialogs.hpp"
@@ -95,6 +96,163 @@ void sync_thumbnails(App& app) {
         }
     }
 }
+
+constexpr float k_record_max_seconds = 600.F;
+constexpr std::size_t k_max_path_keys = 10000;
+
+float recording_elapsed(const App::CameraPathRecording& r) {
+    const auto now = r.paused ? r.paused_at : std::chrono::steady_clock::now();
+    return std::clamp(std::chrono::duration<float>(now-r.started).count()-r.paused_seconds, 0.F, k_record_max_seconds);
+}
+void start_path_recording(App& app) {
+    auto& r = app.camera_path_recording;
+    r.active = true; r.paused = false; r.review = false; r.preview_playing = false;
+    r.started = std::chrono::steady_clock::now(); r.paused_seconds = 0.F;
+    r.result.clear();
+    r.take.begin(capture(app.camera, 0.F), camera_recording::quality_for(r.quality, app.camera.distance), r.preserve_pauses);
+    app.camera_path_playing = false; app.camera_timeline_drag = -1;
+    app.preview_follow_view = false;
+}
+void finish_path_recording(App& app) {
+    auto& r = app.camera_path_recording;
+    if (!r.active) return;
+    r.result = r.take.finish(r.paused ? r.take.anchor : capture(app.camera, 0.F), recording_elapsed(r));
+    r.active = false; r.paused = false;
+    r.preview_camera = app.camera;
+    r.review = !r.result.empty();
+    if (!r.review) set_message(app, tr("No camera movement detected. No path was created."), theme::text_muted);
+}
+void discard_path_recording(App& app) {
+    auto& r = app.camera_path_recording;
+    if (r.review) apply(app, capture(r.preview_camera, 0.F));
+    r.active = r.review = r.paused = r.preview_playing = false;
+    r.result.clear(); r.take.samples.clear();
+}
+void apply_path_recording(App& app) {
+    auto& r = app.camera_path_recording;
+    const float start = r.replace_path || app.camera_keyframes.empty() ? 0.F : app.camera_keyframes.back().time+2.F;
+    if (r.result.empty() || start+r.result.back().time > 36000.F ||
+        (r.replace_path ? 0 : app.camera_keyframes.size())+r.result.size() > k_max_path_keys) {
+        set_message(app, tr("The recording exceeds the camera path limit."), theme::warning); return;
+    }
+    if (r.replace_path) app.camera_keyframes.clear();
+    const int first = static_cast<int>(app.camera_keyframes.size());
+    for (auto key : r.result) { key.time += start; app.camera_keyframes.push_back(std::move(key)); }
+    r.review = r.preview_playing = false; r.result.clear(); r.take.samples.clear();
+    sync_thumbnails(app); select_key(app, first);
+    app.camera_thumbnail_pending = first;
+    set_message(app, tr("Camera path recording added."), theme::accent);
+}
+void update_path_recording(App& app) {
+    auto& r = app.camera_path_recording;
+    if (r.active && !r.paused) {
+        r.take.observe(capture(app.camera, 0.F), recording_elapsed(r));
+        if (recording_elapsed(r) >= k_record_max_seconds || r.take.samples.size() >= k_max_path_keys-3)
+            finish_path_recording(app);
+    }
+    if (r.review && r.preview_playing) {
+        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now()-r.preview_started).count();
+        apply(app, evaluate(r.result, elapsed));
+        if (elapsed >= r.result.back().time) r.preview_playing = false;
+    }
+}
+
+// Recording belongs to the Camera Path dock, never the rendered viewport.
+void draw_recording_controls(App& app) {
+    auto& r = app.camera_path_recording;
+    const float width = ImGui::GetContentRegionAvail().x;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float action_w = std::max(106.F, ImGui::CalcTextSize(tr(r.review ? "Preview" : "Resume")).x+40.F);
+    const float cancel_w = std::max(80.F, ImGui::CalcTextSize(tr(r.review ? "Discard" : "Cancel")).x+24.F);
+    const float finish_w = std::max(116.F, ImGui::CalcTextSize(tr(r.review ? "Use path" : "Finish")).x+28.F);
+    const float actions_width = action_w+cancel_w+finish_w+16.F;
+    const bool single_row = width >= actions_width+300.F;
+    const float seconds = r.review ? r.result.back().time : recording_elapsed(r);
+    char clock[32];
+    std::snprintf(clock,sizeof(clock),"%02d:%05.2f",static_cast<int>(seconds)/60,std::fmod(seconds,60.F));
+    ImGui::SetCursorScreenPos({origin.x,origin.y+7.F});
+    ImGui::GetWindowDrawList()->AddCircleFilled({origin.x+5.F,origin.y+15.F},4.F,
+        theme::u32(r.review ? theme::accent : r.paused ? theme::warning : theme::danger));
+    ImGui::Dummy({14.F,16.F}); ImGui::SameLine(0.F,6.F);
+    ImGui::TextUnformatted(tr(r.review ? "Your flight is ready" : r.paused ? "Recording paused" : "Flight recording"));
+    ImGui::SameLine(0.F,16.F); ImGui::TextColored(theme::text_bright,"%s",clock);
+    ImGui::SetCursorScreenPos({single_row ? origin.x+width-actions_width : origin.x,
+                              single_row ? origin.y : origin.y+35.F});
+    if (r.review) {
+        if (icons::labeled_button("##preview_take",r.preview_playing ? icons::Icon::pause : icons::Icon::play,
+                tr(r.preview_playing ? "Pause" : "Preview"),{action_w,30.F})) {
+            r.preview_playing=!r.preview_playing; r.preview_started=std::chrono::steady_clock::now();
+        }
+        ImGui::SameLine(0.F,8.F);
+        if (ImGui::Button(tr("Discard"),{cancel_w,30.F})) discard_path_recording(app);
+        ImGui::SameLine(0.F,8.F);
+        if (theme::primary_button(tr("Use path"),{finish_w,30.F})) apply_path_recording(app);
+    } else {
+        if (icons::labeled_button("##pause_take",r.paused ? icons::Icon::play : icons::Icon::pause,
+                tr(r.paused ? "Resume" : "Pause"),{action_w,30.F})) {
+            if (!r.paused) { r.paused_at=std::chrono::steady_clock::now(); r.paused=true; }
+            else { r.paused_seconds+=std::chrono::duration<float>(std::chrono::steady_clock::now()-r.paused_at).count(); r.paused=false; }
+        }
+        ImGui::SameLine(0.F,8.F);
+        if (ImGui::Button(tr("Cancel"),{cancel_w,30.F})) discard_path_recording(app);
+        ImGui::SameLine(0.F,8.F);
+        if (theme::primary_button(tr("Finish"),{finish_w,30.F})) finish_path_recording(app);
+    }
+    ImGui::SetCursorScreenPos({origin.x,origin.y+(single_row ? 40.F : 75.F)});
+    ImGui::Separator(); ImGui::Spacing();
+    if (r.review) {
+        ImGui::Text(tr("%zu keyframes selected from %zu motion samples"),r.result.size(),r.take.samples.size());
+        ImGui::Checkbox(tr("Replace current path"),&r.replace_path);
+        if (r.replace_path && !app.camera_keyframes.empty()) {
+            ImGui::SameLine(0.F,12.F);
+            ImGui::TextColored(theme::warning,"%s",tr("Replaces the current path when applied."));
+        }
+    } else if (r.active) {
+        ImGui::TextWrapped("%s",tr(r.preserve_pauses ? "Stillness keeps its timing. Preparation is trimmed." : "Idle time is trimmed. Move to build the path."));
+        ImGui::TextDisabled(tr("%zu motion samples"),r.take.samples.size());
+    }
+}
+
+void draw_recording_setup(App& app) {
+    auto& r = app.camera_path_recording;
+    if (r.show_setup) { ImGui::OpenPopup("##flight_setup"); r.show_setup=false; }
+    const auto* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos({vp->WorkPos.x+vp->WorkSize.x*.5F,vp->WorkPos.y+vp->WorkSize.y*.5F},ImGuiCond_Appearing,{.5F,.5F});
+    ImGui::SetNextWindowSize({440.F,0.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{22.F,20.F});
+    const bool visible = ImGui::BeginPopupModal("##flight_setup",nullptr,ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleVar();
+    if (!visible) return;
+    icons::inline_icon(icons::Icon::camera,theme::u32(theme::accent),20.F); ImGui::SameLine(0.F,10.F);
+    ImGui::TextUnformatted(tr("Fly a new path"));
+    ImGui::Spacing(); ImGui::TextWrapped("%s",tr("Explore the scene. We choose keyframes that preserve your camera motion."));
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::BeginTable("##flight_options",2,ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Labels",ImGuiTableColumnFlags_WidthFixed,98.F);
+        ImGui::TableSetupColumn("Values",ImGuiTableColumnFlags_WidthStretch);
+        const auto row=[](const char* label) { ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s",tr(label)); ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1.F); };
+        row("Path detail"); const char* detail[]{tr("Precise"),tr("Balanced"),tr("Compact")};
+        ImGui::Combo("##detail",&r.quality,detail,3);
+        row("Idle time"); int pause=r.preserve_pauses ? 1 : 0;
+        const char* pauses[]{tr("Trim pauses"),tr("Keep pauses")};
+        if (ImGui::Combo("##idle",&pause,pauses,2)) r.preserve_pauses=pause==1;
+        row("Destination"); int destination=r.replace_path ? 1 : 0;
+        const char* destinations[]{tr("Append to path"),tr("Replace current path")};
+        if (ImGui::Combo("##destination",&destination,destinations,2)) r.replace_path=destination==1;
+        ImGui::EndTable();
+    }
+    ImGui::Spacing(); ImGui::TextWrapped("%s",tr(camera_navigation_hint(app.camera)));
+    ImGui::PushTextWrapPos(0.F);
+    ImGui::TextDisabled("%s",tr("Nothing changes until you preview and use the recording."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::Button(tr("Cancel"),{110.F,32.F})) ImGui::CloseCurrentPopup();
+    ImGui::SameLine();
+    if (theme::primary_button(tr("Start flight"),{272.F,32.F})) { start_path_recording(app); ImGui::CloseCurrentPopup(); }
+    ImGui::EndPopup();
+}
+
 void format_time(float seconds, char* out, std::size_t size) {
     const int centiseconds = static_cast<int>(std::lround(std::max(0.F, seconds) * 100.F));
     const int minutes = centiseconds / 6000;
@@ -328,10 +486,13 @@ void timeline(App& app) {
 
 } // namespace
 
+bool finish_camera_path_recording(App& app) { finish_path_recording(app); return !app.camera_path_recording.review; }
+
 bool start_video_render(App& app, const std::filesystem::path& output, const std::filesystem::path& ffmpeg) {
     auto& render = app.video_render;
     try {
         if (render.job.valid()) throw std::runtime_error("A video render is already running");
+        if (app.camera_path_recording.active || app.camera_path_recording.review) throw std::runtime_error("Stop camera path recording before rendering");
         if (ffmpeg.empty()) throw std::runtime_error("ffmpeg was not found");
         if (render.width < 2 || render.width > 8192 || render.width % 2 ||
             render.height < 2 || render.height > 8192 || render.height % 2 ||
@@ -527,6 +688,7 @@ void draw_video_render_settings(App& app) {
 }
 
 void clear_camera_path_thumbnails(App& app) {
+    app.camera_path_recording = {};
     for (auto& item : app.camera_thumbnails) item.texture.reset();
     app.camera_thumbnails.clear(); app.camera_thumbnail_pending = -1; app.camera_key_delete_pending = -1;
     app.camera_timeline_drag = -1;
@@ -547,6 +709,7 @@ void capture_camera_path_thumbnail(App& app) {
 }
 
 void draw_camera_path_panel(App& app) {
+    update_path_recording(app);
     auto& keys = app.camera_keyframes;
     if (app.camera_key_delete_pending >= 0 && app.camera_key_delete_pending < static_cast<int>(keys.size())) {
         const auto i = static_cast<std::size_t>(app.camera_key_delete_pending);
@@ -581,9 +744,23 @@ void draw_camera_path_panel(App& app) {
     ImGui::SetNextWindowSize({1100.F, 200.F}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints({430.F, 170.F}, {FLT_MAX, FLT_MAX});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.F, 12.F});
+    if (app.camera_path_focus_requested) { ImGui::SetNextWindowFocus(); app.camera_path_focus_requested=false; }
     const bool open = ImGui::Begin(i18n::id("Camera Path", "###CameraPath"), &app.show_camera_path);
     ImGui::PopStyleVar();
     if (!open) { ImGui::End(); return; }
+    if (app.camera_path_recording.active || app.camera_path_recording.review) {
+        draw_recording_controls(app);
+        ImGui::End(); return;
+    }
+    const auto& io = ImGui::GetIO();
+    if (!app.camera_path_recording.active && !app.camera_path_recording.review && !shortcuts::suspended &&
+        app.camera_key_selected >= 0 && app.camera_key_selected < static_cast<int>(keys.size()) &&
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+        !io.WantTextInput && !ImGui::IsAnyItemActive() && shortcuts::modifiers() == 0 &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+        app.camera_key_delete_pending = app.camera_key_selected;
+    ImGui::BeginDisabled(app.camera_path_recording.active || app.camera_path_recording.review);
     sync_thumbnails(app);
     const float width = ImGui::GetContentRegionAvail().x;
     const ImVec2 header = ImGui::GetCursorScreenPos();
@@ -621,11 +798,18 @@ void draw_camera_path_panel(App& app) {
         format_time(app.camera_path_time, current, sizeof(current));
         format_time(keys.back().time, total, sizeof(total));
         std::snprintf(text, sizeof(text), "%s  /  %s", current, total);
-        const float available = header.x + width - 178.F - (transport_x + 123.F);
+        const float available = header.x + width - 315.F - (transport_x + 123.F);
         if (ImGui::CalcTextSize(text).x <= available)
             draw->AddText({transport_x + 123.F, header.y + 8.F}, theme::u32(theme::text_muted), text);
     }
     const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
+    if (!compact && width >= 940.F) {
+        const float record_width = std::max(92.F, ImGui::CalcTextSize(tr("Fly a new path")).x + 44.F);
+        ImGui::SetCursorScreenPos({header.x + width - add_width - 44.F - record_width, header.y});
+        if (icons::labeled_button("##record", icons::Icon::camera, tr("Fly a new path"),
+                {record_width, 30.F}, icons::ButtonStyle::normal, true,
+                false, tr("Explore the scene and generate a camera path."))) app.camera_path_recording.show_setup = true;
+    }
     ImGui::SetCursorScreenPos({header.x + width - add_width - 36.F, header.y});
     if (icons::labeled_button("##add", icons::Icon::add, tr("Add view"), {add_width, 30.F}, icons::ButtonStyle::primary)) {
         add_camera_view(app);
@@ -634,6 +818,11 @@ void draw_camera_path_panel(App& app) {
     if (icons::ghost_button("##path_actions", icons::Icon::more, {30.F, 30.F}, false, true, tr("Path tools")))
         ImGui::OpenPopup("##path_tools");
     if (ImGui::BeginPopup("##path_tools")) {
+        if (ImGui::MenuItem(tr("Fly a new path"))) {
+            app.camera_path_recording.show_setup = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         ImGui::TextUnformatted(tr("Orbit around target"));
         ImGui::TextDisabled("%s", tr("Uses the current view and orbit target."));
         static float duration = 12.F;
@@ -654,6 +843,7 @@ void draw_camera_path_panel(App& app) {
         ImGui::EndDisabled();
         ImGui::EndPopup();
     }
+    draw_recording_setup(app);
     ImGui::SetCursorScreenPos({header.x, header.y + (compact ? 78.F : 43.F)});
     if (keys.empty()) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -684,7 +874,7 @@ void draw_camera_path_panel(App& app) {
             if (icons::labeled_button("##add_first", icons::Icon::add, tr("Add first view"),
                     {button_w, 30.F}, icons::ButtonStyle::primary)) add_camera_view(app);
         }
-        ImGui::End(); return;
+        ImGui::EndDisabled(); ImGui::End(); return;
     }
     timeline(app);
     ImGui::Separator();
@@ -717,7 +907,7 @@ void draw_camera_path_panel(App& app) {
         if (icons::ghost_button("##view_key", icons::Icon::camera, {24.F, 24.F}, false, true, tr("View keyframe")))
             select_key(app, selected);
         ImGui::SameLine(0.F, 12.F);
-        if (icons::ghost_button("##delete", icons::Icon::trash, {24.F, 24.F}, false, true, tr("Delete keyframe")))
+        if (icons::ghost_button("##delete", icons::Icon::trash, {24.F, 24.F}, false, true, tr("Delete keyframe (Delete)")))
             app.camera_key_delete_pending = selected;
         ImGui::SameLine(0.F, 6.F);
         if (icons::ghost_button("##lens", icons::Icon::sliders, {24.F, 24.F}, false, true, tr("Lens settings")))
@@ -859,6 +1049,7 @@ void draw_camera_path_panel(App& app) {
         ImGui::PopStyleVar(4);
         app.camera_path_edit = false;
     } else ImGui::TextDisabled("%s", tr("Select a view to edit"));
+    ImGui::EndDisabled();
     ImGui::End();
 }
 } // namespace editor

@@ -850,10 +850,10 @@ void request_ascan_scene_load(App& app) {
 }
 
 bool has_unsaved_project_changes(const App& app) {
-    const bool has_content = !app.camera_keyframes.empty() || app.settings.images_dir[0] || app.settings.dataset_source[0] ||
+    const bool has_content = app.camera_path_recording.active || app.camera_path_recording.review || !app.camera_keyframes.empty() || app.settings.images_dir[0] || app.settings.dataset_source[0] ||
         has_reconstruction_result(app) || !app.gaussian_models.empty() || !app.imported_mesh_source.empty();
     if (app.saved_project_settings.empty()) return has_content;
-    if (app.project_results_dirty || app.job.running() ||
+    if (app.camera_path_recording.active || app.camera_path_recording.review || app.project_results_dirty || app.job.running() ||
         (app.splat_edit.dirty() && app.splat_edit.edit_revision() != app.saved_edit_revision)) return true;
     if (photara::project::encode_settings(collect_project_settings(app), app.layout.project_file) !=
         app.saved_project_settings) return true;
@@ -907,6 +907,10 @@ void process_project_transition(App& app) {
 
 bool save_project_to_path(App& app, const std::filesystem::path& path) {
     try {
+        if (!finish_camera_path_recording(app)) {
+            set_message(app, tr("Use or discard the flight recording before saving."), theme::warning);
+            return false;
+        }
         std::error_code error;
         photara::project::Archive archive =
             photara::project::Archive::create();

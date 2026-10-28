@@ -1068,7 +1068,13 @@ void draw_status_bar(App& app) {
 
     ImGui::SameLine(0.F, 8.F);
     ImGui::SetCursorPosY(centre_y);
-    if (busy) {
+    if (app.camera_path_recording.active || app.camera_path_recording.review) {
+        const auto& recording = app.camera_path_recording;
+        if (ImGui::SmallButton(tr(recording.review ? "Your flight is ready" : recording.paused ? "Recording paused" : "Flight recording"))) {
+            app.show_camera_path=true;
+            app.camera_path_focus_requested=true;
+        }
+    } else if (busy) {
         const std::string headline = paused
             ? (std::string(tr("Paused")) + "  |  " + app.monitor.headline())
             : app.monitor.headline();

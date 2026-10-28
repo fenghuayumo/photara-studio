@@ -8,6 +8,7 @@
 #include "prior_preview.hpp"
 #include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
+#include "camera_path_recording.hpp"
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "splat_edit.hpp"
@@ -195,11 +196,23 @@ struct App {
     int camera_key_selected{-1};
     float camera_path_time{};
     bool camera_path_playing{};
+    struct CameraPathRecording {
+        bool active{};
+        bool paused{}, review{}, show_setup{}, replace_path{}, preserve_pauses{}, preview_playing{};
+        int quality{1};
+        std::chrono::steady_clock::time_point started{};
+        std::chrono::steady_clock::time_point paused_at{}, preview_started{};
+        float paused_seconds{};
+        camera_recording::Recorder<photara::project::CameraKeyframe> take;
+        std::vector<photara::project::CameraKeyframe> result;
+        OrbitCamera preview_camera;
+    } camera_path_recording;
     int camera_timeline_drag{-1};
     float camera_timeline_drag_span{};
     bool show_camera_path{true};
     bool camera_path_edit{};
     bool camera_path_dock_pending{true};
+    bool camera_path_focus_requested{};
     int camera_thumbnail_pending{-1};
     int camera_key_delete_pending{-1};
     struct CameraThumbnail {
@@ -462,6 +475,7 @@ void select_video_file(App& app);
 void select_project_folder(App& app);
 void open_project_from_path(App& app, const std::filesystem::path& path);
 void clear_camera_path_thumbnails(App& app);
+bool finish_camera_path_recording(App& app);
 void capture_camera_path_thumbnail(App& app);
 void save_project(App& app);
 bool save_project_to_path(App& app, const std::filesystem::path& path);
