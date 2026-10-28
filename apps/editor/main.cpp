@@ -386,7 +386,6 @@ int main(const int argc, char** argv) {
         editor::draw_camera_path_panel(app);
         editor::draw_video_render_settings(app);
         editor::draw_viewport_panel(app);
-        app.camera_thumbnail_pending = -1;
         const Action inspector_action = editor::draw_inspector(app);
         if (action == Action::none) action = inspector_action;
         editor::draw_status_bar(app);

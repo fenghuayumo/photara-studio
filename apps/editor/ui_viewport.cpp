@@ -1832,8 +1832,6 @@ void draw_splat_render_tab(
     if (shown) {
         if (!effect) draw->AddImage(texture, min, max);
         if (!effect) draw_display_legend(app, min, max);
-        if (!effect && !rings && app.display_channel == DisplayChannel::color)
-            capture_camera_path_thumbnail(app);
     } else {
         const std::string& failure = app.splat_renderer->failure();
         draw_empty_viewport(
@@ -1915,6 +1913,9 @@ void draw_splat_render_tab(
         hint[0] != '\0' ? hint
                         : tr(camera_navigation_hint(app.camera)));
     draw->PopClipRect();
+    // Complete viewport picking/diagnostics first. The thumbnail uses a spare
+    // same-size frame slot and cannot replace the image queued above.
+    if (shown) capture_camera_path_thumbnail(app,raster_w,raster_h);
 }
 
 bool handle_view_camera_shortcuts(App& app, const bool viewport_hot) {

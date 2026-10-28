@@ -1083,6 +1083,12 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
                 throw std::runtime_error("Reconstruction schedule does not match the Gaussian model");
             settings.preview_arrivals = reconstruction_arrivals_;
             settings.preview_reconstruction = {r.time,r.start,r.end,r.hold,r.growth,r.radius,r.density,r.glow};
+        } else if (reconstruction_arrivals_.size() == count_) {
+            // Keep the installed schedule's GPU camera layout across effect /
+            // ordinary-frame transitions. A completed reveal restores the exact
+            // original geometry and material, including thumbnail captures.
+            settings.preview_arrivals = reconstruction_arrivals_;
+            settings.preview_reconstruction = {1.F,0.F,1.F,0.F,1.F,.001F,1.F,0.F};
         }
         std::vector<splat_drender::vulkan::SplatPreviewTransform> placements;
         placements.reserve(model_transforms_.size());

@@ -217,6 +217,16 @@ struct App {
     int camera_key_selected{-1};
     float camera_path_time{};
     bool camera_path_playing{};
+    struct CameraPathClearUndo {
+        std::vector<photara::project::CameraKeyframe> keys;
+        photara::project::CameraEffectTrack effect;
+        std::vector<photara::project::CameraEffectTrack> clips;
+        camera_timeline::View timeline_view;
+        int selected{-1};
+        float time{};
+        bool preview{true};
+    } camera_path_clear_undo;
+    bool camera_path_clear_pending{}, camera_path_restore_pending{};
     struct CameraPathRecording {
         bool active{};
         bool paused{}, review{}, show_setup{}, replace_path{}, preserve_pauses{}, preview_playing{}, from_capture{};
@@ -515,7 +525,7 @@ void open_project_from_path(App& app, const std::filesystem::path& path);
 void clear_camera_path_thumbnails(App& app);
 bool finish_camera_path_recording(App& app);
 void select_camera_path_keyframe(App& app, int index);
-void capture_camera_path_thumbnail(App& app);
+void capture_camera_path_thumbnail(App& app, unsigned width, unsigned height);
 void save_project(App& app);
 bool save_project_to_path(App& app, const std::filesystem::path& path);
 void request_project_save(App& app, bool exit_after_save);

@@ -29,6 +29,14 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Open 3DGS view", "切换至 3DGS 视图", "Open 3DGS view", "Open 3DGS view"},
+    {"Pause to generate preview", "暂停后生成预览", "Pause to generate preview", "Pause to generate preview"},
+    {"Generating preview...", "正在生成预览…", "Generating preview...", "Generating preview..."},
+
+    {"Clear entire path", "清空整条路径", "Clear entire path", "Clear entire path"},
+    {"Undo clear path", "撤销清空路径", "Undo clear path", "Undo clear path"},
+    {"Remove all camera keyframes and effect clips. Undo is available until a new path is added.", "一次移除全部相机关键帧和特效片段；添加新路径前可撤销恢复。", "Remove all camera keyframes and effect clips. Undo is available until a new path is added.", "Remove all camera keyframes and effect clips. Undo is available until a new path is added."},
+
     {"Limit effect to clip", "限定特效片段范围", "Limit effect to clip", "Limit effect to clip"},
     {"Use cinematic interpolation", "应用电影曲线", "Use cinematic interpolation", "Use cinematic interpolation"},
 

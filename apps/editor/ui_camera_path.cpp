@@ -42,12 +42,6 @@ Key capture(const OrbitCamera& c, float time) {
     k.fisheye_k1 = c.fisheye_k1; k.projection = static_cast<int>(c.projection);
     return k;
 }
-bool same_pose(const OrbitCamera& c, const Key& k) {
-    return c.target.x == k.target[0] && c.target.y == k.target[1] && c.target.z == k.target[2] &&
-        c.roll == k.roll && c.yaw == k.yaw && c.pitch == k.pitch && c.distance == k.distance &&
-        c.fov_degrees == k.fov_degrees && c.ortho_height == k.ortho_height &&
-        c.fisheye_k1 == k.fisheye_k1 && static_cast<int>(c.projection) == k.projection;
-}
 void apply(App& app, const Key& k) {
     auto& c = app.camera;
     c.target = {k.target[0], k.target[1], k.target[2]};
@@ -68,6 +62,7 @@ void select_key(App& app, int i) {
     app.camera_timeline_view.reveal(camera_timeline::span(app.camera_keyframes.back().time),app.camera_path_time);
     app.camera_path_playing = false;
     apply(app, app.camera_keyframes[static_cast<std::size_t>(i)]);
+    if (app.camera_keyframes[static_cast<std::size_t>(i)].thumbnail_rgb.empty()) app.camera_thumbnail_pending=i;
 }
 void sync_thumbnails(App& app) {
     auto& cache = app.camera_thumbnails;
@@ -1159,6 +1154,8 @@ void draw_video_render_settings(App& app) {
 }
 
 void clear_camera_path_thumbnails(App& app) {
+    app.camera_path_clear_undo = {};
+    app.camera_path_clear_pending = app.camera_path_restore_pending = false;
     app.camera_effect = {};
     app.camera_effect_clips.clear();
     app.camera_effect_preview = true;
@@ -1178,24 +1175,69 @@ void clear_camera_path_thumbnails(App& app) {
     app.camera_timeline_drag = -1;
     app.camera_timeline_view = {};
 }
-void capture_camera_path_thumbnail(App& app) {
+void capture_camera_path_thumbnail(App& app, unsigned width, unsigned height) {
+    if (app.camera_path_playing || app.camera.interacting || !app.image_export.path.empty() ||
+        app.camera_path_recording.active || app.camera_path_recording.review || !app.splat_renderer) return;
+    // Also repair missing thumbnails in loaded projects without seeking the
+    // viewport: playback may have left it at a different camera/time.
+    if (app.camera_thumbnail_pending<0 && app.show_camera_path && app.camera_key_selected>=0 &&
+        app.camera_key_selected<static_cast<int>(app.camera_keyframes.size()) &&
+        app.camera_keyframes[app.camera_key_selected].thumbnail_rgb.empty())
+        app.camera_thumbnail_pending=app.camera_key_selected;
     const int i = app.camera_thumbnail_pending;
     if (i < 0 || i >= static_cast<int>(app.camera_keyframes.size())) return;
-    app.camera_thumbnail_pending = -1;
     auto& key = app.camera_keyframes[static_cast<std::size_t>(i)];
-    if (!same_pose(app.camera, key) || !app.splat_renderer) return;
     try {
-        std::vector<std::uint8_t> rgb; std::uint32_t width = 0, height = 0;
-        if (app.splat_renderer->download_rgb(rgb, width, height, 256)) {
-            key.thumbnail_width = width; key.thumbnail_height = height; key.thumbnail_rgb = std::move(rgb);
+        const bool local_model=app.composed_model && !app.gaussian_preview_baked && !app.splat_edit.dirty();
+        if (!app.splat_renderer->set_model_transforms(local_model
+            ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
+            : std::span<const splat_render::ModelTransform>{})) return;
+        photara::io::RgbImage image;
+        if (camera_effects::capture_keyframe_thumbnail(*app.splat_renderer,key,width,height,app.navigation_near_clip,image)) {
+            key.thumbnail_width = image.width; key.thumbnail_height = image.height; key.thumbnail_rgb = std::move(image.pixels);
+            app.camera_thumbnail_pending=-1;
             if (i < static_cast<int>(app.camera_thumbnails.size())) app.camera_thumbnails[i].pixels = nullptr;
         }
     } catch (...) { key.thumbnail_width = key.thumbnail_height = 0; key.thumbnail_rgb.clear(); }
 }
 
+namespace {
+void clear_camera_path(App& app) {
+    if (app.camera_keyframes.empty()) return;
+    App::CameraPathClearUndo backup;
+    backup.keys=std::move(app.camera_keyframes);
+    backup.effect=app.camera_effect;
+    backup.clips=std::move(app.camera_effect_clips);
+    backup.timeline_view=app.camera_timeline_view;
+    backup.selected=app.camera_key_selected; backup.time=app.camera_path_time;
+    backup.preview=app.camera_effect_preview;
+    clear_camera_path_thumbnails(app);
+    app.camera_keyframes.clear();
+    app.camera_path_clear_undo=std::move(backup);
+    app.camera_key_selected=-1; app.camera_path_time=0.F; app.camera_path_playing=false;
+}
+void restore_camera_path(App& app) {
+    if (!app.camera_keyframes.empty() || app.camera_path_clear_undo.keys.empty()) return;
+    auto backup=std::move(app.camera_path_clear_undo);
+    clear_camera_path_thumbnails(app);
+    app.camera_keyframes=std::move(backup.keys);
+    app.camera_effect=backup.effect; app.camera_effect_clips=std::move(backup.clips);
+    app.camera_effect_preview=backup.preview; app.camera_timeline_view=backup.timeline_view;
+    app.camera_key_selected=backup.selected; app.camera_path_time=backup.time;
+    app.camera_path_playing=false;
+    sync_thumbnails(app); seek(app);
+}
+}
+
 void draw_camera_path_panel(App& app) {
     update_path_recording(app);
+    if (!app.camera_path_recording.active && !app.camera_path_recording.review) {
+        if (app.camera_path_clear_pending) clear_camera_path(app);
+        else if (app.camera_path_restore_pending) restore_camera_path(app);
+    }
+    app.camera_path_clear_pending=app.camera_path_restore_pending=false;
     auto& keys = app.camera_keyframes;
+    if (!keys.empty() && !app.camera_path_clear_undo.keys.empty()) app.camera_path_clear_undo={};
     if (app.camera_key_delete_pending >= 0 && app.camera_key_delete_pending < static_cast<int>(keys.size())) {
         const auto i = static_cast<std::size_t>(app.camera_key_delete_pending);
         if (i < app.camera_thumbnails.size()) { app.camera_thumbnails[i].texture.reset(); app.camera_thumbnails.erase(app.camera_thumbnails.begin() + i); }
@@ -1291,31 +1333,49 @@ void draw_camera_path_panel(App& app) {
     if (icons::ghost_button("##next", icons::Icon::next_keyframe, {30.F, 30.F}, false, !keys.empty(), tr("Next view"))) {
         select_key(app, static_cast<int>(camera_timeline::next(keys, app.camera_path_time)));
     }
+    // Keep creation primary; group quiet maintenance actions at the far right.
+    // One contextual slot switches from clear to undo after clearing the path.
+    const float right = header.x + width;
+    const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
+    const bool show_record = !compact && width >= 940.F;
+    const float record_width = std::max(92.F, ImGui::CalcTextSize(tr("Fly a new path")).x + 44.F);
+    const float add_x = right - add_width - 86.F;
+    const float tools_left = show_record ? add_x - 8.F - record_width : add_x;
     if (!compact && width >= 940.F && !keys.empty()) {
         char current[32], total[32], text[72];
         format_time(app.camera_path_time, current, sizeof(current));
         format_time(keys.back().time, total, sizeof(total));
         std::snprintf(text, sizeof(text), "%s  /  %s", current, total);
-        const float available = header.x + width - 315.F - (transport_x + 191.F);
+        const float available = tools_left - 12.F - (transport_x + 191.F);
         if (ImGui::CalcTextSize(text).x <= available)
             draw->AddText({transport_x + 191.F, header.y + 8.F}, theme::u32(theme::text_muted), text);
     }
-    const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
-    if (!compact && width >= 940.F) {
-        const float record_width = std::max(92.F, ImGui::CalcTextSize(tr("Fly a new path")).x + 44.F);
-        ImGui::SetCursorScreenPos({header.x + width - add_width - 44.F - record_width, header.y});
+    if (show_record) {
+        ImGui::SetCursorScreenPos({tools_left, header.y});
         if (icons::labeled_button("##record", icons::Icon::camera, tr("Fly a new path"),
                 {record_width, 30.F}, icons::ButtonStyle::normal, true,
                 false, tr("Explore the scene and generate a camera path."))) app.camera_path_recording.show_setup = true;
     }
-    ImGui::SetCursorScreenPos({header.x + width - add_width - 36.F, header.y});
+    ImGui::SetCursorScreenPos({add_x, header.y});
     if (icons::labeled_button("##add", icons::Icon::add, tr("Add view"), {add_width, 30.F}, icons::ButtonStyle::primary)) {
         add_camera_view(app);
     }
-    ImGui::SameLine(0.F, 6.F);
+    draw->AddLine({right - 75.F, header.y + 7.F}, {right - 75.F, header.y + 23.F}, theme::u32(theme::border));
+    ImGui::SetCursorScreenPos({right - 66.F, header.y});
+    const bool can_restore = keys.empty() && !app.camera_path_clear_undo.keys.empty();
+    if (icons::ghost_button("##clear_or_restore_path", can_restore ? icons::Icon::undo : icons::Icon::trash,
+            {30.F, 30.F}, false, can_restore || !keys.empty(), tr(can_restore ? "Undo clear path" : "Clear entire path"))) {
+        if (can_restore) app.camera_path_restore_pending = true;
+        else app.camera_path_clear_pending = true;
+    }
+    ImGui::SetCursorScreenPos({right - 30.F, header.y});
     if (icons::ghost_button("##path_actions", icons::Icon::more, {30.F, 30.F}, false, true, tr("Path tools")))
         ImGui::OpenPopup("##path_tools");
     if (ImGui::BeginPopup("##path_tools")) {
+        if (ImGui::MenuItem(tr("Clear entire path"),nullptr,false,!keys.empty())) app.camera_path_clear_pending=true;
+        if (ImGui::MenuItem(tr("Undo clear path"),nullptr,false,keys.empty() && !app.camera_path_clear_undo.keys.empty()))
+            app.camera_path_restore_pending=true;
+        ImGui::Separator();
         if (ImGui::BeginMenu(tr("Demo shots"))) { demo_shots(app); ImGui::EndMenu(); }
         if (ImGui::MenuItem(tr("Use cinematic interpolation"),nullptr,false,keys.size()>=2)) {
             camera_timeline::make_cinematic(keys);
@@ -1574,7 +1634,10 @@ void draw_camera_path_panel(App& app) {
                         {pos.x + size.x - offset.x, pos.y + size.y - offset.y},
                         {0.F, 0.F}, {1.F, 1.F}, IM_COL32_WHITE, 5.F);
                 } else {
-                    const char* label = tr("No preview");
+                    const bool can_generate=app.has_model && app.workspace==ViewportWorkspace::scene_3d &&
+                        (camera_effect_view_active(app) || app.view_mode==VisualizationMode::splat || app.view_mode==VisualizationMode::rings);
+                    const char* label = tr(!app.has_model ? "No preview" : !can_generate ? "Open 3DGS view" :
+                        app.camera_path_playing ? "Pause to generate preview" : "Generating preview...");
                     d->AddText({pos.x + (size.x - ImGui::CalcTextSize(label).x) * .5F, pos.y + 32.F},
                         theme::u32(theme::text_faint), label);
                 }

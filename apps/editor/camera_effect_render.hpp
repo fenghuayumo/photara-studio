@@ -9,6 +9,34 @@
 
 namespace editor::camera_effects {
 
+// Use the resident model and another frame slot at the viewport's existing
+// extent. Resizing here would invalidate images already queued in ImGui.
+template <typename Key>
+inline bool capture_keyframe_thumbnail(splat_render::Renderer& renderer,const Key& key,
+    unsigned width,unsigned height,float near_clip,photara::io::RgbImage& image) {
+    if (!renderer.has_frame_size(width,height)) return false;
+    OrbitCamera orbit;
+    orbit.target={key.target[0],key.target[1],key.target[2]};
+    orbit.yaw=key.yaw; orbit.pitch=key.pitch; orbit.roll=key.roll; orbit.distance=key.distance;
+    orbit.fov_degrees=key.fov_degrees; orbit.ortho_height=key.ortho_height;
+    orbit.fisheye_k1=key.fisheye_k1; orbit.projection=static_cast<EditorProjection>(key.projection);
+    const auto source=make_preview_camera(orbit,width,height);
+    splat_render::Camera camera;
+    camera.world_to_camera=source.world_to_camera; camera.position=source.position;
+    camera.width=width; camera.height=height;
+    camera.fx=source.fx; camera.fy=source.fy; camera.cx=source.cx; camera.cy=source.cy;
+    camera.k1=source.k1; camera.k2=source.k2; camera.k3=source.k3; camera.k4=source.k4;
+    camera.model=key.projection;
+    if (orbit.projection==EditorProjection::orthographic) {
+        camera.fx=camera.fy=float(height)/std::max(.0001F,key.ortho_height);
+        camera.cx=width*.5F; camera.cy=height*.5F;
+    }
+    splat_render::DisplayOptions display; display.near_clip=near_clip;
+    splat_render::FrameTarget frame;
+    return renderer.draw(camera,frame,splat_render::Shading::gaussian,display) &&
+        renderer.download_rgb(image.pixels,image.width,image.height,256);
+}
+
 inline SparseScene model_points(const photara::splat::GaussianModel& model,
     std::span<const splat_render::ModelTransform> transforms = {}, std::size_t max_points = 600000) {
     SparseScene scene;

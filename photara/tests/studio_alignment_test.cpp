@@ -174,6 +174,27 @@ void test_camera_effect_render() {
         require(earlier_frame.pixels!=full.pixels,"appended crossfade retains the earlier reconstruction shot");
         std::swap(later,clips[0]);
         require(render_sequence(5.F).pixels==earlier_frame.pixels,"editing selection leaves exported sequence pixels unchanged");
+        // Effect/ring/diagnostic viewport passes must not become the thumbnail.
+        auto thumbnail_key=keys.front();
+        renderer.set_reconstruction_schedule(reconstruction.arrival_times());
+        splat_render::FrameTarget effect_target;
+        require(renderer.draw(camera,effect_target,splat_render::Shading::gaussian,
+            reconstruction.display_options(bounded,5.F)),"effect viewport frame is available before thumbnail capture");
+        const auto thumbnail_epoch=renderer.frames_epoch(),thumbnail_revision=renderer.model_upload_revision();
+        photara::io::RgbImage thumbnail;
+        require(editor::camera_effects::capture_keyframe_thumbnail(renderer,thumbnail_key,64,48,.2F,thumbnail) &&
+            thumbnail.pixels==full.pixels,"keyframe thumbnail renders full colour instead of the viewport effect");
+        thumbnail_key.target[0]=.5F;
+        require(editor::camera_effects::capture_keyframe_thumbnail(renderer,thumbnail_key,64,48,.2F,thumbnail) &&
+            thumbnail.pixels!=full.pixels,"thumbnail uses the selected key pose independently of the viewport camera");
+        for (int projection=0;projection<4;++projection) {
+            thumbnail_key.projection=projection;
+            require(editor::camera_effects::capture_keyframe_thumbnail(renderer,thumbnail_key,64,48,.2F,thumbnail) &&
+                thumbnail.width==64 && thumbnail.height==48,"thumbnail capture supports all keyframe projections");
+        }
+        require(!editor::camera_effects::capture_keyframe_thumbnail(renderer,thumbnail_key,128,96,.2F,thumbnail) &&
+            renderer.frames_epoch()==thumbnail_epoch && renderer.model_upload_revision()==thumbnail_revision,
+            "thumbnail capture never resizes viewport images or reuploads the resident model");
 
     }
 }
