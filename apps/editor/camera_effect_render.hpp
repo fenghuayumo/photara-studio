@@ -10,7 +10,7 @@
 namespace editor::camera_effects {
 
 inline SparseScene model_points(const photara::splat::GaussianModel& model,
-    std::span<const splat_render::ModelTransform> transforms = {}) {
+    std::span<const splat_render::ModelTransform> transforms = {}, std::size_t max_points = 600000) {
     SparseScene scene;
     // Keep the same centre locations and DC colours as the rendered model.
     // CPU tensors share storage here; GPU tensors are downloaded once.
@@ -18,7 +18,8 @@ inline SparseScene model_points(const photara::splat::GaussianModel& model,
     const float* positions = means.ptr<float>();
     const float* colours = sh.ptr<float>();
     const std::size_t bases = sh.shape()[1];
-    const std::size_t stride = std::max<std::size_t>(1, (model.size() + 599999) / 600000);
+    max_points = std::max<std::size_t>(1, max_points);
+    const std::size_t stride = std::max<std::size_t>(1, model.size()/max_points + (model.size()%max_points != 0));
     scene.gaussian_sample_stride = stride;
     scene.points.reserve((model.size() + stride - 1) / stride);
     scene.colours.reserve(scene.points.capacity());
@@ -63,7 +64,7 @@ inline photara::io::RgbImage render(
             throw std::runtime_error(renderer.failure().empty() ? "Cannot render camera effect frame" : renderer.failure());
         return image;
     };
-    if (effect.enabled && effect.kind == 1)
+    if (effect.enabled && effect.reconstruction())
         throw std::logic_error("Scan reveal requires the camera-path reconstruction renderer");
     if (weights.points > 0.F) {
         auto image = render_point_cloud_image(points, orbit, options, camera.width, camera.height);

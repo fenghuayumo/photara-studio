@@ -29,6 +29,31 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Limit effect to clip", "限定特效片段范围", "Limit effect to clip", "Limit effect to clip"},
+    {"Use cinematic interpolation", "应用电影曲线", "Use cinematic interpolation", "Use cinematic interpolation"},
+
+    {"Cinematic", "电影曲线", "Cinematic", "Cinematic"},
+    {"Effect clip", "特效片段", "Effect clip", "Effect clip"},
+    {"Effect clips", "特效片段", "Effect clips", "Effect clips"},
+    {"Clip start (s)", "片段开始（秒）", "Clip start (s)", "Clip start (s)"},
+    {"Wave automatically covers the whole scene.", "波纹会自动扩展，覆盖整个场景。", "Wave automatically covers the whole scene.", "Wave automatically covers the whole scene."},
+    {"Appends 17 editable keyframes. Reveal shots preserve earlier effect clips.", "追加 17 个可编辑关键帧，揭幕镜头会保留已有特效片段。", "Appends 17 editable keyframes. Reveal shots preserve earlier effect clips.", "Appends 17 editable keyframes. Reveal shots preserve earlier effect clips."},
+
+    {"Demo shots", "演示镜头", "Demo shots", "Demo shots"},
+    {"Shot preset", "镜头预设", "Shot preset", "Shot preset"},
+    {"Energy wave reveal", "能量波揭幕", "Energy wave reveal", "Energy wave reveal"},
+    {"Micro fly-through", "微观穿梭", "Micro fly-through", "Micro fly-through"},
+    {"Spiral ascent", "螺旋升空", "Spiral ascent", "Spiral ascent"},
+    {"Shot distance", "镜头距离", "Shot distance", "Shot distance"},
+    {"Append demo shot", "追加演示镜头", "Append demo shot", "Append demo shot"},
+    {"Wave radius / scene size", "波纹半径 / 场景尺寸", "Wave radius / scene size", "Wave radius / scene size"},
+    {"A luminous wave reveals the scene while the camera orbits.", "发光波纹向外扩散，场景逐渐显现，相机同步环绕。", "A luminous wave reveals the scene while the camera orbits.", "A luminous wave reveals the scene while the camera orbits."},
+    {"Pull back from Gaussian particles to the complete scene.", "从高斯粒子近景拉远，展示完整重建场景。", "Pull back from Gaussian particles to the complete scene.", "Pull back from Gaussian particles to the complete scene."},
+    {"Orbit the subject and rise to a wide overview.", "围绕主体盘旋上升，逐渐展开全景。", "Orbit the subject and rise to a wide overview.", "Orbit the subject and rise to a wide overview."},
+    {"Uses the current orbit target as the subject centre. Adjust it in the viewport first.", "以当前环绕中心为主体中心，请先在视口中调整。", "Uses the current orbit target as the subject centre. Adjust it in the viewport first.", "Uses the current orbit target as the subject centre. Adjust it in the viewport first."},
+    {"Appends 17 editable keyframes. Reveal shots replace the current effect clip.", "追加 17 个可编辑关键帧。揭幕镜头会替换当前特效片段。", "Appends 17 editable keyframes. Reveal shots replace the current effect clip.", "Appends 17 editable keyframes. Reveal shots replace the current effect clip."},
+    {"Load a Gaussian model to use reveal shots.", "加载高斯模型后即可生成揭幕镜头。", "Load a Gaussian model to use reveal shots.", "Load a Gaussian model to use reveal shots."},
+
     {"Preparing reconstruction preview...", "正在准备重建预览…", "Preparing reconstruction preview...", "Preparing reconstruction preview..."},
     {"Point hold (s)", "点云停留时间（秒）", "Point hold (s)", "Point hold (s)"},
     {"Surface growth (s)", "表面生长时间（秒）", "Surface growth (s)", "Surface growth (s)"},

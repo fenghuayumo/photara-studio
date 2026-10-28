@@ -25,6 +25,8 @@ struct RecordedKey {
     float time{}, target[3]{}, yaw{}, pitch{}, roll{}, distance{1.F};
     float fov_degrees{50.F}, ortho_height{4.F}, fisheye_k1{};
     int projection{}, interpolation{};
+    unsigned thumbnail_width{}, thumbnail_height{};
+    std::vector<unsigned char> thumbnail_rgb;
 };
 struct CopyProbe : RecordedKey {
     inline static int copies=0;
@@ -40,6 +42,46 @@ bool near(float a, float b) { return std::abs(a - b) < 0.0001F; }
 }
 int main() {
     using namespace editor::camera_timeline;
+    std::vector<RecordedKey> existing(4);
+    existing[0].interpolation=1; existing[1].interpolation=2;
+    make_cinematic(existing);
+    expect(existing[0].interpolation==3 && existing[1].interpolation==2 && existing[2].interpolation==3 &&
+        existing[3].interpolation==0,"existing paths can opt into cinematic motion while retaining cuts");
+    for (int kind=0; kind<3; ++kind) {
+        RecordedKey pose; pose.distance=10.F; pose.target[0]=7.F;
+        pose.projection=3; pose.thumbnail_rgb={1,2,3};
+        std::vector<RecordedKey> demo;
+        expect(append_demo_shot(demo,pose,kind,15.F,false,1.F)==0 && demo.size()==17,"demo shot generates editable keys");
+        expect(near(demo.front().time,0.F) && near(demo.back().time,15.F),"demo shot duration");
+        for (std::size_t i=0;i<demo.size();++i) {
+            expect(demo[i].target[0]==7.F && demo[i].projection==0 && demo[i].thumbnail_rgb.empty(),"demo shot retains target and clears thumbnails");
+            if (i) expect(demo[i].time>demo[i-1].time && demo[i].yaw-demo[i-1].yaw<3.14159265F,"demo shot preserves interpolation direction");
+        }
+        if (kind==1) expect(near(demo.front().distance,1.2F) && near(demo.back().distance,10.F),"micro shot pulls back from particles");
+        if (kind==2) expect(demo.back().pitch>demo.front().pitch && near(demo.back().yaw,6.28318530718F),"spiral rises through a full revolution");
+        const float dt=.001F;
+        for (std::size_t i=1;i<16;++i) {
+            const float t=demo[i].time;
+            const auto before=evaluate(demo,t-dt),at=evaluate(demo,t),after=evaluate(demo,t+dt);
+            const auto continuous=[&](float l,float c,float r) {return std::abs((c-l)/dt-(r-c)/dt)<.015F;};
+            expect(continuous(before.yaw,at.yaw,after.yaw) && continuous(before.pitch,at.pitch,after.pitch) &&
+                continuous(before.distance,at.distance,after.distance),"demo keyframe velocity is continuous");
+        }
+        expect(std::abs(evaluate(demo,dt).yaw-demo.front().yaw)/dt<.005F &&
+            std::abs(demo.back().yaw-evaluate(demo,15.F-dt).yaw)/dt<.005F,"cinematic shots start and finish at rest");
+        // Moving an editable key must not introduce lens/position overshoot.
+        demo[8].distance=20.F;
+        for (int i=0;i<16;++i) for (int j=0;j<=20;++j) {
+            const auto value=evaluate(demo,demo[i].time+(demo[i+1].time-demo[i].time)*float(j)/20.F);
+            expect(value.distance>=std::min(demo[i].distance,demo[i+1].distance)-.0001F &&
+                value.distance<=std::max(demo[i].distance,demo[i+1].distance)+.0001F,"cinematic interpolation stays inside edited key bounds");
+        }
+        const auto first=append_demo_shot(demo,pose,kind,10.F,true,2.F);
+        expect(first==17 && near(demo[first].time,17.F) && demo.back().yaw<demo[first].yaw,"demo appends and respects clockwise direction");
+        const auto count=demo.size();
+        append_demo_shot(demo,pose,kind,std::numeric_limits<float>::quiet_NaN(),false,1.F);
+        expect(demo.size()==count,"invalid demo duration does not modify the path");
+    }
     const std::vector<Key> keys{{0.F}, {2.F}, {5.F}};
     expect(near(span(0.F), 6.F) && near(span(20.F), 23.F), "timeline span");
     expect(near(tick_step(0.6F), 1.F) && near(tick_step(1.1F), 2.F) &&

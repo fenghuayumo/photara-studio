@@ -25,7 +25,8 @@ using namespace photara::project;
 
 int failures = 0;
 constexpr std::size_t k_scan_bytes = 2 * sizeof(std::int32_t) + sizeof(std::uint8_t) + 5 * sizeof(float);
-constexpr std::size_t k_effect_bytes = sizeof(std::uint8_t) + 5 * sizeof(float) + sizeof(std::int32_t) + k_scan_bytes + 4 * sizeof(float);
+constexpr std::size_t k_clip_bytes = sizeof(float)+sizeof(std::uint32_t);
+constexpr std::size_t k_effect_bytes = sizeof(std::uint8_t) + 5 * sizeof(float) + sizeof(std::int32_t) + k_scan_bytes + 4 * sizeof(float)+k_clip_bytes;
 std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
@@ -338,7 +339,7 @@ int main() {
         const auto legacy_path = decode_settings(v25, ascan_path);
         expect(legacy_path.camera_keyframes[0].interpolation == 0,
                "legacy camera paths default to smooth interpolation");
-        path.camera_keyframes[0].interpolation = 3;
+        path.camera_keyframes[0].interpolation = 4;
         rejected = false;
         try { (void)encode_settings(path, ascan_path); } catch (const std::exception&) { rejected = true; }
         expect(rejected, "invalid interpolation rejected");
@@ -394,12 +395,60 @@ int main() {
         expect(minimum == 30 && scan.kind == 1 && scan.scan_axis == 2 && scan.scan_reverse &&
             scan.scan_softness == .05F && scan.scan_glow == .8F && scan.scan_hold == 2.F &&
             scan.scan_growth == 4.F && scan.scan_range == .5F && scan.scan_density == .4F, "scan reveal settings survive project round trip");
-        auto v29 = scan_bytes; v29.resize(v29.size() - 4 * sizeof(float));
+        auto v29 = scan_bytes; v29.resize(v29.size() - 4 * sizeof(float)-k_clip_bytes);
+        auto energy_project = scan_project;
+        energy_project.camera_effect = camera_energy_demo(0.F,15.F);
+        const auto energy_bytes = encode_settings(energy_project,ascan_path);
+        std::memcpy(&minimum,energy_bytes.data()+4,sizeof(minimum));
+        const auto energy=decode_settings(energy_bytes,ascan_path).camera_effect;
+        expect(minimum==31 && energy.kind==2 && energy.reconstruction() && energy.scan_glow==1.F && energy.scan_range==.8F,
+            "energy wave settings survive round trip and require a compatible reader");
+        Settings sequence;
+        auto wave=camera_energy_demo(17.F,32.F); wave.clip_start=17.F;
+        append_camera_effect(sequence.camera_effect,sequence.camera_effect_clips,wave);
+        auto micro=camera_effect_demo(34.F,49.F); micro.clip_start=34.F;
+        append_camera_effect(sequence.camera_effect,sequence.camera_effect_clips,micro);
+        expect(!camera_effect_at(sequence.camera_effect,sequence.camera_effect_clips,5.F).enabled,
+            "appending reveals preserves earlier ordinary shots");
+        expect(camera_effect_at(sequence.camera_effect,sequence.camera_effect_clips,18.F).kind==2 &&
+            camera_effect_at(sequence.camera_effect,sequence.camera_effect_clips,35.F).kind==0,
+            "appending a reveal retains previous reveal shots");
+        expect(!camera_effect_at(sequence.camera_effect,sequence.camera_effect_clips,33.F).enabled &&
+            !camera_effect_at(sequence.camera_effect,sequence.camera_effect_clips,50.F).enabled,
+            "gaps and the end of bounded clips restore ordinary rendering");
+        expect(camera_effect_weights(wave,16.F).splat==1.F && camera_effect_weights(wave,32.F).splat==1.F,
+            "bounded effects leave preceding and following representations intact");
+        CameraKeyframe cinematic; cinematic.time=0.F; cinematic.interpolation=3;
+        sequence.camera_keyframes={cinematic};
+        const auto sequence_bytes=encode_settings(sequence,ascan_path);
+        const auto saved_sequence=decode_settings(sequence_bytes,ascan_path);
+        std::memcpy(&minimum,sequence_bytes.data()+4,sizeof(minimum));
+        expect(minimum==32 && saved_sequence.camera_keyframes[0].interpolation==3 &&
+            saved_sequence.camera_effect.clip_start==34.F && saved_sequence.camera_effect_clips.size()==1 &&
+            saved_sequence.camera_effect_clips[0].clip_start==17.F,"cinematic curves and bounded effect clips survive project save/load");
+        auto selected=sequence.camera_effect; auto other=sequence.camera_effect_clips;
+        std::swap(selected,other[0]);
+        expect(camera_effect_at(selected,other,18.F).kind==2 && camera_effect_at(selected,other,35.F).kind==0,
+            "selecting an earlier clip for editing does not change playback");
+        auto overlap=wave; overlap.kind=0; overlap.start_time=wave.start_time; overlap.clip_start=wave.clip_start;
+        selected=overlap; other={wave};
+        const auto chosen=camera_effect_at(selected,other,18.F).kind;
+        std::swap(selected,other[0]);
+        expect(camera_effect_at(selected,other,18.F).kind==chosen,"overlap priority is independent of editor selection");
+        selected=wave; selected.enabled=false; other.clear();
+        append_camera_effect(selected,other,micro);
+        expect(other.size()==1 && !other[0].enabled && other[0].clip_start==17.F,
+            "appending a shot retains disabled clips for later editing");
+        auto legacy31=energy_bytes; legacy31.resize(legacy31.size()-k_clip_bytes);
+        const std::uint32_t version31=31;
+        std::memcpy(legacy31.data(),&version31,4);
+        expect(decode_settings(legacy31,ascan_path).camera_effect.clip_start==-1.F,
+            "legacy energy wave projects retain their pre-roll behaviour");
         const std::uint32_t version29 = 29;
         std::memcpy(v29.data(), &version29, 4); std::memcpy(v29.data()+4, &version29, 4);
         expect(decode_settings(v29, ascan_path).camera_effect.scan_growth == 2.5F,
             "legacy scan projects receive reconstruction defaults");
-        auto v28 = scan_bytes; v28.resize(v28.size() - k_scan_bytes - 4 * sizeof(float));
+        auto v28 = scan_bytes; v28.resize(v28.size() - k_scan_bytes - 4 * sizeof(float)-k_clip_bytes);
         const std::uint32_t version28 = 28;
         std::memcpy(v28.data(), &version28, 4); std::memcpy(v28.data() + 4, &version28, 4);
         expect(decode_settings(v28, ascan_path).camera_effect.kind == 0,

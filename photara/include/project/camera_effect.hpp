@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <span>
+#include <vector>
+#include <tuple>
 
 namespace photara::project {
 
@@ -12,16 +15,23 @@ struct CameraEffectTrack {
     float start_time{2.F}, rings_time{4.F}, end_time{6.F};
     float point_size{2.F}, ring_scale{2.828427F};
     int easing{1}; // 0 linear, 1 smoothstep.
-    int kind{}; // 0: points/rings/splat crossfade, 1: view-triggered reconstruction.
+    int kind{}; // 0: points/rings/splat, 1: view-triggered reconstruction, 2: radial energy wave.
+    bool reconstruction() const { return kind == 1 || kind == 2; }
+    const char* name() const {
+        return kind == 2 ? "Energy wave reveal" : kind == 1 ? "Scan reveal" : "Point Cloud > Rings > 3DGS";
+    }
     int scan_axis{3}; // Legacy plane fields retained for older project readers.
     bool scan_reverse{};
     float scan_softness{.025F}, scan_glow{.7F};
     float scan_direction[3]{1.F, 0.F, 0.F};
     float scan_hold{1.F}, scan_growth{2.5F};
     float scan_range{.32F}, scan_density{.22F};
+    float clip_start{-1.F}; // -1 keeps legacy pre-roll; nonnegative bounds this shot.
+    bool contains(float time) const { return enabled && (clip_start<0.F || (time>=clip_start && time<end_time)); }
 
     void validate() const {
-        if (!std::isfinite(scan_hold) || scan_hold < 0.F || scan_hold > 10.F ||
+        if (!std::isfinite(clip_start) || (clip_start != -1.F && (clip_start<0.F || clip_start>start_time)) ||
+            !std::isfinite(scan_hold) || scan_hold < 0.F || scan_hold > 10.F ||
             !std::isfinite(scan_growth) || scan_growth < .1F || scan_growth > 10.F ||
             !std::isfinite(scan_range) || scan_range < .02F || scan_range > 2.F ||
             !std::isfinite(scan_density) || scan_density < .01F || scan_density > 1.F ||
@@ -30,7 +40,7 @@ struct CameraEffectTrack {
             end_time - rings_time < .01F || end_time > 36000.F ||
             !std::isfinite(point_size) || point_size < 1.F || point_size > 6.F ||
             !std::isfinite(ring_scale) || ring_scale < .5F || ring_scale > 8.F ||
-            easing < 0 || easing > 1 || kind < 0 || kind > 1 || scan_axis < 0 || scan_axis > 3 ||
+            easing < 0 || easing > 1 || kind < 0 || kind > 2 || scan_axis < 0 || scan_axis > 3 ||
             !std::isfinite(scan_softness) || scan_softness < .001F || scan_softness > .2F ||
             !std::isfinite(scan_glow) || scan_glow < 0.F || scan_glow > 1.F ||
             !std::isfinite(scan_direction[0]) || !std::isfinite(scan_direction[1]) || !std::isfinite(scan_direction[2]) ||
@@ -40,10 +50,33 @@ struct CameraEffectTrack {
     }
 };
 
+inline CameraEffectTrack camera_effect_at(const CameraEffectTrack& current,
+    std::span<const CameraEffectTrack> clips,float time) {
+    // Editing selection must not change overlap priority. The latest shot wins.
+    const auto priority=[](const CameraEffectTrack& clip) {
+        return std::tuple{clip.clip_start,clip.start_time,clip.end_time,clip.kind,clip.rings_time,
+            clip.point_size,clip.ring_scale,clip.easing,clip.scan_hold,clip.scan_growth,
+            clip.scan_range,clip.scan_density,clip.scan_glow};
+    };
+    const CameraEffectTrack* best=current.contains(time) ? &current : nullptr;
+    for (const auto& clip:clips) if (clip.contains(time) &&
+        (!best || priority(clip)>priority(*best))) best=&clip;
+    return best ? *best : CameraEffectTrack{};
+}
+
+inline bool camera_effects_enabled(const CameraEffectTrack& current,std::span<const CameraEffectTrack> clips) {
+    return current.enabled || std::any_of(clips.begin(),clips.end(),[](const auto& clip){return clip.enabled;});
+}
+
+inline void append_camera_effect(CameraEffectTrack& current,std::vector<CameraEffectTrack>& clips,CameraEffectTrack next) {
+    if (current.enabled || current.clip_start>=0.F) clips.push_back(current);
+    current=next;
+}
+
 struct CameraEffectWeights { float points{}, rings{}, splat{1.F}; };
 
 inline CameraEffectWeights camera_effect_weights(const CameraEffectTrack& effect, float time) {
-    if (!effect.enabled) return {};
+    if (!effect.contains(time)) return {};
     effect.validate();
     const auto weight = [&](float value) {
         value = std::clamp(value, 0.F, 1.F);
@@ -76,6 +109,17 @@ inline CameraEffectTrack camera_scan_demo(float first,float last) {
     effect.start_time=first+std::min(.7F,duration*.1F);
     effect.end_time=first+duration*.8F;
     effect.rings_time=(effect.start_time+effect.end_time)*.5F;
+    return effect;
+}
+
+inline CameraEffectTrack camera_energy_demo(float first, float last) {
+    auto effect = camera_scan_demo(first, last);
+    effect.kind = 2;
+    effect.scan_hold = .15F;
+    effect.scan_growth = .8F;
+    effect.scan_range = .8F;
+    effect.scan_density = .65F;
+    effect.scan_glow = 1.F;
     return effect;
 }
 

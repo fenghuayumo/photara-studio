@@ -119,6 +119,61 @@ void test_camera_effect_render() {
             "24fps playback renders moving intermediate camera poses without rebuilding the model");
         require(model.log_scales.ptr<float>()[0] == std::log(.25F) && model.opacity_logits.ptr<float>()[0] == 8.F,
             "preview geometry never changes the editable source model");
+        const auto energy=photara::project::camera_energy_demo(0.F,8.F);
+        for (auto& key:keys) key.target[0]=0.F;
+        const auto wave_final=reconstruction.render(camera,keys,{},energy,8.F,{});
+        const auto wave_start=reconstruction.render(camera,keys,{},energy,0.F,{});
+        require(wave_final.pixels==full.pixels && wave_start.pixels!=full.pixels,
+            "energy wave restores exact materials and rewinds on 3DGS and 3DGUT");
+        for (float t:{1.F,2.F,4.F,2.F}) {
+            const auto gpu=reconstruction.render(camera,keys,{},energy,t,{});
+            const auto cpu=reference.render(camera,keys,{},energy,t,{},true);
+            unsigned largest=0;
+            for (std::size_t p=0;p<gpu.pixels.size();++p)
+                largest=std::max(largest,unsigned(std::abs(int(gpu.pixels[p])-int(cpu.pixels[p]))));
+            require(largest<=5,"energy wave GPU preview agrees with the CPU reference when scrubbing");
+        }
+        // The viewport renders directly into an ImGui GPU texture. With bloom
+        // disabled, its pixels must match the offline renderer exactly.
+        auto direct_effect=energy; direct_effect.scan_glow=0.F;
+        const auto resident_revision=renderer.model_upload_revision();
+        renderer.set_reconstruction_schedule(reconstruction.arrival_times());
+        for (float t:{0.F,1.F,2.F,4.F,8.F,2.F}) {
+            splat_render::FrameTarget target;
+            require(renderer.draw(camera,target,splat_render::Shading::gaussian,
+                reconstruction.display_options(direct_effect,t)),"resident model renders direct reconstruction preview");
+            photara::io::RgbImage direct;
+            require(renderer.download_rgb(direct.pixels,direct.width,direct.height),"direct preview is readable for verification");
+            require(direct.pixels==reconstruction.render(camera,keys,{},direct_effect,t,{}).pixels,
+                "direct GPU preview matches export throughout playback and seeking");
+        }
+        require(renderer.model_upload_revision()==resident_revision,"direct preview reuses the resident model");
+        splat_render::FrameTarget restored;
+        require(renderer.draw(camera,restored,splat_render::Shading::gaussian,{}),"normal rendering works after reconstruction preview");
+        photara::io::RgbImage normal;
+        require(renderer.download_rgb(normal.pixels,normal.width,normal.height) && normal.pixels==full.pixels,
+            "preview uniforms do not leak into normal rendering");
+        auto bounded=photara::project::camera_energy_demo(4.F,12.F); bounded.clip_start=4.F;
+        for (float t:{0.F,3.99F,12.F,13.F}) {
+            require(!reconstruction.display_options(bounded,t).reconstruction.enabled,
+                "bounded clips disable GPU animation outside their shot");
+            require(reconstruction.render(camera,keys,{},bounded,t,{}).pixels==full.pixels &&
+                reference.render(camera,keys,{},bounded,t,{},true).pixels==full.pixels,
+                "bounded reconstruction preserves normal RGB before and after the clip, including bloom");
+        }
+        auto later=photara::project::camera_effect_demo(17.F,25.F); later.clip_start=17.F;
+        std::vector<photara::project::CameraEffectTrack> clips{bounded};
+        const auto render_sequence=[&](float time) {
+            const auto clip=photara::project::camera_effect_at(later,clips,time);
+            return clip.enabled && clip.reconstruction() ? reconstruction.render(camera,keys,{},clip,time,{})
+                : editor::camera_effects::render(renderer,camera,orbit,points,options,clip,time,{});
+        };
+        for (float t:{0.F,3.F,13.F,26.F}) require(render_sequence(t).pixels==full.pixels,
+            "mixed-effect sequence preserves ordinary frames outside both clips");
+        const auto earlier_frame=render_sequence(5.F);
+        require(earlier_frame.pixels!=full.pixels,"appended crossfade retains the earlier reconstruction shot");
+        std::swap(later,clips[0]);
+        require(render_sequence(5.F).pixels==earlier_frame.pixels,"editing selection leaves exported sequence pixels unchanged");
 
     }
 }
@@ -132,6 +187,9 @@ void test_scan_reveal_mask() {
     model.quaternions=Tensor::from_vector({1.F,0.F,0.F,0.F,1.F,0.F,0.F,0.F},{2,4},Device::CPU);
     model.opacity_logits=Tensor::from_vector({4.F,4.F},{2,1},Device::CPU);
     model.sh=Tensor::from_vector(std::vector<float>(6,0.F),{2,1,3},Device::CPU);
+    const auto preview_points=editor::camera_effects::model_points(model,{},1);
+    require(preview_points.points.size()==1 && preview_points.gaussian_sample_stride==2 && preview_points.points[0].x==0.F,
+        "preview point budgets retain source indices for model placements");
     std::vector<photara::project::CameraKeyframe> keys(3);
     for(auto& k:keys) { k.yaw=k.pitch=0.F; k.distance=2.F; }
     keys[1].time=4.F; keys[1].target[0]=10.F; keys[2].time=8.F;
@@ -149,6 +207,23 @@ void test_scan_reveal_mask() {
     splat_render::ModelTransform transform; transform.end_index=2; transform.translation[0]=100.F;
     reconstruction.prepare(keys,std::span{&transform,1},effect,16.F/9.F);
     require(reconstruction.arrival_times()[0]>=effect.start_time, "model placement and timing changes invalidate the reveal schedule");
+    effect=photara::project::camera_energy_demo(0.F,8.F);
+    for (auto& key:keys) key.target[0]=0.F;
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    const auto wave=reconstruction.arrival_times();
+    require(wave[0]<wave[1],"energy wave propagates outwards from the orbit target");
+    for (auto& key:keys) key.yaw+=1.F;
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    require(wave==reconstruction.arrival_times(),"wave arrivals are independent of camera visibility");
+    for (auto& key:keys) key.target[0]=10.F;
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    require(reconstruction.arrival_times()[1]<reconstruction.arrival_times()[0],"moving the subject centre rebuilds radial arrivals");
+    effect.scan_range=.02F;
+    for (auto& key:keys) key.target[0]=-10.F;
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    const auto outside=reconstruction.arrival_times();
+    require(outside[0]<outside[1] && outside[1]<effect.end_time,
+        "small wave radii keep distinct arrivals beyond the requested range and finish within the clip");
 }
 void test_point_cloud_video_frames() {
     editor::SparseScene scene;

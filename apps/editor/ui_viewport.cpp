@@ -26,7 +26,7 @@ namespace editor {
 using i18n::tr;
 
 bool camera_effect_view_active(const App& app) {
-    return app.camera_effect.enabled && app.camera_effect_preview && app.has_model &&
+    return photara::project::camera_effect_at(app.camera_effect,app.camera_effect_clips,app.camera_path_time).enabled && app.camera_effect_preview && app.has_model &&
         app.camera_keyframes.size() >= 2 && !live_preview_active(app) &&
         !app.camera_path_recording.active && !app.camera_path_recording.review &&
         app.view_mode != VisualizationMode::mesh;
@@ -180,7 +180,7 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
             }
         }
         ImGui::SameLine(0.F, 2.F);
-        const bool video_scene_ready = app.camera_effect.enabled ? app.has_model && app.view_mode != VisualizationMode::mesh
+        const bool video_scene_ready = photara::project::camera_effects_enabled(app.camera_effect,app.camera_effect_clips) ? app.has_model && app.view_mode != VisualizationMode::mesh
             : app.view_mode == VisualizationMode::points
             ? app.scene.has_points() && !app.loading_scene
             : app.has_model && (app.view_mode == VisualizationMode::splat ||
@@ -1586,7 +1586,7 @@ bool draw_splat_image(
     splat_render::Camera camera = orbit == nullptr
         ? preview_camera_from(preview)
         : preview_camera_for_orbit(preview, *orbit);
-    if (rings) camera.ring_sigma = effect_pass ? app.camera_effect.ring_scale : app.view_options.ring_scale;
+    if (rings) camera.ring_sigma = effect_pass ? photara::project::camera_effect_at(app.camera_effect,app.camera_effect_clips,app.camera_path_time).ring_scale : app.view_options.ring_scale;
     const std::uint32_t width = std::max(1U, camera.width);
     const std::uint32_t height = std::max(1U, camera.height);
     if (!app.splat_renderer->has_frame_size(width, height)) {
@@ -1641,20 +1641,19 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
     const splat_render::Camera& camera, ImDrawList* draw, ImVec2 min, ImVec2 max) {
     if (!ensure_splat_renderer(app)) return false;
     try {
+        const auto effect=photara::project::camera_effect_at(app.camera_effect,app.camera_effect_clips,app.camera_path_time);
         auto& cache = app.effect_preview;
         const bool local_model = app.composed_model && !app.gaussian_preview_baked && !app.splat_edit.dirty();
         if (cache.source != app.splat_renderer->source_key() ||
             cache.revision != app.splat_edit.edit_revision() || cache.baked != !local_model) {
-            photara::splat::GaussianModel edited;
-            if (!local_model && !app.splat_edit.copy_model(edited)) return false;
-            cache.points = camera_effects::model_points(local_model ? *app.composed_model : edited);
+            cache.points = {};
             cache.source = app.splat_renderer->source_key();
             cache.revision = app.splat_edit.edit_revision(); cache.baked = !local_model;
             cache.reconstruction.reset();
             cache.reconstruction_request.clear();
             cache.reconstruction_ready = false;
         }
-        if (app.camera_effect.kind == 1) {
+        if (effect.reconstruction()) {
             if (!cache.reconstruction) {
                 photara::splat::GaussianModel edited;
                 if (!local_model && !app.splat_edit.copy_model(edited)) return false;
@@ -1671,21 +1670,18 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                 auto image = cache.reconstruction->render(camera, app.camera_keyframes,
                     local_model ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
                                 : std::span<const splat_render::ModelTransform>{},
-                    app.camera_effect, app.camera_path_time, display, false, schedule_aspect);
+                    effect, app.camera_path_time, display, false, schedule_aspect);
                 cache.texture.upload(image);
                 cache.reconstruction_ready = true;
                 app.image_export.effect_frame = std::make_shared<photara::io::RgbImage>(std::move(image));
                 app.image_export.frame_ready = true;
             } else {
-                // Keep controls responsive while the complete Gaussian model is
-                // animated. A busy worker finishes its snapshot; the next job
-                // always takes the latest time/pose/settings, so scrubbing coalesces.
-                std::vector<float> request{app.camera_path_time,float(camera.width),float(camera.height),
-                    camera.fx,camera.fy,camera.cx,camera.cy,camera.k1,camera.k2,camera.k3,camera.k4,
-                    float(camera.model),display.near_clip,app.camera_effect.start_time,app.camera_effect.end_time,
-                    app.camera_effect.scan_hold,app.camera_effect.scan_growth,app.camera_effect.scan_range,
-                    app.camera_effect.scan_density,app.camera_effect.scan_glow,app.camera_effect.point_size,schedule_aspect};
-                request.insert(request.end(),camera.world_to_camera.begin(),camera.world_to_camera.end());
+                // Schedule preparation runs only when the path or reveal changes.
+                // Animation stays on the resident viewport model: no per-frame
+                // RGB download, CPU bloom, texture upload or async frame lag.
+                std::vector<float> request{float(effect.kind),effect.clip_start,schedule_aspect,
+                    effect.start_time,effect.end_time,
+                    effect.scan_hold,effect.scan_growth,effect.scan_range};
                 for (const auto& k:app.camera_keyframes)
                     request.insert(request.end(),{k.time,k.target[0],k.target[1],k.target[2],k.yaw,k.pitch,k.roll,
                         k.distance,k.fov_degrees,k.ortho_height,k.fisheye_k1,float(k.projection),float(k.interpolation)});
@@ -1696,30 +1692,54 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                     request.insert(request.end(),t.rotation.begin(),t.rotation.end());
                 }
                 if (cache.reconstruction_job.valid() && cache.reconstruction_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                    auto image = cache.reconstruction_job.get();
-                    if (cache.reconstruction_pending == cache.reconstruction &&
-                        (app.camera_path_playing || request == cache.reconstruction_request)) {
-                        cache.texture.upload(*image);
+                    cache.reconstruction_job.get();
+                    if (cache.reconstruction_pending == cache.reconstruction && request == cache.reconstruction_request) {
+                        app.splat_renderer->set_reconstruction_schedule(cache.reconstruction->arrival_times());
                         cache.reconstruction_ready = true;
                     }
                     cache.reconstruction_pending.reset();
                 }
                 if (!cache.reconstruction_job.valid() && request != cache.reconstruction_request) {
-                    auto keys = app.camera_keyframes;
-                    for (auto& k:keys) { k.thumbnail_rgb.clear(); k.thumbnail_width=k.thumbnail_height=0; }
+                    std::vector<photara::project::CameraKeyframe> keys;
+                    keys.reserve(app.camera_keyframes.size());
+                    for (const auto& k:app.camera_keyframes)
+                        keys.push_back(camera_recording::interpolate(k,k,0.F));
                     cache.reconstruction_pending = cache.reconstruction;
                     cache.reconstruction_request = std::move(request);
+                    cache.reconstruction_ready = false;
                     cache.reconstruction_job = std::async(std::launch::async,
-                        [state=cache.reconstruction,camera,keys=std::move(keys),transforms=std::move(transforms),
-                         effect=app.camera_effect,time=app.camera_path_time,display,schedule_aspect] {
-                            return std::make_shared<photara::io::RgbImage>(state->render(camera,keys,transforms,effect,time,display,false,schedule_aspect));
+                        [state=cache.reconstruction,keys=std::move(keys),transforms,
+                         effect=effect,schedule_aspect] {
+                            state->prepare(keys,transforms,effect,schedule_aspect);
                         });
                 }
+                if (cache.reconstruction_ready) {
+                    if (!app.splat_renderer->set_model_transforms(transforms)) return false;
+                    if (!app.splat_renderer->has_frame_size(camera.width,camera.height)) {
+                        gpu::wait_idle();
+                        release_splat_preview_sets(app);
+                    }
+                    splat_render::FrameTarget target;
+                    if (!app.splat_renderer->draw(camera,target,splat_render::Shading::gaussian,
+                            cache.reconstruction->display_options(effect,app.camera_path_time,display))) return false;
+                    const auto set=splat_preview_texture(app,target);
+                    if (!set) return false;
+                    draw->AddImage(reinterpret_cast<ImTextureID>(set),min,max);
+                    return true;
+                }
             }
-            if (cache.texture.descriptor)
+            if (!app.image_export.path.empty() && cache.texture.descriptor)
                 draw->AddImage(reinterpret_cast<ImTextureID>(cache.texture.descriptor), min, max);
             else draw->AddText({min.x+16.F,min.y+16.F},IM_COL32(180,190,200,255),tr("Preparing reconstruction preview..."));
             return true;
+        }
+        const std::size_t point_budget = app.image_export.path.empty() ? 120000 : 600000;
+        const auto point_count = app.splat_renderer->splat_count();
+        const auto point_stride = std::max<std::size_t>(1,point_count/point_budget+(point_count%point_budget != 0));
+        if (cache.points.points.empty() || cache.points.gaussian_sample_stride != point_stride) {
+            photara::splat::GaussianModel edited;
+            if (!local_model && !app.splat_edit.copy_model(edited)) return false;
+            cache.points = camera_effects::model_points(local_model ? *app.composed_model : edited, {}, point_budget);
         }
         cache.points.set_model_transforms(local_model
             ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
@@ -1728,14 +1748,14 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                 ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
                 : std::span<const splat_render::ModelTransform>{})) return false;
         auto options = app.view_options;
-        options.point_size = app.camera_effect.point_size;
-        options.ring_scale = app.camera_effect.ring_scale;
+        options.point_size = effect.point_size;
+        options.ring_scale = effect.ring_scale;
         options.colour_by_depth = false; options.show_cloud = true;
         // Still-image exports use the same two passes at the preview camera.
-        if (!app.image_export.path.empty() || app.camera_effect.kind == 1) {
+        if (!app.image_export.path.empty() || effect.reconstruction()) {
             splat_render::DisplayOptions display; display.near_clip = app.navigation_near_clip;
             auto image = camera_effects::render(*app.splat_renderer, camera, app.camera,
-                cache.points, options, app.camera_effect, app.camera_path_time, display);
+                cache.points, options, effect, app.camera_path_time, display);
             cache.texture.upload(image);
             if (!app.image_export.path.empty()) {
                 app.image_export.effect_frame = std::make_shared<photara::io::RgbImage>(std::move(image));
@@ -1744,7 +1764,7 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
             draw->AddImage(reinterpret_cast<ImTextureID>(cache.texture.descriptor), min, max);
             return true;
         }
-        const auto weights = photara::project::camera_effect_weights(app.camera_effect, app.camera_path_time);
+        const auto weights = photara::project::camera_effect_weights(effect, app.camera_path_time);
         if (weights.points > 0.F) {
             cache.texture.upload(render_point_cloud_image(cache.points, app.camera, options, camera.width, camera.height));
             draw->AddImage(reinterpret_cast<ImTextureID>(cache.texture.descriptor), min, max);
@@ -1787,9 +1807,11 @@ void draw_splat_render_tab(
     std::uint32_t raster_h = app.preview_raster_height;
     fit_preview_raster(max.x - min.x, max.y - min.y, false, raster_w, raster_h);
     const bool effect = camera_effect_view_active(app);
-    if (!effect || app.camera_effect.kind != 1) {
+    if (!effect || !photara::project::camera_effect_at(app.camera_effect,app.camera_effect_clips,app.camera_path_time).reconstruction()) {
         auto& cache = app.effect_preview;
-        cache.reconstruction.reset(); cache.reconstruction_request.clear();
+        // Keep the CPU model resident between bounded shots. Source/edit
+        // invalidation above and project teardown still discard it.
+        cache.reconstruction_request.clear();
         cache.reconstruction_ready = false;
         if (cache.reconstruction_job.valid() && cache.reconstruction_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             cache.reconstruction_job = {};
@@ -1862,7 +1884,7 @@ void draw_splat_render_tab(
     handle_preview_view_input(app, viewport_input);
 
     draw_viewport_overlay(
-        draw, min, effect ? tr(app.camera_effect.kind == 1 ? "Scan reveal" : "Reconstruction reveal") : rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
+        draw, min, effect ? tr(photara::project::camera_effect_at(app.camera_effect,app.camera_effect_clips,app.camera_path_time).name()) : rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
         shown ? theme::success : theme::warning);
     char readout[192];
     const bool simplified = app.splat_simplify.applied &&

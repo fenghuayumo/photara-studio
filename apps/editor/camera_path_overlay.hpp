@@ -20,10 +20,10 @@ template <std::size_t N> float chord_error(const std::array<float,N>& p,const st
 
 // Independent of keyframe count: refine curved segments until their projected
 // chord error is below a pixel. Invisible/near-plane samples use world error.
-template <typename Key,typename Project,typename Emit>
-std::size_t tessellate(const Key& a,const Key& b,float world_tolerance,Project project,Emit emit) {
+template <typename Key,typename Project,typename Emit,typename Sample>
+std::size_t tessellate_sampled(const Key& a,const Key& b,float world_tolerance,Project project,Emit emit,Sample sample) {
     if (a.interpolation==2) return 0;
-    const auto point=[&](float t){return eye(camera_recording::interpolate(a,b,camera_timeline::interpolation_weight(t,a.interpolation)));};
+    const auto point=[&](float t){return eye(sample(t));};
     std::size_t count=0;
     const auto refine=[&](auto&& self,float start,float end,V3 p,V3 q,int depth)->void {
         const float mid=(start+end)*.5F;
@@ -39,5 +39,20 @@ std::size_t tessellate(const Key& a,const Key& b,float world_tolerance,Project p
     };
     refine(refine,0.F,1.F,eye(a),eye(b),0);
     return count;
+}
+
+template <typename Key,typename Project,typename Emit>
+std::size_t tessellate(const Key& a,const Key& b,float world_tolerance,Project project,Emit emit) {
+    return tessellate_sampled(a,b,world_tolerance,project,emit,[&](float t){
+        return camera_recording::interpolate(a,b,camera_timeline::interpolation_weight(t,a.interpolation));
+    });
+}
+
+template <typename Keys,typename Project,typename Emit>
+std::size_t tessellate_path(const Keys& keys,std::size_t right,float tolerance,Project project,Emit emit) {
+    const auto& a=keys[right-1]; const auto& b=keys[right];
+    return tessellate_sampled(a,b,tolerance,project,emit,[&](float u){
+        return camera_timeline::evaluate(keys,a.time+(b.time-a.time)*u);
+    });
 }
 } // namespace editor::camera_path_overlay

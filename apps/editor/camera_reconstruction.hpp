@@ -77,13 +77,24 @@ public:
     std::uint64_t model_upload_revision() const { return renderer_.model_upload_revision(); }
     std::array<double,3> frame_milliseconds() const { return frame_milliseconds_; }
 
+    // Shared animation uniforms for direct GPU preview and offline RGB export.
+    splat_render::DisplayOptions display_options(const photara::project::CameraEffectTrack& effect,
+        float time, splat_render::DisplayOptions display = {}) const {
+        if (!effect.contains(time)) { display.reconstruction={}; return display; }
+        const float phase_scale=std::min(1.F,(effect.end_time-effect.start_time)*.85F/(effect.scan_hold+effect.scan_growth));
+        display.reconstruction={true,time,effect.start_time,effect.end_time,
+            effect.scan_hold*phase_scale,effect.scan_growth*phase_scale,
+            scale_*.00036F*effect.point_size*.5F,effect.scan_density,effect.scan_glow};
+        return display;
+    }
+
     void prepare(const std::vector<photara::project::CameraKeyframe>& keys,
         std::span<const splat_render::ModelTransform> transforms,
         const photara::project::CameraEffectTrack& effect, float aspect) {
         effect.validate();
         if (keys.size()<2 || keys.back().time<=keys.front().time || !std::isfinite(aspect) || aspect<=0)
             throw std::invalid_argument("Scan reveal needs a valid camera path");
-        std::vector<float> signature{aspect,effect.start_time,effect.end_time,effect.scan_hold,
+        std::vector<float> signature{float(effect.kind),effect.clip_start,aspect,effect.start_time,effect.end_time,effect.scan_hold,
             effect.scan_growth,effect.scan_range};
         for (const auto& k:keys) {
             signature.insert(signature.end(),{k.time,k.target[0],k.target[1],k.target[2],k.yaw,k.pitch,k.roll,
@@ -116,6 +127,10 @@ public:
         arrival_.resize(base_.size());
         const float span=effect.end_time-effect.start_time;
         const float phase=std::min(effect.scan_hold+effect.scan_growth,span*.85F);
+        // The wave originates at the shot's orbit target, independent of which
+        // parts of the scene happen to be visible to the animated camera.
+        const auto origin=camera_timeline::evaluate(keys,effect.start_time);
+        float wave_radius=std::max(1e-6F,world_scale*effect.scan_range);
         for (std::size_t i=0;i<base_.size();++i) {
             std::array<float,3> point{base_.means.ptr<float>()[i*3],base_.means.ptr<float>()[i*3+1],base_.means.ptr<float>()[i*3+2]};
             if (!transforms.empty()) {
@@ -123,6 +138,13 @@ public:
                     [](std::size_t index,const auto& placement) {return index<placement.end_index;});
                 if (t==transforms.end()) throw std::invalid_argument("Scan placements do not cover the model");
                 point=splat_render::transform_point(*t,point);
+            }
+            if (effect.kind == 2) {
+                float distance2=0.F;
+                for (int c=0;c<3;++c) distance2+=(point[c]-origin.target[c])*(point[c]-origin.target[c]);
+                arrival_[i]=std::sqrt(distance2);
+                wave_radius=std::max(wave_radius,arrival_[i]);
+                continue;
             }
             float first=effect.end_time-phase;
             for (const auto& s:samples) {
@@ -146,6 +168,8 @@ public:
             const float jitter=(float(reconstruction_hash(unsigned(i))%10000)/10000.F-.5F)*.18F;
             arrival_[i]=std::clamp(first+jitter,effect.start_time,effect.end_time-phase);
         }
+        if (effect.kind==2) for (auto& distance:arrival_)
+            distance=effect.start_time+(distance/wave_radius)*(span-phase);
         renderer_.set_reconstruction_schedule(arrival_);
         signature_=std::move(signature);
         last_frame_.clear();
@@ -159,7 +183,7 @@ public:
         prepare(keys,transforms,effect,schedule_aspect > 0.F ? schedule_aspect : float(camera.width)/camera.height);
         std::vector<float> frame{time,float(camera.width),float(camera.height),camera.fx,camera.fy,camera.cx,camera.cy,
             camera.k1,camera.k2,camera.k3,camera.k4,float(camera.model),display.near_clip,
-            effect.point_size,effect.scan_density,effect.scan_glow,float(cpu_reference)};
+            effect.clip_start,effect.point_size,effect.scan_density,effect.scan_glow,float(cpu_reference)};
         frame.insert(frame.end(),camera.world_to_camera.begin(),camera.world_to_camera.end());
         frame.insert(frame.end(),camera.position.begin(),camera.position.end());
         if (frame==last_frame_) return image_;
@@ -182,16 +206,14 @@ public:
                 gpu_model_loaded_=true;
             }
             if (!renderer_.set_model_transforms(transforms)) throw std::runtime_error(renderer_.failure());
-            auto settings=display;
-            settings.reconstruction={true,time,effect.start_time,effect.end_time,hold,growth,
-                scale_*.00036F*effect.point_size*.5F,effect.scan_density,effect.scan_glow};
+            const auto settings=display_options(effect,time,display);
             splat_render::FrameTarget target;
             const auto draw_started=std::chrono::steady_clock::now();
             if (!renderer_.draw(camera,target,splat_render::Shading::gaussian,settings)) throw std::runtime_error(renderer_.failure());
             const auto readback_started=std::chrono::steady_clock::now();
             if (!renderer_.download_rgb(image_.pixels,image_.width,image_.height)) throw std::runtime_error(renderer_.failure());
             const auto bloom_started=std::chrono::steady_clock::now();
-            reconstruction_bloom(image_,effect.scan_glow/.7F*1.15F*(1.F-reconstruction_smooth(effect.end_time-1.F,effect.end_time,time)));
+            if (effect.contains(time)) reconstruction_bloom(image_,effect.scan_glow/.7F*1.15F*(1.F-reconstruction_smooth(effect.end_time-1.F,effect.end_time,time)));
             const auto finished=std::chrono::steady_clock::now();
             frame_milliseconds_={std::chrono::duration<double,std::milli>(readback_started-draw_started).count(),
                 std::chrono::duration<double,std::milli>(bloom_started-readback_started).count(),
@@ -202,7 +224,7 @@ public:
         scales_.resize(count*3); opacity_.resize(count); sh_.resize(base_.sh.numel());
         for (std::size_t i=0;i<count;++i) {
             const float age=time-arrival_[i];
-            const bool complete=time>=effect.end_time || age>=hold+growth;
+            const bool complete=!effect.contains(time) || time>=effect.end_time || age>=hold+growth;
             if (complete) {
                 std::copy_n(base_.log_scales.ptr<float>()+i*3,3,scales_.data()+i*3);
                 opacity_[i]=base_.opacity_logits.ptr<float>()[i];
@@ -243,7 +265,7 @@ public:
         splat_render::FrameTarget target;
         if (!renderer_.draw(camera,target,splat_render::Shading::gaussian,display) ||
             !renderer_.download_rgb(image_.pixels,image_.width,image_.height)) throw std::runtime_error(renderer_.failure());
-        reconstruction_bloom(image_,effect.scan_glow/.7F*1.15F*(1.F-reconstruction_smooth(effect.end_time-1.F,effect.end_time,time)));
+        if (effect.contains(time)) reconstruction_bloom(image_,effect.scan_glow/.7F*1.15F*(1.F-reconstruction_smooth(effect.end_time-1.F,effect.end_time,time)));
         last_frame_=std::move(frame);
         return image_;
     }

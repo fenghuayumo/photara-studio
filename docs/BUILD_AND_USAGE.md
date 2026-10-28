@@ -54,6 +54,43 @@ use their native libraries, FreeImage handles the remaining supported image
 formats, and the core geometry code uses Eigen, PoseLib, and Ceres.
 
 
+## Studio demo camera shots
+
+In **Camera Path**, open **Demo shots** (also available under **Path tools**).
+Frame the subject and set its orbit target in the viewport, then choose:
+
+- **Energy wave reveal**: a cyan luminous wave grows outwards from the orbit
+  target as the camera makes a quarter orbit and gently pushes in.
+- **Micro fly-through**: pulls back from a close particle view through Gaussian
+  rings to the fully rendered scene.
+- **Spiral ascent**: makes a full orbit while rising and widening the view.
+
+Set duration (15 seconds by default), distance multiplier and clockwise direction,
+then select **Append demo shot**. Each shot adds 17 editable perspective
+keyframes after the existing path. Reveal shots require a loaded Gaussian model
+and add a bounded effect clip without replacing earlier clips; spiral shots
+retain existing effects. Use **Effect clip** to select a previous clip for editing.
+Outside each shot's clip interval, ordinary rendering is preserved. New demo
+shots use monotone cubic interpolation with continuous velocity; existing keys
+can opt into **Cinematic** interpolation in the keyframe inspector or use
+**Path tools > Use cinematic interpolation** to convert the path while retaining
+hold/cut segments. For an older effect with global pre-roll, enable
+**Limit effect to clip** in **Effect settings** and set its clip start.
+The generated shots do not perform collision avoidance, so preview the path
+before exporting, especially for interiors and close particle shots.
+
+Use **Effect settings** to adjust wave radius, point density, highlight, growth
+and timing. The wave centre follows the orbit target at the effect start time;
+editing that target updates the reveal. Wave radius is a minimum reach: the wave
+automatically expands to cover all geometry without making outer regions arrive
+at the same time. Preview, still-image export and video
+export share the same reconstruction animation and material settings. Interactive
+reconstruction preview displays GPU textures directly, and point-cloud preview
+samples up to 120,000 source points. Image/video export retains the 600,000-point
+budget and full CPU bloom; preview retains the luminous material without that
+additional bloom pass. Projects using bounded clips or cinematic interpolation
+require settings reader version 32; existing projects remain readable.
+
 ## Repository layout and CMake targets
 
 ```text

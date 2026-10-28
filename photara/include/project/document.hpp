@@ -16,7 +16,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 30;
+inline constexpr std::uint32_t k_settings_version = 32;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -34,7 +34,7 @@ struct CameraKeyframe {
     float yaw{}, pitch{}, distance{6.F}, fov_degrees{50.F}, ortho_height{4.F}, fisheye_k1{};
     int projection{};
     float roll{};
-    int interpolation{}; // Outgoing segment: smooth, linear, hold.
+    int interpolation{}; // Outgoing segment: smooth, linear, hold, cinematic cubic.
     std::uint32_t thumbnail_width{}, thumbnail_height{};
     std::vector<std::uint8_t> thumbnail_rgb;
 };
@@ -43,6 +43,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     std::string name;
     std::vector<CameraKeyframe> camera_keyframes;
     CameraEffectTrack camera_effect;
+    std::vector<CameraEffectTrack> camera_effect_clips;
     std::filesystem::path image_directory;
     // Optional external camera/dataset input used by direct splat training.
     // These fields are additive so older .ascan settings remain readable.

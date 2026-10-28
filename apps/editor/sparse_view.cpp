@@ -3132,7 +3132,7 @@ SceneDrawStats SceneRenderer::draw(
         const auto eye_for=[&](const auto& key){return Vec3{key.target[0],key.target[1],key.target[2]}-as_vec(camera_recording::forward(key))*key.distance;};
         if (options.show_trajectory && path.size()>1) {
             for (std::size_t i=1;i<path.size();++i)
-                stats.drawn_path_segments+=camera_path_overlay::tessellate(path[i-1],path[i],scene.radius*.0005F,
+                stats.drawn_path_segments+=camera_path_overlay::tessellate_path(path,i,scene.radius*.0005F,
                     [&](const auto& point,camera_path_overlay::V2& pixel) {
                         ImVec2 screen; float depth;
                         if (!project(frame,as_vec(point),screen,depth)) return false;

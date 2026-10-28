@@ -197,6 +197,7 @@ struct App {
     float navigation_near_clip{0.01F};
     std::vector<photara::project::CameraKeyframe> camera_keyframes;
     photara::project::CameraEffectTrack camera_effect;
+    std::vector<photara::project::CameraEffectTrack> camera_effect_clips;
     bool camera_effect_preview{true};
     int camera_effect_drag{-1};
     float camera_effect_drag_x{};
@@ -204,7 +205,7 @@ struct App {
     struct CameraEffectPreview {
         std::shared_ptr<camera_effects::Reconstruction> reconstruction;
         std::shared_ptr<camera_effects::Reconstruction> reconstruction_pending;
-        std::future<std::shared_ptr<photara::io::RgbImage>> reconstruction_job;
+        std::future<void> reconstruction_job;
         std::vector<float> reconstruction_request;
         bool reconstruction_ready{};
         std::string source;

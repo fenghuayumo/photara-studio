@@ -57,6 +57,43 @@ std::filesystem::path project_directory(const std::filesystem::path& project_fil
     return parent.empty() ? std::filesystem::current_path() : parent;
 }
 
+void write_effect(BufferWriter& writer,const CameraEffectTrack& effect) {
+    effect.validate();
+    writer.value(static_cast<std::uint8_t>(effect.enabled));
+    writer.value(effect.start_time);
+    writer.value(effect.rings_time);
+    writer.value(effect.end_time);
+    writer.value(effect.point_size);
+    writer.value(effect.ring_scale);
+    writer.value(static_cast<std::int32_t>(effect.easing));
+    writer.value(static_cast<std::int32_t>(effect.kind));
+    writer.value(static_cast<std::int32_t>(effect.scan_axis));
+    writer.value(static_cast<std::uint8_t>(effect.scan_reverse));
+    writer.value(effect.scan_softness);
+    writer.value(effect.scan_glow);
+    for (float v : effect.scan_direction) writer.value(v);
+    writer.value(effect.scan_hold);
+    writer.value(effect.scan_growth);
+    writer.value(effect.scan_range);
+    writer.value(effect.scan_density);
+    writer.value(effect.clip_start);
+}
+
+CameraEffectTrack read_effect(BufferReader& reader) {
+    CameraEffectTrack effect;
+    effect.enabled=reader.value<std::uint8_t>()!=0;
+    effect.start_time=reader.value<float>(); effect.rings_time=reader.value<float>(); effect.end_time=reader.value<float>();
+    effect.point_size=reader.value<float>(); effect.ring_scale=reader.value<float>();
+    effect.easing=reader.value<std::int32_t>(); effect.kind=reader.value<std::int32_t>();
+    effect.scan_axis=reader.value<std::int32_t>(); effect.scan_reverse=reader.value<std::uint8_t>()!=0;
+    effect.scan_softness=reader.value<float>(); effect.scan_glow=reader.value<float>();
+    for (auto& value:effect.scan_direction) value=reader.value<float>();
+    effect.scan_hold=reader.value<float>(); effect.scan_growth=reader.value<float>();
+    effect.scan_range=reader.value<float>(); effect.scan_density=reader.value<float>();
+    effect.clip_start=reader.value<float>(); effect.validate();
+    return effect;
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> encode_settings(
@@ -67,7 +104,9 @@ std::vector<std::uint8_t> encode_settings(
     const bool has_rotation = std::any_of(settings.gaussian_models.begin(), settings.gaussian_models.end(), [](const auto& model) {
         return model.rotation_degrees[0] != 0.F || model.rotation_degrees[1] != 0.F || model.rotation_degrees[2] != 0.F;
     });
-    writer.value(settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 30U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    const bool modern_camera = settings.camera_effect.clip_start>=0.F || !settings.camera_effect_clips.empty() ||
+        std::any_of(settings.camera_keyframes.begin(),settings.camera_keyframes.end(),[](const auto& key){return key.interpolation==3;});
+    writer.value(modern_camera ? 32U : settings.camera_effect.kind == 2 ? 31U : settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 30U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -208,7 +247,7 @@ std::vector<std::uint8_t> encode_settings(
             writer.value(value);
         }
     for (const auto& key : settings.camera_keyframes) {
-        if (key.interpolation < 0 || key.interpolation > 2)
+        if (key.interpolation < 0 || key.interpolation > 3)
             throw std::invalid_argument("Invalid camera interpolation");
         writer.value(static_cast<std::int32_t>(key.interpolation));
     }
@@ -216,24 +255,10 @@ std::vector<std::uint8_t> encode_settings(
         if (!std::isfinite(key.roll)) throw std::invalid_argument("Invalid camera roll");
         writer.value(key.roll);
     }
-    settings.camera_effect.validate();
-    writer.value(static_cast<std::uint8_t>(settings.camera_effect.enabled));
-    writer.value(settings.camera_effect.start_time);
-    writer.value(settings.camera_effect.rings_time);
-    writer.value(settings.camera_effect.end_time);
-    writer.value(settings.camera_effect.point_size);
-    writer.value(settings.camera_effect.ring_scale);
-    writer.value(static_cast<std::int32_t>(settings.camera_effect.easing));
-    writer.value(static_cast<std::int32_t>(settings.camera_effect.kind));
-    writer.value(static_cast<std::int32_t>(settings.camera_effect.scan_axis));
-    writer.value(static_cast<std::uint8_t>(settings.camera_effect.scan_reverse));
-    writer.value(settings.camera_effect.scan_softness);
-    writer.value(settings.camera_effect.scan_glow);
-    for (float v : settings.camera_effect.scan_direction) writer.value(v);
-    writer.value(settings.camera_effect.scan_hold);
-    writer.value(settings.camera_effect.scan_growth);
-    writer.value(settings.camera_effect.scan_range);
-    writer.value(settings.camera_effect.scan_density);
+    write_effect(writer,settings.camera_effect);
+    if (settings.camera_effect_clips.size()>10000) throw std::invalid_argument("Too many camera effect clips");
+    writer.value(static_cast<std::uint32_t>(settings.camera_effect_clips.size()));
+    for (const auto& clip:settings.camera_effect_clips) write_effect(writer,clip);
     return writer.take();
 }
 
@@ -568,7 +593,7 @@ Settings decode_settings(
     if (version >= 26) {
         for (auto& key : settings.camera_keyframes) {
             key.interpolation = reader.value<std::int32_t>();
-            if (key.interpolation < 0 || key.interpolation > 2)
+            if (key.interpolation < 0 || key.interpolation > 3)
                 throw std::invalid_argument("Invalid camera interpolation");
         }
     }
@@ -601,6 +626,12 @@ Settings decode_settings(
         settings.camera_effect.scan_range = reader.value<float>();
         settings.camera_effect.scan_density = reader.value<float>();
         settings.camera_effect.validate();
+    }
+    if (version>=32) {
+        settings.camera_effect.clip_start=reader.value<float>(); settings.camera_effect.validate();
+        const auto count=reader.value<std::uint32_t>();
+        if (count>10000) throw std::invalid_argument("Too many camera effect clips");
+        for (std::uint32_t i=0;i<count;++i) settings.camera_effect_clips.push_back(read_effect(reader));
     }
     std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
         [](const auto& a, const auto& b) { return a.time < b.time; });
