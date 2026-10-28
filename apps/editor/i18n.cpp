@@ -29,6 +29,11 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"Preparing reconstruction preview...", "正在准备重建预览…", "Preparing reconstruction preview...", "Preparing reconstruction preview..."},
+    {"Point hold (s)", "点云停留时间（秒）", "Point hold (s)", "Point hold (s)"},
+    {"Surface growth (s)", "表面生长时间（秒）", "Surface growth (s)", "Surface growth (s)"},
+    {"Scan distance / scene size", "扫描距离 / 场景尺寸", "Scan distance / scene size", "Scan distance / scene size"},
+    {"Scan point density", "扫描点云密度", "Scan point density", "Scan point density"},
     {"Drag the scan clip or its start/end handles.", "拖动扫描片段整体或开始、结束控制点。", "Drag the scan clip or its start/end handles.", "Drag the scan clip or its start/end handles."},
     {"Scan reveal", "扫描揭幕", "Scan reveal", "Scan reveal"},
     {"Effect type", "特效类型", "Effect type", "Effect type"},
@@ -41,6 +46,9 @@ constexpr Entry k_entries[] = {
     {"Append 8s scan reveal shot", "追加 8 秒扫描揭幕镜头", "Append 8s scan reveal shot", "Append 8s scan reveal shot"},
     {"Reconstruction reveal", "重建揭幕", "Reconstruction reveal", "Reconstruction reveal"},
     {"Effect track", "特效轨道", "Effect track", "Effect track"},
+    {"Render / effects", "渲染 / 特效", "Render / effects", "Render / effects"},
+    {"Readback / GPU wait", "回读 / 等待 GPU", "Readback / GPU wait", "Readback / GPU wait"},
+    {"Encoder wait", "编码器等待", "Encoder wait", "Encoder wait"},
     {"Preview effects", "预览特效", "Preview effects", "Preview effects"},
     {"Demo preset", "演示预设", "Demo preset", "Demo preset"},
     {"Effect settings", "特效设置", "Effect settings", "Effect settings"},

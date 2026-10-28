@@ -16,7 +16,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 29;
+inline constexpr std::uint32_t k_settings_version = 30;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {

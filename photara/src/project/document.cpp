@@ -67,7 +67,7 @@ std::vector<std::uint8_t> encode_settings(
     const bool has_rotation = std::any_of(settings.gaussian_models.begin(), settings.gaussian_models.end(), [](const auto& model) {
         return model.rotation_degrees[0] != 0.F || model.rotation_degrees[1] != 0.F || model.rotation_degrees[2] != 0.F;
     });
-    writer.value(settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 29U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    writer.value(settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 30U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -230,6 +230,10 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.camera_effect.scan_softness);
     writer.value(settings.camera_effect.scan_glow);
     for (float v : settings.camera_effect.scan_direction) writer.value(v);
+    writer.value(settings.camera_effect.scan_hold);
+    writer.value(settings.camera_effect.scan_growth);
+    writer.value(settings.camera_effect.scan_range);
+    writer.value(settings.camera_effect.scan_density);
     return writer.take();
 }
 
@@ -589,6 +593,13 @@ Settings decode_settings(
         settings.camera_effect.scan_softness = reader.value<float>();
         settings.camera_effect.scan_glow = reader.value<float>();
         for (float& v : settings.camera_effect.scan_direction) v = reader.value<float>();
+        settings.camera_effect.validate();
+    }
+    if (version >= 30) {
+        settings.camera_effect.scan_hold = reader.value<float>();
+        settings.camera_effect.scan_growth = reader.value<float>();
+        settings.camera_effect.scan_range = reader.value<float>();
+        settings.camera_effect.scan_density = reader.value<float>();
         settings.camera_effect.validate();
     }
     std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),

@@ -40,6 +40,7 @@
 #include <vector>
 
 namespace editor {
+namespace camera_effects { class Reconstruction; }
 
 inline constexpr std::uint32_t k_preview_extent = 1920;
 inline constexpr float k_toolbar_height = 52.F;
@@ -155,6 +156,7 @@ struct App {
         std::atomic<int> completed{};
         std::atomic<int> total{};
         std::atomic<bool> encoding{};
+        std::atomic<double> render_seconds{}, readback_seconds{}, pipe_seconds{}, elapsed_seconds{};
     };
     struct VideoRenderState {
         bool show_settings{};
@@ -200,6 +202,10 @@ struct App {
     float camera_effect_drag_x{};
     photara::project::CameraEffectTrack camera_effect_drag_origin;
     struct CameraEffectPreview {
+        std::shared_ptr<camera_effects::Reconstruction> reconstruction;
+        std::shared_ptr<camera_effects::Reconstruction> reconstruction_pending;
+        std::future<std::shared_ptr<photara::io::RgbImage>> reconstruction_job;
+        std::vector<float> reconstruction_request;
         std::string source;
         std::uint64_t revision{};
         bool baked{};

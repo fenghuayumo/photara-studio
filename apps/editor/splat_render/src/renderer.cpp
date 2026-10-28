@@ -171,6 +171,7 @@ void Renderer::reset() {
     destroy_storage(dummy_);
     destroy_storage(transforms_);
     destroy_storage(rgba_staging_);
+    destroy_storage(readback_staging_);
     if (frame_mapped_) {
         vkUnmapMemory(device_, frame_ubo_.memory);
         frame_mapped_ = nullptr;
@@ -1292,10 +1293,12 @@ bool Renderer::download_rgb(
     }
     const VkDeviceSize bytes =
         static_cast<VkDeviceSize>(image.width) * image.height * 4U;
-    Storage staging{};
-    create_storage(
-        staging, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (readback_staging_.size < bytes) {
+        create_storage(
+            readback_staging_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
+    const Storage& staging = readback_staging_;
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
     check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1337,7 +1340,16 @@ bool Renderer::download_rgb(
     check(vkMapMemory(device_, staging.memory, 0, bytes, 0, &mapped), "vkMapMemory");
     const auto* rgba = static_cast<const std::uint8_t*>(mapped);
     rgb.resize(static_cast<std::size_t>(out_w) * out_h * 3U);
-    for (std::uint32_t y = 0; y < out_h; ++y) {
+    if (out_w == image.width && out_h == image.height) {
+        // Video export keeps the native resolution; avoid resampling coordinate
+        // arithmetic for every pixel in this common path.
+        const std::size_t pixels = static_cast<std::size_t>(out_w) * out_h;
+        for (std::size_t p = 0; p < pixels; ++p) {
+            rgb[p * 3U] = rgba[p * 4U];
+            rgb[p * 3U + 1U] = rgba[p * 4U + 1U];
+            rgb[p * 3U + 2U] = rgba[p * 4U + 2U];
+        }
+    } else for (std::uint32_t y = 0; y < out_h; ++y) {
         const std::uint32_t sy = std::min(
             image.height - 1,
             static_cast<std::uint32_t>(
@@ -1356,7 +1368,6 @@ bool Renderer::download_rgb(
         }
     }
     vkUnmapMemory(device_, staging.memory);
-    destroy_storage(staging);
     width = out_w;
     height = out_h;
     return true;

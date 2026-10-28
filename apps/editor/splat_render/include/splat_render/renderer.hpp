@@ -217,6 +217,7 @@ private:
     struct EwaPreview;
     EwaPreview* ewa_{};
     Storage rgba_staging_{};
+    Storage readback_staging_{};
     // Density-preserving opacity multiplier introduced by filter_3d. Center
     // edits provide the base sigmoid opacity and must retain this multiplier.
     std::vector<float> ewa_opacity_factors_;

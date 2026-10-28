@@ -2,6 +2,7 @@
 #include "sparse_view.hpp"
 #include "camera_path_overlay.hpp"
 #include "camera_effect_render.hpp"
+#include "camera_reconstruction.hpp"
 #include "sfm/asfm.hpp"
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
@@ -70,52 +71,50 @@ void test_camera_effect_render() {
         require(frame(3.F).pixels == editor::camera_effects::blend(dot, rings, .5F).pixels &&
                 frame(5.F).pixels == editor::camera_effects::blend(rings, full, .5F).pixels,
             "both 3DGS and 3DGUT export transitions at the timeline weights");
-        auto scan = effect; scan.kind = 1; scan.scan_axis = 0;
-        const auto scan_frame = [&](float time) {
-            return editor::camera_effects::render(renderer, camera, orbit, points, options, scan, time, {});
-        };
-        require(scan_frame(0.F).pixels == dot.pixels && scan_frame(8.F).pixels == full.pixels,
-            "scan reveal preserves exact start and end representations");
-        const auto partial = scan_frame(4.F);
-        require(renderer.depth_frame().depth.size() == 64 * 48 &&
-            renderer.depth_frame().alpha.size() == 64 * 48 &&
-            partial.pixels != dot.pixels && partial.pixels != full.pixels,
-            "3DGS and 3DGUT scan reveal render RGB with surface depth");
+        auto scan = effect; scan.kind = 1;
+        model.render_method = static_cast<photara::splat::RenderMethod>(method);
+        model.filter_mode = static_cast<photara::splat::SplatFilterMode>(cloud.filter_mode);
+        editor::camera_effects::Reconstruction reconstruction(model);
+        reconstruction.attach(device);
+        std::vector<photara::project::CameraKeyframe> keys(2);
+        for (auto& k : keys) { k.distance=2.F; k.yaw=k.pitch=0.F; }
+        keys.back().time=8.F;
+        const auto final = reconstruction.render(camera, keys, {}, scan, 8.F, {});
+        require(final.pixels == full.pixels, "reconstruction restores exact 3DGS and 3DGUT material endpoints");
+        const auto initial = reconstruction.render(camera, keys, {}, scan, 0.F, {});
+        require(initial.pixels != final.pixels, "rewinding reconstruction returns to unrevealed geometry");
+        require(model.log_scales.ptr<float>()[0] == std::log(.25F) && model.opacity_logits.ptr<float>()[0] == 8.F,
+            "preview geometry never changes the editable source model");
+
     }
 }
 
 void test_scan_reveal_mask() {
-    splat_render::Camera camera;
-    camera.width = 2; camera.height = 1; camera.fx = camera.fy = 1.F;
-    camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    camera.cx = camera.cy = 0.F;
-    photara::io::RgbImage full, dots;
-    full.width = dots.width = 2; full.height = dots.height = 1;
-    full.pixels = {255,0,0,255,0,0}; dots.pixels = {0,0,255,0,0,255};
-    splat_render::Renderer::DepthFrame depth;
-    depth.width = 2; depth.height = 1; depth.depth = {1.F,1.F}; depth.alpha = {1.F,1.F};
-    editor::camera_effects::ScanPlane plane{{1.F,0.F,0.F}, .5F, .01F};
-    const auto left = editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F);
-    require(left.pixels == std::vector<std::uint8_t>{255,0,0,0,0,255},
-        "scan reveals surfaces behind the world plane and keeps points ahead");
-    plane.normal[0] = -1.F; plane.position = -.5F;
-    require(editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F).pixels ==
-            std::vector<std::uint8_t>{0,0,255,255,0,0}, "reverse scan reveals the opposite surface first");
-    plane.normal[0] = 1.F; plane.position = 10.5F;
-    camera.position[0] = 10.F; camera.world_to_camera[12] = -10.F;
-    require(editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F).pixels == left.pixels,
-        "scan mask uses world coordinates including camera translation");
-    plane.position = 10.F;
-    const auto glow = editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 1.F);
-    require(glow.pixels[0] == 38 && glow.pixels[1] == 217 && glow.pixels[2] == 255,
-        "scan intersection carries a bounded cyan highlight");
-    editor::SparseScene points; points.points = {{-1,0,0},{1,0,0}};
-    auto effect = photara::project::camera_effect_demo(0.F, 8.F); effect.kind = 1; effect.scan_axis = 0;
-    const auto forward = editor::camera_effects::scan_plane(points, effect, .5F);
-    effect.scan_reverse = true;
-    const auto backward = editor::camera_effects::scan_plane(points, effect, .5F);
-    require(forward.normal[0] == 1.F && backward.normal[0] == -1.F && std::abs(forward.position) < 1e-6F,
-        "scan bounds and direction remain independent of the viewing camera");
+    using tinytensor::Tensor; using tinytensor::Device;
+    photara::splat::GaussianModel model;
+    model.sh_degree=0;
+    model.means=Tensor::from_vector({0.F,0.F,0.F,10.F,0.F,0.F},{2,3},Device::CPU);
+    model.log_scales=Tensor::from_vector(std::vector<float>(6,-3.F),{2,3},Device::CPU);
+    model.quaternions=Tensor::from_vector({1.F,0.F,0.F,0.F,1.F,0.F,0.F,0.F},{2,4},Device::CPU);
+    model.opacity_logits=Tensor::from_vector({4.F,4.F},{2,1},Device::CPU);
+    model.sh=Tensor::from_vector(std::vector<float>(6,0.F),{2,1,3},Device::CPU);
+    std::vector<photara::project::CameraKeyframe> keys(3);
+    for(auto& k:keys) { k.yaw=k.pitch=0.F; k.distance=2.F; }
+    keys[1].time=4.F; keys[1].target[0]=10.F; keys[2].time=8.F;
+    auto effect=photara::project::camera_effect_demo(0.F,8.F); effect.kind=1;
+    effect.start_time=0.F; effect.rings_time=4.F; effect.end_time=8.F;
+    editor::camera_effects::Reconstruction reconstruction(model);
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    auto arrivals=reconstruction.arrival_times();
+    require(arrivals[0]<arrivals[1], "new view regions reveal later while revisited regions keep their first arrival");
+    require(arrivals[1]>1.5F, "later rooms retain the recorded camera timing instead of a compressed reveal schedule");
+    keys[0].target[0]=10.F; keys[1].target[0]=0.F;
+    reconstruction.prepare(keys,{},effect,16.F/9.F);
+    require(reconstruction.arrival_times()[1]<reconstruction.arrival_times()[0], "editing a keyframe rebuilds the reveal schedule");
+    effect.scan_range=2.F;
+    splat_render::ModelTransform transform; transform.end_index=2; transform.translation[0]=100.F;
+    reconstruction.prepare(keys,std::span{&transform,1},effect,16.F/9.F);
+    require(reconstruction.arrival_times()[0]>=effect.start_time, "model placement and timing changes invalidate the reveal schedule");
 }
 void test_point_cloud_video_frames() {
     editor::SparseScene scene;

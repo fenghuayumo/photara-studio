@@ -2,9 +2,11 @@
 #include "camera_timeline.hpp"
 #include "camera_capture_path.hpp"
 #include "camera_effect_render.hpp"
+#include "camera_reconstruction.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
 #include "shortcuts.hpp"
+#include "raw_video_stream.hpp"
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
 #include "file_dialogs.hpp"
@@ -401,7 +403,7 @@ std::string render_video_worker(
         if (temp.path.empty()) throw std::runtime_error("Cannot create temporary video render directory");
         if (progress->cancel) return "Cancelled";
         splat_render::Renderer renderer;
-        if (view_mode != VisualizationMode::points || effect.enabled) {
+        if ((view_mode != VisualizationMode::points || effect.enabled) && !(effect.enabled && effect.kind == 1)) {
             renderer.attach(runtime);
             splat_render::GaussianCloud cloud;
             cloud.count = static_cast<std::uint32_t>(model->size());
@@ -419,15 +421,49 @@ std::string render_video_worker(
         }
         splat_render::DisplayOptions display;
         display.near_clip = near_clip;
-        if (effect.enabled) {
+        std::unique_ptr<camera_effects::Reconstruction> reconstruction;
+        if (effect.enabled && effect.kind == 1) {
+            reconstruction = std::make_unique<camera_effects::Reconstruction>(*model);
+            reconstruction->attach(runtime);
+        }
+        if (effect.enabled && effect.kind == 0) {
             effect.validate();
             point_scene = std::make_shared<SparseScene>(camera_effects::model_points(*model, transforms));
         }
         const float duration = keys.back().time - keys.front().time;
         const int count = std::max(2, static_cast<int>(std::ceil(duration * fps)) + 1);
         progress->total = count;
+        RawVideoStream stream(temp.path / "frames.rgb");
+        const auto encoded = temp.path / "video.mp4";
+        // Limit the output to the known frame count; finish() drains pending
+        // pipe bytes and sends EOF before waiting for the encoder to finalize.
+        const std::string command = process_quote(ffmpeg) +
+            " -nostdin -hide_banner -loglevel error -y -probesize 32 -analyzeduration 0 -fpsprobesize 0 -f rawvideo -pixel_format rgb24 -video_size " +
+            std::to_string(width) + "x" + std::to_string(height) + " -framerate " +
+            std::to_string(fps) + " -i " + process_quote(stream.path()) +
+            " -frames:v " + std::to_string(count) +
+            (codec == 1 ? " -c:v libx265 -tag:v hvc1" : " -c:v libx264") +
+            " -pix_fmt yuv420p -movflags +faststart " + process_quote(encoded);
+        ProcessJob encoder;
+        encoder.start(command, temp.path / "ffmpeg.log");
+        const auto check_encoder = [&] {
+            if (progress->cancel) throw std::runtime_error("Cancelled");
+            encoder.poll();
+            if (!encoder.running()) {
+                std::ifstream log(temp.path / "ffmpeg.log");
+                std::string details((std::istreambuf_iterator<char>(log)), {});
+                throw std::runtime_error("Video encoder stopped before all frames were sent: " + details.substr(0, 500));
+            }
+        };
+        stream.connect(check_encoder);
+        const auto started = std::chrono::steady_clock::now();
+        double render_seconds = 0, readback_seconds = 0, pipe_seconds = 0;
+        const auto seconds_since = [](auto start) {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        };
+        photara::io::RgbImage image;
         for (int i = 0; i < count; ++i) {
-            if (progress->cancel) return "Cancelled";
+            check_encoder();
             const float frame_time = std::min(keys.back().time, keys.front().time + float(i) / fps);
             const auto key = evaluate(keys, frame_time);
             orbit.target = {key.target[0], key.target[1], key.target[2]};
@@ -451,8 +487,10 @@ std::string render_video_worker(
             case EditorProjection::panorama: camera.model = splat_render::k_camera_equirectangular; break;
             default: camera.model = splat_render::k_camera_pinhole; break;
             }
-            photara::io::RgbImage image;
-            if (effect.enabled) {
+            const auto render_start = std::chrono::steady_clock::now();
+            if (reconstruction) {
+                image = reconstruction->render(camera, keys, transforms, effect, frame_time, display);
+            } else if (effect.enabled) {
                 image = camera_effects::render(renderer, camera, orbit, *point_scene,
                     view_options, effect, frame_time, display);
             } else if (view_mode == VisualizationMode::points) {
@@ -464,27 +502,40 @@ std::string render_video_worker(
                 camera.ring_sigma = view_options.ring_scale;
                 if (!renderer.draw(camera, frame, shading, display))
                     throw std::runtime_error(renderer.failure());
+                render_seconds += seconds_since(render_start);
+                const auto readback_start = std::chrono::steady_clock::now();
                 if (!renderer.download_rgb(image.pixels, image.width, image.height))
                     throw std::runtime_error("Cannot download a rendered video frame");
+                readback_seconds += seconds_since(readback_start);
             }
-            char filename[32]; std::snprintf(filename, sizeof(filename), "frame_%08d.png", i);
-            photara::io::save_rgb_png(image, temp.path / filename);
+            if (effect.enabled || view_mode == VisualizationMode::points)
+                render_seconds += seconds_since(render_start);
+            if (image.width != static_cast<unsigned>(width) || image.height != static_cast<unsigned>(height) ||
+                image.pixels.size() != static_cast<std::size_t>(width) * height * 3U)
+                throw std::runtime_error("Invalid rendered video frame size");
+            const auto pipe_start = std::chrono::steady_clock::now();
+            stream.write(image.pixels, check_encoder);
+            pipe_seconds += seconds_since(pipe_start);
+            progress->render_seconds = render_seconds;
+            progress->readback_seconds = readback_seconds;
+            progress->pipe_seconds = pipe_seconds;
+            progress->elapsed_seconds = seconds_since(started);
             progress->completed = i + 1;
         }
         if (progress->cancel) return "Cancelled";
         progress->encoding = true;
-        const auto encoded = temp.path / "video.mp4";
-        const std::string command = process_quote(ffmpeg) + " -nostdin -hide_banner -loglevel error -y -framerate " +
-            std::to_string(fps) + " -i " + process_quote(temp.path / "frame_%08d.png") +
-            (codec == 1 ? " -c:v libx265 -tag:v hvc1" : " -c:v libx264") +
-            " -pix_fmt yuv420p -movflags +faststart " + process_quote(encoded);
-        ProcessJob encoder;
-        encoder.start(command, temp.path / "ffmpeg.log");
+        stream.finish([&] {
+            if (progress->cancel) throw std::runtime_error("Cancelled");
+            encoder.poll();
+            progress->elapsed_seconds = seconds_since(started);
+        }, [&] { encoder.stop(); });
         while (encoder.running()) {
             if (progress->cancel) { encoder.stop(); return "Cancelled"; }
             encoder.poll();
+            progress->elapsed_seconds = seconds_since(started);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
+        stream.close();
         if (encoder.exit_code() != 0) {
             std::ifstream log(temp.path / "ffmpeg.log");
             std::string details((std::istreambuf_iterator<char>(log)), {});
@@ -638,7 +689,8 @@ void effect_track(App& app) {
     ImGui::BeginDisabled(!usable);
     if (ImGui::SmallButton(tr("Demo preset"))) {
         const auto kind = effect.kind;
-        effect = photara::project::camera_effect_demo(keys.front().time, keys.back().time);
+        effect = kind == 1 ? photara::project::camera_scan_demo(keys.front().time, keys.back().time)
+                           : photara::project::camera_effect_demo(keys.front().time, keys.back().time);
         effect.kind = kind;
         const auto forward = camera_recording::forward(capture(app.camera, 0.F));
         std::copy(forward.begin(), forward.end(), effect.scan_direction);
@@ -650,6 +702,7 @@ void effect_track(App& app) {
     if (ImGui::BeginPopup("settings")) {
         const char* types[]{tr("Point Cloud > Rings > 3DGS"), tr("Scan reveal")};
         if (ImGui::Combo(tr("Effect type"), &effect.kind, types, 2) && effect.kind == 1) {
+            if (usable) effect = photara::project::camera_scan_demo(keys.front().time, keys.back().time);
             const auto forward = camera_recording::forward(capture(app.camera, 0.F));
             std::copy(forward.begin(), forward.end(), effect.scan_direction);
         }
@@ -664,20 +717,15 @@ void effect_track(App& app) {
         ImGui::SetNextItemWidth(180.F);
         changed |= ImGui::DragFloat(tr("Transition end (s)"), &candidate.end_time, .05F, .02F, 36000.F, "%.2f", ImGuiSliderFlags_AlwaysClamp);
         const char* easing[]{tr("Linear"), tr("Smooth")};
-        changed |= ImGui::Combo(tr("Easing"), &candidate.easing, easing, 2);
-        changed |= ImGui::SliderFloat(tr("Point size"), &candidate.point_size, 1.F, 6.F, "%.1f px");
+        if (effect.kind == 0) changed |= ImGui::Combo(tr("Easing"), &candidate.easing, easing, 2);
+        changed |= ImGui::SliderFloat(tr("Point size"), &candidate.point_size, 1.F, 6.F, effect.kind == 0 ? "%.1f px" : "%.1f");
         if (effect.kind == 0)
             changed |= ImGui::SliderFloat(tr("Ring scale"), &candidate.ring_scale, .5F, 8.F, "%.2f");
         else {
-            const char* axes[]{"X", "Y", "Z", tr("Captured view direction")};
-            changed |= ImGui::Combo(tr("Scan direction"), &candidate.scan_axis, axes, 4);
-            if (ImGui::Button(tr("Use current view direction"))) {
-                const auto forward = camera_recording::forward(capture(app.camera, 0.F));
-                std::copy(forward.begin(), forward.end(), candidate.scan_direction);
-                candidate.scan_axis = 3; changed = true;
-            }
-            changed |= ImGui::Checkbox(tr("Reverse scan"), &candidate.scan_reverse);
-            changed |= ImGui::SliderFloat(tr("Scan feather"), &candidate.scan_softness, .001F, .2F, "%.3f");
+            changed |= ImGui::SliderFloat(tr("Point hold (s)"), &candidate.scan_hold, 0.F, 10.F, "%.2f");
+            changed |= ImGui::SliderFloat(tr("Surface growth (s)"), &candidate.scan_growth, .1F, 10.F, "%.2f");
+            changed |= ImGui::SliderFloat(tr("Scan distance / scene size"), &candidate.scan_range, .02F, 2.F, "%.2f");
+            changed |= ImGui::SliderFloat(tr("Scan point density"), &candidate.scan_density, .01F, 1.F, "%.2f");
             changed |= ImGui::SliderFloat(tr("Scan highlight"), &candidate.scan_glow, 0.F, 1.F, "%.2f");
             candidate.rings_time = (candidate.start_time + candidate.end_time) * .5F;
         }
@@ -982,6 +1030,17 @@ void draw_video_render_settings(App& app) {
             ImGui::SetCursorPosY(progress_size.y < 195.F ? 82.F : 103.F);
             theme::progress_track({-1.F, 6.F},
                 encoding || cancelling || total == 0 ? -1.F : float(completed) / total, theme::accent);
+            const double elapsed = render.progress->elapsed_seconds.load();
+            if (completed > 0 && elapsed > 0 && progress_size.y >= 195.F) {
+                ImGui::SetCursorPosY(121.F);
+                ImGui::TextDisabled("%.1f fps", completed / elapsed);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s: %.1f ms\n%s: %.1f ms\n%s: %.1f ms",
+                        tr("Render / effects"), render.progress->render_seconds.load() * 1000 / completed,
+                        tr("Readback / GPU wait"), render.progress->readback_seconds.load() * 1000 / completed,
+                        tr("Encoder wait"), render.progress->pipe_seconds.load() * 1000 / completed);
+                }
+            }
             ImGui::SetCursorPosY(progress_size.y - 53.F);
             const float cancel_width = std::max(94.F, ImGui::CalcTextSize(tr("Cancel")).x + 30.F);
             ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - cancel_width));
@@ -1000,6 +1059,11 @@ void clear_camera_path_thumbnails(App& app) {
     app.camera_effect_preview = true;
     app.camera_effect_drag = -1;
     app.effect_preview.texture.reset();
+    if (app.effect_preview.reconstruction_job.valid()) app.effect_preview.reconstruction_job.wait();
+    app.effect_preview.reconstruction_job = {};
+    app.effect_preview.reconstruction_pending.reset();
+    app.effect_preview.reconstruction_request.clear();
+    app.effect_preview.reconstruction.reset();
     app.effect_preview.points = {};
     app.effect_preview.source.clear();
     app.camera_path_recording = {};
@@ -1154,7 +1218,8 @@ void draw_camera_path_panel(App& app) {
                     key.distance = std::max(.001F, pose.distance * (1.F - float(i) * .075F));
                     key.interpolation = 0; keys.push_back(std::move(key));
                 }
-                app.camera_effect = photara::project::camera_effect_demo(first_time, first_time + 8.F);
+                app.camera_effect = kind == 1 ? photara::project::camera_scan_demo(first_time, first_time + 8.F)
+                    : photara::project::camera_effect_demo(first_time, first_time + 8.F);
                 app.camera_effect.kind = kind;
                 const auto forward = camera_recording::forward(pose);
                 std::copy(forward.begin(), forward.end(), app.camera_effect.scan_direction);

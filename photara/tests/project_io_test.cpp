@@ -25,7 +25,7 @@ using namespace photara::project;
 
 int failures = 0;
 constexpr std::size_t k_scan_bytes = 2 * sizeof(std::int32_t) + sizeof(std::uint8_t) + 5 * sizeof(float);
-constexpr std::size_t k_effect_bytes = sizeof(std::uint8_t) + 5 * sizeof(float) + sizeof(std::int32_t) + k_scan_bytes;
+constexpr std::size_t k_effect_bytes = sizeof(std::uint8_t) + 5 * sizeof(float) + sizeof(std::int32_t) + k_scan_bytes + 4 * sizeof(float);
 std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
@@ -386,12 +386,20 @@ int main() {
         scan_project.camera_effect.kind = 1; scan_project.camera_effect.scan_axis = 2;
         scan_project.camera_effect.scan_reverse = true; scan_project.camera_effect.scan_softness = .05F;
         scan_project.camera_effect.scan_glow = .8F;
+        scan_project.camera_effect.scan_hold = 2.F; scan_project.camera_effect.scan_growth = 4.F;
+        scan_project.camera_effect.scan_range = .5F; scan_project.camera_effect.scan_density = .4F;
         const auto scan_bytes = encode_settings(scan_project, ascan_path);
         const auto scan = decode_settings(scan_bytes, ascan_path).camera_effect;
         std::memcpy(&minimum, scan_bytes.data() + 4, sizeof(minimum));
-        expect(minimum == 29 && scan.kind == 1 && scan.scan_axis == 2 && scan.scan_reverse &&
-            scan.scan_softness == .05F && scan.scan_glow == .8F, "scan reveal settings survive project round trip");
-        auto v28 = scan_bytes; v28.resize(v28.size() - k_scan_bytes);
+        expect(minimum == 30 && scan.kind == 1 && scan.scan_axis == 2 && scan.scan_reverse &&
+            scan.scan_softness == .05F && scan.scan_glow == .8F && scan.scan_hold == 2.F &&
+            scan.scan_growth == 4.F && scan.scan_range == .5F && scan.scan_density == .4F, "scan reveal settings survive project round trip");
+        auto v29 = scan_bytes; v29.resize(v29.size() - 4 * sizeof(float));
+        const std::uint32_t version29 = 29;
+        std::memcpy(v29.data(), &version29, 4); std::memcpy(v29.data()+4, &version29, 4);
+        expect(decode_settings(v29, ascan_path).camera_effect.scan_growth == 2.5F,
+            "legacy scan projects receive reconstruction defaults");
+        auto v28 = scan_bytes; v28.resize(v28.size() - k_scan_bytes - 4 * sizeof(float));
         const std::uint32_t version28 = 28;
         std::memcpy(v28.data(), &version28, 4); std::memcpy(v28.data() + 4, &version28, 4);
         expect(decode_settings(v28, ascan_path).camera_effect.kind == 0,

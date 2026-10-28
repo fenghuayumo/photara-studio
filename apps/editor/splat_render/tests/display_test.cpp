@@ -45,6 +45,23 @@ int main() {
         };
         draw(splat_render::Shading::gaussian);
         const auto color = center();
+        // Reused readback storage must survive growth, shrink and downsampling.
+        for (const unsigned size : {128U, 32U, 64U}) {
+            camera.width = camera.height = size;
+            draw(splat_render::Shading::gaussian);
+            std::vector<std::uint8_t> native, repeated, reduced;
+            std::uint32_t w{}, h{};
+            require(renderer.download_rgb(native, w, h) && w == size && h == size,
+                    "resized native readback failed");
+            require(renderer.download_rgb(repeated, w, h) && native == repeated,
+                    "repeated readback changed pixels");
+            require(renderer.download_rgb(reduced, w, h, size / 2) && w == size / 2 && h == size / 2,
+                    "downsampled readback failed");
+            for (unsigned y = 0; y < h; ++y) for (unsigned x = 0; x < w; ++x)
+                for (unsigned c = 0; c < 3; ++c)
+                    require(reduced[(y * w + x) * 3U + c] == native[((2U * y + 1U) * size + 2U * x + 1U) * 3U + c],
+                            "downsampling changed after native readback optimization");
+        }
         for (const auto shading : {splat_render::Shading::gaussian, splat_render::Shading::rings}) {
             options.selection_depth_enabled = false; draw(shading);
             const auto original = center();
