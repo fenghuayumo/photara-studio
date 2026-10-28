@@ -212,5 +212,26 @@ int main() {
     expect(editor::camera_path_overlay::tessellate(arc_a,arc_b,.001F,projection,[](auto,auto){})==1,"straight flight uses a single chord");
     arc_a.interpolation=2;
     expect(editor::camera_path_overlay::tessellate(arc_a,arc_b,.001F,projection,[](auto,auto){})==0,"hold/cut has no flight chord");
+    editor::camera_timeline::View timeline_view;
+    timeline_view.constrain(40.F);
+    expect(near(timeline_view.duration,40.F) && near(timeline_view.start,0.F),"timeline initially fits the full path");
+    const float anchor=timeline_view.time_at(.75F);
+    timeline_view.zoom(40.F,4.F,.75F);
+    expect(near(timeline_view.duration,10.F) && near(timeline_view.time_at(.75F),anchor),"zoom preserves the time under the pointer");
+    timeline_view.pan(40.F,100.F);
+    expect(near(timeline_view.start,30.F),"pan clamps to the end of the path");
+    timeline_view.pan(40.F,-100.F);
+    expect(near(timeline_view.start,0.F),"pan clamps to the start of the path");
+    timeline_view.reveal(40.F,37.F);
+    expect(timeline_view.fraction(37.F)>=0.F && timeline_view.fraction(37.F)<=1.F,"transport navigation reveals an offscreen playhead");
+    expect(timeline_view.fraction(0.F)<0.F,"offscreen keys remain outside the range instead of clamping to its edge");
+    const float timestamp=timeline_view.time_at(.33F);
+    expect(near(timeline_view.fraction(timestamp),.33F),"zoomed timeline coordinates round-trip");
+    timeline_view.zoom(40.F,1e9F,.5F);
+    expect(near(timeline_view.duration,.1F),"timeline zoom stops at a useful minimum duration");
+    timeline_view.zoom(40.F,1e-9F,.5F);
+    expect(timeline_view.fit && near(timeline_view.duration,40.F),"zooming out restores fit mode");
+    expect(near(editor::camera_timeline::jump_time(3.F,-5.F,0.F,33.F),0.F) &&
+           near(editor::camera_timeline::jump_time(31.F,5.F,0.F,33.F),33.F),"transport jumps clamp to path endpoints");
     return 0;
 }

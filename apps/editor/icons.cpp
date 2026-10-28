@@ -557,6 +557,16 @@ void draw(
                 point(min, max, base, 0.25F), point(min, max, base, 0.75F), colour);
             break;
         }
+        case Icon::rewind:
+        case Icon::fast_forward: {
+            const bool back=icon==Icon::rewind;
+            for (int i=0;i<2;++i) {
+                const float x=.14F+float(i)*.36F;
+                draw_list->AddTriangleFilled(point(min,max,back ? x : x+.32F,.5F),
+                    point(min,max,back ? x+.32F : x,.22F),point(min,max,back ? x+.32F : x,.78F),colour);
+            }
+            break;
+        }
         case Icon::chevron_left: {
             line(draw_list, min, max, 0.60F, 0.24F, 0.34F, 0.50F, colour,
                  thickness);

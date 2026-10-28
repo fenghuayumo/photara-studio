@@ -62,6 +62,7 @@ void seek(App& app) {
 void select_key(App& app, int i) {
     app.camera_key_selected = i;
     app.camera_path_time = app.camera_keyframes[static_cast<std::size_t>(i)].time;
+    app.camera_timeline_view.reveal(camera_timeline::span(app.camera_keyframes.back().time),app.camera_path_time);
     app.camera_path_playing = false;
     apply(app, app.camera_keyframes[static_cast<std::size_t>(i)]);
 }
@@ -327,6 +328,7 @@ void add_camera_view(App& app) {
     keys.push_back(capture(app.camera, t));
     app.camera_key_selected = static_cast<int>(keys.size()) - 1;
     app.camera_path_time = t;
+    app.camera_timeline_view.reveal(camera_timeline::span(keys.back().time),t);
     app.camera_path_playing = false;
     app.camera_thumbnail_pending = app.camera_key_selected;
     sync_thumbnails(app);
@@ -486,74 +488,123 @@ std::string render_video_worker(
 }
 
 void timeline(App& app) {
-    auto& keys = app.camera_keyframes;
-    const float natural_span = camera_timeline::span(keys.back().time);
-    const float span = app.camera_timeline_drag >= 0 ? app.camera_timeline_drag_span : natural_span;
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float width = std::max(1.F, ImGui::GetContentRegionAvail().x);
-    const float left = origin.x + 80.F, right = std::max(left + 1.F, origin.x + width - 8.F);
-    const float line_y = origin.y + 49.F;
-    ImGui::InvisibleButton("##timeline", {width, 72.F});
-    const auto x_for = [&](float t) { return left + (right - left) * std::clamp(t / span, 0.F, 1.F); };
+    auto& keys=app.camera_keyframes;
+    auto& view=app.camera_timeline_view;
+    const float total=camera_timeline::span(keys.back().time);
+    if (app.camera_timeline_drag<0) view.constrain(total);
+    if (app.camera_path_playing) view.reveal(total,app.camera_path_time);
+    const ImVec2 origin=ImGui::GetCursorScreenPos();
+    const float width=std::max(1.F,ImGui::GetContentRegionAvail().x);
+    const float left=origin.x+80.F,right=std::max(left+1.F,origin.x+width-8.F),plot_width=right-left;
+    const float line_y=origin.y+46.F;
+    ImGui::PushID("timeline_zoom");
+    const float centre=std::clamp(view.fraction(app.camera_path_time),0.F,1.F);
+    ImGui::SetCursorScreenPos(origin);
+    if (ImGui::Button("-",{20.F,20.F})) view.zoom(total,1.F/1.5F,centre);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tr("Zoom out"));
+    ImGui::SameLine(0.F,3.F);
+    if (ImGui::Button("+",{20.F,20.F})) view.zoom(total,1.5F,centre);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tr("Zoom in"));
+    ImGui::SameLine(0.F,3.F);
+    if (icons::ghost_button("##fit",icons::Icon::frame,{20.F,20.F},false,true,tr("Fit full path"))) {
+        view={};view.constrain(total);
+    }
+    ImGui::PopID();
+    ImGui::SetCursorScreenPos({left,origin.y});
+    ImGui::InvisibleButton("##timeline",{plot_width,60.F},ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
+    auto& io=ImGui::GetIO();
+    if (hovered) {
+        ImGui::SetKeyOwner(ImGuiKey_MouseWheelY,ImGui::GetItemID());
+        ImGui::SetKeyOwner(ImGuiKey_MouseWheelX,ImGui::GetItemID());
+    }
+    if (hovered && !active) {
+        if (io.MouseWheel!=0.F) {
+            if (io.KeyShift) view.pan(total,-io.MouseWheel*view.duration*.15F);
+            else view.zoom(total,std::pow(1.25F,io.MouseWheel),(io.MousePos.x-left)/plot_width);
+        }
+        if (io.MouseWheelH!=0.F) view.pan(total,-io.MouseWheelH*view.duration*.15F);
+        if (io.MouseWheel!=0.F || io.MouseWheelH!=0.F) ImGui::SetKeyOwner(ImGuiKey_MouseWheelY,ImGui::GetItemID());
+    }
+    const auto x_for=[&](float time){return left+plot_width*view.fraction(time);};
     if (ImGui::IsItemActivated()) {
-        app.camera_timeline_drag = -1;
-        app.camera_timeline_drag_span = natural_span;
-        const float mouse_x = ImGui::GetIO().MousePos.x;
-        float closest = 9.F;
-        for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
-            const float distance = std::abs(mouse_x - x_for(keys[i].time));
-            if (distance < closest) { closest = distance; app.camera_timeline_drag = i; }
-        }
-        if (app.camera_timeline_drag >= 0) select_key(app, app.camera_timeline_drag);
-    }
-    if (ImGui::IsItemActive() && right > left) {
-        const float t = std::clamp((ImGui::GetIO().MousePos.x - left) / (right - left), 0.F, 1.F) * span;
-        const int index = app.camera_timeline_drag;
-        if (index >= 0 && index < static_cast<int>(keys.size()) && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.F)) {
-            keys[index].time = camera_timeline::bounded_time(keys, static_cast<std::size_t>(index), t);
-            app.camera_path_time = keys[index].time; app.camera_path_playing = false;
-        } else if (index < 0) {
-            app.camera_path_time = std::min(t, keys.back().time);
-            app.camera_path_playing = false; seek(app);
+        app.camera_timeline_drag=-1;
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && std::abs(io.MousePos.y-line_y)<12.F) {
+            float closest=9.F;
+            for (int i=0;i<static_cast<int>(keys.size());++i) {
+                if (keys[i].time<view.start || keys[i].time>view.start+view.duration) continue;
+                const float distance=std::abs(io.MousePos.x-x_for(keys[i].time));
+                if (distance<closest) {closest=distance;app.camera_timeline_drag=i;}
+            }
+            if (app.camera_timeline_drag>=0) select_key(app,app.camera_timeline_drag);
         }
     }
-    if (ImGui::IsItemDeactivated()) app.camera_timeline_drag = -1;
-    auto* d = ImGui::GetWindowDrawList();
-    d->AddRectFilled({origin.x, origin.y + 34.F}, {origin.x + width, origin.y + 66.F},
-        theme::u32(theme::surface_1), 4.F);
-    d->AddText({origin.x + 10.F, line_y - ImGui::GetTextLineHeight() * .5F},
-        theme::u32(theme::text_muted), tr("Camera"));
-    const float major = camera_timeline::tick_step(span * 85.F / (right - left));
-    const float minor = major / 5.F;
-    for (int i = 0; i <= 500; ++i) {
-        const float t = i * minor;
-        if (t > span + minor * 0.001F) break;
-        const bool is_major = i % 5 == 0;
-        const float x = x_for(t);
-        d->AddLine({x, line_y - (is_major ? 10.F : 5.F)}, {x, line_y - 3.F},
-            theme::u32(is_major ? theme::text_faint : theme::border));
+    if (active) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) view.pan(total,-io.MouseDelta.x/plot_width*view.duration);
+        else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const float time=view.time_at((io.MousePos.x-left)/plot_width);
+            const int index=app.camera_timeline_drag;
+            if (index>=0 && index<static_cast<int>(keys.size()) && ImGui::IsMouseDragging(ImGuiMouseButton_Left,2.F)) {
+                keys[index].time=camera_timeline::bounded_time(keys,static_cast<std::size_t>(index),time);
+                app.camera_path_time=keys[index].time;app.camera_path_playing=false;
+            } else if (index<0) {
+                app.camera_path_time=std::clamp(time,keys.front().time,keys.back().time);
+                app.camera_path_playing=false;seek(app);
+            }
+        }
+    }
+    if (ImGui::IsItemDeactivated()) app.camera_timeline_drag=-1;
+    if (hovered && !active) ImGui::SetTooltip("%s",tr("Wheel: zoom · Shift+wheel or middle-drag: pan"));
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->AddRectFilled({origin.x,origin.y+31.F},{origin.x+width,origin.y+59.F},theme::u32(theme::surface_1),4.F);
+    draw->AddText({origin.x+10.F,line_y-ImGui::GetTextLineHeight()*.5F},theme::u32(theme::text_muted),tr("Camera"));
+    draw->PushClipRect({left-6.F,origin.y},{right+6.F,origin.y+61.F},true);
+    const float major=camera_timeline::tick_step(view.duration*85.F/plot_width),minor=major/5.F;
+    const auto first_tick=static_cast<long long>(std::ceil(view.start/minor));
+    for (int i=0;i<1000;++i) {
+        const auto tick=first_tick+i;
+        const float time=static_cast<float>(double(tick)*minor);
+        if (time>view.start+view.duration+minor*.001F) break;
+        const bool is_major=tick%5==0;
+        const float x=x_for(time);
+        draw->AddLine({x,line_y-(is_major ? 10.F : 5.F)},{x,line_y-3.F},theme::u32(is_major ? theme::text_faint : theme::border));
         if (is_major) {
             char label[32];
-            if (major < 1.F) std::snprintf(label, sizeof(label), "%.1f s", t);
-            else std::snprintf(label, sizeof(label), "%.0f s", t);
-            const float label_width = ImGui::CalcTextSize(label).x;
-            d->AddText({std::clamp(x - label_width * 0.5F, left, std::max(left, right - label_width)), origin.y},
-                theme::u32(theme::text_muted), label);
+            std::snprintf(label,sizeof(label),major<.1F ? "%.2f s" : major<1.F ? "%.1f s" : "%.0f s",time);
+            const float label_width=ImGui::CalcTextSize(label).x;
+            draw->AddText({std::clamp(x-label_width*.5F,left,std::max(left,right-label_width)),origin.y},theme::u32(theme::text_muted),label);
         }
     }
-    d->AddLine({left, line_y}, {right, line_y}, theme::u32(theme::surface_3), 2.F);
-    const float playhead = x_for(app.camera_path_time);
-    d->AddLine({left, line_y}, {playhead, line_y}, theme::u32(theme::accent_deep), 2.F);
-    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
-        const float x = x_for(keys[i].time); const bool selected = i == app.camera_key_selected;
-        const float r = selected ? 6.F : 5.F;
-        const ImU32 edge = theme::u32(selected ? theme::accent : theme::text_muted);
-        d->AddQuadFilled({x, line_y - r}, {x + r, line_y}, {x, line_y + r}, {x - r, line_y}, edge);
-        if (selected) d->AddQuadFilled({x, line_y - 3.F}, {x + 3.F, line_y}, {x, line_y + 3.F}, {x - 3.F, line_y}, theme::u32(theme::surface_0));
+    draw->AddLine({left,line_y},{right,line_y},theme::u32(theme::surface_3),2.F);
+    const float playhead=x_for(app.camera_path_time);
+    draw->AddLine({left,line_y},{std::clamp(playhead,left,right),line_y},theme::u32(theme::accent_deep),2.F);
+    for (int i=0;i<static_cast<int>(keys.size());++i) {
+        const float x=x_for(keys[i].time);
+        if (x<left-6.F || x>right+6.F) continue;
+        const bool selected=i==app.camera_key_selected;
+        const float radius=selected ? 6.F : 4.F;
+        draw->AddQuadFilled({x,line_y-radius},{x+radius,line_y},{x,line_y+radius},{x-radius,line_y},theme::u32(selected ? theme::accent : theme::text_muted));
+        if (selected) draw->AddQuadFilled({x,line_y-3.F},{x+3.F,line_y},{x,line_y+3.F},{x-3.F,line_y},theme::u32(theme::surface_0));
     }
-    d->AddLine({playhead, origin.y + 16.F}, {playhead, line_y + 11.F}, theme::u32(theme::accent), 1.5F);
-    d->AddTriangleFilled({playhead - 4.F, origin.y + 16.F}, {playhead + 4.F, origin.y + 16.F},
-        {playhead, origin.y + 21.F}, theme::u32(theme::accent));
+    if (playhead>=left && playhead<=right) {
+        draw->AddLine({playhead,origin.y+16.F},{playhead,line_y+11.F},theme::u32(theme::accent),1.5F);
+        draw->AddTriangleFilled({playhead-4.F,origin.y+16.F},{playhead+4.F,origin.y+16.F},{playhead,origin.y+21.F},theme::u32(theme::accent));
+    }
+    draw->PopClipRect();
+    // Overview doubles as a horizontal scrollbar for the visible time range.
+    const float thumb_width=std::min(plot_width,std::max(18.F,plot_width*view.duration/total));
+    const float travel=plot_width-thumb_width;
+    float thumb_x=left+(total>view.duration ? view.start/(total-view.duration)*travel : 0.F);
+    ImGui::SetCursorScreenPos({left,origin.y+64.F});
+    ImGui::InvisibleButton("##timeline_scroll",{plot_width,8.F});
+    if (ImGui::IsItemActivated()) app.camera_timeline_scroll_grab=io.MousePos.x>=thumb_x && io.MousePos.x<=thumb_x+thumb_width ? io.MousePos.x-thumb_x : thumb_width*.5F;
+    if (ImGui::IsItemActive() && travel>0.F) {
+        view.start=std::clamp((io.MousePos.x-left-app.camera_timeline_scroll_grab)/travel,0.F,1.F)*(total-view.duration);
+        thumb_x=left+view.start/(total-view.duration)*travel;
+    }
+    draw->AddRectFilled({left,origin.y+65.F},{right,origin.y+71.F},theme::u32(theme::surface_1),3.F);
+    draw->AddRectFilled({thumb_x,origin.y+65.F},{thumb_x+thumb_width,origin.y+71.F},theme::u32(ImGui::IsItemHovered() || ImGui::IsItemActive() ? theme::accent : theme::surface_3),3.F);
+    ImGui::SetCursorScreenPos({origin.x,origin.y+76.F});
 }
 
 } // namespace
@@ -802,6 +853,7 @@ void clear_camera_path_thumbnails(App& app) {
     for (auto& item : app.camera_thumbnails) item.texture.reset();
     app.camera_thumbnails.clear(); app.camera_thumbnail_pending = -1; app.camera_key_delete_pending = -1;
     app.camera_timeline_drag = -1;
+    app.camera_timeline_view = {};
 }
 void capture_camera_path_thumbnail(App& app) {
     const int i = app.camera_thumbnail_pending;
@@ -881,12 +933,12 @@ void draw_camera_path_panel(App& app) {
         ImGui::SameLine(0.F, 16.F);
         ImGui::TextDisabled("%zu %s  ·  %.1f s", keys.size(), tr("views"), keys.empty() ? 0.F : keys.back().time);
     }
-    const float transport_x = header.x + (width - 104.F) * 0.5F;
+    const float transport_x = header.x + (width - 170.F) * 0.5F;
     const float transport_y = header.y + (compact ? 38.F : 0.F);
     auto* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled({transport_x - 4.F, transport_y - 2.F}, {transport_x + 108.F, transport_y + 32.F},
+    draw->AddRectFilled({transport_x - 4.F, transport_y - 2.F}, {transport_x + 174.F, transport_y + 32.F},
         theme::u32(theme::surface_1), 7.F);
-    draw->AddRect({transport_x - 4.F, transport_y - 2.F}, {transport_x + 108.F, transport_y + 32.F},
+    draw->AddRect({transport_x - 4.F, transport_y - 2.F}, {transport_x + 174.F, transport_y + 32.F},
         theme::u32(theme::border), 7.F);
     ImGui::SetCursorScreenPos({transport_x, transport_y});
     const bool can_play = keys.size() >= 2;
@@ -894,10 +946,20 @@ void draw_camera_path_panel(App& app) {
         select_key(app, static_cast<int>(camera_timeline::previous(keys, app.camera_path_time)));
     }
     ImGui::SameLine(0.F, 5.F);
+    if (icons::ghost_button("##rewind",icons::Icon::rewind,{30.F,30.F},false,!keys.empty(),tr("Rewind 5 seconds"))) {
+        app.camera_path_time=camera_timeline::jump_time(app.camera_path_time,-5.F,keys.front().time,keys.back().time);
+        seek(app);app.camera_timeline_view.reveal(camera_timeline::span(keys.back().time),app.camera_path_time);
+    }
+    ImGui::SameLine(0.F, 5.F);
     if (icons::button("##play", app.camera_path_playing ? icons::Icon::pause : icons::Icon::play,
             {30.F, 30.F}, app.camera_path_playing, can_play, tr(app.camera_path_playing ? "Pause" : "Play"))) {
         app.camera_path_playing = !app.camera_path_playing;
         if (app.camera_path_playing && app.camera_path_time >= keys.back().time) app.camera_path_time = keys.front().time;
+    }
+    ImGui::SameLine(0.F, 5.F);
+    if (icons::ghost_button("##fast_forward",icons::Icon::fast_forward,{30.F,30.F},false,!keys.empty(),tr("Forward 5 seconds"))) {
+        app.camera_path_time=camera_timeline::jump_time(app.camera_path_time,5.F,keys.front().time,keys.back().time);
+        seek(app);app.camera_timeline_view.reveal(camera_timeline::span(keys.back().time),app.camera_path_time);
     }
     ImGui::SameLine(0.F, 5.F);
     if (icons::ghost_button("##next", icons::Icon::next_keyframe, {30.F, 30.F}, false, !keys.empty(), tr("Next view"))) {
@@ -908,9 +970,9 @@ void draw_camera_path_panel(App& app) {
         format_time(app.camera_path_time, current, sizeof(current));
         format_time(keys.back().time, total, sizeof(total));
         std::snprintf(text, sizeof(text), "%s  /  %s", current, total);
-        const float available = header.x + width - 315.F - (transport_x + 123.F);
+        const float available = header.x + width - 315.F - (transport_x + 191.F);
         if (ImGui::CalcTextSize(text).x <= available)
-            draw->AddText({transport_x + 123.F, header.y + 8.F}, theme::u32(theme::text_muted), text);
+            draw->AddText({transport_x + 191.F, header.y + 8.F}, theme::u32(theme::text_muted), text);
     }
     const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
     if (!compact && width >= 940.F) {

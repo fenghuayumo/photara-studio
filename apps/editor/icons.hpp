@@ -63,6 +63,8 @@ enum class Icon {
     edit,
     sliders,
     lasso,
+    rewind,
+    fast_forward,
 };
 
 enum class ButtonStyle { normal, primary, danger };

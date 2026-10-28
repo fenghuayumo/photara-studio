@@ -9,6 +9,7 @@
 #include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
 #include "camera_path_recording.hpp"
+#include "camera_timeline.hpp"
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "splat_edit.hpp"
@@ -214,7 +215,8 @@ struct App {
         float duration{12.F};
     } camera_capture_path;
     int camera_timeline_drag{-1};
-    float camera_timeline_drag_span{};
+    camera_timeline::View camera_timeline_view;
+    float camera_timeline_scroll_grab{};
     bool show_camera_path{true};
     bool camera_path_edit{};
     bool camera_path_dock_pending{true};

@@ -46,6 +46,40 @@ inline float span(float last_time) {
     return std::max(6.F, std::ceil(std::max(0.F, last_time) * 1.15F));
 }
 
+struct View {
+    float start{},duration{6.F};
+    bool fit{true};
+    void constrain(float total) {
+        total=std::max(.1F,total);
+        if (fit) {start=0.F;duration=total;return;}
+        duration=std::clamp(duration,.1F,total);
+        start=std::clamp(start,0.F,total-duration);
+    }
+    void zoom(float total,float factor,float anchor) {
+        constrain(total);
+        if (!std::isfinite(factor) || factor<=0.F) return;
+        anchor=std::clamp(anchor,0.F,1.F);
+        const float time=start+duration*anchor;
+        duration=std::clamp(duration/factor,.1F,total);
+        start=time-duration*anchor; fit=duration>=total;
+        constrain(total);
+    }
+    void pan(float total,float seconds) {
+        constrain(total);start+=seconds;constrain(total);
+    }
+    void reveal(float total,float time) {
+        constrain(total);
+        if (time<start) start=time-duration*.2F;
+        else if (time>start+duration) start=time-duration*.8F;
+        constrain(total);
+    }
+    float fraction(float time) const {return (time-start)/duration;}
+    float time_at(float fraction) const {return start+std::clamp(fraction,0.F,1.F)*duration;}
+};
+inline float jump_time(float current,float delta,float first,float last) {
+    return std::clamp(current+delta,first,last);
+}
+
 // A 1/2/5 progression keeps labels comfortably spaced at any panel width.
 inline float tick_step(float seconds_per_tick) {
     const float magnitude = std::pow(10.F, std::floor(std::log10(std::max(0.001F, seconds_per_tick))));
