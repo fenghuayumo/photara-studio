@@ -17,9 +17,17 @@ void draw_view_settings(App& app) {
         if (ImGui::Checkbox(tr("Show cameras"), &app.view_options.show_views))
             app.view_options.show_camera_photos = app.view_options.show_views;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Wire frustums and capture photos in the 3D / training view.");
+            ImGui::SetTooltip("%s",tr("Show Camera Path keyframes and capture camera poses."));
         ImGui::Checkbox(tr("Show trajectory"), &app.view_options.show_trajectory);
+        if (app.view_options.show_views || app.view_options.show_trajectory) {
+            theme::caption("Camera overlay source");
+            const char* sources[]{tr("All cameras"),tr("Camera Path"),tr("Capture cameras")};
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::Combo("##camera_overlay_source",&app.view_options.camera_overlay_source,sources,3);
+            ImGui::TextColored(theme::warning,"%s",tr("Camera Path"));
+            ImGui::SameLine(0.F,12.F);
+            ImGui::TextColored(theme::accent,"%s",tr("Capture cameras"));
+        }
         ImGui::Checkbox(tr("Show ground grid"), &app.view_options.show_grid);
         ImGui::Checkbox(tr("Show origin axes"), &app.view_options.show_axes);
         if (ImGui::IsItemHovered())

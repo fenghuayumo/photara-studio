@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <vector>
 #include <utility>
+#include "camera_path_recording.hpp"
 
 namespace editor::camera_timeline {
 
@@ -12,6 +13,15 @@ inline float interpolation_weight(float u, int method) {
     u = std::clamp(u, 0.F, 1.F);
     if (method == 2) return u < 1.F ? 0.F : 1.F;
     return method == 1 ? u : u * u * (3.F - 2.F * u);
+}
+
+template <typename Keys> auto evaluate(const Keys& keys, float time) -> typename Keys::value_type {
+    if (keys.empty()) return {};
+    if (time<=keys.front().time) return camera_recording::interpolate(keys.front(),keys.front(),0.F);
+    if (time>=keys.back().time) return camera_recording::interpolate(keys.back(),keys.back(),0.F);
+    const auto right=std::upper_bound(keys.begin(),keys.end(),time,[](float t,const auto& key){return t<key.time;});
+    const auto& b=*right; const auto& a=*(right-1);
+    return camera_recording::interpolate(a,b,interpolation_weight((time-a.time)/(b.time-a.time),a.interpolation));
 }
 
 // Append one revolution about a fixed target. Small yaw increments preserve

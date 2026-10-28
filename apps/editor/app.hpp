@@ -219,6 +219,7 @@ struct App {
     bool camera_path_edit{};
     bool camera_path_dock_pending{true};
     bool camera_path_focus_requested{};
+    std::vector<SceneDrawStats::CameraHit> camera_pick_candidates;
     int camera_thumbnail_pending{-1};
     int camera_key_delete_pending{-1};
     struct CameraThumbnail {
@@ -482,6 +483,7 @@ void select_project_folder(App& app);
 void open_project_from_path(App& app, const std::filesystem::path& path);
 void clear_camera_path_thumbnails(App& app);
 bool finish_camera_path_recording(App& app);
+void select_camera_path_keyframe(App& app, int index);
 void capture_camera_path_thumbnail(App& app);
 void save_project(App& app);
 bool save_project_to_path(App& app, const std::filesystem::path& path);

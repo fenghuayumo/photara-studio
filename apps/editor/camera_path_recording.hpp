@@ -40,7 +40,11 @@ inline float angular_distance(V3 a, V3 b) {
     return 2.F * std::asin(std::min(1.F, std::sqrt(d) * .5F));
 }
 template <typename Key> Key interpolate(const Key& a, const Key& b, float u) {
-    Key p = a;
+    // Interpolation is a pose operation. Never copy thumbnails or other payloads.
+    Key p{};
+    p.time=a.time+(b.time-a.time)*u;
+    p.projection=u>=1.F ? b.projection : a.projection;
+    p.interpolation=a.interpolation;
     const auto mix = [u](float x, float y) { return x + (y-x)*u; };
     constexpr float tau = 6.28318530718F;
     for (int j = 0; j < 3; ++j) p.target[j] = mix(a.target[j], b.target[j]);

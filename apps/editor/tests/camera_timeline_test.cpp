@@ -1,6 +1,7 @@
 #include "camera_timeline.hpp"
 #include "camera_path_recording.hpp"
 #include "camera_capture_path.hpp"
+#include "camera_path_overlay.hpp"
 #include <string>
 #include <array>
 
@@ -24,6 +25,13 @@ struct RecordedKey {
     float time{}, target[3]{}, yaw{}, pitch{}, roll{}, distance{1.F};
     float fov_degrees{50.F}, ortho_height{4.F}, fisheye_k1{};
     int projection{}, interpolation{};
+};
+struct CopyProbe : RecordedKey {
+    inline static int copies=0;
+    CopyProbe()=default;
+    CopyProbe(const CopyProbe& value):RecordedKey(value){++copies;}
+    CopyProbe(CopyProbe&&)=default;
+    CopyProbe& operator=(const CopyProbe&)=default;
 };
 void expect(bool ok, const char* message) {
     if (!ok) { std::cerr << message << '\n'; std::exit(1); }
@@ -168,5 +176,41 @@ int main() {
     try { (void)generate<RecordedKey>(views,ordered(views,false,false),2,2,4.F,1,2.F,[](const auto&){return 0;}); }
     catch(const std::invalid_argument&) { invalid_range=true; }
     expect(invalid_range,"single-camera paths are rejected");
+    std::vector<RecordedKey> playback(2);
+    playback[1].time=2.F; playback[1].target[0]=2.F;
+    playback[0].interpolation=0;
+    expect(near(editor::camera_timeline::evaluate(playback,.5F).target[0],.3125F),"shared path evaluation uses smooth interpolation");
+    playback[0].interpolation=1;
+    expect(near(editor::camera_timeline::evaluate(playback,.5F).target[0],.5F),"shared path evaluation uses linear interpolation");
+    playback[0].interpolation=2;
+    expect(near(editor::camera_timeline::evaluate(playback,1.9F).target[0],0.F) && near(editor::camera_timeline::evaluate(playback,2.F).target[0],2.F),"shared path evaluation preserves hold and cut endpoints");
+    std::vector<CopyProbe> probes(2); probes[1].time=1.F;
+    CopyProbe::copies=0;
+    (void)editor::camera_recording::interpolate(probes[0],probes[1],.5F);
+    (void)editor::camera_timeline::evaluate(probes,.5F);
+    (void)editor::camera_timeline::evaluate(probes,0.F);
+    (void)editor::camera_timeline::evaluate(probes,1.F);
+    expect(CopyProbe::copies==0,"pose interpolation and endpoint evaluation never copy a full keyframe");
+    RecordedKey arc_a,arc_b; arc_a.distance=arc_b.distance=1.F;
+    arc_a.interpolation=1; arc_b.yaw=3.14159265F;
+    std::vector<std::pair<editor::camera_recording::V3,editor::camera_recording::V3>> chords;
+    const auto projection=[](const auto& p,editor::camera_path_overlay::V2& screen){screen={p[0]*100.F,p[2]*100.F};return true;};
+    auto arc_segments=editor::camera_path_overlay::tessellate(arc_a,arc_b,.001F,projection,
+        [&](auto a,auto b){chords.emplace_back(a,b);});
+    expect(arc_segments>8,"half-turn trajectory is subdivided by curvature");
+    for(int i=1;i<128;++i) {
+        const auto eye=editor::camera_path_overlay::eye(editor::camera_recording::interpolate(arc_a,arc_b,float(i)/128.F));
+        editor::camera_path_overlay::V2 screen; projection(eye,screen);
+        float best=1e9F;
+        for(const auto& chord:chords) {
+            editor::camera_path_overlay::V2 a,b; projection(chord.first,a);projection(chord.second,b);
+            best=std::min(best,editor::camera_path_overlay::chord_error(screen,a,b));
+        }
+        expect(best<=.751F,"rendered arc remains within the screen-space tolerance");
+    }
+    arc_b=arc_a; arc_b.target[0]=1.F;
+    expect(editor::camera_path_overlay::tessellate(arc_a,arc_b,.001F,projection,[](auto,auto){})==1,"straight flight uses a single chord");
+    arc_a.interpolation=2;
+    expect(editor::camera_path_overlay::tessellate(arc_a,arc_b,.001F,projection,[](auto,auto){})==0,"hold/cut has no flight chord");
     return 0;
 }

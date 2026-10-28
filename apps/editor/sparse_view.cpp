@@ -2,6 +2,9 @@
 
 #include "imgui_internal.h"
 #include "theme.hpp"
+#include "camera_timeline.hpp"
+#include "camera_path_overlay.hpp"
+#include "project/document.hpp"
 
 #include "core/camera_projection.hpp"
 #include "io/image.hpp"
@@ -2724,7 +2727,8 @@ SceneDrawStats SceneRenderer::draw(
     const SparseScene& scene, const OrbitCamera& camera,
     const ViewOptions& options, const bool hovered,
     const ImTextureID* view_photos, const std::size_t view_photo_count,
-    const PreviewMesh* mesh, const ReconstructionBox* region, const int selected_view) {
+    const PreviewMesh* mesh, const ReconstructionBox* region, const int selected_view,
+    const std::span<const photara::project::CameraKeyframe> path, const int selected_key) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
@@ -2887,7 +2891,7 @@ SceneDrawStats SceneRenderer::draw(
         stats.drawn_faces = mesh_scratch_.size();
     }
 
-    if (options.show_trajectory && scene.views.size() > 1) {
+    if (options.show_trajectory && options.camera_overlay_source != 1 && scene.views.size() > 1) {
         const ImU32 colour = theme::u32(theme::accent, 0.18F);
         const ViewPose* previous = nullptr;
         for (const ViewPose& pose : scene.views) {
@@ -2899,7 +2903,7 @@ SceneDrawStats SceneRenderer::draw(
         }
     }
 
-    if (options.show_views) {
+    if (options.show_views && options.camera_overlay_source != 1) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         float best_distance = 18.F;
         std::vector<std::size_t> markers;
@@ -2953,6 +2957,11 @@ SceneDrawStats SceneRenderer::draw(
                 if (curved && have_ray && (drawn[index] || static_cast<int>(index) == selected_view)) {
                     hit = camera_marker_hit_distance(pose,length,ray_origin,ray_direction);
                     if (std::isfinite(hit)) score = std::min(score,4.F);
+                }
+                if (score<18.F) {
+                    ImVec2 screen; float depth=std::numeric_limits<float>::infinity();
+                    project(frame,pose.centre,screen,depth);
+                    stats.camera_hits.push_back({static_cast<int>(index),false,score,std::isfinite(hit) ? hit : depth});
                 }
                 if (score < best_distance || (score == best_distance && hit < best_hit)) {
                     best_distance = score;
@@ -3068,6 +3077,64 @@ SceneDrawStats SceneRenderer::draw(
         }
     }
 
+    if (!path.empty() && options.camera_overlay_source != 2) {
+        const auto as_vec=[](const camera_recording::V3& p){return Vec3{p[0],p[1],p[2]};};
+        const auto eye_for=[&](const auto& key){return Vec3{key.target[0],key.target[1],key.target[2]}-as_vec(camera_recording::forward(key))*key.distance;};
+        if (options.show_trajectory && path.size()>1) {
+            for (std::size_t i=1;i<path.size();++i)
+                stats.drawn_path_segments+=camera_path_overlay::tessellate(path[i-1],path[i],scene.radius*.0005F,
+                    [&](const auto& point,camera_path_overlay::V2& pixel) {
+                        ImVec2 screen; float depth;
+                        if (!project(frame,as_vec(point),screen,depth)) return false;
+                        pixel={screen.x,screen.y}; return true;
+                    },
+                    [&](const auto& a,const auto& b) {draw_segment(draw,frame,as_vec(a),as_vec(b),theme::u32(theme::warning,.85F),2.F);});
+        }
+        if (options.show_views) {
+            const std::size_t stride=std::max<std::size_t>(1,(path.size()+255)/256);
+            const float length=std::max(1e-4F,scene.radius*options.view_scale);
+            const auto shown=[&](std::size_t i){return i%stride==0 || i+1==path.size() || static_cast<int>(i)==selected_key;};
+            float best=11.F;
+            if (hovered) for (std::size_t i=0;i<path.size();++i) {
+                ImVec2 screen; float depth;
+                if (!project(frame,eye_for(path[i]),screen,depth)) continue;
+                const auto mouse=ImGui::GetIO().MousePos;
+                const float distance=std::hypot(screen.x-mouse.x,screen.y-mouse.y);
+                if (distance<11.F) stats.camera_hits.push_back({static_cast<int>(i),true,distance,depth});
+                if (distance<best) {best=distance;stats.hovered_keyframe=static_cast<int>(i);}
+            }
+            for (std::size_t i=0;i<path.size();++i) {
+                const auto& key=path[i]; const Vec3 eye=eye_for(key);
+                const bool selected=static_cast<int>(i)==selected_key, hot=static_cast<int>(i)==stats.hovered_keyframe;
+                const ImU32 colour=theme::u32(selected || hot ? theme::accent : theme::warning,selected || hot ? 1.F : .7F);
+                // Every key has a visible, pickable point. Only frustum details
+                // are thinned in dense paths, with selected/hovered keys expanded.
+                if (shown(i) || hot) {
+                    const Vec3 forward=as_vec(camera_recording::forward(key)), right=as_vec(camera_recording::right(key));
+                    const Vec3 up=cross(right,forward), centre=eye+forward*length;
+                    const float half=length*.4F;
+                    const Vec3 corners[]{centre-right*half+up*half*.65F,centre+right*half+up*half*.65F,
+                                         centre+right*half-up*half*.65F,centre-right*half-up*half*.65F};
+                    for (int j=0;j<4;++j) {
+                        draw_segment(draw,frame,eye,corners[j],colour,selected || hot ? 2.F : 1.F);
+                        draw_segment(draw,frame,corners[j],corners[(j+1)%4],colour,selected || hot ? 2.F : 1.F);
+                    }
+                    draw_segment(draw,frame,corners[0],centre+up*half*1.1F,colour,1.F);
+                    draw_segment(draw,frame,corners[1],centre+up*half*1.1F,colour,1.F);
+                }
+                ImVec2 screen; float depth;
+                if (project(frame,eye,screen,depth)) {
+                    ++stats.drawn_keyframes;
+                    draw->AddCircleFilled(screen,selected || hot ? 4.F : 2.5F,colour);
+                    if (selected || hot) {
+                        char label[32]; std::snprintf(label,sizeof(label),"K%zu",i+1);
+                        draw->AddText({screen.x+7.F,screen.y-8.F},colour,label);
+                    }
+                }
+            }
+        }
+    }
+
     if (options.show_region && region != nullptr && region->valid) {
         const Vec3& mn = region->min;
         const Vec3& mx = region->max;
@@ -3095,6 +3162,15 @@ SceneDrawStats SceneRenderer::draw(
     }
 
     draw->PopClipRect();
+    std::stable_sort(stats.camera_hits.begin(),stats.camera_hits.end(),[](const auto& a,const auto& b) {
+        if (a.score!=b.score) return a.score<b.score;
+        return a.depth<b.depth;
+    });
+    stats.hovered_view=stats.hovered_keyframe=-1;
+    if (!stats.camera_hits.empty()) {
+        const auto& hit=stats.camera_hits.front();
+        if (hit.keyframe) stats.hovered_keyframe=hit.index; else stats.hovered_view=hit.index;
+    }
     hovered_view_ = stats.hovered_view;
     return stats;
 }

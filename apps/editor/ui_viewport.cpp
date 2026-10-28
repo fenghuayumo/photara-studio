@@ -712,10 +712,66 @@ void snap_preview_to_index(App& app, const unsigned index) {
 
 // Double-click a training frustum to look through that capture; otherwise
 // focus the orbit pivot on the point (or splat pixel) under the cursor.
+std::span<const photara::project::CameraKeyframe> camera_path_overlay_keys(const App& app) {
+    return app.camera_path_recording.review ? std::span<const photara::project::CameraKeyframe>(app.camera_path_recording.result)
+        : std::span<const photara::project::CameraKeyframe>(app.camera_keyframes);
+}
+
 bool handle_viewport_double_click(
     App& app, const bool accepts_input, const SceneDrawStats& stats,
     const ImVec2 min, const ImVec2 max) {
+    ImGui::SetNextWindowSizeConstraints({240.F,0.F},{500.F,360.F});
+    if (ImGui::BeginPopup("##overlapping_camera_pick")) {
+        ImGui::TextDisabled("%s",tr("Choose camera")); ImGui::Separator();
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(app.camera_pick_candidates.size()));
+        while (clipper.Step()) for (int i=clipper.DisplayStart;i<clipper.DisplayEnd;++i) {
+            const auto& hit=app.camera_pick_candidates[i];
+            const auto path=camera_path_overlay_keys(app);
+            if (hit.index<0 || (hit.keyframe ? static_cast<std::size_t>(hit.index)>=path.size()
+                : static_cast<std::size_t>(hit.index)>=app.scene.views.size())) continue;
+            ImGui::PushID(i);
+            std::string label;
+            if (hit.keyframe) label=std::string(tr("Camera Path"))+" · K"+std::to_string(hit.index+1);
+            else label=std::string(tr("Capture cameras"))+" · "+app.scene.views[hit.index].name;
+            if (ImGui::Selectable(label.c_str())) {
+                if (hit.keyframe) select_camera_path_keyframe(app,hit.index);
+                else snap_preview_to_index(app,static_cast<unsigned>(hit.index));
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndPopup(); return true;
+    }
     if (!accepts_input || ImGui::GetIO().WantTextInput) return false;
+    if (stats.camera_hits.size()>1) {
+        ImGui::SetTooltip("%s",tr("Multiple cameras here. Double-click to choose."));
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            app.camera_pick_candidates=stats.camera_hits;
+            ImGui::OpenPopup("##overlapping_camera_pick"); return true;
+        }
+    }
+    if (stats.hovered_keyframe>=0) {
+        if (stats.camera_hits.size()<2) {
+            if (app.camera_path_recording.review) ImGui::SetTooltip("%s · K%d",tr("Preview"),stats.hovered_keyframe+1);
+            else ImGui::SetTooltip(tr("Camera Path keyframe %d\nClick to select; double-click to view."),stats.hovered_keyframe+1);
+        }
+        if (app.camera_path_recording.review && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            select_camera_path_keyframe(app,stats.hovered_keyframe); return true;
+        }
+        if (!app.camera_path_recording.review && !app.camera_path_recording.active) {
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                select_camera_path_keyframe(app,stats.hovered_keyframe); return true;
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                app.camera_key_selected=stats.hovered_keyframe;
+                app.camera_path_time=app.camera_keyframes[stats.hovered_keyframe].time;
+                app.camera_path_playing=false;
+                return true;
+            }
+        }
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) return true;
+    }
     if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) return false;
     if (stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size() &&
@@ -1026,7 +1082,8 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.photos.ids(), app.photos.size(),
         app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr,
         &app.reconstruction_box,
-        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
+        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1,
+        camera_path_overlay_keys(app),app.camera_path_recording.review ? -1 : app.camera_key_selected);
 
     const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
@@ -1173,7 +1230,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             ? tr("2 / 3: switch 2D image QA and 3D scene")
             : tr(camera_navigation_hint(app.camera)));
 
-    if (!gizmo_captures && stats.hovered_view >= 0 &&
+    if (!gizmo_captures && stats.camera_hits.size()<2 && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[stats.hovered_view];
         ImGui::SetTooltip(
@@ -1282,7 +1339,8 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const SceneDrawStats overlay_stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, overlay, hovered,
         app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box,
-        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1);
+        app.preview_follow_view ? static_cast<int>(app.preview_view) : -1,
+        camera_path_overlay_keys(app),app.camera_path_recording.review ? -1 : app.camera_key_selected);
 
     const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
@@ -1356,7 +1414,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
         controls);
 
-    if (!gizmo_captures && overlay_stats.hovered_view >= 0 &&
+    if (!gizmo_captures && overlay_stats.camera_hits.size()<2 && overlay_stats.hovered_view >= 0 &&
         static_cast<std::size_t>(overlay_stats.hovered_view) <
             app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[overlay_stats.hovered_view];
@@ -1577,7 +1635,8 @@ void draw_splat_render_tab(
     ensure_reconstruction_box(app);
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, overlay, hovered,
-        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box);
+        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box,-1,
+        camera_path_overlay_keys(app),app.camera_path_recording.review ? -1 : app.camera_key_selected);
     const OrbitCamera camera_before_gizmo = app.camera;
     const bool gizmo_captures = draw_viewport_gizmo(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,

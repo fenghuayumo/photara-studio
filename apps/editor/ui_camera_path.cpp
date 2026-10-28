@@ -54,23 +54,7 @@ void apply(App& app, const Key& k) {
     c.interacting = false; app.preview_follow_view = false;
 }
 Key evaluate(const std::vector<Key>& keys, float t) {
-    if (t <= keys.front().time) return keys.front();
-    if (t >= keys.back().time) return keys.back();
-    const auto right = std::upper_bound(keys.begin(), keys.end(), t,
-        [](float time, const Key& key) { return time < key.time; });
-    const Key& b = *right; const Key& a = *(right - 1);
-    float u = (t - a.time) / (b.time - a.time);
-    u = camera_timeline::interpolation_weight(u, a.interpolation);
-    const auto mix = [u](float x, float y) { return x + (y - x) * u; };
-    Key result; result.projection = a.projection;
-    for (int i = 0; i < 3; ++i) result.target[i] = mix(a.target[i], b.target[i]);
-    result.yaw = a.yaw + std::remainder(b.yaw - a.yaw, 6.28318530718F) * u;
-    result.roll = a.roll + std::remainder(b.roll - a.roll, 6.28318530718F) * u;
-    result.pitch = mix(a.pitch, b.pitch); result.distance = mix(a.distance, b.distance);
-    result.fov_degrees = mix(a.fov_degrees, b.fov_degrees);
-    result.ortho_height = mix(a.ortho_height, b.ortho_height);
-    result.fisheye_k1 = mix(a.fisheye_k1, b.fisheye_k1);
-    return result;
+    return camera_timeline::evaluate(keys, t);
 }
 void seek(App& app) {
     if (!app.camera_keyframes.empty()) apply(app, evaluate(app.camera_keyframes, app.camera_path_time));
@@ -562,6 +546,18 @@ void timeline(App& app) {
 }
 
 } // namespace
+
+void select_camera_path_keyframe(App& app, int index) {
+    if (app.camera_path_recording.active) return;
+    if (app.camera_path_recording.review) {
+        auto& recording=app.camera_path_recording;
+        if (index>=0 && index<static_cast<int>(recording.result.size())) {
+            recording.preview_playing=false; apply(app,recording.result[index]);
+        }
+        return;
+    }
+    if (index>=0 && index<static_cast<int>(app.camera_keyframes.size())) select_key(app,index);
+}
 
 bool finish_camera_path_recording(App& app) { finish_path_recording(app); return !app.camera_path_recording.review; }
 

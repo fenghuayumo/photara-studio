@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 #include "sparse_view.hpp"
+#include "camera_path_overlay.hpp"
 #include "sfm/asfm.hpp"
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
@@ -62,6 +63,57 @@ void test_camera_navigation() {
     require(std::abs(matrix[0] - preview.world_to_camera[0]) < 1e-5F,
         "rolled viewport and render camera share their basis");
     ImGui::EndFrame(); ImGui::DestroyContext(context);
+}
+void test_camera_path_overlays() {
+    auto* context=ImGui::CreateContext();
+    auto& io=ImGui::GetIO(); io.DisplaySize={800,600}; io.DeltaTime=1.F/60.F;
+    unsigned char* pixels; int width,height; io.Fonts->GetTexDataAsRGBA32(&pixels,&width,&height);
+    ImGui::NewFrame(); ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({800,600}); ImGui::Begin("path overlays");
+    editor::SparseScene scene;
+    editor::OrbitCamera camera; camera.yaw=0.F; camera.pitch=0.F;
+    editor::ViewOptions options; options.show_cloud=false; options.show_grid=false; options.show_axes=false; options.show_region=false;
+    std::vector<photara::project::CameraKeyframe> keys(2);
+    for (std::size_t i=0;i<keys.size();++i) {keys[i].target[0]=float(i)-.5F;keys[i].target[2]=1.F;keys[i].yaw=3.14159265F;keys[i].distance=1.F;keys[i].time=float(i);}
+    editor::SceneRenderer renderer;
+    auto* draw=ImGui::GetWindowDrawList();
+    ImVec2 point; float depth;
+    require(editor::project_world_to_screen(camera,{0,0},{800,600},{-.5F,0,0},point,depth),"keyframe point projects into viewport");
+    io.MousePos=point;
+    options.camera_overlay_source=1;
+    auto stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,true,nullptr,0,nullptr,nullptr,-1,keys,1);
+    require(stats.drawn_keyframes==2 && stats.hovered_keyframe==0,"authored keyframes draw and remain pickable without training cameras");
+    options.camera_overlay_source=2;
+    stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,true,nullptr,0,nullptr,nullptr,-1,keys,1);
+    require(stats.drawn_keyframes==0 && stats.hovered_keyframe==-1,"capture-only source excludes authored camera markers");
+    options.camera_overlay_source=0; options.show_views=false; options.show_trajectory=false;
+    const auto vertices=draw->VtxBuffer.Size;
+    stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,true,nullptr,0,nullptr,nullptr,-1,keys,1);
+    require(stats.drawn_keyframes==0 && draw->VtxBuffer.Size==vertices,"master overlay switches hide path cameras and trajectory");
+    options.show_trajectory=true;
+    renderer.draw(draw,{0,0},{800,600},scene,camera,options,false,nullptr,0,nullptr,nullptr,-1,keys,1);
+    require(draw->VtxBuffer.Size>vertices,"authored trajectory can show independently of camera markers");
+    options.show_views=true; options.show_trajectory=false; options.camera_overlay_source=1;
+    keys.resize(257);
+    for(std::size_t i=0;i<keys.size();++i) {keys[i]=keys[0];keys[i].target[0]=float(i)*.006F-.75F;keys[i].time=float(i);}
+    const auto eye=editor::camera_path_overlay::eye(keys[1]);
+    editor::project_world_to_screen(camera,{0,0},{800,600},{eye[0],eye[1],eye[2]},point,depth);io.MousePos=point;
+    stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,true,nullptr,0,nullptr,nullptr,-1,keys,-1);
+    require(stats.drawn_keyframes==257 && stats.hovered_keyframe==1,"dense paths retain every camera point and pick formerly skipped keyframes");
+    editor::ViewPose capture; capture.registered=true;capture.centre={eye[0],eye[1],eye[2]};capture.fx=capture.fy=240;capture.width=640;capture.height=480;
+    scene.views.push_back(capture);options.camera_overlay_source=0;
+    stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,true,nullptr,0,nullptr,nullptr,-1,keys,-1);
+    bool have_capture=false,have_path=false;
+    for(const auto& hit:stats.camera_hits) {have_capture |= !hit.keyframe && hit.index==0; have_path |= hit.keyframe && hit.index==1;}
+    require(have_capture && have_path,"overlapping training and path cameras both remain available for disambiguation");
+    options.show_views=false;options.show_trajectory=true;
+    keys.resize(1025);
+    for(std::size_t i=0;i<keys.size();++i) {keys[i]={};keys[i].distance=1;keys[i].yaw=i ? 3.14159265F : 0.F;keys[i].interpolation=1;keys[i].time=float(i);}
+    stats=renderer.draw(draw,{0,0},{800,600},scene,camera,options,false,nullptr,0,nullptr,nullptr,-1,keys,-1);
+    require(stats.drawn_path_segments>1024,"dense paths do not flatten curved flight segments");
+    keys[0].thumbnail_width=keys[0].thumbnail_height=256;keys[0].thumbnail_rgb.resize(256*256*3,127);
+    const auto pose=editor::camera_timeline::evaluate(keys,.5F);
+    require(pose.thumbnail_rgb.empty() && keys[0].thumbnail_rgb.size()==256*256*3,"playback does not carry thumbnail payloads into interpolated poses");
+    ImGui::End(); ImGui::EndFrame(); ImGui::DestroyContext(context);
 }
 void test_camera_markers() {
     editor::ViewPose pose;
@@ -152,6 +204,7 @@ int main(int argc, char** argv) {
         test_studio_image_qa_projection();
         test_camera_markers();
         test_camera_navigation();
+        test_camera_path_overlays();
         editor::RunMonitor monitor;
         monitor.begin(editor::JobKind::align, editor::Stage::preparing);
         monitor.consume(R"(capture_frame kind=video ready=1 completed=20 total=20 image="D:\\capture frames\\00019.jpg")");

@@ -16,6 +16,8 @@
 #include <span>
 #include <vector>
 
+namespace photara::project { struct CameraKeyframe; }
+
 namespace editor {
 
 struct Vec2 {
@@ -370,6 +372,7 @@ struct ViewOptions {
     bool show_views = true;
     bool show_camera_photos = true;
     bool show_trajectory = true;
+    int camera_overlay_source = 0; // 0: both, 1: Camera Path, 2: captures
     bool show_grid = true;
     bool show_axes = true;
     bool show_region = true;
@@ -383,11 +386,20 @@ struct ViewOptions {
 };
 
 struct SceneDrawStats {
+    struct CameraHit {
+        int index{-1};
+        bool keyframe{};
+        float score{},depth{};
+    };
+    std::vector<CameraHit> camera_hits;
     std::size_t drawn_points{};
     std::size_t drawn_faces{};
     std::size_t drawn_views{};
+    std::size_t drawn_keyframes{};
+    std::size_t drawn_path_segments{};
     // Index into SparseScene::views, or -1 when nothing is under the cursor.
     int hovered_view{-1};
+    int hovered_keyframe{-1};
 };
 
 class SceneRenderer {
@@ -397,7 +409,8 @@ public:
         const OrbitCamera& camera, const ViewOptions& options,
         bool hovered, const ImTextureID* view_photos = nullptr,
         std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr,
-        const ReconstructionBox* region = nullptr, int selected_view = -1);
+        const ReconstructionBox* region = nullptr, int selected_view = -1,
+        std::span<const photara::project::CameraKeyframe> path = {}, int selected_key = -1);
 
     [[nodiscard]] int hovered_view() const { return hovered_view_; }
 
