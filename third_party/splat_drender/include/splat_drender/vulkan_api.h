@@ -71,6 +71,10 @@ struct SplatPreviewTransform {
 };
 
 struct SplatSettings {
+    // Forward-only Gaussian reconstruction animation. Arrival times are
+    // immutable model-sized data; camera motion only changes scalar parameters.
+    std::span<const float> preview_arrivals;
+    std::array<float, 8> preview_reconstruction{}; // time,start,end,hold,growth,radius,density,glow
     // Preview-only: training leaves this empty and uses the original model.
     std::span<const SplatPreviewTransform> preview_transforms;
     float alpha_clip = 0.99F;

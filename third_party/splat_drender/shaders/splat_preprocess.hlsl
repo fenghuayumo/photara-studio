@@ -14,6 +14,7 @@
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> values;
 
 #include "splat_enum.hlsli"
+#include "splat_reconstruction.hlsli"
 #include "splat_gut.hlsli"
 
 float3 preview_rotate(float4 q, float3 v) {
@@ -119,6 +120,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         c5 = covariances[base + 5];
     }
 
+    reconstruction_geometry(index,scale,opacity);
     if (transform_count != 0u) {
         scale *= placement_scale;
         float4 q = placement_rotation;
@@ -171,12 +173,14 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 rgb;
     if (has_sh) {
         uint bases = pc.u2;
-        rgb = evaluate_sh(pc.u1, sh_mean, sh_eye, color_src, index * bases * 3,
+        rgb = evaluate_sh_unclamped(pc.u1, sh_mean, sh_eye, color_src, index * bases * 3,
                           clamped0, clamped1, clamped2);
+        if (!reconstruction_enabled()) rgb = max(rgb,0.f);
     } else {
         rgb = float3(color_src[3 * index], color_src[3 * index + 1], color_src[3 * index + 2]);
     }
 
+    rgb = reconstruction_color(index,rgb);
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > .5f && (selection_depth < camera[20] || selection_depth > camera[21]))
         rgb *= .18f;

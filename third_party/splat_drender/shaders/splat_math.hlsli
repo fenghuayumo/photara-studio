@@ -747,7 +747,7 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     return built;
 }
 
-float3 evaluate_sh(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs, uint coeff_offset,
+float3 evaluate_sh_unclamped(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs, uint coeff_offset,
                    out float clamped0, out float clamped1, out float clamped2) {
     float3 dir = pos - campos;
     float inv = rsqrt(dot(dir, dir));
@@ -796,7 +796,12 @@ float3 evaluate_sh(uint degree, float3 pos, float3 campos, StructuredBuffer<floa
     clamped0 = result.x < 0.0f ? 1.0f : 0.0f;
     clamped1 = result.y < 0.0f ? 1.0f : 0.0f;
     clamped2 = result.z < 0.0f ? 1.0f : 0.0f;
-    return max(result, 0.0f);
+    return result;
+}
+
+float3 evaluate_sh(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs, uint coeff_offset,
+                   out float clamped0, out float clamped1, out float clamped2) {
+    return max(evaluate_sh_unclamped(degree,pos,campos,coeffs,coeff_offset,clamped0,clamped1,clamped2),0.f);
 }
 
 #endif

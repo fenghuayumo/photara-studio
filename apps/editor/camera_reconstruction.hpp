@@ -7,6 +7,7 @@
 #include "io/image.hpp"
 #include <limits>
 #include <numeric>
+#include <chrono>
 
 namespace editor::camera_effects {
 
@@ -58,7 +59,6 @@ public:
         base_.sh = source.sh.cpu();
         if (source.filter_3d.is_valid()) base_.filter_3d = source.filter_3d.cpu();
         if (!base_.size() || !base_.sh.is_valid()) throw std::runtime_error("Scan reveal needs a Gaussian model");
-        scales_.resize(base_.size()*3); opacity_.resize(base_.size()); sh_.resize(base_.sh.numel());
         // Robust extent excludes extreme reconstruction floaters.
         std::vector<float> values;
         for (int c=0;c<3;++c) {
@@ -74,6 +74,8 @@ public:
     }
     void attach(const photara::vk::Device& runtime) { renderer_.attach(runtime); }
     const std::vector<float>& arrival_times() const { return arrival_; }
+    std::uint64_t model_upload_revision() const { return renderer_.model_upload_revision(); }
+    std::array<double,3> frame_milliseconds() const { return frame_milliseconds_; }
 
     void prepare(const std::vector<photara::project::CameraKeyframe>& keys,
         std::span<const splat_render::ModelTransform> transforms,
@@ -144,6 +146,7 @@ public:
             const float jitter=(float(reconstruction_hash(unsigned(i))%10000)/10000.F-.5F)*.18F;
             arrival_[i]=std::clamp(first+jitter,effect.start_time,effect.end_time-phase);
         }
+        renderer_.set_reconstruction_schedule(arrival_);
         signature_=std::move(signature);
         last_frame_.clear();
     }
@@ -152,11 +155,11 @@ public:
         const std::vector<photara::project::CameraKeyframe>& keys,
         std::span<const splat_render::ModelTransform> transforms,
         const photara::project::CameraEffectTrack& effect,float time,
-        const splat_render::DisplayOptions& display) {
-        prepare(keys,transforms,effect,float(camera.width)/camera.height);
+        const splat_render::DisplayOptions& display, bool cpu_reference = false, float schedule_aspect = 0.F) {
+        prepare(keys,transforms,effect,schedule_aspect > 0.F ? schedule_aspect : float(camera.width)/camera.height);
         std::vector<float> frame{time,float(camera.width),float(camera.height),camera.fx,camera.fy,camera.cx,camera.cy,
             camera.k1,camera.k2,camera.k3,camera.k4,float(camera.model),display.near_clip,
-            effect.point_size,effect.scan_density,effect.scan_glow};
+            effect.point_size,effect.scan_density,effect.scan_glow,float(cpu_reference)};
         frame.insert(frame.end(),camera.world_to_camera.begin(),camera.world_to_camera.end());
         frame.insert(frame.end(),camera.position.begin(),camera.position.end());
         if (frame==last_frame_) return image_;
@@ -164,6 +167,39 @@ public:
         const float span=effect.end_time-effect.start_time;
         const float phase_scale=std::min(1.F,span*.85F/(effect.scan_hold+effect.scan_growth));
         const float hold=effect.scan_hold*phase_scale, growth=effect.scan_growth*phase_scale;
+        if (!cpu_reference) {
+            if (!gpu_model_loaded_) {
+                splat_render::GaussianCloud cloud;
+                cloud.count=unsigned(count); cloud.sh_degree=base_.sh_degree; cloud.sh_bases=unsigned(stride/3);
+                cloud.means=base_.means.ptr<float>(); cloud.log_scales=base_.log_scales.ptr<float>();
+                cloud.opacity_logits=base_.opacity_logits.ptr<float>(); cloud.quaternions=base_.quaternions.ptr<float>();
+                cloud.sh=base_.sh.ptr<float>();
+                cloud.render_method=static_cast<splat_render::RenderMethod>(base_.render_method);
+                cloud.filter_mode=static_cast<splat_render::FilterMode>(base_.filter_mode);
+                cloud.filter_3d=base_.filter_3d.is_valid() && base_.filter_3d.numel()==count ? base_.filter_3d.ptr<float>() : nullptr;
+                if (!renderer_.upload(cloud,"camera-reconstruction")) throw std::runtime_error(renderer_.failure());
+                renderer_.set_reconstruction_schedule(arrival_);
+                gpu_model_loaded_=true;
+            }
+            if (!renderer_.set_model_transforms(transforms)) throw std::runtime_error(renderer_.failure());
+            auto settings=display;
+            settings.reconstruction={true,time,effect.start_time,effect.end_time,hold,growth,
+                scale_*.00036F*effect.point_size*.5F,effect.scan_density,effect.scan_glow};
+            splat_render::FrameTarget target;
+            const auto draw_started=std::chrono::steady_clock::now();
+            if (!renderer_.draw(camera,target,splat_render::Shading::gaussian,settings)) throw std::runtime_error(renderer_.failure());
+            const auto readback_started=std::chrono::steady_clock::now();
+            if (!renderer_.download_rgb(image_.pixels,image_.width,image_.height)) throw std::runtime_error(renderer_.failure());
+            const auto bloom_started=std::chrono::steady_clock::now();
+            reconstruction_bloom(image_,effect.scan_glow/.7F*1.15F*(1.F-reconstruction_smooth(effect.end_time-1.F,effect.end_time,time)));
+            const auto finished=std::chrono::steady_clock::now();
+            frame_milliseconds_={std::chrono::duration<double,std::milli>(readback_started-draw_started).count(),
+                std::chrono::duration<double,std::milli>(bloom_started-readback_started).count(),
+                std::chrono::duration<double,std::milli>(finished-bloom_started).count()};
+            last_frame_=std::move(frame);
+            return image_;
+        }
+        scales_.resize(count*3); opacity_.resize(count); sh_.resize(base_.sh.numel());
         for (std::size_t i=0;i<count;++i) {
             const float age=time-arrival_[i];
             const bool complete=time>=effect.end_time || age>=hold+growth;
@@ -200,7 +236,8 @@ public:
         cloud.render_method=static_cast<splat_render::RenderMethod>(base_.render_method);
         cloud.filter_mode=static_cast<splat_render::FilterMode>(base_.filter_mode);
         cloud.filter_3d=base_.filter_3d.is_valid() && base_.filter_3d.numel()==count ? base_.filter_3d.ptr<float>() : nullptr;
-        renderer_.clear_model(); // Re-seed tile capacity after geometry animation.
+        gpu_model_loaded_=false;
+        renderer_.clear_model(); // CPU reference only; interactive/export animation stays on the GPU.
         if (!renderer_.upload(cloud,"camera-reconstruction") || !renderer_.set_model_transforms(transforms))
             throw std::runtime_error(renderer_.failure());
         splat_render::FrameTarget target;
@@ -213,6 +250,8 @@ public:
 private:
     photara::splat::GaussianModel base_;
     splat_render::Renderer renderer_;
+    bool gpu_model_loaded_{};
+    std::array<double,3> frame_milliseconds_{};
     float scale_{.001F};
     std::vector<float> scales_,opacity_,sh_,arrival_,signature_,last_frame_;
     photara::io::RgbImage image_;

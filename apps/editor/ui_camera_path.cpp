@@ -1063,6 +1063,7 @@ void clear_camera_path_thumbnails(App& app) {
     app.effect_preview.reconstruction_job = {};
     app.effect_preview.reconstruction_pending.reset();
     app.effect_preview.reconstruction_request.clear();
+    app.effect_preview.reconstruction_ready = false;
     app.effect_preview.reconstruction.reset();
     app.effect_preview.points = {};
     app.effect_preview.source.clear();
@@ -1098,7 +1099,9 @@ void draw_camera_path_panel(App& app) {
         app.camera_thumbnail_pending = -1; app.camera_key_delete_pending = -1; app.camera_timeline_drag = -1;
     }
     if (app.camera_path_playing && keys.size() >= 2) {
-        app.camera_path_time += ImGui::GetIO().DeltaTime;
+        const bool preparing_scan = camera_effect_view_active(app) && app.camera_effect.kind == 1 &&
+            !app.effect_preview.reconstruction_ready;
+        if (!preparing_scan) app.camera_path_time += ImGui::GetIO().DeltaTime;
         if (app.camera_path_time >= keys.back().time) { app.camera_path_time = keys.back().time; app.camera_path_playing = false; }
         seek(app);
     }

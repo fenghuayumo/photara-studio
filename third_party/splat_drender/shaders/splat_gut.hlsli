@@ -60,9 +60,12 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     float3 eye = float3(camera[16], camera[17], camera[18]);
     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f;
     float3 rgb;
-    if ((pc.u3 & 1u) != 0u)
-        rgb = evaluate_sh(pc.u1, sh_mean, sh_eye, color_src, index*pc.u2*3u, c0, c1, c2);
+    if ((pc.u3 & 1u) != 0u) {
+        rgb = evaluate_sh_unclamped(pc.u1, sh_mean, sh_eye, color_src, index*pc.u2*3u, c0, c1, c2);
+        if (!reconstruction_enabled()) rgb = max(rgb,0.f);
+    }
     else rgb = float3(color_src[3u*index], color_src[3u*index+1u], color_src[3u*index+2u]);
+    rgb = reconstruction_color(index,rgb);
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > 0.5f && (selection_depth < camera[20] || selection_depth > camera[21])) rgb *= 0.18f;
     Mat3 W = world_rotation_transposed(camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],

@@ -186,6 +186,8 @@ void Renderer::reset() {
     ready_ = false;
     count_ = 0;
     source_key_.clear();
+    reconstruction_arrivals_.clear();
+    readback_rgba_.clear();
     cache_valid_ = false;
     display_ = -1;
 }
@@ -549,6 +551,11 @@ void Renderer::clear_model() {
     reset();
     if (runtime.valid()) attach(runtime);
     ++generation_;
+}
+
+void Renderer::set_reconstruction_schedule(std::span<const float> arrival) {
+    reconstruction_arrivals_.assign(arrival.begin(),arrival.end());
+    cache_valid_ = false;
 }
 
 bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_key) {
@@ -1070,6 +1077,13 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         default: trained.mode = 0; break;
         }
         splat_drender::vulkan::SplatSettings settings;
+        if (display_options_.reconstruction.enabled) {
+            const auto& r = display_options_.reconstruction;
+            if (reconstruction_arrivals_.size() != count_)
+                throw std::runtime_error("Reconstruction schedule does not match the Gaussian model");
+            settings.preview_arrivals = reconstruction_arrivals_;
+            settings.preview_reconstruction = {r.time,r.start,r.end,r.hold,r.growth,r.radius,r.density,r.glow};
+        }
         std::vector<splat_drender::vulkan::SplatPreviewTransform> placements;
         placements.reserve(model_transforms_.size());
         for (const auto& transform : model_transforms_)
@@ -1336,9 +1350,15 @@ bool Renderer::download_rgb(
     submit_queue(runtime_, queue_, submit, fence_);
     wait_gpu();
 
+    readback_rgba_.resize(static_cast<std::size_t>(bytes));
     void* mapped{};
     check(vkMapMemory(device_, staging.memory, 0, bytes, 0, &mapped), "vkMapMemory");
-    const auto* rgba = static_cast<const std::uint8_t*>(mapped);
+    // HOST_COHERENT memory can be uncached/write-combined on Windows. Millions
+    // of individual byte reads from it make RGB conversion much slower than
+    // the render itself. Fetch contiguous RGBA once, then work in cached RAM.
+    std::memcpy(readback_rgba_.data(),mapped,static_cast<std::size_t>(bytes));
+    vkUnmapMemory(device_, staging.memory);
+    const auto* rgba = readback_rgba_.data();
     rgb.resize(static_cast<std::size_t>(out_w) * out_h * 3U);
     if (out_w == image.width && out_h == image.height) {
         // Video export keeps the native resolution; avoid resampling coordinate
@@ -1367,7 +1387,6 @@ bool Renderer::download_rgb(
             rgb[dst + 2] = rgba[src + 2];
         }
     }
-    vkUnmapMemory(device_, staging.memory);
     width = out_w;
     height = out_h;
     return true;

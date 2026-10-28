@@ -536,6 +536,7 @@ public:
         // The caller owns this per-frame span. The retained training policy
         // never keeps a pointer into preview-side temporary storage.
         policy_settings_.preview_transforms = {};
+        policy_settings_.preview_arrivals = {};
         auto camera = source_camera;
         camera.cx -= settings.pixel_center_offset;
         camera.cy -= settings.pixel_center_offset;
@@ -600,6 +601,17 @@ public:
         camera_slot_ ^= 1U;
         frame_camera_ = &camera_[camera_slot_];
         const auto transform_count = settings.preview_transforms.size();
+        const bool reconstruction = !settings.preview_arrivals.empty();
+        require(!reconstruction || (settings.preview_arrivals.size() == count && has_scales &&
+            !settings.pixel_snapshots && !reuse_projection && !depth_query_only),
+            "Reconstruction animation requires model-sized arrivals and forward-only scaled Gaussians");
+        if (reconstruction) {
+            for (const auto v : settings.preview_reconstruction) require(std::isfinite(v), "Nonfinite reconstruction parameters");
+            const auto& r = settings.preview_reconstruction;
+            require(r[2]>r[1] && r[3]>=0.F && r[4]>0.F && r[5]>0.F && r[6]>0.F && r[6]<=1.F,
+                "Invalid reconstruction parameters");
+        }
+        const auto camera_words = 23 + transform_count * 9 + 9 + settings.preview_arrivals.size();
         require(transform_count <= count, "Too many preview transforms");
         std::uint32_t previous_end = 0;
         for (const auto& transform : settings.preview_transforms) {
@@ -618,17 +630,15 @@ public:
         require(transform_count == 0 || (previous_end == count && has_scales),
                 "Preview transforms require scales and full model coverage");
         Buffer& camera_buffer = grow(*frame_camera_,
-            (23 + transform_count * 9) * sizeof(float), BufferMemory::host_visible);
+            camera_words * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
         const std::uint32_t grid_y = div_up(camera.height, k_tile);
         const std::uint32_t tiles = grid_x * grid_y;
         const std::uint32_t tile_bits = tiles > 1 ? 32u - static_cast<std::uint32_t>(std::countl_zero(tiles - 1)) : 0u;
         const auto pixels = static_cast<std::uint32_t>(static_cast<std::uint64_t>(camera.width) * camera.height);
         const int wrap_width = camera.mode == 3 ? static_cast<int>(camera.width) : 0;
-        std::array<float, 23> default_camera_pack{};
-        std::vector<float> placed_camera_pack;
-        if (transform_count != 0) placed_camera_pack.resize(23 + transform_count * 9, 0.F);
-        float* camera_pack = transform_count == 0 ? default_camera_pack.data() : placed_camera_pack.data();
+        std::vector<float> placed_camera_pack(camera_words, 0.F);
+        float* camera_pack = placed_camera_pack.data();
         std::memcpy(camera_pack, camera.world_to_camera.data(), 16 * sizeof(float));
         std::memcpy(camera_pack + 16, camera.center.data(), 3 * sizeof(float));
         camera_pack[19] = settings.preview_selection_depth ? 1.F : 0.F;
@@ -644,7 +654,13 @@ public:
             camera_pack[base + 4] = transform.scale;
             std::copy(transform.rotation.begin(), transform.rotation.end(), camera_pack + base + 5);
         }
-        camera_buffer.upload(camera_pack, (23 + transform_count * 9) * sizeof(float));
+        const auto reconstruction_base = 23 + transform_count * 9;
+        camera_pack[reconstruction_base] = reconstruction ? 1.F : 0.F;
+        if (reconstruction) {
+            std::copy(settings.preview_reconstruction.begin(),settings.preview_reconstruction.end(),camera_pack+reconstruction_base+1);
+            std::copy(settings.preview_arrivals.begin(),settings.preview_arrivals.end(),camera_pack+reconstruction_base+9);
+        }
+        camera_buffer.upload(camera_pack, camera_words * sizeof(float));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
         // GUT uses seven float4 slots for UT bounds, color and ray transforms,
@@ -731,6 +747,10 @@ public:
                 capacity_gut_rings_ = settings.preview_rings;
                 capacity_gut_ring_sigma_ = ring_sigma;
             }
+            // Animated footprints can grow abruptly even without a new model.
+            // Measure the current demand before sorting so no overflow frame
+            // is shown or exported. Model buffers and pipelines stay resident.
+            if (reconstruction) instance_capacity_ = 0;
             bool use_gpu_driven = instance_capacity_ != 0;
             Buffer& frame_counts = grow(
                 frame_counts_, 19 * sizeof(std::uint32_t),

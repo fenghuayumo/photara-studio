@@ -43,12 +43,12 @@ splat_render::Camera camera_for(const Key& key, unsigned width, unsigned height)
     return camera;
 }
 int main(int argc, char** argv) try {
-    if (argc < 3) throw std::runtime_error("Usage: photara_camera_demo project.ascan output-directory [inspect|preview|render] [width height fps]");
+    if (argc < 3) throw std::runtime_error("Usage: photara_camera_demo project.ascan output-directory [inspect|preview|render|baseline|benchmark] [width height fps]");
     std::cout << std::unitbuf;
     const auto project = std::filesystem::u8path(argv[1]);
     const auto output = std::filesystem::u8path(argv[2]);
     const std::string mode = argc>3 ? argv[3] : "preview";
-    if (mode!="inspect" && mode!="preview" && mode!="baseline" && mode!="render") throw std::runtime_error("Unknown mode");
+    if (mode!="inspect" && mode!="preview" && mode!="baseline" && mode!="render" && mode!="benchmark") throw std::runtime_error("Unknown mode");
     const unsigned width=argc>4 ? std::stoul(argv[4]) : 1280, height=argc>5 ? std::stoul(argv[5]) : 720;
     const unsigned fps=argc>6 ? std::stoul(argv[6]) : 30;
     if (width<2 || height<2 || width>8192 || height>8192 || fps<1 || fps>120) throw std::runtime_error("Invalid video dimensions or fps");
@@ -92,6 +92,7 @@ int main(int argc, char** argv) try {
         << "\nEffect: shared Studio camera-path reconstruction renderer.\n";
     std::vector<float> times;
     if(mode=="preview" || mode=="baseline") times={0.F,1.5F,3.F,5.F,8.F,12.F,16.F,20.F,duration};
+    else if (mode=="benchmark") for (unsigned i=0;i<120;++i) times.push_back(std::min(duration,8.F+float(i)/fps));
     else for(int i=0,n=int(std::ceil(duration*fps))+1;i<n;++i) times.push_back(std::min(duration,float(i)/fps));
     const auto started=std::chrono::steady_clock::now();
     for(std::size_t frame=0;frame<times.size();++frame) {
@@ -101,9 +102,13 @@ int main(int argc, char** argv) try {
         auto image=reconstruction.render(camera,keys,{},effect,
             mode=="baseline" ? effect.end_time : keys.front().time+time,display);
         char filename[64]; std::snprintf(filename,sizeof(filename),mode!="render" ? "preview_%02zu.png" : "frame_%05zu.png",frame);
-        photara::io::save_rgb_png(image,output/filename);
+        if (mode!="benchmark") photara::io::save_rgb_png(image,output/filename);
         const float seconds=std::chrono::duration<float>(std::chrono::steady_clock::now()-started).count();
         std::cout << "Frame " << frame+1 << '/' << times.size() << " t=" << time << " elapsed=" << seconds << "s\n";
+        if (mode=="benchmark") {
+            const auto timing=reconstruction.frame_milliseconds();
+            std::cout << "draw_ms=" << timing[0] << " readback_ms=" << timing[1] << " bloom_ms=" << timing[2] << '\n';
+        }
     }
     return 0;
 } catch(const std::exception& error) {std::cerr << "Camera demo: " << error.what() << '\n'; return 1;}

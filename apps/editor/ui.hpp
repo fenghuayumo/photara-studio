@@ -22,6 +22,7 @@ void draw_viewport_panel(App& app);
 bool handle_view_camera_shortcuts(App& app, bool viewport_hot);
 void draw_console_panel(App& app);
 void draw_camera_path_panel(App& app);
+bool camera_effect_view_active(const App& app);
 void draw_status_bar(App& app);
 void draw_controls_window(App& app);
 void draw_about_window(App& app);

@@ -83,6 +83,40 @@ void test_camera_effect_render() {
         require(final.pixels == full.pixels, "reconstruction restores exact 3DGS and 3DGUT material endpoints");
         const auto initial = reconstruction.render(camera, keys, {}, scan, 0.F, {});
         require(initial.pixels != final.pixels, "rewinding reconstruction returns to unrevealed geometry");
+        const auto upload_revision = reconstruction.model_upload_revision();
+        editor::camera_effects::Reconstruction reference(model);
+        reference.attach(device);
+        for (const float t : {0.F,2.F,4.F,5.F,5.5F,8.F,3.F}) {
+            const auto gpu = reconstruction.render(camera,keys,{},scan,t,{});
+            const auto cpu = reference.render(camera,keys,{},scan,t,{},true);
+            unsigned largest=0; double sum=0;
+            for (std::size_t p=0;p<gpu.pixels.size();++p) {
+                const auto delta=unsigned(std::abs(int(gpu.pixels[p])-int(cpu.pixels[p])));
+                largest=std::max(largest,delta); sum+=delta;
+            }
+            if (largest>5 || sum/gpu.pixels.size()>=.5) std::cerr << "GPU/reference method=" << int(method) << " t=" << t << " max=" << largest << " mean=" << sum/gpu.pixels.size() << '\n';
+            require(largest<=5 && sum/gpu.pixels.size()<.5,
+                "GPU reconstruction matches the offline reference throughout growth and rewinding");
+        }
+        require(reconstruction.model_upload_revision()==upload_revision,
+            "camera animation keeps the original Gaussian buffers resident instead of re-uploading every frame");
+        keys.back().target[0]=.5F;
+        std::vector<std::uint8_t> previous;
+        int changed_frames=0;
+        for(int i=0;i<24;++i) {
+            const float t=6.F+float(i)/24.F;
+            const auto pose=editor::camera_timeline::evaluate(keys,t);
+            auto moving_orbit=orbit;
+            moving_orbit.target={pose.target[0],pose.target[1],pose.target[2]};
+            const auto moving_source=editor::make_preview_camera(moving_orbit,64,48);
+            auto moving_camera=camera;
+            moving_camera.world_to_camera=moving_source.world_to_camera; moving_camera.position=moving_source.position;
+            const auto image=reconstruction.render(moving_camera,keys,{},scan,t,{});
+            if(!previous.empty() && previous!=image.pixels) ++changed_frames;
+            previous=image.pixels;
+        }
+        require(changed_frames>10 && reconstruction.model_upload_revision()==upload_revision,
+            "24fps playback renders moving intermediate camera poses without rebuilding the model");
         require(model.log_scales.ptr<float>()[0] == std::log(.25F) && model.opacity_logits.ptr<float>()[0] == 8.F,
             "preview geometry never changes the editable source model");
 

@@ -31,6 +31,11 @@ enum class RenderMethod : std::uint32_t { gaussian_3dgs = 0, gaussian_3dgut = 1 
 enum class FilterMode : int { classic = 1, mip_2d, mip_3d, mip };
 
 struct DisplayOptions {
+    struct Reconstruction {
+        bool enabled{};
+        float time{}, start{}, end{}, hold{}, growth{1.F}, radius{.001F}, density{.22F}, glow{.7F};
+        bool operator==(const Reconstruction&) const = default;
+    } reconstruction;
     // Near clipping for perspective and orthographic viewport rendering.
     float near_clip{0.2F};
     bool automatic_depth{true};
@@ -103,6 +108,7 @@ public:
     [[nodiscard]] bool attached() const noexcept { return device_ != VK_NULL_HANDLE; }
 
     bool upload(const GaussianCloud& cloud, std::string_view source_key);
+    void set_reconstruction_schedule(std::span<const float> arrival);
     // Replaces world positions. `centers` is xyzw, and w is the activated opacity.
     bool update_centers(const float* centers, std::uint32_t count);
     // Updates only per-model forward parameters; no Gaussian buffer upload.
@@ -218,6 +224,8 @@ private:
     EwaPreview* ewa_{};
     Storage rgba_staging_{};
     Storage readback_staging_{};
+    std::vector<std::uint8_t> readback_rgba_;
+    std::vector<float> reconstruction_arrivals_;
     // Density-preserving opacity multiplier introduced by filter_3d. Center
     // edits provide the base sigmoid opacity and must retain this multiplier.
     std::vector<float> ewa_opacity_factors_;

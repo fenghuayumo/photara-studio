@@ -206,6 +206,7 @@ struct App {
         std::shared_ptr<camera_effects::Reconstruction> reconstruction_pending;
         std::future<std::shared_ptr<photara::io::RgbImage>> reconstruction_job;
         std::vector<float> reconstruction_request;
+        bool reconstruction_ready{};
         std::string source;
         std::uint64_t revision{};
         bool baked{};

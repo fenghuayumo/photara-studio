@@ -1545,6 +1545,7 @@ void release_splat_preview(App& app) {
     app.effect_preview.reconstruction_job = {};
     app.effect_preview.reconstruction_pending.reset();
     app.effect_preview.reconstruction_request.clear();
+    app.effect_preview.reconstruction_ready = false;
     app.effect_preview.reconstruction.reset();
     cancel_splat_model_load(app);
     app.final_splat_ready = false;
@@ -1651,6 +1652,7 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
             cache.revision = app.splat_edit.edit_revision(); cache.baked = !local_model;
             cache.reconstruction.reset();
             cache.reconstruction_request.clear();
+            cache.reconstruction_ready = false;
         }
         if (app.camera_effect.kind == 1) {
             if (!cache.reconstruction) {
@@ -1659,32 +1661,30 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                 cache.reconstruction = std::make_shared<camera_effects::Reconstruction>(local_model ? *app.composed_model : edited);
                 cache.reconstruction->attach(gpu::runtime());
                 cache.reconstruction_request.clear();
+                cache.reconstruction_ready = false;
             }
             splat_render::DisplayOptions display; display.near_clip = app.navigation_near_clip;
+            const float schedule_aspect = float(app.video_render.width) / std::max(1,app.video_render.height);
             if (!app.image_export.path.empty()) {
                 if (cache.reconstruction_job.valid()) { cache.reconstruction_job.wait(); cache.reconstruction_job.get(); }
                 cache.reconstruction_pending.reset(); cache.reconstruction_request.clear();
                 auto image = cache.reconstruction->render(camera, app.camera_keyframes,
                     local_model ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
                                 : std::span<const splat_render::ModelTransform>{},
-                    app.camera_effect, app.camera_path_time, display);
+                    app.camera_effect, app.camera_path_time, display, false, schedule_aspect);
                 cache.texture.upload(image);
+                cache.reconstruction_ready = true;
                 app.image_export.effect_frame = std::make_shared<photara::io::RgbImage>(std::move(image));
                 app.image_export.frame_ready = true;
             } else {
                 // Keep controls responsive while the complete Gaussian model is
                 // animated. A busy worker finishes its snapshot; the next job
                 // always takes the latest time/pose/settings, so scrubbing coalesces.
-                if (cache.reconstruction_job.valid() && cache.reconstruction_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                    auto image = cache.reconstruction_job.get();
-                    if (cache.reconstruction_pending == cache.reconstruction) cache.texture.upload(*image);
-                    cache.reconstruction_pending.reset();
-                }
                 std::vector<float> request{app.camera_path_time,float(camera.width),float(camera.height),
                     camera.fx,camera.fy,camera.cx,camera.cy,camera.k1,camera.k2,camera.k3,camera.k4,
                     float(camera.model),display.near_clip,app.camera_effect.start_time,app.camera_effect.end_time,
                     app.camera_effect.scan_hold,app.camera_effect.scan_growth,app.camera_effect.scan_range,
-                    app.camera_effect.scan_density,app.camera_effect.scan_glow,app.camera_effect.point_size};
+                    app.camera_effect.scan_density,app.camera_effect.scan_glow,app.camera_effect.point_size,schedule_aspect};
                 request.insert(request.end(),camera.world_to_camera.begin(),camera.world_to_camera.end());
                 for (const auto& k:app.camera_keyframes)
                     request.insert(request.end(),{k.time,k.target[0],k.target[1],k.target[2],k.yaw,k.pitch,k.roll,
@@ -1695,6 +1695,15 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                     request.insert(request.end(),t.translation.begin(),t.translation.end());
                     request.insert(request.end(),t.rotation.begin(),t.rotation.end());
                 }
+                if (cache.reconstruction_job.valid() && cache.reconstruction_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    auto image = cache.reconstruction_job.get();
+                    if (cache.reconstruction_pending == cache.reconstruction &&
+                        (app.camera_path_playing || request == cache.reconstruction_request)) {
+                        cache.texture.upload(*image);
+                        cache.reconstruction_ready = true;
+                    }
+                    cache.reconstruction_pending.reset();
+                }
                 if (!cache.reconstruction_job.valid() && request != cache.reconstruction_request) {
                     auto keys = app.camera_keyframes;
                     for (auto& k:keys) { k.thumbnail_rgb.clear(); k.thumbnail_width=k.thumbnail_height=0; }
@@ -1702,8 +1711,8 @@ bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
                     cache.reconstruction_request = std::move(request);
                     cache.reconstruction_job = std::async(std::launch::async,
                         [state=cache.reconstruction,camera,keys=std::move(keys),transforms=std::move(transforms),
-                         effect=app.camera_effect,time=app.camera_path_time,display] {
-                            return std::make_shared<photara::io::RgbImage>(state->render(camera,keys,transforms,effect,time,display));
+                         effect=app.camera_effect,time=app.camera_path_time,display,schedule_aspect] {
+                            return std::make_shared<photara::io::RgbImage>(state->render(camera,keys,transforms,effect,time,display,false,schedule_aspect));
                         });
                 }
             }
@@ -1781,6 +1790,7 @@ void draw_splat_render_tab(
     if (!effect || app.camera_effect.kind != 1) {
         auto& cache = app.effect_preview;
         cache.reconstruction.reset(); cache.reconstruction_request.clear();
+        cache.reconstruction_ready = false;
         if (cache.reconstruction_job.valid() && cache.reconstruction_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             cache.reconstruction_job = {};
             cache.reconstruction_pending.reset();

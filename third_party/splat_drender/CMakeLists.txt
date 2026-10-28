@@ -154,6 +154,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_gut.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_reconstruction.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_gut_backward.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_gut_backward_subgroup.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward.hlsl"
