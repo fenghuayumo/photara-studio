@@ -198,7 +198,8 @@ struct App {
     bool camera_path_playing{};
     struct CameraPathRecording {
         bool active{};
-        bool paused{}, review{}, show_setup{}, replace_path{}, preserve_pauses{}, preview_playing{};
+        bool paused{}, review{}, show_setup{}, replace_path{}, preserve_pauses{}, preview_playing{}, from_capture{};
+        std::size_t source_count{};
         int quality{1};
         std::chrono::steady_clock::time_point started{};
         std::chrono::steady_clock::time_point paused_at{}, preview_started{};
@@ -207,6 +208,11 @@ struct App {
         std::vector<photara::project::CameraKeyframe> result;
         OrbitCamera preview_camera;
     } camera_path_recording;
+    struct CapturePathSettings {
+        bool show_setup{}, reverse{}, automatic{true};
+        int order{1}, first{1}, last{}, step{1}, quality{1};
+        float duration{12.F};
+    } camera_capture_path;
     int camera_timeline_drag{-1};
     float camera_timeline_drag_span{};
     bool show_camera_path{true};

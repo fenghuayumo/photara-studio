@@ -1,5 +1,6 @@
 #include "ui.hpp"
 #include "camera_timeline.hpp"
+#include "camera_capture_path.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
 #include "shortcuts.hpp"
@@ -109,6 +110,7 @@ void start_path_recording(App& app) {
     r.active = true; r.paused = false; r.review = false; r.preview_playing = false;
     r.started = std::chrono::steady_clock::now(); r.paused_seconds = 0.F;
     r.result.clear();
+    r.from_capture=false;
     r.take.begin(capture(app.camera, 0.F), camera_recording::quality_for(r.quality, app.camera.distance), r.preserve_pauses);
     app.camera_path_playing = false; app.camera_timeline_drag = -1;
     app.preview_follow_view = false;
@@ -141,7 +143,7 @@ void apply_path_recording(App& app) {
     r.review = r.preview_playing = false; r.result.clear(); r.take.samples.clear();
     sync_thumbnails(app); select_key(app, first);
     app.camera_thumbnail_pending = first;
-    set_message(app, tr("Camera path recording added."), theme::accent);
+    set_message(app, tr("Camera path added."), theme::accent);
 }
 void update_path_recording(App& app) {
     auto& r = app.camera_path_recording;
@@ -174,7 +176,7 @@ void draw_recording_controls(App& app) {
     ImGui::GetWindowDrawList()->AddCircleFilled({origin.x+5.F,origin.y+15.F},4.F,
         theme::u32(r.review ? theme::accent : r.paused ? theme::warning : theme::danger));
     ImGui::Dummy({14.F,16.F}); ImGui::SameLine(0.F,6.F);
-    ImGui::TextUnformatted(tr(r.review ? "Your flight is ready" : r.paused ? "Recording paused" : "Flight recording"));
+    ImGui::TextUnformatted(tr(r.review ? (r.from_capture ? "Capture path ready" : "Your flight is ready") : r.paused ? "Recording paused" : "Flight recording"));
     ImGui::SameLine(0.F,16.F); ImGui::TextColored(theme::text_bright,"%s",clock);
     ImGui::SetCursorScreenPos({single_row ? origin.x+width-actions_width : origin.x,
                               single_row ? origin.y : origin.y+35.F});
@@ -201,7 +203,8 @@ void draw_recording_controls(App& app) {
     ImGui::SetCursorScreenPos({origin.x,origin.y+(single_row ? 40.F : 75.F)});
     ImGui::Separator(); ImGui::Spacing();
     if (r.review) {
-        ImGui::Text(tr("%zu keyframes selected from %zu motion samples"),r.result.size(),r.take.samples.size());
+        if (r.from_capture) ImGui::Text(tr("%zu keyframes from %zu capture cameras"),r.result.size(),r.source_count);
+        else ImGui::Text(tr("%zu keyframes selected from %zu motion samples"),r.result.size(),r.take.samples.size());
         ImGui::Checkbox(tr("Replace current path"),&r.replace_path);
         if (r.replace_path && !app.camera_keyframes.empty()) {
             ImGui::SameLine(0.F,12.F);
@@ -251,6 +254,80 @@ void draw_recording_setup(App& app) {
     ImGui::SameLine();
     if (theme::primary_button(tr("Start flight"),{272.F,32.F})) { start_path_recording(app); ImGui::CloseCurrentPopup(); }
     ImGui::EndPopup();
+}
+
+void draw_capture_path_setup(App& app) {
+    auto& options=app.camera_capture_path;
+    if (options.show_setup) { ImGui::OpenPopup("##capture_path_setup"); options.show_setup=false; options.first=1; options.last=0; }
+    const auto* vp=ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos({vp->WorkPos.x+vp->WorkSize.x*.5F,vp->WorkPos.y+vp->WorkSize.y*.5F},ImGuiCond_Appearing,{.5F,.5F});
+    ImGui::SetNextWindowSize({470.F,0.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{22.F,20.F});
+    const bool open=ImGui::BeginPopupModal("##capture_path_setup",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleVar();
+    if (!open) return;
+    auto indices=camera_capture_path::ordered(app.scene.views,options.order==0,options.reverse);
+    const int count=static_cast<int>(indices.size());
+    if (options.last==0) {
+        options.last=count;
+        options.duration=std::clamp(std::max(options.duration,float(std::max(1,count)-1)*.02F),.1F,600.F);
+    }
+    options.first=std::clamp(options.first,1,std::max(1,count));
+    options.last=std::clamp(options.last,options.first,std::max(1,count));
+    icons::inline_icon(icons::Icon::camera,theme::u32(theme::accent),20.F); ImGui::SameLine(0.F,10.F);
+    ImGui::TextUnformatted(tr("From capture cameras"));
+    ImGui::Spacing(); ImGui::TextWrapped("%s",tr("Build a path from the cameras used for training or reconstruction."));
+    ImGui::TextDisabled(tr("%zu usable capture cameras"),indices.size());
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::BeginTable("##capture_options",2,ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Labels",ImGuiTableColumnFlags_WidthFixed,112.F);
+        ImGui::TableSetupColumn("Values",ImGuiTableColumnFlags_WidthStretch);
+        const auto row=[](const char* label){ImGui::TableNextColumn();ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",tr(label));ImGui::TableNextColumn();ImGui::SetNextItemWidth(-1.F);};
+        row("Camera order"); const char* orders[]{tr("File name (natural)"),tr("Dataset order")};
+        ImGui::Combo("##capture_order",&options.order,orders,2);
+        row("Direction"); ImGui::Checkbox(tr("Reverse order"),&options.reverse);
+        row("Camera range"); ImGui::PushMultiItemsWidths(2,ImGui::GetContentRegionAvail().x);
+        ImGui::DragInt("##first_camera",&options.first,1.F,1,std::max(1,count),"%d",ImGuiSliderFlags_AlwaysClamp); ImGui::PopItemWidth(); ImGui::SameLine();
+        ImGui::DragInt("##last_camera",&options.last,1.F,options.first,std::max(1,count),"%d",ImGuiSliderFlags_AlwaysClamp); ImGui::PopItemWidth();
+        row("Duration (s)"); ImGui::DragFloat("##capture_duration",&options.duration,.1F,.1F,600.F,"%.1f",ImGuiSliderFlags_AlwaysClamp);
+        row("Keyframe selection"); ImGui::Checkbox(tr("Automatic reduction"),&options.automatic);
+        if (options.automatic) { row("Path detail"); const char* qualities[]{tr("Precise"),tr("Balanced"),tr("Compact")}; ImGui::Combo("##capture_quality",&options.quality,qualities,3); }
+        else { row("Camera interval"); ImGui::DragInt("##capture_step",&options.step,1.F,1,std::max(1,count),"%d",ImGuiSliderFlags_AlwaysClamp); }
+        row("Destination"); int destination=app.camera_path_recording.replace_path ? 1 : 0;
+        const char* destinations[]{tr("Append to path"),tr("Replace current path")};
+        if (ImGui::Combo("##capture_destination",&destination,destinations,2)) app.camera_path_recording.replace_path=destination==1;
+        ImGui::EndTable();
+    }
+    // Re-evaluate after changing order or range in this frame.
+    indices=camera_capture_path::ordered(app.scene.views,options.order==0,options.reverse);
+    options.first=std::clamp(options.first,1,std::max(1,count));
+    options.last=std::clamp(options.last,options.first,std::max(1,count));
+    const int selected=options.last-options.first+1;
+    if (count>0) {
+        ImGui::Spacing(); ImGui::TextDisabled("%s",app.scene.views[indices[options.first-1]].name.c_str());
+        ImGui::TextDisabled("%s",app.scene.views[indices[options.last-1]].name.c_str());
+    }
+    ImGui::Spacing(); ImGui::TextWrapped("%s",tr("Capture timestamps are unavailable. Cameras are spaced evenly over the chosen duration."));
+    const int needed=options.automatic ? selected : (selected-1)/std::max(1,options.step)+1+((selected-1)%std::max(1,options.step)!=0);
+    const bool valid=count>=2 && selected>=2 && needed<=10000 && options.duration/float(selected-1)>=.01F;
+    if (!valid) ImGui::TextWrapped("%s",tr("Choose at least two cameras, at most 10000 samples, and at least 0.01 seconds per source camera."));
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::Button(tr("Cancel"),{110.F,32.F})) ImGui::CloseCurrentPopup();
+    ImGui::SameLine(); ImGui::BeginDisabled(!valid);
+    if (theme::primary_button(tr("Generate preview"),{302.F,32.F})) {
+        const float distance=std::max(.01F,app.scene.radius);
+        auto samples=camera_capture_path::generate<Key>(app.scene.views,indices,
+            static_cast<std::size_t>(options.first-1),static_cast<std::size_t>(options.last-1),options.duration,
+            options.automatic ? 1 : static_cast<std::size_t>(std::max(1,options.step)),distance,
+            [](const auto& view){return view.model==photara::CameraModel::equirectangular ? 3 : view.model==photara::CameraModel::opencv_fisheye ? 2 : 0;});
+        auto& result=app.camera_path_recording;
+        result.result=options.automatic ? camera_recording::reduce(samples,camera_recording::quality_for(options.quality,distance)) : std::move(samples);
+        result.active=false; result.review=true; result.from_capture=true; result.source_count=selected;
+        result.preview_playing=false; result.preview_camera=app.camera; result.take.samples.clear();
+        app.camera_path_playing=false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled(); ImGui::EndPopup();
 }
 
 void format_time(float seconds, char* out, std::size_t size) {
@@ -818,6 +895,13 @@ void draw_camera_path_panel(App& app) {
     if (icons::ghost_button("##path_actions", icons::Icon::more, {30.F, 30.F}, false, true, tr("Path tools")))
         ImGui::OpenPopup("##path_tools");
     if (ImGui::BeginPopup("##path_tools")) {
+        const auto capture_count=std::count_if(app.scene.views.begin(),app.scene.views.end(),[](const auto& view){return camera_capture_path::usable(view);});
+        if (ImGui::MenuItem(tr("From capture cameras"),nullptr,false,capture_count>=2)) {
+            app.camera_capture_path.show_setup=true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (capture_count<2 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s",tr("Load training or reconstruction cameras to use this option."));
         if (ImGui::MenuItem(tr("Fly a new path"))) {
             app.camera_path_recording.show_setup = true;
             ImGui::CloseCurrentPopup();
@@ -844,6 +928,7 @@ void draw_camera_path_panel(App& app) {
         ImGui::EndPopup();
     }
     draw_recording_setup(app);
+    draw_capture_path_setup(app);
     ImGui::SetCursorScreenPos({header.x, header.y + (compact ? 78.F : 43.F)});
     if (keys.empty()) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();

@@ -1,5 +1,8 @@
 #include "camera_timeline.hpp"
 #include "camera_path_recording.hpp"
+#include "camera_capture_path.hpp"
+#include <string>
+#include <array>
 
 #include <cmath>
 #include <iostream>
@@ -8,6 +11,14 @@
 
 namespace {
 struct Key { float time; };
+struct CaptureView {
+    std::string name;
+    bool registered{true};
+    struct { float x{},y{},z{}; } centre;
+    std::array<float,9> rotation{1,0,0,0,1,0,0,0,1};
+    float fy{240.F},k1{};
+    unsigned height{480};
+};
 struct OrbitKey { float time{}, yaw{}, roll{}; int interpolation{}; unsigned thumbnail_width{}, thumbnail_height{}; std::vector<unsigned char> thumbnail_rgb; };
 struct RecordedKey {
     float time{}, target[3]{}, yaw{}, pitch{}, roll{}, distance{1.F};
@@ -125,5 +136,37 @@ int main() {
     const auto precise=editor::camera_recording::reduce(turning,editor::camera_recording::quality_for(0,1.F));
     const auto compact=editor::camera_recording::reduce(turning,editor::camera_recording::quality_for(2,1.F));
     expect(precise.size()>=compact.size(),"precision setting cannot reduce full-turn detail");
+    using namespace editor::camera_capture_path;
+    std::vector<CaptureView> views(4);
+    views[0].name="frame10.png"; views[1].name="frame2.png"; views[2].name="frame1.png";
+    views[3].registered=false;
+    const auto sorted=ordered(views,true,false);
+    expect(sorted==std::vector<std::size_t>({2,1,0}),"capture path uses numeric filename ordering and skips unregistered cameras");
+    expect(ordered(views,false,true)==std::vector<std::size_t>({2,1,0}),"capture dataset order supports reversal");
+    views[0].rotation[0]=std::numeric_limits<float>::quiet_NaN();
+    expect(ordered(views,true,false).size()==2,"non-finite capture rotations are rejected");
+    auto view=views[1]; view.centre={2.F,3.F,4.F};
+    const auto key=key_from_view<RecordedKey>(view,0,2.F,3.F);
+    const auto direction=editor::camera_recording::forward(key);
+    expect(near(key.target[0]-direction[0]*key.distance,2.F) && near(key.target[1]-direction[1]*key.distance,3.F) &&
+           near(key.target[2]-direction[2]*key.distance,4.F),"capture conversion preserves camera position");
+    expect(near(key.fov_degrees,90.F) && key.interpolation==1 && near(key.time,3.F),"capture conversion keeps lens and assigns linear timeline time");
+    view.rotation={0,-1,0,1,0,0,0,0,1};
+    const auto rolled=key_from_view<RecordedKey>(view,0,2.F,0.F);
+    const auto rolled_right=editor::camera_recording::right(rolled);
+    expect(near(rolled_right[0],0.F) && near(rolled_right[1],-1.F),"capture path preserves camera roll");
+    view.k1=.12F;
+    expect(near(key_from_view<RecordedKey>(view,2,2.F,0.F).fisheye_k1,.12F),"capture fisheye lens coefficient survives conversion");
+    views.resize(5);
+    for(std::size_t i=0;i<views.size();++i) { views[i]={}; views[i].name="frame"+std::to_string(i); views[i].centre.x=float(i); }
+    const auto path=generate<RecordedKey>(views,ordered(views,false,false),0,4,8.F,3,2.F,[](const auto&){return 0;});
+    expect(path.size()==3 && near(path[0].time,0.F) && near(path[1].time,6.F) && near(path.back().time,8.F),
+           "capture interval preserves source timing and includes the final camera");
+    const auto subset=generate<RecordedKey>(views,ordered(views,false,false),1,3,4.F,1,2.F,[](const auto&){return 0;});
+    expect(subset.size()==3 && near(subset.front().target[0],1.F) && near(subset.back().target[0],3.F),"capture range selects requested endpoints");
+    bool invalid_range=false;
+    try { (void)generate<RecordedKey>(views,ordered(views,false,false),2,2,4.F,1,2.F,[](const auto&){return 0;}); }
+    catch(const std::invalid_argument&) { invalid_range=true; }
+    expect(invalid_range,"single-camera paths are rejected");
     return 0;
 }

@@ -1070,7 +1070,7 @@ void draw_status_bar(App& app) {
     ImGui::SetCursorPosY(centre_y);
     if (app.camera_path_recording.active || app.camera_path_recording.review) {
         const auto& recording = app.camera_path_recording;
-        if (ImGui::SmallButton(tr(recording.review ? "Your flight is ready" : recording.paused ? "Recording paused" : "Flight recording"))) {
+        if (ImGui::SmallButton(tr(recording.review ? (recording.from_capture ? "Capture path ready" : "Your flight is ready") : recording.paused ? "Recording paused" : "Flight recording"))) {
             app.show_camera_path=true;
             app.camera_path_focus_requested=true;
         }
