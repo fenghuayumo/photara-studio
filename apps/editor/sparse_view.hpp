@@ -218,7 +218,11 @@ MeshLoad prepare_mesh_preview(MeshLoad loaded, bool fit_box);
 enum class EditorProjection { perspective, orthographic, fisheye, panorama };
 enum class OrthographicView { front, back, left, right, top, bottom };
 
+enum class CameraNavigation { turntable, trackball, first_person, fly };
+
 struct OrbitCamera {
+    CameraNavigation navigation{CameraNavigation::turntable};
+    float roll{};
     float yaw{0.785398F};
     float pitch{0.61548F};
     float distance{6.F};
@@ -239,6 +243,15 @@ struct OrbitCamera {
     // SuperSplat-style pivot: keep the current eye, orbit around `point`.
     void focus_on(const Vec3& point);
 };
+
+inline const char* camera_navigation_hint(const OrbitCamera& camera) {
+    switch (camera.navigation) {
+    case CameraNavigation::trackball: return "Drag: trackball; MMB: pan; wheel: zoom";
+    case CameraNavigation::first_person: return "RMB + WASD: walk; Q/E: height; drag: look";
+    case CameraNavigation::fly: return "RMB + WASD/QE: fly; Z/C: roll; Shift: accelerate";
+    default: return "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus";
+    }
+}
 
 // Axis-aligned reconstruction volume in reconstruction space. Defaults to the
 // sparse-cloud AABB; object-mode splat training follows later edits.

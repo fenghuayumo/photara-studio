@@ -212,6 +212,10 @@ std::vector<std::uint8_t> encode_settings(
             throw std::invalid_argument("Invalid camera interpolation");
         writer.value(static_cast<std::int32_t>(key.interpolation));
     }
+    for (const auto& key : settings.camera_keyframes) {
+        if (!std::isfinite(key.roll)) throw std::invalid_argument("Invalid camera roll");
+        writer.value(key.roll);
+    }
     return writer.take();
 }
 
@@ -549,6 +553,10 @@ Settings decode_settings(
             if (key.interpolation < 0 || key.interpolation > 2)
                 throw std::invalid_argument("Invalid camera interpolation");
         }
+    }
+    if (version >= 27) for (auto& key : settings.camera_keyframes) {
+        key.roll = reader.value<float>();
+        if (!std::isfinite(key.roll)) throw std::invalid_argument("Invalid camera roll");
     }
     std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
         [](const auto& a, const auto& b) { return a.time < b.time; });

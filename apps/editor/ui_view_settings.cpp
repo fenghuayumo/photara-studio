@@ -142,6 +142,22 @@ void draw_view_settings(App& app) {
     if (app.workspace != ViewportWorkspace::image_2d &&
         ImGui::CollapsingHeader(tr("Navigation camera"), ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
+        theme::caption("Camera control");
+        int navigation = static_cast<int>(app.camera.navigation);
+        const char* modes[]{tr("Turntable"), tr("Trackball"), tr("First person"), tr("Free flight")};
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::Combo("##camera_control", &navigation, modes, 4)) {
+            app.camera.navigation = static_cast<CameraNavigation>(navigation);
+            app.camera.interacting = false;
+            store_editor_preferences(app);
+        }
+        if (app.camera.navigation == CameraNavigation::first_person)
+            ImGui::TextWrapped("%s", tr("RMB + WASD: walk; Q/E: height; drag: look"));
+        else if (app.camera.navigation == CameraNavigation::fly)
+            ImGui::TextWrapped("%s", tr("RMB + WASD/QE: fly; Z/C: roll; Shift: accelerate"));
+        else if (app.camera.navigation == CameraNavigation::trackball)
+            ImGui::TextWrapped("%s", tr("Drag: trackball; MMB: pan; wheel: zoom"));
+        if (std::abs(app.camera.roll) > .0001F && ImGui::Button(tr("Level horizon"))) app.camera.roll = 0.F;
         theme::caption("Projection");
         ImGui::SetNextItemWidth(-1.F);
         int projection = static_cast<int>(app.camera.projection);

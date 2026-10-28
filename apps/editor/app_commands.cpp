@@ -1092,7 +1092,9 @@ void clear_viewport_scene(App& app) {
     app.atlas_preview.reset();
     app.atlas_preview_path.clear();
     app.scene_source.clear();
+    const auto navigation = app.camera.navigation;
     app.camera = {};
+    app.camera.navigation = navigation;
     app.reconstruction_box.clear();
     app.gizmo.box = {};
     app.view_mode = VisualizationMode::points;
@@ -1286,6 +1288,11 @@ void load_editor_preferences(App& app) {
                 if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
                     shortcuts::valid(binding)) entry->binding = binding;
             }
+        } else if (key == "camera_navigation") {
+            int mode{};
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), mode);
+            if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && mode >= 0 && mode <= 3)
+                app.camera.navigation = static_cast<CameraNavigation>(mode);
         } else if (key == "navigation_near_clip") {
             float near_clip{};
             const auto result = std::from_chars(value.data(), value.data() + value.size(), near_clip);
@@ -1340,6 +1347,7 @@ void store_editor_preferences(const App& app) {
            << "alignment=" << alignment << '\n'
            << "sam=" << sam << '\n'
            << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n'
+           << "camera_navigation=" << static_cast<int>(app.camera.navigation) << '\n'
            << "navigation_near_clip=" << app.navigation_near_clip << '\n';
     for (const auto& entry : shortcuts::entries)
         output << "shortcut." << entry.id << '='

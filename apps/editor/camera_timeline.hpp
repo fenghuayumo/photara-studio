@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <vector>
+#include <utility>
 
 namespace editor::camera_timeline {
 
@@ -11,6 +12,24 @@ inline float interpolation_weight(float u, int method) {
     u = std::clamp(u, 0.F, 1.F);
     if (method == 2) return u < 1.F ? 0.F : 1.F;
     return method == 1 ? u : u * u * (3.F - 2.F * u);
+}
+
+// Append one revolution about a fixed target. Small yaw increments preserve
+// direction when playback takes the shortest angular route between keys.
+template <typename Key>
+std::size_t append_orbit(std::vector<Key>& keys, const Key& pose, float duration, bool clockwise) {
+    const float start = keys.empty() ? 0.F : keys.back().time + 2.F;
+    if (!std::isfinite(duration) || duration < .1F || start + duration > 36000.F) return keys.size();
+    const std::size_t first = keys.size();
+    for (int i = 0; i <= 8; ++i) {
+        Key key = pose;
+        key.time = start + duration * static_cast<float>(i) / 8.F;
+        key.yaw = pose.yaw + (clockwise ? -1.F : 1.F) * 6.28318530718F * static_cast<float>(i) / 8.F;
+        key.interpolation = 1;
+        key.thumbnail_rgb.clear(); key.thumbnail_width = key.thumbnail_height = 0;
+        keys.push_back(std::move(key));
+    }
+    return first;
 }
 
 inline float span(float last_time) {

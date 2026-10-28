@@ -32,21 +32,21 @@ using i18n::tr;
 Key capture(const OrbitCamera& c, float time) {
     Key k; k.time = time;
     k.target[0] = c.target.x; k.target[1] = c.target.y; k.target[2] = c.target.z;
-    k.yaw = c.yaw; k.pitch = c.pitch; k.distance = c.distance;
+    k.yaw = c.yaw; k.pitch = c.pitch; k.roll = c.roll; k.distance = c.distance;
     k.fov_degrees = c.fov_degrees; k.ortho_height = c.ortho_height;
     k.fisheye_k1 = c.fisheye_k1; k.projection = static_cast<int>(c.projection);
     return k;
 }
 bool same_pose(const OrbitCamera& c, const Key& k) {
     return c.target.x == k.target[0] && c.target.y == k.target[1] && c.target.z == k.target[2] &&
-        c.yaw == k.yaw && c.pitch == k.pitch && c.distance == k.distance &&
+        c.roll == k.roll && c.yaw == k.yaw && c.pitch == k.pitch && c.distance == k.distance &&
         c.fov_degrees == k.fov_degrees && c.ortho_height == k.ortho_height &&
         c.fisheye_k1 == k.fisheye_k1 && static_cast<int>(c.projection) == k.projection;
 }
 void apply(App& app, const Key& k) {
     auto& c = app.camera;
     c.target = {k.target[0], k.target[1], k.target[2]};
-    c.yaw = k.yaw; c.pitch = k.pitch; c.distance = k.distance;
+    c.yaw = k.yaw; c.pitch = k.pitch; c.roll = k.roll; c.distance = k.distance;
     c.fov_degrees = k.fov_degrees; c.ortho_height = k.ortho_height;
     c.fisheye_k1 = k.fisheye_k1; c.projection = static_cast<EditorProjection>(k.projection);
     c.interacting = false; app.preview_follow_view = false;
@@ -63,6 +63,7 @@ Key evaluate(const std::vector<Key>& keys, float t) {
     Key result; result.projection = a.projection;
     for (int i = 0; i < 3; ++i) result.target[i] = mix(a.target[i], b.target[i]);
     result.yaw = a.yaw + std::remainder(b.yaw - a.yaw, 6.28318530718F) * u;
+    result.roll = a.roll + std::remainder(b.roll - a.roll, 6.28318530718F) * u;
     result.pitch = mix(a.pitch, b.pitch); result.distance = mix(a.distance, b.distance);
     result.fov_degrees = mix(a.fov_degrees, b.fov_degrees);
     result.ortho_height = mix(a.ortho_height, b.ortho_height);
@@ -199,7 +200,7 @@ std::string render_video_worker(
             if (progress->cancel) return "Cancelled";
             const auto key = evaluate(keys, std::min(keys.back().time, keys.front().time + float(i) / fps));
             orbit.target = {key.target[0], key.target[1], key.target[2]};
-            orbit.yaw = key.yaw; orbit.pitch = key.pitch; orbit.distance = key.distance;
+            orbit.yaw = key.yaw; orbit.pitch = key.pitch; orbit.roll = key.roll; orbit.distance = key.distance;
             orbit.fov_degrees = key.fov_degrees; orbit.ortho_height = key.ortho_height;
             orbit.fisheye_k1 = key.fisheye_k1; orbit.projection = static_cast<EditorProjection>(key.projection);
             const auto source = make_preview_camera(orbit, width, height);
@@ -340,7 +341,7 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
             throw std::runtime_error("Invalid video dimensions, frame rate, or camera path");
         float previous = -std::numeric_limits<float>::infinity();
         for (const auto& key : app.camera_keyframes) {
-            if (!std::isfinite(key.time) || key.time <= previous ||
+            if (!std::isfinite(key.roll) || !std::isfinite(key.time) || key.time <= previous ||
                 key.projection < static_cast<int>(EditorProjection::perspective) ||
                 key.projection > static_cast<int>(EditorProjection::panorama))
                 throw std::runtime_error("Camera path has invalid or unordered keyframes");
@@ -564,19 +565,6 @@ void draw_camera_path_panel(App& app) {
     // layouts. Migrate that window into Console's dock, preserving wider custom
     // floating layouts and all existing sidebar splits.
     if (app.camera_path_dock_pending) {
-        ImGuiID bottom_id = 0;
-        if (const auto* console = ImGui::FindWindowByName("###Console")) bottom_id = console->DockId;
-        if (!bottom_id) if (const auto* settings = ImGui::FindWindowSettingsByID(ImHashStr("###Console"))) bottom_id = settings->DockId;
-        if (auto* bottom = ImGui::DockBuilderGetNode(bottom_id)) {
-            if (bottom->ParentNode && bottom->ParentNode->SplitAxis == ImGuiAxis_Y && bottom->Size.y < 300.F) {
-                const float height = std::min(300.F, bottom->ParentNode->Size.y * 0.45F);
-                bottom->SizeRef.y = height;
-                auto* parent = bottom->ParentNode;
-                auto* sibling = parent->ChildNodes[parent->ChildNodes[0] == bottom ? 1 : 0];
-                if (sibling) sibling->SizeRef.y = std::max(1.F, parent->Size.y - height - ImGui::GetStyle().DockingSeparatorSize);
-                ImGui::MarkIniSettingsDirty();
-            }
-        }
         const auto* saved = ImGui::FindWindowSettingsByID(ImHashStr("###CameraPath"));
         if (saved && (saved->DockId || saved->Size.x >= 480)) app.camera_path_dock_pending = false;
         else {
@@ -590,7 +578,7 @@ void draw_camera_path_panel(App& app) {
             }
         }
     }
-    ImGui::SetNextWindowSize({1100.F, 360.F}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({1100.F, 200.F}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints({430.F, 170.F}, {FLT_MAX, FLT_MAX});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.F, 12.F});
     const bool open = ImGui::Begin(i18n::id("Camera Path", "###CameraPath"), &app.show_camera_path);
@@ -633,14 +621,38 @@ void draw_camera_path_panel(App& app) {
         format_time(app.camera_path_time, current, sizeof(current));
         format_time(keys.back().time, total, sizeof(total));
         std::snprintf(text, sizeof(text), "%s  /  %s", current, total);
-        const float available = header.x + width - 142.F - (transport_x + 123.F);
+        const float available = header.x + width - 178.F - (transport_x + 123.F);
         if (ImGui::CalcTextSize(text).x <= available)
             draw->AddText({transport_x + 123.F, header.y + 8.F}, theme::u32(theme::text_muted), text);
     }
     const float add_width = std::max(122.F, ImGui::CalcTextSize(tr("Add view")).x + 44.F);
-    ImGui::SetCursorScreenPos({header.x + width - add_width, header.y});
+    ImGui::SetCursorScreenPos({header.x + width - add_width - 36.F, header.y});
     if (icons::labeled_button("##add", icons::Icon::add, tr("Add view"), {add_width, 30.F}, icons::ButtonStyle::primary)) {
         add_camera_view(app);
+    }
+    ImGui::SameLine(0.F, 6.F);
+    if (icons::ghost_button("##path_actions", icons::Icon::more, {30.F, 30.F}, false, true, tr("Path tools")))
+        ImGui::OpenPopup("##path_tools");
+    if (ImGui::BeginPopup("##path_tools")) {
+        ImGui::TextUnformatted(tr("Orbit around target"));
+        ImGui::TextDisabled("%s", tr("Uses the current view and orbit target."));
+        static float duration = 12.F;
+        static bool clockwise = false;
+        ImGui::SetNextItemWidth(120.F);
+        ImGui::DragFloat(tr("Duration (s)"), &duration, .1F, .1F, 600.F, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::Checkbox(tr("Clockwise"), &clockwise);
+        ImGui::TextDisabled("%s", tr("Adds 9 keyframes at the end of the path."));
+        const float start = keys.empty() ? 0.F : keys.back().time + 2.F;
+        ImGui::BeginDisabled(start + duration > 36000.F);
+        if (ImGui::Button(tr("Append orbit"))) {
+            const auto first = camera_timeline::append_orbit(keys, capture(app.camera, 0.F), duration, clockwise);
+            sync_thumbnails(app);
+            select_key(app, static_cast<int>(first));
+            app.camera_thumbnail_pending = static_cast<int>(first);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
     }
     ImGui::SetCursorScreenPos({header.x, header.y + (compact ? 78.F : 43.F)});
     if (keys.empty()) {
@@ -677,9 +689,8 @@ void draw_camera_path_panel(App& app) {
     timeline(app);
     ImGui::Separator();
     ImGui::Spacing();
-    const int selected = app.camera_key_selected;
+    int selected = app.camera_key_selected;
     if (selected >= 0 && selected < static_cast<int>(keys.size())) {
-        Key& k = keys[selected];
         const float inspector_width = ImGui::GetContentRegionAvail().x;
         const bool wide = inspector_width >= 1040.F;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14.F, 10.F});
@@ -690,12 +701,58 @@ void draw_camera_path_panel(App& app) {
         ImGui::AlignTextToFramePadding();
         icons::inline_icon(icons::Icon::camera, theme::u32(theme::accent), 16.F);
         ImGui::SameLine(0.F, 8.F);
-        ImGui::Text("%s %02d", tr("Keyframe"), selected + 1);
-        ImGui::SameLine(0.F, 10.F);
-        ImGui::TextDisabled("/ %zu", keys.size());
+        char key_label[64];
+        std::snprintf(key_label, sizeof(key_label), "%s %02d / %zu", tr("Keyframe"), selected + 1, keys.size());
+        ImGui::SetNextItemWidth(160.F);
+        if (ImGui::BeginCombo("##selected_key", key_label)) {
+            for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
+                char label[80];
+                std::snprintf(label, sizeof(label), "%02d   ·   %.2f s", i + 1, keys[i].time);
+                if (ImGui::Selectable(label, selected == i)) { select_key(app, i); selected = i; }
+            }
+            ImGui::EndCombo();
+        }
+        Key& k = keys[selected];
+        ImGui::SameLine(0.F, 6.F);
+        if (icons::ghost_button("##view_key", icons::Icon::camera, {24.F, 24.F}, false, true, tr("View keyframe")))
+            select_key(app, selected);
         ImGui::SameLine(0.F, 12.F);
         if (icons::ghost_button("##delete", icons::Icon::trash, {24.F, 24.F}, false, true, tr("Delete keyframe")))
             app.camera_key_delete_pending = selected;
+        ImGui::SameLine(0.F, 6.F);
+        if (icons::ghost_button("##lens", icons::Icon::sliders, {24.F, 24.F}, false, true, tr("Lens settings")))
+            ImGui::OpenPopup("##lens_settings");
+        bool lens_changed = false;
+        ImGui::SetNextWindowSize({290.F, 0.F}, ImGuiCond_Appearing);
+        if (ImGui::BeginPopup("##lens_settings")) {
+            ImGui::TextUnformatted(tr("Lens settings"));
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", tr("Projection"));
+            const char* projections[]{tr("Perspective"), tr("Orthographic"), tr("Fisheye"), tr("Panorama")};
+            ImGui::SetNextItemWidth(-1.F);
+            lens_changed |= ImGui::Combo("##key_projection", &k.projection, projections, 4);
+            if (k.projection == static_cast<int>(EditorProjection::orthographic)) {
+                ImGui::TextDisabled("%s", tr("Orthographic height"));
+                ImGui::SetNextItemWidth(-1.F);
+                lens_changed |= ImGui::DragFloat("##key_ortho", &k.ortho_height, .01F, .001F, 1e6F, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            } else if (k.projection != static_cast<int>(EditorProjection::panorama)) {
+                ImGui::TextDisabled("%s", tr("Field of view"));
+                ImGui::SetNextItemWidth(-1.F);
+                lens_changed |= ImGui::DragFloat("##key_lens_fov", &k.fov_degrees, .1F, 1.F, 179.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
+                if (k.projection == static_cast<int>(EditorProjection::fisheye)) {
+                    ImGui::TextDisabled("%s", tr("Fisheye distortion (k1)"));
+                    ImGui::SetNextItemWidth(-1.F);
+                    lens_changed |= ImGui::DragFloat("##key_k1", &k.fisheye_k1, .001F, -1.F, 1.F, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+                }
+            } else ImGui::TextDisabled("360° × 180°");
+            ImGui::TextDisabled("%s", tr("Camera roll"));
+            ImGui::SetNextItemWidth(-1.F);
+            float roll_degrees = k.roll * 57.2957795F;
+            if (ImGui::DragFloat("##key_roll", &roll_degrees, .1F, -180.F, 180.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp)) {
+                k.roll = roll_degrees / 57.2957795F; lens_changed = true;
+            }
+            ImGui::EndPopup();
+        }
         const float update_width = std::max(126.F, ImGui::CalcTextSize(tr("Update pose")).x + 36.F);
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.F, ImGui::GetWindowContentRegionMax().x - update_width));
         if (icons::labeled_button("##update", icons::Icon::camera, tr("Update pose"), {update_width, 26.F})) {
@@ -706,7 +763,7 @@ void draw_camera_path_panel(App& app) {
             app.camera_thumbnail_pending = selected;
         }
         ImGui::Spacing();
-        bool changed = false;
+        bool changed = lens_changed;
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {10.F, 2.F});
         if (ImGui::BeginTable("##inspector", wide ? 2 : 1, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
             ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthFixed, wide ? 680.F : 410.F);
@@ -736,8 +793,14 @@ void draw_camera_path_panel(App& app) {
                 ImGui::SetNextItemWidth(268.F);
                 changed |= ImGui::DragFloat3("##target", k.target, .01F, 0.F, 0.F, "%.3f");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("X / Y / Z");
-                row("Field of view");
-                changed |= ImGui::DragFloat("##fov", &k.fov_degrees, .1F, 1.F, 179.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
+                row(k.projection == static_cast<int>(EditorProjection::orthographic) ? "Orthographic height" : "Field of view");
+                if (k.projection == static_cast<int>(EditorProjection::orthographic))
+                    changed |= ImGui::DragFloat("##ortho_height", &k.ortho_height, .01F, .001F, 1e6F, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+                else {
+                    ImGui::BeginDisabled(k.projection == static_cast<int>(EditorProjection::panorama));
+                    changed |= ImGui::DragFloat("##fov", &k.fov_degrees, .1F, 1.F, 179.F, "%.1f°", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::EndDisabled();
+                }
                 row("Orbit");
                 float orbit[]{k.yaw * 57.2957795F, k.pitch * 57.2957795F, k.distance};
                 ImGui::PushMultiItemsWidths(3, 268.F);

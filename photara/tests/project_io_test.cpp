@@ -296,7 +296,7 @@ int main() {
     settings.ai_prior_tokens = 1600;
     {
         Settings path;
-        CameraKeyframe first; first.time = 0.F; first.yaw = 0.3F; first.interpolation = 1;
+        CameraKeyframe first; first.time = 0.F; first.yaw = 0.3F; first.interpolation = 1; first.roll = .4F;
         CameraKeyframe second; second.time = 3.F; second.target[1] = 2.F; second.projection = 1; second.interpolation = 2;
         second.thumbnail_width = 2; second.thumbnail_height = 1; second.thumbnail_rgb = {10, 20, 30, 40, 50, 60};
         path.camera_keyframes = {first, second};
@@ -304,10 +304,10 @@ int main() {
         expect(restored.camera_keyframes.size() == 2 && restored.camera_keyframes[1].time == 3.F &&
                restored.camera_keyframes[1].target[1] == 2.F && restored.camera_keyframes[1].projection == 1 &&
                restored.camera_keyframes[1].thumbnail_rgb == second.thumbnail_rgb &&
-               restored.camera_keyframes[0].interpolation == 1 && restored.camera_keyframes[1].interpolation == 2,
+               restored.camera_keyframes[0].roll == .4F && restored.camera_keyframes[0].interpolation == 1 && restored.camera_keyframes[1].interpolation == 2,
                "camera keyframes survive project round trip");
         auto v23 = encode_settings(path, ascan_path);
-        v23.resize(v23.size() - 2 * sizeof(std::int32_t) - 2 * 2 * sizeof(std::uint32_t) - second.thumbnail_rgb.size());
+        v23.resize(v23.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - 2 * 2 * sizeof(std::uint32_t) - second.thumbnail_rgb.size());
         const std::uint32_t old_version = 23, old_min_reader = 1;
         std::memcpy(v23.data(), &old_version, sizeof(old_version));
         std::memcpy(v23.data() + sizeof(old_version), &old_min_reader, sizeof(old_min_reader));
@@ -316,13 +316,20 @@ int main() {
                "version 23 paths remain readable without thumbnails");
         auto corrupt = encode_settings(path, ascan_path);
         const std::uint32_t invalid_width = 257;
-        const auto second_thumbnail = corrupt.size() - 2 * sizeof(std::int32_t) - second.thumbnail_rgb.size() - 2 * sizeof(std::uint32_t);
+        const auto second_thumbnail = corrupt.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - second.thumbnail_rgb.size() - 2 * sizeof(std::uint32_t);
         std::memcpy(corrupt.data() + second_thumbnail, &invalid_width, sizeof(invalid_width));
         bool rejected = false;
         try { (void)decode_settings(corrupt, ascan_path); } catch (const std::exception&) { rejected = true; }
         expect(rejected, "oversized thumbnails are rejected");
+        auto v26 = encode_settings(path, ascan_path);
+        v26.resize(v26.size() - 2 * sizeof(float));
+        const std::uint32_t version26 = 26;
+        std::memcpy(v26.data(), &version26, sizeof(version26));
+        const auto legacy_roll = decode_settings(v26, ascan_path);
+        expect(legacy_roll.camera_keyframes[0].roll == 0.F && legacy_roll.camera_keyframes[0].interpolation == 1,
+               "version 26 keeps interpolation and defaults roll to zero");
         auto v25 = encode_settings(path, ascan_path);
-        v25.resize(v25.size() - 2 * sizeof(std::int32_t));
+        v25.resize(v25.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t));
         const std::uint32_t version25 = 25;
         std::memcpy(v25.data(), &version25, sizeof(version25));
         const auto legacy_path = decode_settings(v25, ascan_path);

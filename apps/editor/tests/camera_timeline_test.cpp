@@ -7,6 +7,7 @@
 
 namespace {
 struct Key { float time; };
+struct OrbitKey { float time{}, yaw{}, roll{}; int interpolation{}; unsigned thumbnail_width{}, thumbnail_height{}; std::vector<unsigned char> thumbnail_rgb; };
 void expect(bool ok, const char* message) {
     if (!ok) { std::cerr << message << '\n'; std::exit(1); }
 }
@@ -32,5 +33,15 @@ int main() {
     expect(near(interpolation_weight(.25F, 1), .25F), "linear interpolation");
     expect(near(interpolation_weight(.99F, 2), 0.F) && near(interpolation_weight(1.F, 2), 1.F),
            "hold switches at segment endpoint");
+    std::vector<OrbitKey> orbit;
+    OrbitKey pose; pose.yaw = .3F; pose.roll = .2F;
+    expect(append_orbit(orbit, pose, 12.F, false) == 0 && orbit.size() == 9, "orbit generates a full revolution");
+    expect(near(orbit.back().time, 12.F) && near(orbit.back().yaw - orbit.front().yaw, 6.2831853F), "orbit duration and direction");
+    expect(orbit[3].interpolation == 1 && near(orbit[3].roll, .2F), "orbit maintains pose and constant angular speed");
+    expect(append_orbit(orbit, pose, 4.F, true) == 9 && near(orbit.back().time, 18.F), "orbit appends without replacing keys");
+    expect(orbit.back().yaw < orbit[9].yaw, "clockwise reverses direction");
+    const auto count = orbit.size();
+    append_orbit(orbit, pose, std::numeric_limits<float>::infinity(), false);
+    expect(orbit.size() == count, "invalid orbit duration cannot mutate path");
     return 0;
 }

@@ -16,6 +16,53 @@ namespace {
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
+void test_camera_navigation() {
+    auto* context = ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.DisplaySize = {800, 600}; io.DeltaTime = 1.F / 60.F;
+    unsigned char* pixels; int w, h;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);
+    ImGui::NewFrame();
+    const auto eye = [](const editor::OrbitCamera& c) { return editor::make_preview_camera(c, 640, 480).position; };
+    for (const auto mode : {editor::CameraNavigation::turntable, editor::CameraNavigation::trackball,
+                           editor::CameraNavigation::first_person, editor::CameraNavigation::fly}) {
+        editor::OrbitCamera c; c.navigation = mode; c.interacting = true;
+        const auto before = eye(c);
+        io.MouseDown[1] = true; io.MouseDelta = {14.F, 8.F};
+        editor::update_orbit_camera(c, true, 1.F, true);
+        const auto after = eye(c);
+        const float distance = std::abs(after[0]-before[0]) + std::abs(after[1]-before[1]) + std::abs(after[2]-before[2]);
+        require(std::isfinite(distance), "camera control remains finite");
+        if (mode == editor::CameraNavigation::first_person || mode == editor::CameraNavigation::fly)
+            require(distance < 1e-4F, "look modes keep eye fixed");
+        else require(distance > .01F, "orbit modes move around target");
+    }
+    ImGui::EndFrame();
+    io.AddKeyEvent(ImGuiKey_W, true);
+    ImGui::NewFrame();
+    io.MouseDown[1] = true; io.MouseDelta = {0.F, 0.F};
+    for (const auto mode : {editor::CameraNavigation::first_person, editor::CameraNavigation::fly}) {
+        editor::OrbitCamera moving; moving.navigation = mode; moving.pitch = .8F;
+        const auto before = eye(moving);
+        editor::update_orbit_camera(moving, true, 1.F, true);
+        const auto after = eye(moving);
+        require(std::abs(after[0]-before[0]) + std::abs(after[2]-before[2]) > .001F, "W moves the camera");
+        if (mode == editor::CameraNavigation::first_person)
+            require(std::abs(after[1]-before[1]) < 1e-5F, "first person movement stays horizontal");
+        else require(std::abs(after[1]-before[1]) > .001F, "flight follows pitched view");
+    }
+    editor::OrbitCamera trackball; trackball.navigation = editor::CameraNavigation::trackball; trackball.interacting = true;
+    io.MouseDelta = {7.F, 25.F};
+    for (int i = 0; i < 100; ++i) editor::update_orbit_camera(trackball, true, 1.F, true);
+    require(std::isfinite(trackball.yaw) && std::isfinite(trackball.roll), "trackball remains stable through poles");
+    editor::OrbitCamera c; c.roll = .7F;
+    const auto preview = editor::make_preview_camera(c, 640, 480);
+    std::array<float, 16> matrix;
+    editor::camera_view_matrix(c, {0,0}, {640,480}, matrix);
+    require(std::abs(matrix[0] - preview.world_to_camera[0]) < 1e-5F,
+        "rolled viewport and render camera share their basis");
+    ImGui::EndFrame(); ImGui::DestroyContext(context);
+}
 void test_camera_markers() {
     editor::ViewPose pose;
     pose.width=640; pose.height=480; pose.fx=pose.fy=300; pose.cx=320; pose.cy=240;
@@ -104,6 +151,7 @@ int main(int argc, char** argv) {
         if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
         test_studio_image_qa_projection();
         test_camera_markers();
+        test_camera_navigation();
         editor::RunMonitor monitor;
         monitor.begin(editor::JobKind::align, editor::Stage::preparing);
         monitor.consume(R"(capture_frame kind=video ready=1 completed=20 total=20 image="D:\\capture frames\\00019.jpg")");

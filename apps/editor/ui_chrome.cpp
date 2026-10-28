@@ -132,7 +132,7 @@ void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
     ImGui::DockBuilderSplitNode(
         dock_main, ImGuiDir_Right, 0.24F, &dock_right, &dock_main);
     ImGui::DockBuilderSplitNode(
-        dock_main, ImGuiDir_Down, 0.34F, &dock_bottom, &dock_main);
+        dock_main, ImGuiDir_Down, 0.19F, &dock_bottom, &dock_main);
 
     ImGui::DockBuilderDockWindow("###Scene", dock_left);
     ImGui::DockBuilderDockWindow("###Viewport", dock_main);

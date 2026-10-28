@@ -627,7 +627,7 @@ bool orbit_pose_changed(const OrbitCamera& a, const OrbitCamera& b) {
     const auto differs = [](const float left, const float right) {
         return std::abs(left - right) > 1e-5F;
     };
-    return differs(a.yaw, b.yaw) || differs(a.pitch, b.pitch) ||
+    return differs(a.roll, b.roll) || differs(a.yaw, b.yaw) || differs(a.pitch, b.pitch) ||
            differs(a.distance, b.distance) || differs(a.fov_degrees, b.fov_degrees) ||
            differs(a.ortho_height, b.ortho_height) ||
            differs(a.fisheye_k1, b.fisheye_k1) ||
@@ -1171,7 +1171,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             ? ring_hint
             : align_waiting
             ? tr("2 / 3: switch 2D image QA and 3D scene")
-            : tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  drag region gizmo  |  double-click focus"));
+            : tr(camera_navigation_hint(app.camera)));
 
     if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
@@ -1641,7 +1641,7 @@ void draw_splat_render_tab(
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
         hint[0] != '\0' ? hint
-                        : tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus"));
+                        : tr(camera_navigation_hint(app.camera)));
     draw->PopClipRect();
 }
 

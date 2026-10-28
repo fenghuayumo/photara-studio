@@ -75,6 +75,23 @@ Vec3 orbit_right(const Vec3 forward, const float yaw) {
     return {-std::cos(yaw), 0.F, std::sin(yaw)};
 }
 
+Vec3 rotate_axis(Vec3 v, Vec3 axis, float angle) {
+    axis = normalize(axis);
+    return v * std::cos(angle) + cross(axis, v) * std::sin(angle) + axis * (dot(axis, v) * (1.F - std::cos(angle)));
+}
+Vec3 camera_right(const OrbitCamera& camera, Vec3 forward) {
+    const Vec3 right = orbit_right(forward, camera.yaw);
+    return right * std::cos(camera.roll) + cross(right, forward) * std::sin(camera.roll);
+}
+void set_camera_basis(OrbitCamera& camera, Vec3 forward, Vec3 right) {
+    forward = normalize(forward);
+    camera.pitch = std::asin(std::clamp(forward.y, -1.F, 1.F));
+    if (std::hypot(forward.x, forward.z) > 1e-6F)
+        camera.yaw = std::atan2(-forward.x, -forward.z);
+    const Vec3 level_right = orbit_right(forward, camera.yaw);
+    camera.roll = std::atan2(dot(right, cross(level_right, forward)), dot(right, level_right));
+}
+
 const char* camera_model_label(const photara::CameraModel model) {
     switch (model) {
         case photara::CameraModel::opencv_fisheye:
@@ -175,7 +192,7 @@ ViewFrame build_frame(
         std::cos(pitch) * std::cos(camera.yaw)};
     frame.eye = camera.target + offset * camera.distance;
     frame.forward = normalize(camera.target - frame.eye);
-    frame.right = orbit_right(frame.forward, camera.yaw);
+    frame.right = camera_right(camera, frame.forward);
     frame.up = cross(frame.right, frame.forward);
     const float height = std::max(1.F, max.y - min.y);
     const float width = std::max(1.F, max.x - min.x);
@@ -2463,9 +2480,11 @@ void update_orbit_camera(
         if (camera.projection == EditorProjection::orthographic) {
             camera.ortho_height = std::clamp(
                 camera.ortho_height * zoom, 1e-3F, 1e7F);
+        } else if (camera.navigation == CameraNavigation::first_person || camera.navigation == CameraNavigation::fly) {
+            const ViewFrame frame = build_frame(camera, {0.F, 0.F}, {1.F, 1.F});
+            camera.target = camera.target + frame.forward * (io.MouseWheel * std::max(scene_radius, .01F) * .12F * camera.move_speed);
         } else {
-            camera.distance = std::clamp(
-                camera.distance * zoom, 1e-3F, 1e7F);
+            camera.distance = std::clamp(camera.distance * zoom, 1e-3F, 1e7F);
         }
     }
 
@@ -2484,7 +2503,7 @@ void update_orbit_camera(
         std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
         std::cos(pitch) * std::cos(camera.yaw)};
     const Vec3 forward = normalize(offset * -1.F);
-    const Vec3 right = orbit_right(forward, camera.yaw);
+    const Vec3 right = camera_right(camera, forward);
     const Vec3 up = cross(right, forward);
 
     if (camera.interacting) {
@@ -2494,10 +2513,23 @@ void update_orbit_camera(
         const bool looking = ImGui::IsMouseDown(ImGuiMouseButton_Right);
         const ImVec2 delta = io.MouseDelta;
         if (orbiting || looking) {
-            camera.yaw -= delta.x * 0.008F;
-            camera.pitch = std::clamp(
-                camera.pitch + delta.y * 0.008F,
-                -k_pi * 0.5F, k_pi * 0.5F);
+            const bool eye_mode = camera.navigation == CameraNavigation::first_person || camera.navigation == CameraNavigation::fly;
+            const Vec3 eye = camera.target - forward * camera.distance;
+            if (camera.navigation == CameraNavigation::trackball || camera.navigation == CameraNavigation::fly) {
+                Vec3 next_forward = rotate_axis(forward, up, -delta.x * .008F);
+                Vec3 next_right = rotate_axis(right, up, -delta.x * .008F);
+                next_forward = rotate_axis(next_forward, next_right, -delta.y * .008F);
+                set_camera_basis(camera, next_forward, next_right);
+            } else {
+                camera.yaw -= delta.x * .008F;
+                camera.pitch = std::clamp(camera.pitch + delta.y * .008F, -k_pi * .5F + .001F, k_pi * .5F - .001F);
+                camera.roll = 0.F;
+            }
+            if (eye_mode) {
+                const Vec3 next_forward{ -std::cos(camera.pitch) * std::sin(camera.yaw),
+                    std::sin(camera.pitch), -std::cos(camera.pitch) * std::cos(camera.yaw)};
+                camera.target = eye + next_forward * camera.distance;
+            }
         } else {
             const float pan_ref =
                 camera.projection == EditorProjection::orthographic
@@ -2516,13 +2548,23 @@ void update_orbit_camera(
     const float boost = io.KeyShift ? 4.F : 1.F;
     const float base = std::max(scene_radius, camera.distance * 0.2F);
     const float step = base * camera.move_speed * boost * io.DeltaTime;
+    const ViewFrame travel_frame = build_frame(camera, {0.F, 0.F}, {1.F, 1.F});
+    const Vec3 travel_forward = camera.navigation == CameraNavigation::first_person
+        ? Vec3{-std::sin(camera.yaw), 0.F, -std::cos(camera.yaw)} : travel_frame.forward;
+    const Vec3 travel_right = camera.navigation == CameraNavigation::first_person ? orbit_right(travel_forward, camera.yaw) : travel_frame.right;
+    const Vec3 travel_up = camera.navigation == CameraNavigation::first_person ? k_world_up : travel_frame.up;
+    if (camera.navigation == CameraNavigation::fly) {
+        const float roll_step = io.DeltaTime * (io.KeyShift ? 2.F : 1.F);
+        if (ImGui::IsKeyDown(ImGuiKey_Z)) camera.roll -= roll_step;
+        if (ImGui::IsKeyDown(ImGuiKey_C)) camera.roll += roll_step;
+    }
     Vec3 movement;
-    if (ImGui::IsKeyDown(ImGuiKey_W)) movement = movement + forward;
-    if (ImGui::IsKeyDown(ImGuiKey_S)) movement = movement - forward;
-    if (ImGui::IsKeyDown(ImGuiKey_D)) movement = movement + right;
-    if (ImGui::IsKeyDown(ImGuiKey_A)) movement = movement - right;
-    if (ImGui::IsKeyDown(ImGuiKey_E)) movement = movement + up;
-    if (ImGui::IsKeyDown(ImGuiKey_Q)) movement = movement - up;
+    if (ImGui::IsKeyDown(ImGuiKey_W)) movement = movement + travel_forward;
+    if (ImGui::IsKeyDown(ImGuiKey_S)) movement = movement - travel_forward;
+    if (ImGui::IsKeyDown(ImGuiKey_D)) movement = movement + travel_right;
+    if (ImGui::IsKeyDown(ImGuiKey_A)) movement = movement - travel_right;
+    if (ImGui::IsKeyDown(ImGuiKey_E)) movement = movement + travel_up;
+    if (ImGui::IsKeyDown(ImGuiKey_Q)) movement = movement - travel_up;
     if (dot(movement, movement) > 1e-8F)
         camera.target = camera.target + normalize(movement) * step;
 }
@@ -3115,7 +3157,7 @@ SplatPreviewCamera make_preview_camera(
         std::cos(pitch) * std::cos(camera.yaw)};
     const Vec3 eye = camera.target + offset * camera.distance;
     const Vec3 forward = normalize(camera.target - eye);
-    const Vec3 right = orbit_right(forward, camera.yaw);
+    const Vec3 right = camera_right(camera, forward);
     const Vec3 up = cross(right, forward);
     // OpenCV / COLMAP: X right, Y down, Z forward.
     const Vec3 x = right;
@@ -3210,6 +3252,7 @@ void set_editor_projection(
 }
 
 void set_orthographic_view(OrbitCamera& camera, const OrthographicView view) {
+    camera.roll = 0.F;
     set_editor_projection(camera, EditorProjection::orthographic);
     constexpr float half_pi = k_pi * 0.5F;
     switch (view) {
