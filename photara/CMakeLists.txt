@@ -1058,6 +1058,19 @@ if(TARGET photara_features)
                 target_link_libraries(photara_studio PRIVATE ole32 shell32)
             endif()
             target_compile_features(photara_studio PRIVATE cxx_std_20)
+            # Offline camera-path reconstruction demonstrations, without opening Studio.
+            add_executable(photara_camera_demo
+                ${PHOTARA_STUDIO_DIR}/camera_demo.cpp
+                ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
+                ${PHOTARA_STUDIO_DIR}/theme.cpp
+                ${PHOTARA_STUDIO_DIR}/i18n.cpp)
+            target_include_directories(photara_camera_demo PRIVATE ${PHOTARA_STUDIO_DIR})
+            get_target_property(_camera_demo_libraries photara_studio LINK_LIBRARIES)
+            target_link_libraries(photara_camera_demo PRIVATE ${_camera_demo_libraries})
+            target_compile_features(photara_camera_demo PRIVATE cxx_std_20)
+            if(MSVC)
+                target_compile_options(photara_camera_demo PRIVATE /utf-8 /openmp)
+            endif()
             if(MSVC)
                 target_compile_options(photara_studio PRIVATE /utf-8)
             endif()
