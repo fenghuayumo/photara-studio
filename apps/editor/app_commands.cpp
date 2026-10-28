@@ -417,6 +417,7 @@ photara::sfm::Scene load_working_sfm(
 photara::project::Settings collect_project_settings(const App& app) {
     photara::project::Settings settings;
     settings.camera_keyframes = app.camera_keyframes;
+    settings.camera_effect = app.camera_effect;
     settings.name = app.layout.project_file.empty()
         ? std::string("Untitled")
         : path_to_utf8(app.layout.project_file.stem());
@@ -554,6 +555,7 @@ void apply_project_settings(
     App& app, const photara::project::Settings& settings) {
     clear_camera_path_thumbnails(app);
     app.camera_keyframes = settings.camera_keyframes;
+    app.camera_effect = settings.camera_effect;
     app.camera_key_selected = -1; app.camera_path_time = 0.F; app.camera_path_playing = false;
     if (!settings.image_directory.empty())
         store_path_field(app.settings.images_dir, settings.image_directory);

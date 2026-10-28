@@ -3,6 +3,7 @@
 #include "splat/loss_settings.hpp"
 
 #include "project/archive.hpp"
+#include "project/camera_effect.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/scene.hpp"
 
@@ -15,7 +16,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 27;
+inline constexpr std::uint32_t k_settings_version = 29;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -41,6 +42,7 @@ struct CameraKeyframe {
 struct Settings : photara::splat::TrainingLossSettings {
     std::string name;
     std::vector<CameraKeyframe> camera_keyframes;
+    CameraEffectTrack camera_effect;
     std::filesystem::path image_directory;
     // Optional external camera/dataset input used by direct splat training.
     // These fields are additive so older .ascan settings remain readable.

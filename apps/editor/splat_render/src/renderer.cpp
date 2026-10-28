@@ -137,6 +137,7 @@ void Renderer::attach(const photara::vk::Device& runtime) {
 }
 
 void Renderer::reset() {
+    depth_frame_ = {};
     model_transforms_.clear();
 #if SPLAT_DRENDER_HAS_VULKAN
     delete ewa_;
@@ -844,6 +845,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
         return true;
     }
     if (!ensure_frames(width, height)) return false;
+    depth_frame_ = {};
     display_options_ = display;
     if (shading != Shading::rings || render_method_ == RenderMethod::gaussian_3dgut)
         return draw_ewa(camera, frame, target);
@@ -1078,7 +1080,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         settings.compensate_2d = mip2d;
         const bool geometry = frame.reserved == static_cast<std::uint32_t>(Shading::depth) ||
                               frame.reserved == static_cast<std::uint32_t>(Shading::normal);
-        settings.need_depth = geometry;
+        settings.need_depth = geometry || display_options_.capture_depth;
         settings.primitive = render_method_ == RenderMethod::gaussian_3dgut
             ? splat_drender::vulkan::SplatPrimitive::gaussian_3dgut
             : splat_drender::vulkan::SplatPrimitive::gaussian_3dgs;
@@ -1088,7 +1090,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
         settings.preview_selection_near = display_options_.selection_depth_near;
         settings.preview_selection_far = display_options_.selection_depth_far;
         try {
-            if (geometry) {
+            if (geometry || display_options_.capture_depth) {
                 // Use the same median-depth and alpha-normalized footprint
                 // normals as training, rather than coloring Gaussian centers.
                 const auto output = ewa_->rasterizer.render(trained, settings);
@@ -1096,53 +1098,69 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
                 if (output.alpha.size() != pixels || output.median_depth.size() != pixels ||
                     output.normal.size() != pixels * 3U)
                     throw std::runtime_error("The rasterizer did not produce depth and normals");
-                const auto valid = [&](std::size_t p) {
-                    return std::isfinite(output.alpha[p]) && output.alpha[p] > 0.05F &&
-                           std::isfinite(output.median_depth[p]) && output.median_depth[p] > 0.F;
-                };
-                float near = display_options_.depth_near;
-                float far = display_options_.depth_far;
-                if (display_options_.automatic_depth) {
-                    std::vector<float> depths;
-                    depths.reserve(pixels);
-                    for (std::size_t p = 0; p < pixels; ++p)
-                        if (valid(p)) depths.push_back(output.median_depth[p]);
-                    near = 0.F; far = 1.F;
-                    if (!depths.empty()) {
-                        const std::size_t low = (depths.size() - 1U) / 100U;
-                        const std::size_t high = (depths.size() - 1U) * 99U / 100U;
-                        std::nth_element(depths.begin(), depths.begin() + low, depths.end());
-                        near = depths[low];
-                        std::nth_element(depths.begin(), depths.begin() + high, depths.end());
-                        far = std::max(depths[high], near + std::max(1e-4F, near * 1e-4F));
-                    }
+                if (display_options_.capture_depth) {
+                    depth_frame_.width = width; depth_frame_.height = height;
+                    depth_frame_.depth = output.median_depth; depth_frame_.alpha = output.alpha;
                 }
-                if (!std::isfinite(near)) near = 0.F;
-                if (!std::isfinite(far) || far <= near) far = near + 1.F;
-                depth_range_ = {near, far};
-                rgba.assign(pixels * 4U, 0);
-                for (std::size_t p = 0; p < pixels; ++p) {
-                    rgba[p * 4U + 3U] = 255;
-                    if (!valid(p)) continue;
-                    std::array<float, 3> rgb;
-                    if (frame.reserved == static_cast<std::uint32_t>(Shading::depth)) {
-                        rgb = depth_color((output.median_depth[p] - near) / (far - near),
-                                          display_options_.grayscale_depth);
-                    } else {
-                        float x = output.normal[p], y = output.normal[p + pixels],
-                              z = output.normal[p + pixels * 2U];
-                        if (display_options_.world_normals) {
-                            const auto& m = camera.world_to_camera;
-                            const float wx = m[0] * x + m[1] * y + m[2] * z;
-                            const float wy = m[4] * x + m[5] * y + m[6] * z;
-                            const float wz = m[8] * x + m[9] * y + m[10] * z;
-                            x = wx; y = wy; z = wz;
-                        }
-                        rgb = normal_color(x,y,z);
+                if (!geometry) {
+                    if (output.color.size() != pixels * 3U)
+                        throw std::runtime_error("The rasterizer did not produce RGB");
+                    rgba.resize(pixels * 4U);
+                    for (std::size_t p = 0; p < pixels; ++p) {
+                        for (std::size_t c = 0; c < 3; ++c)
+                            rgba[p * 4U + c] = static_cast<std::uint8_t>(std::lround(
+                                std::clamp(output.color[c * pixels + p], 0.F, 1.F) * 255.F));
+                        rgba[p * 4U + 3U] = 255;
                     }
-                    for (std::size_t c = 0; c < 3; ++c)
-                        rgba[p * 4U + c] = static_cast<std::uint8_t>(
-                            std::lround(std::clamp(rgb[c], 0.F, 1.F) * 255.F));
+                } else {
+                    const auto valid = [&](std::size_t p) {
+                        return std::isfinite(output.alpha[p]) && output.alpha[p] > 0.05F &&
+                               std::isfinite(output.median_depth[p]) && output.median_depth[p] > 0.F;
+                    };
+                    float near = display_options_.depth_near;
+                    float far = display_options_.depth_far;
+                    if (display_options_.automatic_depth) {
+                        std::vector<float> depths;
+                        depths.reserve(pixels);
+                        for (std::size_t p = 0; p < pixels; ++p)
+                            if (valid(p)) depths.push_back(output.median_depth[p]);
+                        near = 0.F; far = 1.F;
+                        if (!depths.empty()) {
+                            const std::size_t low = (depths.size() - 1U) / 100U;
+                            const std::size_t high = (depths.size() - 1U) * 99U / 100U;
+                            std::nth_element(depths.begin(), depths.begin() + low, depths.end());
+                            near = depths[low];
+                            std::nth_element(depths.begin(), depths.begin() + high, depths.end());
+                            far = std::max(depths[high], near + std::max(1e-4F, near * 1e-4F));
+                        }
+                    }
+                    if (!std::isfinite(near)) near = 0.F;
+                    if (!std::isfinite(far) || far <= near) far = near + 1.F;
+                    depth_range_ = {near, far};
+                    rgba.assign(pixels * 4U, 0);
+                    for (std::size_t p = 0; p < pixels; ++p) {
+                        rgba[p * 4U + 3U] = 255;
+                        if (!valid(p)) continue;
+                        std::array<float, 3> rgb;
+                        if (frame.reserved == static_cast<std::uint32_t>(Shading::depth)) {
+                            rgb = depth_color((output.median_depth[p] - near) / (far - near),
+                                              display_options_.grayscale_depth);
+                        } else {
+                            float x = output.normal[p], y = output.normal[p + pixels],
+                                  z = output.normal[p + pixels * 2U];
+                            if (display_options_.world_normals) {
+                                const auto& m = camera.world_to_camera;
+                                const float wx = m[0] * x + m[1] * y + m[2] * z;
+                                const float wy = m[4] * x + m[5] * y + m[6] * z;
+                                const float wz = m[8] * x + m[9] * y + m[10] * z;
+                                x = wx; y = wy; z = wz;
+                            }
+                            rgb = normal_color(x,y,z);
+                        }
+                        for (std::size_t c = 0; c < 3; ++c)
+                            rgba[p * 4U + c] = static_cast<std::uint8_t>(
+                                std::lround(std::clamp(rgb[c], 0.F, 1.F) * 255.F));
+                    }
                 }
             } else if (ewa_->shared_device) {
                 // The preview runs on this device, so the frame stays in VRAM

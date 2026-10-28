@@ -24,6 +24,8 @@ using namespace photara::sfm;
 using namespace photara::project;
 
 int failures = 0;
+constexpr std::size_t k_scan_bytes = 2 * sizeof(std::int32_t) + sizeof(std::uint8_t) + 5 * sizeof(float);
+constexpr std::size_t k_effect_bytes = sizeof(std::uint8_t) + 5 * sizeof(float) + sizeof(std::int32_t) + k_scan_bytes;
 std::vector<std::uint8_t> encode_settings_v12(
     Settings settings, const std::filesystem::path& project) {
     settings.ai_prior_model.clear(); settings.ai_prior_directory.clear();
@@ -31,6 +33,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.sam_detector_model.clear();
     settings.camera_keyframes.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - k_effect_bytes);
     bytes.resize(bytes.size() - sizeof(std::uint32_t)); // v23 camera keyframes.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v22 filter mode.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v21 rendering method.
@@ -307,7 +310,7 @@ int main() {
                restored.camera_keyframes[0].roll == .4F && restored.camera_keyframes[0].interpolation == 1 && restored.camera_keyframes[1].interpolation == 2,
                "camera keyframes survive project round trip");
         auto v23 = encode_settings(path, ascan_path);
-        v23.resize(v23.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - 2 * 2 * sizeof(std::uint32_t) - second.thumbnail_rgb.size());
+        v23.resize(v23.size() - k_effect_bytes - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - 2 * 2 * sizeof(std::uint32_t) - second.thumbnail_rgb.size());
         const std::uint32_t old_version = 23, old_min_reader = 1;
         std::memcpy(v23.data(), &old_version, sizeof(old_version));
         std::memcpy(v23.data() + sizeof(old_version), &old_min_reader, sizeof(old_min_reader));
@@ -316,20 +319,20 @@ int main() {
                "version 23 paths remain readable without thumbnails");
         auto corrupt = encode_settings(path, ascan_path);
         const std::uint32_t invalid_width = 257;
-        const auto second_thumbnail = corrupt.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - second.thumbnail_rgb.size() - 2 * sizeof(std::uint32_t);
+        const auto second_thumbnail = corrupt.size() - k_effect_bytes - 2 * sizeof(float) - 2 * sizeof(std::int32_t) - second.thumbnail_rgb.size() - 2 * sizeof(std::uint32_t);
         std::memcpy(corrupt.data() + second_thumbnail, &invalid_width, sizeof(invalid_width));
         bool rejected = false;
         try { (void)decode_settings(corrupt, ascan_path); } catch (const std::exception&) { rejected = true; }
         expect(rejected, "oversized thumbnails are rejected");
         auto v26 = encode_settings(path, ascan_path);
-        v26.resize(v26.size() - 2 * sizeof(float));
+        v26.resize(v26.size() - k_effect_bytes - 2 * sizeof(float));
         const std::uint32_t version26 = 26;
         std::memcpy(v26.data(), &version26, sizeof(version26));
         const auto legacy_roll = decode_settings(v26, ascan_path);
         expect(legacy_roll.camera_keyframes[0].roll == 0.F && legacy_roll.camera_keyframes[0].interpolation == 1,
                "version 26 keeps interpolation and defaults roll to zero");
         auto v25 = encode_settings(path, ascan_path);
-        v25.resize(v25.size() - 2 * sizeof(float) - 2 * sizeof(std::int32_t));
+        v25.resize(v25.size() - k_effect_bytes - 2 * sizeof(float) - 2 * sizeof(std::int32_t));
         const std::uint32_t version25 = 25;
         std::memcpy(v25.data(), &version25, sizeof(version25));
         const auto legacy_path = decode_settings(v25, ascan_path);
@@ -357,7 +360,7 @@ int main() {
                restored.gaussian_models[0].scale == 1.5F && restored.gaussian_models[0].rotation_degrees[0] == 15.F &&
                restored.gaussian_models[0].rotation_degrees[2] == 90.F, "Gaussian transform survives project round trip");
         auto legacy = bytes;
-        legacy.resize(legacy.size() - 3 * sizeof(float));
+        legacy.resize(legacy.size() - k_effect_bytes - 3 * sizeof(float));
         const std::uint32_t version = 24, min_reader = 1;
         std::memcpy(legacy.data(), &version, sizeof(version));
         std::memcpy(legacy.data() + sizeof(version), &min_reader, sizeof(min_reader));
@@ -366,6 +369,60 @@ int main() {
                old.gaussian_models[0].rotation_degrees[2] == 0.F, "Older project defaults to no Gaussian rotation");
     }
     settings.name = "demo";
+    {
+        Settings effect_project;
+        effect_project.camera_effect = camera_effect_demo(0.F, 8.F);
+        effect_project.camera_effect.point_size = 3.F;
+        effect_project.camera_effect.ring_scale = 2.F;
+        const auto bytes = encode_settings(effect_project, ascan_path);
+        const auto restored = decode_settings(bytes, ascan_path);
+        expect(restored.camera_effect.enabled && restored.camera_effect.start_time == 2.F &&
+            restored.camera_effect.rings_time == 4.F && restored.camera_effect.end_time == 6.F &&
+            restored.camera_effect.point_size == 3.F && restored.camera_effect.ring_scale == 2.F,
+            "effect track survives project round trip");
+        std::uint32_t minimum{}; std::memcpy(&minimum, bytes.data() + 4, sizeof(minimum));
+        expect(minimum == 28, "enabled effects require a reader that preserves them");
+        auto scan_project = effect_project;
+        scan_project.camera_effect.kind = 1; scan_project.camera_effect.scan_axis = 2;
+        scan_project.camera_effect.scan_reverse = true; scan_project.camera_effect.scan_softness = .05F;
+        scan_project.camera_effect.scan_glow = .8F;
+        const auto scan_bytes = encode_settings(scan_project, ascan_path);
+        const auto scan = decode_settings(scan_bytes, ascan_path).camera_effect;
+        std::memcpy(&minimum, scan_bytes.data() + 4, sizeof(minimum));
+        expect(minimum == 29 && scan.kind == 1 && scan.scan_axis == 2 && scan.scan_reverse &&
+            scan.scan_softness == .05F && scan.scan_glow == .8F, "scan reveal settings survive project round trip");
+        auto v28 = scan_bytes; v28.resize(v28.size() - k_scan_bytes);
+        const std::uint32_t version28 = 28;
+        std::memcpy(v28.data(), &version28, 4); std::memcpy(v28.data() + 4, &version28, 4);
+        expect(decode_settings(v28, ascan_path).camera_effect.kind == 0,
+            "version 28 effect tracks default to the original crossfade");
+        const auto before = camera_effect_weights(restored.camera_effect, 0.F);
+        const auto middle = camera_effect_weights(restored.camera_effect, 4.F);
+        const auto after = camera_effect_weights(restored.camera_effect, 8.F);
+        expect(before.points == 1.F && middle.rings == 1.F && after.splat == 1.F,
+            "effect holds the correct representation at clip boundaries");
+        for (int i = 0; i <= 800; ++i) {
+            const auto w = camera_effect_weights(restored.camera_effect, float(i) / 100.F);
+            expect(std::abs(w.points + w.rings + w.splat - 1.F) < 1e-6F &&
+                w.points >= 0.F && w.rings >= 0.F && w.splat >= 0.F,
+                "effect weights stay normalized throughout the shot");
+        }
+        auto legacy = bytes; legacy.resize(legacy.size() - k_effect_bytes);
+        const std::uint32_t version27 = 27, minimum1 = 1;
+        std::memcpy(legacy.data(), &version27, 4); std::memcpy(legacy.data() + 4, &minimum1, 4);
+        expect(!decode_settings(legacy, ascan_path).camera_effect.enabled,
+            "older projects open with effects disabled");
+        effect_project.camera_effect.end_time = 3.F;
+        bool rejected = false;
+        try { (void)encode_settings(effect_project, ascan_path); } catch (...) { rejected = true; }
+        expect(rejected, "unordered effect timings cannot be saved");
+        auto corrupt = bytes;
+        const float invalid_end = -1.F;
+        std::memcpy(corrupt.data() + corrupt.size() - k_effect_bytes + 1 + 2 * sizeof(float), &invalid_end, sizeof(float));
+        rejected = false;
+        try { (void)decode_settings(corrupt, ascan_path); } catch (...) { rejected = true; }
+        expect(rejected, "corrupted effect timings cannot be loaded");
+    }
     settings.image_directory = dir / "images";
     settings.dataset_source = dir / "colmap";
     settings.dataset_format = "colmap";

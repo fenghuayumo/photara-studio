@@ -1792,6 +1792,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                 target_compile_options(photara_studio_alignment_test PRIVATE /utf-8)
             endif()
             add_test(NAME photara.studio.alignment COMMAND photara_studio_alignment_test)
+            add_test(NAME photara.studio.camera_effect_render COMMAND photara_studio_alignment_test --camera-effect-render)
             add_executable(photara_model_download_test
                 tests/model_download_test.cpp ${PHOTARA_STUDIO_DIR}/model_download.cpp)
             target_include_directories(photara_model_download_test PRIVATE ${PHOTARA_STUDIO_DIR})

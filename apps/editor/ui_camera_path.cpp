@@ -1,6 +1,7 @@
 #include "ui.hpp"
 #include "camera_timeline.hpp"
 #include "camera_capture_path.hpp"
+#include "camera_effect_render.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
 #include "shortcuts.hpp"
@@ -385,7 +386,7 @@ std::string render_video_worker(
     std::vector<splat_render::ModelTransform> transforms, std::vector<Key> keys,
     OrbitCamera orbit, float near_clip, int width, int height, int fps, int codec,
     VisualizationMode view_mode, std::shared_ptr<const SparseScene> point_scene,
-    ViewOptions view_options,
+    ViewOptions view_options, photara::project::CameraEffectTrack effect,
     std::filesystem::path destination, std::filesystem::path ffmpeg,
     photara::vk::Device runtime, const std::shared_ptr<App::VideoRenderProgress>& progress) {
     try {
@@ -400,7 +401,7 @@ std::string render_video_worker(
         if (temp.path.empty()) throw std::runtime_error("Cannot create temporary video render directory");
         if (progress->cancel) return "Cancelled";
         splat_render::Renderer renderer;
-        if (view_mode != VisualizationMode::points) {
+        if (view_mode != VisualizationMode::points || effect.enabled) {
             renderer.attach(runtime);
             splat_render::GaussianCloud cloud;
             cloud.count = static_cast<std::uint32_t>(model->size());
@@ -418,12 +419,17 @@ std::string render_video_worker(
         }
         splat_render::DisplayOptions display;
         display.near_clip = near_clip;
+        if (effect.enabled) {
+            effect.validate();
+            point_scene = std::make_shared<SparseScene>(camera_effects::model_points(*model, transforms));
+        }
         const float duration = keys.back().time - keys.front().time;
         const int count = std::max(2, static_cast<int>(std::ceil(duration * fps)) + 1);
         progress->total = count;
         for (int i = 0; i < count; ++i) {
             if (progress->cancel) return "Cancelled";
-            const auto key = evaluate(keys, std::min(keys.back().time, keys.front().time + float(i) / fps));
+            const float frame_time = std::min(keys.back().time, keys.front().time + float(i) / fps);
+            const auto key = evaluate(keys, frame_time);
             orbit.target = {key.target[0], key.target[1], key.target[2]};
             orbit.yaw = key.yaw; orbit.pitch = key.pitch; orbit.roll = key.roll; orbit.distance = key.distance;
             orbit.fov_degrees = key.fov_degrees; orbit.ortho_height = key.ortho_height;
@@ -446,7 +452,10 @@ std::string render_video_worker(
             default: camera.model = splat_render::k_camera_pinhole; break;
             }
             photara::io::RgbImage image;
-            if (view_mode == VisualizationMode::points) {
+            if (effect.enabled) {
+                image = camera_effects::render(renderer, camera, orbit, *point_scene,
+                    view_options, effect, frame_time, display);
+            } else if (view_mode == VisualizationMode::points) {
                 image = render_point_cloud_image(*point_scene, orbit, view_options, width, height);
             } else {
                 splat_render::FrameTarget frame;
@@ -607,6 +616,138 @@ void timeline(App& app) {
     ImGui::SetCursorScreenPos({origin.x,origin.y+76.F});
 }
 
+void effect_track(App& app) {
+    auto& effect = app.camera_effect;
+    const auto& keys = app.camera_keyframes;
+    ImGui::PushID("camera_effect");
+    const bool usable = app.has_model && keys.size() >= 2 && keys.back().time - keys.front().time >= .08F;
+    ImGui::BeginDisabled(!usable && !effect.enabled);
+    bool enabled = effect.enabled;
+    if (ImGui::Checkbox(tr("Effect track"), &enabled)) {
+        if (enabled && !effect.enabled &&
+            (effect.start_time < keys.front().time || effect.end_time > keys.back().time)) {
+            const auto preset = photara::project::camera_effect_demo(keys.front().time, keys.back().time);
+            effect.start_time = preset.start_time; effect.rings_time = preset.rings_time; effect.end_time = preset.end_time;
+        }
+        effect.enabled = enabled;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Checkbox(tr("Preview effects"), &app.camera_effect_preview);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!usable);
+    if (ImGui::SmallButton(tr("Demo preset"))) {
+        const auto kind = effect.kind;
+        effect = photara::project::camera_effect_demo(keys.front().time, keys.back().time);
+        effect.kind = kind;
+        const auto forward = camera_recording::forward(capture(app.camera, 0.F));
+        std::copy(forward.begin(), forward.end(), effect.scan_direction);
+        app.camera_effect_preview = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::SmallButton(tr("Effect settings"))) ImGui::OpenPopup("settings");
+    if (ImGui::BeginPopup("settings")) {
+        const char* types[]{tr("Point Cloud > Rings > 3DGS"), tr("Scan reveal")};
+        if (ImGui::Combo(tr("Effect type"), &effect.kind, types, 2) && effect.kind == 1) {
+            const auto forward = camera_recording::forward(capture(app.camera, 0.F));
+            std::copy(forward.begin(), forward.end(), effect.scan_direction);
+        }
+        ImGui::TextDisabled("%s", tr(effect.kind == 1 ? "Drag the scan clip or its start/end handles." : "Drag the effect clip or its three timing handles."));
+        auto candidate = effect;
+        bool changed = false;
+        ImGui::SetNextItemWidth(180.F);
+        changed |= ImGui::DragFloat(tr("Transition start (s)"), &candidate.start_time, .05F, 0.F, 35999.F, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetNextItemWidth(180.F);
+        if (effect.kind == 0)
+            changed |= ImGui::DragFloat(tr("Rings time (s)"), &candidate.rings_time, .05F, .01F, 35999.5F, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetNextItemWidth(180.F);
+        changed |= ImGui::DragFloat(tr("Transition end (s)"), &candidate.end_time, .05F, .02F, 36000.F, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        const char* easing[]{tr("Linear"), tr("Smooth")};
+        changed |= ImGui::Combo(tr("Easing"), &candidate.easing, easing, 2);
+        changed |= ImGui::SliderFloat(tr("Point size"), &candidate.point_size, 1.F, 6.F, "%.1f px");
+        if (effect.kind == 0)
+            changed |= ImGui::SliderFloat(tr("Ring scale"), &candidate.ring_scale, .5F, 8.F, "%.2f");
+        else {
+            const char* axes[]{"X", "Y", "Z", tr("Captured view direction")};
+            changed |= ImGui::Combo(tr("Scan direction"), &candidate.scan_axis, axes, 4);
+            if (ImGui::Button(tr("Use current view direction"))) {
+                const auto forward = camera_recording::forward(capture(app.camera, 0.F));
+                std::copy(forward.begin(), forward.end(), candidate.scan_direction);
+                candidate.scan_axis = 3; changed = true;
+            }
+            changed |= ImGui::Checkbox(tr("Reverse scan"), &candidate.scan_reverse);
+            changed |= ImGui::SliderFloat(tr("Scan feather"), &candidate.scan_softness, .001F, .2F, "%.3f");
+            changed |= ImGui::SliderFloat(tr("Scan highlight"), &candidate.scan_glow, 0.F, 1.F, "%.2f");
+            candidate.rings_time = (candidate.start_time + candidate.end_time) * .5F;
+        }
+        if (changed) {
+            try { candidate.validate(); effect = candidate; }
+            catch (...) { ImGui::TextDisabled("%s", tr("Keep start, Rings and end times in order.")); }
+        }
+        ImGui::TextDisabled("%s", tr("Enabled effects are included in exported video."));
+        ImGui::EndPopup();
+    }
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = std::max(1.F, ImGui::GetContentRegionAvail().x);
+    const float left = origin.x + 80.F, right = std::max(left + 1.F, origin.x + width - 8.F);
+    const auto& view = app.camera_timeline_view;
+    const auto x_for = [&](float time) { return left + (right - left) * view.fraction(time); };
+    ImGui::SetCursorScreenPos({left, origin.y});
+    ImGui::InvisibleButton("lane", {right - left, 24.F});
+    if (effect.enabled && ImGui::IsItemActivated()) {
+        app.camera_effect_drag = 3;
+        app.camera_effect_drag_x = ImGui::GetIO().MousePos.x;
+        app.camera_effect_drag_origin = effect;
+        const float positions[]{x_for(effect.start_time), x_for(effect.rings_time), x_for(effect.end_time)};
+        for (int i = 0; i < 3; ++i)
+            if ((effect.kind == 0 || i != 1) && std::abs(ImGui::GetIO().MousePos.x - positions[i]) <= 7.F) app.camera_effect_drag = i;
+        if (app.camera_effect_drag == 3 &&
+            (ImGui::GetIO().MousePos.x < positions[0] || ImGui::GetIO().MousePos.x > positions[2]))
+            app.camera_effect_drag = -1;
+    }
+    if (effect.enabled && ImGui::IsItemActive() && app.camera_effect_drag >= 0) {
+        const auto& initial = app.camera_effect_drag_origin;
+        const float delta = (ImGui::GetIO().MousePos.x - app.camera_effect_drag_x) / (right - left) * view.duration;
+        auto candidate = initial;
+        if (app.camera_effect_drag == 0) candidate.start_time = std::clamp(initial.start_time + delta, 0.F,
+            std::max(0.F, (effect.kind == 1 ? initial.end_time - .02F : initial.rings_time) - .02F));
+        else if (app.camera_effect_drag == 1 && initial.end_time - initial.start_time >= .04F)
+            candidate.rings_time = std::clamp(initial.rings_time + delta, initial.start_time + .02F, initial.end_time - .02F);
+        else if (app.camera_effect_drag == 2) candidate.end_time = std::clamp(initial.end_time + delta,
+            std::min(36000.F, (effect.kind == 1 ? initial.start_time + .02F : initial.rings_time) + .02F), 36000.F);
+        else if (app.camera_effect_drag == 3) {
+            const float shift = std::clamp(delta, -initial.start_time, 36000.F - initial.end_time);
+            candidate.start_time += shift; candidate.rings_time += shift; candidate.end_time += shift;
+        }
+        if (effect.kind == 1) candidate.rings_time = (candidate.start_time + candidate.end_time) * .5F;
+        try { candidate.validate(); effect = candidate; } catch (...) {}
+    }
+    if (ImGui::IsItemDeactivated()) app.camera_effect_drag = -1;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(effect.kind == 1 ? "Drag the scan clip or its start/end handles." : "Drag the effect clip or its three timing handles."));
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddText({origin.x, origin.y + 4.F}, theme::u32(theme::text_muted), tr("Effects"));
+    draw->PushClipRect({left, origin.y}, {right, origin.y + 24.F}, true);
+    draw->AddRectFilled({left, origin.y + 2.F}, {right, origin.y + 22.F}, theme::u32(theme::surface_1), 3.F);
+    if (effect.enabled) {
+        const float a = x_for(effect.start_time), b = x_for(effect.rings_time), c = x_for(effect.end_time);
+        if (effect.kind == 1) draw->AddRectFilled({a, origin.y + 3.F}, {c, origin.y + 21.F}, theme::u32(theme::accent, .65F));
+        else {
+            draw->AddRectFilled({a, origin.y + 3.F}, {b, origin.y + 21.F}, theme::u32(theme::accent, .55F));
+            draw->AddRectFilled({b, origin.y + 3.F}, {c, origin.y + 21.F}, theme::u32(theme::warning, .55F));
+        }
+        for (float x : {a, c}) draw->AddLine({x, origin.y + 2.F}, {x, origin.y + 22.F}, theme::u32(theme::text_bright), 3.F);
+        if (effect.kind == 0) draw->AddLine({b, origin.y + 2.F}, {b, origin.y + 22.F}, theme::u32(theme::text_bright), 3.F);
+        draw->AddText({std::max(left, a) + 5.F, origin.y + 4.F}, theme::u32(theme::text_bright), tr(effect.kind == 1 ? "Scan reveal" : "Point Cloud > Rings > 3DGS"));
+    }
+    const float playhead = x_for(app.camera_path_time);
+    draw->AddLine({playhead, origin.y}, {playhead, origin.y + 24.F}, theme::u32(theme::accent), 1.5F);
+    draw->PopClipRect();
+    ImGui::SetCursorScreenPos({origin.x, origin.y + 28.F});
+    if (!usable) ImGui::TextDisabled("%s", tr("Load a Gaussian model and add at least two camera views."));
+    ImGui::PopID();
+}
+
 } // namespace
 
 void select_camera_path_keyframe(App& app, int index) {
@@ -629,6 +770,10 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
         if (render.job.valid()) throw std::runtime_error("A video render is already running");
         if (app.camera_path_recording.active || app.camera_path_recording.review) throw std::runtime_error("Stop camera path recording before rendering");
         const auto view_mode = app.view_mode;
+        const auto effect = app.camera_effect;
+        effect.validate();
+        if (effect.enabled && (!app.has_model || live_preview_active(app)))
+            throw std::runtime_error("Finish training or load a Gaussian model before rendering effects");
         if (view_mode != VisualizationMode::points && view_mode != VisualizationMode::splat &&
             view_mode != VisualizationMode::rings)
             throw std::runtime_error("Select Point Cloud, 3DGS, or Rings before rendering video");
@@ -653,7 +798,7 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
         std::shared_ptr<const photara::splat::GaussianModel> model;
         std::shared_ptr<const SparseScene> point_scene;
         std::vector<splat_render::ModelTransform> transforms;
-        if (view_mode == VisualizationMode::points) {
+        if (view_mode == VisualizationMode::points && !effect.enabled) {
             if (app.loading_scene || !app.scene.has_points())
                 throw std::runtime_error("Wait for a point cloud to load before rendering video");
             auto snapshot = std::make_shared<SparseScene>();
@@ -682,7 +827,7 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
         for (auto& key : keys) key.thumbnail_rgb.clear();
         const auto progress = std::make_shared<App::VideoRenderProgress>();
         render.progress = progress; render.output = output;
-        const auto runtime = view_mode == VisualizationMode::points
+        const auto runtime = view_mode == VisualizationMode::points && !effect.enabled
             ? photara::vk::Device{} : gpu::runtime();
         const auto orbit = app.camera;
         const auto near_clip = app.navigation_near_clip;
@@ -690,10 +835,10 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
         const auto view_options = app.view_options;
         render.job = std::async(std::launch::async,
             [model, transforms = std::move(transforms), keys = std::move(keys), orbit,
-             near_clip, width, height, fps, codec, view_mode, point_scene, view_options,
+             near_clip, width, height, fps, codec, view_mode, point_scene, view_options, effect,
              output, ffmpeg, runtime, progress]() mutable {
                 return render_video_worker(model, std::move(transforms), std::move(keys), orbit,
-                    near_clip, width, height, fps, codec, view_mode, point_scene, view_options,
+                    near_clip, width, height, fps, codec, view_mode, point_scene, view_options, effect,
                     output, ffmpeg, runtime, progress);
             });
         app.camera_path_playing = false;
@@ -739,6 +884,8 @@ void draw_video_render_settings(App& app) {
         ImGui::TextUnformatted(tr("Render video"));
         ImGui::Spacing();
         ImGui::TextDisabled("%s", tr("Export your camera path as an MP4 video."));
+        if (app.camera_effect.enabled)
+            ImGui::TextColored(theme::accent, "%s", tr(app.camera_effect.kind == 1 ? "Scan reveal" : "Point Cloud > Rings > 3DGS"));
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         constexpr int widths[]{3840, 2560, 1920, 1280};
         constexpr int heights[]{2160, 1440, 1080, 720};
@@ -849,6 +996,12 @@ void draw_video_render_settings(App& app) {
 }
 
 void clear_camera_path_thumbnails(App& app) {
+    app.camera_effect = {};
+    app.camera_effect_preview = true;
+    app.camera_effect_drag = -1;
+    app.effect_preview.texture.reset();
+    app.effect_preview.points = {};
+    app.effect_preview.source.clear();
     app.camera_path_recording = {};
     for (auto& item : app.camera_thumbnails) item.texture.reset();
     app.camera_thumbnails.clear(); app.camera_thumbnail_pending = -1; app.camera_key_delete_pending = -1;
@@ -990,6 +1143,30 @@ void draw_camera_path_panel(App& app) {
     if (icons::ghost_button("##path_actions", icons::Icon::more, {30.F, 30.F}, false, true, tr("Path tools")))
         ImGui::OpenPopup("##path_tools");
     if (ImGui::BeginPopup("##path_tools")) {
+        for (int kind = 0; kind < 2; ++kind) {
+            if (ImGui::MenuItem(tr(kind == 1 ? "Append 8s scan reveal shot" : "Append 8s reveal shot"), nullptr, false,
+                    app.has_model && keys.size() + 3 <= k_max_path_keys && (keys.empty() || keys.back().time + 10.F <= 36000.F))) {
+                const float first_time = keys.empty() ? 0.F : keys.back().time + 2.F;
+                const auto first = keys.size();
+                const auto pose = capture(app.camera, first_time);
+                for (int i = 0; i < 3; ++i) {
+                    auto key = pose; key.time += float(i) * 4.F;
+                    key.distance = std::max(.001F, pose.distance * (1.F - float(i) * .075F));
+                    key.interpolation = 0; keys.push_back(std::move(key));
+                }
+                app.camera_effect = photara::project::camera_effect_demo(first_time, first_time + 8.F);
+                app.camera_effect.kind = kind;
+                const auto forward = camera_recording::forward(pose);
+                std::copy(forward.begin(), forward.end(), app.camera_effect.scan_direction);
+                app.camera_effect_preview = true;
+                sync_thumbnails(app); select_key(app, static_cast<int>(first));
+                app.camera_thumbnail_pending = static_cast<int>(first);
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr("Adds a gentle push-in from the current view with reconstruction reveal."));
+        }
+        ImGui::Separator();
         const auto capture_count=std::count_if(app.scene.views.begin(),app.scene.views.end(),[](const auto& view){return camera_capture_path::usable(view);});
         if (ImGui::MenuItem(tr("From capture cameras"),nullptr,false,capture_count>=2)) {
             app.camera_capture_path.show_setup=true;
@@ -1057,6 +1234,7 @@ void draw_camera_path_panel(App& app) {
         ImGui::EndDisabled(); ImGui::End(); return;
     }
     timeline(app);
+    effect_track(app);
     ImGui::Separator();
     ImGui::Spacing();
     int selected = app.camera_key_selected;

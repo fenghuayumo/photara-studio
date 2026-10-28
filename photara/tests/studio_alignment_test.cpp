@@ -1,6 +1,7 @@
 #include "pipeline.hpp"
 #include "sparse_view.hpp"
 #include "camera_path_overlay.hpp"
+#include "camera_effect_render.hpp"
 #include "sfm/asfm.hpp"
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
@@ -18,6 +19,103 @@
 namespace {
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
+}
+void test_camera_effect_render() {
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    photara::splat::GaussianModel model;
+    model.sh_degree = 0;
+    model.means = Tensor::from_vector({0.F, 0.F, 0.F}, {1, 3}, Device::CPU);
+    model.log_scales = Tensor::from_vector({std::log(.25F), std::log(.25F), std::log(.04F)}, {1, 3}, Device::CPU);
+    model.quaternions = Tensor::from_vector({1.F, 0.F, 0.F, 0.F}, {1, 4}, Device::CPU);
+    model.opacity_logits = Tensor::from_vector({8.F}, {1, 1}, Device::CPU);
+    model.sh = Tensor::from_vector({1.F, -.5F, 0.F}, {1, 1, 3}, Device::CPU);
+    editor::OrbitCamera orbit;
+    orbit.target = {}; orbit.yaw = orbit.pitch = orbit.roll = 0.F; orbit.distance = 2.F;
+    const auto source = editor::make_preview_camera(orbit, 64, 48);
+    splat_render::Camera camera;
+    camera.world_to_camera = source.world_to_camera; camera.position = source.position;
+    camera.width = source.width; camera.height = source.height;
+    camera.fx = source.fx; camera.fy = source.fy; camera.cx = source.cx; camera.cy = source.cy;
+    photara::vk::DeviceRequest request; request.want.graphics = true;
+    auto device = photara::vk::Device::create(request);
+    splat_render::Renderer renderer; renderer.attach(device);
+    editor::ViewOptions options;
+    const auto effect = photara::project::camera_effect_demo(0.F, 8.F);
+    const auto points = editor::camera_effects::model_points(model);
+    require(points.points.size() == 1 && points.points[0].x == 0.F,
+        "effect points come from the rendered Gaussian model");
+    splat_render::ModelTransform placement; placement.end_index = 1; placement.translation[0] = .5F;
+    const auto placed = editor::camera_effects::model_points(model, std::span{&placement, 1});
+    require(std::abs(placed.world_point(0).x - .5F) < 1e-6F,
+        "effect centre points preserve Gaussian model placements");
+    for (auto method : {splat_render::RenderMethod::gaussian_3dgs, splat_render::RenderMethod::gaussian_3dgut}) {
+        splat_render::GaussianCloud cloud;
+        cloud.count = 1; cloud.sh_degree = 0; cloud.sh_bases = 1; cloud.render_method = method;
+        cloud.filter_mode = method == splat_render::RenderMethod::gaussian_3dgut
+            ? splat_render::FilterMode::mip_2d : splat_render::FilterMode::classic;
+        cloud.means = model.means.ptr<float>(); cloud.log_scales = model.log_scales.ptr<float>();
+        cloud.quaternions = model.quaternions.ptr<float>(); cloud.opacity_logits = model.opacity_logits.ptr<float>();
+        cloud.sh = model.sh.ptr<float>();
+        require(renderer.upload(cloud, "effect-render-test"), "effect model uploads");
+        const auto frame = [&](float time) {
+            return editor::camera_effects::render(renderer, camera, orbit, points, options, effect, time, {});
+        };
+        const auto dot = frame(0.F), rings = frame(4.F), full = frame(8.F);
+        options.point_size = effect.point_size;
+        require(dot.pixels == editor::render_point_cloud_image(points, orbit, options, 64, 48).pixels,
+            "reveal starts with the corresponding Gaussian centres");
+        require(dot.pixels != rings.pixels && rings.pixels != full.pixels,
+            "effect endpoints render distinct representations");
+        require(frame(3.F).pixels == editor::camera_effects::blend(dot, rings, .5F).pixels &&
+                frame(5.F).pixels == editor::camera_effects::blend(rings, full, .5F).pixels,
+            "both 3DGS and 3DGUT export transitions at the timeline weights");
+        auto scan = effect; scan.kind = 1; scan.scan_axis = 0;
+        const auto scan_frame = [&](float time) {
+            return editor::camera_effects::render(renderer, camera, orbit, points, options, scan, time, {});
+        };
+        require(scan_frame(0.F).pixels == dot.pixels && scan_frame(8.F).pixels == full.pixels,
+            "scan reveal preserves exact start and end representations");
+        const auto partial = scan_frame(4.F);
+        require(renderer.depth_frame().depth.size() == 64 * 48 &&
+            renderer.depth_frame().alpha.size() == 64 * 48 &&
+            partial.pixels != dot.pixels && partial.pixels != full.pixels,
+            "3DGS and 3DGUT scan reveal render RGB with surface depth");
+    }
+}
+
+void test_scan_reveal_mask() {
+    splat_render::Camera camera;
+    camera.width = 2; camera.height = 1; camera.fx = camera.fy = 1.F;
+    camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    camera.cx = camera.cy = 0.F;
+    photara::io::RgbImage full, dots;
+    full.width = dots.width = 2; full.height = dots.height = 1;
+    full.pixels = {255,0,0,255,0,0}; dots.pixels = {0,0,255,0,0,255};
+    splat_render::Renderer::DepthFrame depth;
+    depth.width = 2; depth.height = 1; depth.depth = {1.F,1.F}; depth.alpha = {1.F,1.F};
+    editor::camera_effects::ScanPlane plane{{1.F,0.F,0.F}, .5F, .01F};
+    const auto left = editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F);
+    require(left.pixels == std::vector<std::uint8_t>{255,0,0,0,0,255},
+        "scan reveals surfaces behind the world plane and keeps points ahead");
+    plane.normal[0] = -1.F; plane.position = -.5F;
+    require(editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F).pixels ==
+            std::vector<std::uint8_t>{0,0,255,255,0,0}, "reverse scan reveals the opposite surface first");
+    plane.normal[0] = 1.F; plane.position = 10.5F;
+    camera.position[0] = 10.F; camera.world_to_camera[12] = -10.F;
+    require(editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 0.F).pixels == left.pixels,
+        "scan mask uses world coordinates including camera translation");
+    plane.position = 10.F;
+    const auto glow = editor::camera_effects::scan_composite(full, dots, depth, camera, plane, .5F, 1.F);
+    require(glow.pixels[0] == 38 && glow.pixels[1] == 217 && glow.pixels[2] == 255,
+        "scan intersection carries a bounded cyan highlight");
+    editor::SparseScene points; points.points = {{-1,0,0},{1,0,0}};
+    auto effect = photara::project::camera_effect_demo(0.F, 8.F); effect.kind = 1; effect.scan_axis = 0;
+    const auto forward = editor::camera_effects::scan_plane(points, effect, .5F);
+    effect.scan_reverse = true;
+    const auto backward = editor::camera_effects::scan_plane(points, effect, .5F);
+    require(forward.normal[0] == 1.F && backward.normal[0] == -1.F && std::abs(forward.position) < 1e-6F,
+        "scan bounds and direction remain independent of the viewing camera");
 }
 void test_point_cloud_video_frames() {
     editor::SparseScene scene;
@@ -280,12 +378,16 @@ void test_camera_markers() {
 }
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--camera-effect-render") {
+            test_camera_effect_render(); return 0;
+        }
         if (argc == 3) {
             test_studio_image_qa_dataset(argv[1], argv[2]);
             return 0;
         }
         if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
         test_point_cloud_video_frames();
+        test_scan_reveal_mask();
         test_studio_image_qa_projection();
         test_camera_markers();
         test_camera_navigation();

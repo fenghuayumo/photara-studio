@@ -194,6 +194,18 @@ struct App {
     // Viewport-only distance in scene units; does not affect training rays.
     float navigation_near_clip{0.01F};
     std::vector<photara::project::CameraKeyframe> camera_keyframes;
+    photara::project::CameraEffectTrack camera_effect;
+    bool camera_effect_preview{true};
+    int camera_effect_drag{-1};
+    float camera_effect_drag_x{};
+    photara::project::CameraEffectTrack camera_effect_drag_origin;
+    struct CameraEffectPreview {
+        std::string source;
+        std::uint64_t revision{};
+        bool baked{};
+        SparseScene points;
+        gpu::PreviewTexture texture;
+    } effect_preview;
     int camera_key_selected{-1};
     float camera_path_time{};
     bool camera_path_playing{};
@@ -237,6 +249,8 @@ struct App {
         OrbitCamera camera;
         ViewOptions options;
         bool frame_ready{},live_frame{};
+        bool effect_requested{};
+        std::shared_ptr<photara::io::RgbImage> effect_frame;
     } image_export;
     ViewportGizmoState gizmo;
     ReconstructionBox reconstruction_box;

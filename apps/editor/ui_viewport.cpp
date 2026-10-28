@@ -5,6 +5,7 @@
 #include "viewport_gizmo.hpp"
 #include "image_qa_projection.hpp"
 #include "file_dialogs.hpp"
+#include "camera_effect_render.hpp"
 
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
@@ -22,6 +23,13 @@
 
 namespace editor {
 using i18n::tr;
+
+bool camera_effect_view_active(const App& app) {
+    return app.camera_effect.enabled && app.camera_effect_preview && app.has_model &&
+        app.camera_keyframes.size() >= 2 && !live_preview_active(app) &&
+        !app.camera_path_recording.active && !app.camera_path_recording.review &&
+        app.view_mode != VisualizationMode::mesh;
+}
 
 constexpr float k_view_rail_pad = 10.F;
 // The status badge occupies y=14..44; leave 10px before the tool rail.
@@ -145,8 +153,8 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
         const bool live_image = live_preview_active(app) &&
             (!point_image || live_point_view) && app.preview.display.descriptor &&
             gpu::consumed_timeline_value()>0;
-        const bool can_capture = point_image ? live_image || (app.scene.has_points() && !app.loading_scene)
-            : gaussian_image && ((app.has_model && app.splat_renderer && app.splat_renderer->splat_count()>0) || live_image);
+        const bool can_capture = camera_effect_view_active(app) || (point_image ? live_image || (app.scene.has_points() && !app.loading_scene)
+            : gaussian_image && ((app.has_model && app.splat_renderer && app.splat_renderer->splat_count()>0) || live_image));
         const char* image_hint=can_capture ? "Render image" : point_image
             ? "Load a point cloud before rendering an image." : gaussian_image
             ? "Wait for the current 3DGS or Rings preview to be ready."
@@ -167,10 +175,12 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
                 app.image_export.mode=app.view_mode;
                 app.image_export.camera=app.camera;
                 app.image_export.options=app.view_options;
+                app.image_export.effect_requested=camera_effect_view_active(app);
             }
         }
         ImGui::SameLine(0.F, 2.F);
-        const bool video_scene_ready = app.view_mode == VisualizationMode::points
+        const bool video_scene_ready = app.camera_effect.enabled ? app.has_model && app.view_mode != VisualizationMode::mesh
+            : app.view_mode == VisualizationMode::points
             ? app.scene.has_points() && !app.loading_scene
             : app.has_model && (app.view_mode == VisualizationMode::splat ||
                                 app.view_mode == VisualizationMode::rings);
@@ -1556,7 +1566,7 @@ splat_render::Camera preview_camera_for_orbit(
 
 bool draw_splat_image(
     App& app, const SplatPreviewCamera& preview, ImTextureID& texture,
-    const OrbitCamera* orbit = nullptr, const bool rings = false) {
+    const OrbitCamera* orbit = nullptr, const bool rings = false, const bool effect_pass = false) {
     texture = ImTextureID{};
     if (!ensure_splat_renderer(app)) return false;
     if (!app.gaussian_models.empty()) {
@@ -1569,7 +1579,7 @@ bool draw_splat_image(
     splat_render::Camera camera = orbit == nullptr
         ? preview_camera_from(preview)
         : preview_camera_for_orbit(preview, *orbit);
-    if (rings) camera.ring_sigma = app.view_options.ring_scale;
+    if (rings) camera.ring_sigma = effect_pass ? app.camera_effect.ring_scale : app.view_options.ring_scale;
     const std::uint32_t width = std::max(1U, camera.width);
     const std::uint32_t height = std::max(1U, camera.height);
     if (!app.splat_renderer->has_frame_size(width, height)) {
@@ -1582,14 +1592,15 @@ bool draw_splat_image(
     // Compare/error remain RGB even if the 3D view uses a diagnostic channel.
     if (!orbit && app.image_qa.mode == ImageQaMode::depth) shading = splat_render::Shading::depth;
     if (!orbit && app.image_qa.mode == ImageQaMode::normal) shading = splat_render::Shading::normal;
-    if (orbit && !rings && diagnostic_channels_available(app)) {
+    if (orbit && !rings && !effect_pass && diagnostic_channels_available(app)) {
         if (app.display_channel == DisplayChannel::depth) shading = splat_render::Shading::depth;
         if (app.display_channel == DisplayChannel::normal) shading = splat_render::Shading::normal;
     }
     auto display = orbit ? app.display_options : image_qa_display_options(app);
+    if (effect_pass) display = {};
     if (orbit) {
         display.near_clip = app.navigation_near_clip;
-        app.splat_edit.apply_depth_preview(display);
+        if (!effect_pass) app.splat_edit.apply_depth_preview(display);
     }
     if (!app.splat_renderer->draw(camera, target, shading, display))
         return false;
@@ -1619,6 +1630,67 @@ bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
     return true;
 }
 
+bool draw_camera_effect_preview(App& app, const SplatPreviewCamera& preview,
+    const splat_render::Camera& camera, ImDrawList* draw, ImVec2 min, ImVec2 max) {
+    if (!ensure_splat_renderer(app)) return false;
+    try {
+        auto& cache = app.effect_preview;
+        const bool local_model = app.composed_model && !app.gaussian_preview_baked && !app.splat_edit.dirty();
+        if (cache.source != app.splat_renderer->source_key() ||
+            cache.revision != app.splat_edit.edit_revision() || cache.baked != !local_model) {
+            photara::splat::GaussianModel edited;
+            if (!local_model && !app.splat_edit.copy_model(edited)) return false;
+            cache.points = camera_effects::model_points(local_model ? *app.composed_model : edited);
+            cache.source = app.splat_renderer->source_key();
+            cache.revision = app.splat_edit.edit_revision(); cache.baked = !local_model;
+        }
+        cache.points.set_model_transforms(local_model
+            ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
+            : std::span<const splat_render::ModelTransform>{});
+        if (!app.splat_renderer->set_model_transforms(local_model
+                ? std::span<const splat_render::ModelTransform>{app.gaussian_placements}
+                : std::span<const splat_render::ModelTransform>{})) return false;
+        auto options = app.view_options;
+        options.point_size = app.camera_effect.point_size;
+        options.ring_scale = app.camera_effect.ring_scale;
+        options.colour_by_depth = false; options.show_cloud = true;
+        // Still-image exports use the same two passes at the preview camera.
+        if (!app.image_export.path.empty() || app.camera_effect.kind == 1) {
+            splat_render::DisplayOptions display; display.near_clip = app.navigation_near_clip;
+            auto image = camera_effects::render(*app.splat_renderer, camera, app.camera,
+                cache.points, options, app.camera_effect, app.camera_path_time, display);
+            cache.texture.upload(image);
+            if (!app.image_export.path.empty()) {
+                app.image_export.effect_frame = std::make_shared<photara::io::RgbImage>(std::move(image));
+                app.image_export.frame_ready = true;
+            }
+            draw->AddImage(reinterpret_cast<ImTextureID>(cache.texture.descriptor), min, max);
+            return true;
+        }
+        const auto weights = photara::project::camera_effect_weights(app.camera_effect, app.camera_path_time);
+        if (weights.points > 0.F) {
+            cache.texture.upload(render_point_cloud_image(cache.points, app.camera, options, camera.width, camera.height));
+            draw->AddImage(reinterpret_cast<ImTextureID>(cache.texture.descriptor), min, max);
+        }
+        if (weights.rings > 0.F) {
+            ImTextureID texture;
+            if (!draw_splat_image(app, preview, texture, &app.camera, true, true)) return false;
+            draw->AddImage(texture, min, max, {0,0}, {1,1}, IM_COL32(255,255,255,
+                static_cast<int>(std::lround((weights.points > 0.F ? weights.rings : 1.F) * 255.F))));
+        }
+        if (weights.splat > 0.F) {
+            ImTextureID texture;
+            if (!draw_splat_image(app, preview, texture, &app.camera, false, true)) return false;
+            draw->AddImage(texture, min, max, {0,0}, {1,1}, IM_COL32(255,255,255,
+                static_cast<int>(std::lround(weights.splat * 255.F))));
+        }
+        return true;
+    } catch (const std::exception& error) {
+        set_message(app, error.what(), theme::danger);
+        return false;
+    }
+}
+
 void draw_splat_render_tab(
     App& app, const ImVec2 min, const ImVec2 max, const bool rings) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -1637,15 +1709,22 @@ void draw_splat_render_tab(
     std::uint32_t raster_w = app.preview_raster_width;
     std::uint32_t raster_h = app.preview_raster_height;
     fit_preview_raster(max.x - min.x, max.y - min.y, false, raster_w, raster_h);
+    const bool effect = camera_effect_view_active(app);
+    if (effect && std::max(raster_w, raster_h) > 960) {
+        const float scale = 960.F / std::max(raster_w, raster_h);
+        raster_w = std::max(1U, static_cast<unsigned>(std::lround(raster_w * scale)));
+        raster_h = std::max(1U, static_cast<unsigned>(std::lround(raster_h * scale)));
+    }
     const SplatPreviewCamera preview =
         make_preview_camera(app.camera, raster_w, raster_h);
     const splat_render::Camera preview_camera = preview_camera_for_orbit(preview, app.camera);
     ImTextureID texture{};
-    const bool shown = draw_splat_image(app, preview, texture, &app.camera, rings);
+    const bool shown = effect ? draw_camera_effect_preview(app, preview, preview_camera, draw, min, max)
+        : draw_splat_image(app, preview, texture, &app.camera, rings);
     if (shown) {
-        draw->AddImage(texture, min, max);
-        draw_display_legend(app, min, max);
-        if (!rings && app.display_channel == DisplayChannel::color)
+        if (!effect) draw->AddImage(texture, min, max);
+        if (!effect) draw_display_legend(app, min, max);
+        if (!effect && !rings && app.display_channel == DisplayChannel::color)
             capture_camera_path_thumbnail(app);
     } else {
         const std::string& failure = app.splat_renderer->failure();
@@ -1672,13 +1751,13 @@ void draw_splat_render_tab(
         app.preview_follow_view = false;
     write_working_subject_bounds(app);
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
-    app.splat_edit.draw_overlay(draw, min, max, preview_camera);
-    const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max, preview_camera);
+    if (!effect) app.splat_edit.draw_overlay(draw, min, max, preview_camera);
+    const bool over_toolbar = !effect && app.splat_edit.draw_toolbar(app, min, max, preview_camera);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
-    if (app.splat_edit.handle_depth_shortcuts(preview_camera, viewport_input) ||
-        app.splat_edit.consume_alt_wheel(viewport_input))
+    if (!effect && (app.splat_edit.handle_depth_shortcuts(preview_camera, viewport_input) ||
+        app.splat_edit.consume_alt_wheel(viewport_input)))
         ImGui::GetIO().MouseWheel = 0.F;
-    const bool armed = app.splat_edit.tool_armed();
+    const bool armed = !effect && app.splat_edit.tool_armed();
     if (!armed &&
         !handle_viewport_double_click(app, viewport_input, stats, min, max))
         update_orbit_camera(
@@ -1689,7 +1768,7 @@ void draw_splat_render_tab(
     if (!armed && viewport_input && !ImGui::GetIO().WantTextInput &&
         ImGui::IsKeyPressed(ImGuiKey_F, false))
         frame_reconstruction(app);
-    app.splat_edit.handle_pointer(
+    if (!effect) app.splat_edit.handle_pointer(
         app, min, max, preview_camera, hovered && !gizmo_captures, over_toolbar);
     if (app.camera.interacting ||
         (viewport_input && ImGui::GetIO().MouseWheel != 0.F))
@@ -1697,7 +1776,7 @@ void draw_splat_render_tab(
     handle_preview_view_input(app, viewport_input);
 
     draw_viewport_overlay(
-        draw, min, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
+        draw, min, effect ? tr(app.camera_effect.kind == 1 ? "Scan reveal" : "Reconstruction reveal") : rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
         shown ? theme::success : theme::warning);
     char readout[192];
     const bool simplified = app.splat_simplify.applied &&
@@ -1789,7 +1868,12 @@ void finish_viewport_image_export(App& app,ImVec2 min,ImVec2 max) {
     const auto path=std::exchange(request.path,{});
     try {
         photara::io::RgbImage image;
-        if (request.live_frame) {
+        if (request.effect_requested && !request.effect_frame)
+            throw std::runtime_error(tr("No rendered image is available for the current view."));
+        if (request.effect_frame) {
+            image = std::move(*request.effect_frame);
+            request.effect_frame.reset();
+        } else if (request.live_frame) {
             if (!request.frame_ready) throw std::runtime_error(tr("No rendered image is available for the current view."));
             if (!app.preview.display.download_rgb(image)) throw std::runtime_error(tr("Cannot read the current preview image."));
         } else if (request.mode==VisualizationMode::points) {
@@ -1989,6 +2073,9 @@ void draw_viewport_panel(App& app) {
         sync_qa_selection_to_preview(app, previous);
         ensure_dataset_scene_loaded(app);
         ensure_qa_preview(app);
+    } else if (camera_effect_view_active(app)) {
+        draw_splat_render_tab(app, view_min, view_max, false);
+        draw_scene_toggle_rail(app, view_min);
     } else if (app.view_mode == VisualizationMode::mesh) {
         draw_sparse_tab(app, view_min, view_max);
         draw_edit_rail(app, view_min);

@@ -41,6 +41,8 @@ struct DisplayOptions {
     bool selection_depth_enabled{};
     float selection_depth_near{};
     float selection_depth_far{100.F};
+    // Forward-only geometry readback for world-space camera effects.
+    bool capture_depth{};
     bool operator==(const DisplayOptions&) const = default;
 };
 
@@ -117,6 +119,11 @@ public:
         std::vector<std::uint8_t>& rgb, std::uint32_t& width,
         std::uint32_t& height, std::uint32_t max_long_edge = 0);
 
+    struct DepthFrame {
+        std::uint32_t width{}, height{};
+        std::vector<float> depth, alpha;
+    };
+    [[nodiscard]] const DepthFrame& depth_frame() const noexcept { return depth_frame_; }
     [[nodiscard]] const std::string& source_key() const noexcept { return source_key_; }
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     [[nodiscard]] std::uint32_t splat_count() const noexcept { return count_; }
@@ -245,6 +252,7 @@ private:
     DisplayOptions display_options_{};
     DisplayOptions cached_display_{};
     std::array<float, 2> depth_range_{0.F, 1.F};
+    DepthFrame depth_frame_;
 };
 
 }  // namespace splat_render

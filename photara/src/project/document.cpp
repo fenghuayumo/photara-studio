@@ -67,7 +67,7 @@ std::vector<std::uint8_t> encode_settings(
     const bool has_rotation = std::any_of(settings.gaussian_models.begin(), settings.gaussian_models.end(), [](const auto& model) {
         return model.rotation_degrees[0] != 0.F || model.rotation_degrees[1] != 0.F || model.rotation_degrees[2] != 0.F;
     });
-    writer.value(has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    writer.value(settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 29U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -216,6 +216,20 @@ std::vector<std::uint8_t> encode_settings(
         if (!std::isfinite(key.roll)) throw std::invalid_argument("Invalid camera roll");
         writer.value(key.roll);
     }
+    settings.camera_effect.validate();
+    writer.value(static_cast<std::uint8_t>(settings.camera_effect.enabled));
+    writer.value(settings.camera_effect.start_time);
+    writer.value(settings.camera_effect.rings_time);
+    writer.value(settings.camera_effect.end_time);
+    writer.value(settings.camera_effect.point_size);
+    writer.value(settings.camera_effect.ring_scale);
+    writer.value(static_cast<std::int32_t>(settings.camera_effect.easing));
+    writer.value(static_cast<std::int32_t>(settings.camera_effect.kind));
+    writer.value(static_cast<std::int32_t>(settings.camera_effect.scan_axis));
+    writer.value(static_cast<std::uint8_t>(settings.camera_effect.scan_reverse));
+    writer.value(settings.camera_effect.scan_softness);
+    writer.value(settings.camera_effect.scan_glow);
+    for (float v : settings.camera_effect.scan_direction) writer.value(v);
     return writer.take();
 }
 
@@ -557,6 +571,25 @@ Settings decode_settings(
     if (version >= 27) for (auto& key : settings.camera_keyframes) {
         key.roll = reader.value<float>();
         if (!std::isfinite(key.roll)) throw std::invalid_argument("Invalid camera roll");
+    }
+    if (version >= 28) {
+        settings.camera_effect.enabled = reader.value<std::uint8_t>() != 0;
+        settings.camera_effect.start_time = reader.value<float>();
+        settings.camera_effect.rings_time = reader.value<float>();
+        settings.camera_effect.end_time = reader.value<float>();
+        settings.camera_effect.point_size = reader.value<float>();
+        settings.camera_effect.ring_scale = reader.value<float>();
+        settings.camera_effect.easing = reader.value<std::int32_t>();
+        settings.camera_effect.validate();
+    }
+    if (version >= 29) {
+        settings.camera_effect.kind = reader.value<std::int32_t>();
+        settings.camera_effect.scan_axis = reader.value<std::int32_t>();
+        settings.camera_effect.scan_reverse = reader.value<std::uint8_t>() != 0;
+        settings.camera_effect.scan_softness = reader.value<float>();
+        settings.camera_effect.scan_glow = reader.value<float>();
+        for (float& v : settings.camera_effect.scan_direction) v = reader.value<float>();
+        settings.camera_effect.validate();
     }
     std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
         [](const auto& a, const auto& b) { return a.time < b.time; });
