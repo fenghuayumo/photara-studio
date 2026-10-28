@@ -5,6 +5,7 @@
 #include "project/document.hpp"
 #include "splat/checkpoint.hpp"
 #include "splat/trainer.hpp"
+#include "io/image.hpp"
 #include "studio_image_qa_test.hpp"
 #include "../src/splat/checkpoint.hpp"
 #include <filesystem>
@@ -16,6 +17,80 @@
 namespace {
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
+}
+void test_point_cloud_video_frames() {
+    editor::SparseScene scene;
+    scene.points = {{0.F, 0.F, 0.F}};
+    scene.colours = {IM_COL32(255, 0, 0, 255)};
+    editor::OrbitCamera camera;
+    camera.target = {}; camera.yaw = camera.pitch = camera.roll = 0.F; camera.distance = 2.F;
+    editor::ViewOptions options;
+    options.show_grid = options.show_axes = options.show_views =
+        options.show_trajectory = options.show_region = false;
+    const auto red_count = [](const photara::io::RgbImage& image) {
+        std::size_t count = 0;
+        for (std::size_t pixel = 0; pixel < image.pixels.size(); pixel += 3)
+            count += image.pixels[pixel] == 255 && image.pixels[pixel + 1] == 0 && image.pixels[pixel + 2] == 0;
+        return count;
+    };
+    // No ImGui context, Gaussian model or GPU runtime is needed for these frames.
+    for (float size : {2.F, 4.F, 6.F}) {
+        options.point_size = size;
+        const auto image = editor::render_point_cloud_image(scene, camera, options, 64, 48);
+        require(image.width == 64 && image.height == 48 && red_count(image) == std::size_t(size * size),
+            "point-cloud export uses the viewport's square point diameter");
+    }
+    options.point_size = 4.F;
+    for (auto projection : {editor::EditorProjection::perspective, editor::EditorProjection::orthographic,
+                            editor::EditorProjection::fisheye, editor::EditorProjection::panorama}) {
+        camera.projection = projection;
+        require(red_count(editor::render_point_cloud_image(scene, camera, options, 64, 48)) == 16,
+            "point-cloud frames support every camera-path projection");
+    }
+    camera.projection = editor::EditorProjection::perspective;
+    const auto visible = editor::render_point_cloud_image(scene, camera, options, 64, 48);
+    options.show_cloud = false;
+    require(red_count(editor::render_point_cloud_image(scene, camera, options, 64, 48)) == 0,
+        "point-cloud visibility is preserved in export");
+    options.show_cloud = true;
+    scene.points.push_back({.5F, 0.F, .2F}); scene.colours.push_back(IM_COL32(0, 255, 0, 255));
+    options.point_budget = 1;
+    require(editor::render_point_cloud_image(scene, camera, options, 64, 48).pixels == visible.pixels,
+        "export samples the same point budget as the viewport");
+    options.point_budget = 160000;
+    options.colour_by_depth = true;
+    const auto depth = editor::render_point_cloud_image(scene, camera, options, 64, 48);
+    require(red_count(depth) == 0 && depth.pixels != visible.pixels,
+        "depth colouring replaces source RGB in point-cloud frames");
+    auto* context = ImGui::CreateContext();
+    auto& io = ImGui::GetIO(); io.DisplaySize = {800, 600}; io.DeltaTime = 1.F / 60.F;
+    unsigned char* pixels; int width, height; io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    ImGui::NewFrame(); ImGui::Begin("point-cloud frame parity");
+    auto* draw = ImGui::GetWindowDrawList();
+    const int begin = draw->VtxBuffer.Size;
+    editor::SceneRenderer renderer;
+    const auto stats = renderer.draw(draw, {0, 0}, {64, 48}, scene, camera, options, false);
+    require(stats.drawn_points == 2 && draw->VtxBuffer.Size == begin + 8,
+        "viewport and exported frame use the same projected points");
+    for (int index = 0; index < 2; ++index) {
+        const auto& vertex = draw->VtxBuffer[begin + index * 4];
+        const unsigned x = static_cast<unsigned>(std::ceil(vertex.pos.x + 1.F));
+        const unsigned y = static_cast<unsigned>(std::ceil(vertex.pos.y + 1.F));
+        const std::size_t offset = (y * 64U + x) * 3U;
+        require(depth.pixels[offset] == ((vertex.col >> IM_COL32_R_SHIFT) & 255U) &&
+                depth.pixels[offset + 1] == ((vertex.col >> IM_COL32_G_SHIFT) & 255U) &&
+                depth.pixels[offset + 2] == ((vertex.col >> IM_COL32_B_SHIFT) & 255U),
+            "viewport and video depth ramp colours agree");
+    }
+    ImGui::End(); ImGui::EndFrame(); ImGui::DestroyContext(context);
+    options.colour_by_depth = false;
+    scene.points.resize(1); scene.colours.resize(1);
+    editor::SparseScene::Placement placement;
+    placement.transform.end_index = 1; placement.transform.translation = {.4F, 0.F, 0.F};
+    scene.placements = {placement};
+    const auto placed = editor::render_point_cloud_image(scene, camera, options, 64, 48);
+    require(red_count(placed) == 16 && placed.pixels != visible.pixels,
+        "export keeps the current point-cloud placement");
 }
 void test_camera_navigation() {
     auto* context = ImGui::CreateContext();
@@ -201,6 +276,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc != 1) throw std::runtime_error("Usage: studio_alignment_test [native-sfm.bin image-directory]");
+        test_point_cloud_video_frames();
         test_studio_image_qa_projection();
         test_camera_markers();
         test_camera_navigation();

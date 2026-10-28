@@ -162,8 +162,14 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
             }
         }
         ImGui::SameLine(0.F, 2.F);
-        const bool can_video = can_capture && app.camera_keyframes.size() >= 2 &&
-            !app.video_render.job.valid() && !live_preview_active(app);
+        const bool video_scene_ready = app.view_mode == VisualizationMode::points
+            ? app.scene.has_points() && !app.loading_scene
+            : app.has_model && (app.view_mode == VisualizationMode::splat ||
+                                app.view_mode == VisualizationMode::rings);
+        const bool can_video = video_scene_ready &&
+            app.camera_keyframes.size() >= 2 &&
+            !app.video_render.job.valid() && !live_preview_active(app) &&
+            !app.camera_path_recording.active && !app.camera_path_recording.review;
         if (render_toolbar_button("##render_video", icons::Icon::render_video,
             can_video, tr(can_video ? "Render video" : "Add at least two camera views to render video")))
             app.video_render.show_settings = true;

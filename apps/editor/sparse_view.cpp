@@ -655,6 +655,37 @@ ImU32 depth_ramp(const float t) {
     return ImGui::ColorConvertFloat4ToU32(colour);
 }
 
+void collect_cloud_points(
+    const SparseScene& scene, const ViewFrame& frame,
+    const ViewOptions& options, std::vector<ProjectedCloudPoint>& points) {
+    points.clear();
+    if (!options.show_cloud || scene.points.empty()) return;
+    const std::size_t stride = std::max<std::size_t>(
+        1, scene.points.size() / std::max(1, options.point_budget) + 1);
+    points.reserve(scene.points.size() / stride + 1);
+    const bool source_colours = !options.colour_by_depth &&
+        scene.colours.size() == scene.points.size();
+    float near_depth = std::numeric_limits<float>::max(), far_depth = 0.F;
+    for (std::size_t index = 0; index < scene.points.size(); index += stride) {
+        ImVec2 screen;
+        float depth{};
+        if (!project(frame, scene.world_point(index), screen, depth) ||
+            !std::isfinite(screen.x) || !std::isfinite(screen.y) || !std::isfinite(depth) ||
+            screen.x < frame.min.x || screen.x > frame.min.x + frame.width ||
+            screen.y < frame.min.y || screen.y > frame.min.y + frame.height)
+            continue;
+        points.push_back({screen.x, screen.y, depth,
+            source_colours ? scene.colours[index] : 0U});
+        near_depth = std::min(near_depth, depth);
+        far_depth = std::max(far_depth, depth);
+    }
+    if (!source_colours) {
+        const float span = std::max(1e-6F, far_depth - near_depth);
+        for (auto& point : points)
+            point.colour = depth_ramp(1.F - (point.depth - near_depth) / span);
+    }
+}
+
 struct ProjectedRing {
     ImVec2 centre;
     ImVec2 radius;
@@ -2591,6 +2622,52 @@ bool project_world_to_screen(
     return project(build_frame(camera, min, max), world, screen, depth);
 }
 
+photara::io::RgbImage render_point_cloud_image(
+    const SparseScene& scene, const OrbitCamera& camera,
+    const ViewOptions& options, const unsigned width, const unsigned height) {
+    if (width == 0 || height == 0 || width > 8192 || height > 8192 ||
+        !std::isfinite(options.point_size))
+        throw std::invalid_argument("Invalid point-cloud frame dimensions or point size");
+    photara::io::RgbImage image;
+    image.width = width; image.height = height;
+    image.pixels.resize(static_cast<std::size_t>(width) * height * 3U);
+    // Match the sparse viewport's vertical background gradient.
+    for (unsigned y = 0; y < height; ++y) {
+        const float t = (static_cast<float>(y) + .5F) / height;
+        const std::array<std::uint8_t, 3> colour{
+            static_cast<std::uint8_t>(std::lround(9.F + 9.F * t)),
+            static_cast<std::uint8_t>(std::lround(11.F + 11.F * t)),
+            static_cast<std::uint8_t>(std::lround(16.F + 16.F * t))};
+        for (unsigned x = 0; x < width; ++x)
+            std::copy(colour.begin(), colour.end(),
+                image.pixels.begin() + (static_cast<std::size_t>(y) * width + x) * 3U);
+    }
+    std::vector<ProjectedCloudPoint> points;
+    collect_cloud_points(scene, build_frame(camera, {0.F, 0.F},
+        {static_cast<float>(width), static_cast<float>(height)}), options, points);
+    const float half = std::max(.5F, options.point_size * .5F);
+    const auto bound = [](float edge, unsigned size) {
+        return static_cast<unsigned>(std::clamp(std::ceil(edge - .5F), 0.F, static_cast<float>(size)));
+    };
+    for (const auto& point : points) {
+        const unsigned x0 = bound(point.x - half, width), x1 = bound(point.x + half, width);
+        const unsigned y0 = bound(point.y - half, height), y1 = bound(point.y + half, height);
+        const unsigned alpha = (point.colour >> IM_COL32_A_SHIFT) & 255U;
+        const std::array<unsigned, 3> colour{
+            (point.colour >> IM_COL32_R_SHIFT) & 255U,
+            (point.colour >> IM_COL32_G_SHIFT) & 255U,
+            (point.colour >> IM_COL32_B_SHIFT) & 255U};
+        for (unsigned y = y0; y < y1; ++y)
+            for (unsigned x = x0; x < x1; ++x)
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    auto& pixel = image.pixels[(static_cast<std::size_t>(y) * width + x) * 3U + channel];
+                    pixel = static_cast<std::uint8_t>(
+                        (colour[channel] * alpha + pixel * (255U - alpha) + 127U) / 255U);
+                }
+    }
+    return image;
+}
+
 bool camera_world_ray(
     const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
     const ImVec2 mouse, Vec3& origin, Vec3& direction) {
@@ -2752,31 +2829,7 @@ SceneDrawStats SceneRenderer::draw(
         stats.drawn_points =
             draw_gaussian_rings(draw, frame, scene, options, min, max);
     } else if (count > 0) {
-        const std::size_t stride = std::max<std::size_t>(
-            1, count / std::max(1, options.point_budget) + 1);
-        scratch_.clear();
-        scratch_.reserve(count / stride + 1);
-        float near_depth = std::numeric_limits<float>::max();
-        float far_depth = 0.F;
-        const bool source_colours =
-            !options.colour_by_depth && !scene.colours.empty();
-        colour_scratch_.clear();
-        if (source_colours) colour_scratch_.reserve(count / stride + 1);
-
-        for (std::size_t i = 0; i < count; i += stride) {
-            ImVec2 screen;
-            float depth{};
-            if (!project(frame, scene.world_point(i), screen, depth)) continue;
-            if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
-                screen.y > max.y)
-                continue;
-            scratch_.push_back({screen.x, screen.y, depth});
-            if (source_colours) colour_scratch_.push_back(scene.colours[i]);
-            near_depth = std::min(near_depth, depth);
-            far_depth = std::max(far_depth, depth);
-        }
-
-        const float span = std::max(1e-6F, far_depth - near_depth);
+        collect_cloud_points(scene, frame, options, scratch_);
         const float half = std::max(0.5F, options.point_size * 0.5F);
         constexpr std::size_t chunk = 4'096;
         for (std::size_t begin = 0; begin < scratch_.size(); begin += chunk) {
@@ -2785,13 +2838,10 @@ SceneDrawStats SceneRenderer::draw(
             const int batch = static_cast<int>(end - begin);
             draw->PrimReserve(batch * 6, batch * 4);
             for (std::size_t i = begin; i < end; ++i) {
-                const Projected& point = scratch_[i];
-                const ImU32 colour = source_colours
-                    ? colour_scratch_[i]
-                    : depth_ramp(1.F - (point.depth - near_depth) / span);
+                const ProjectedCloudPoint& point = scratch_[i];
                 draw->PrimRect(
                     {point.x - half, point.y - half},
-                    {point.x + half, point.y + half}, colour);
+                    {point.x + half, point.y + half}, point.colour);
             }
         }
         stats.drawn_points = scratch_.size();

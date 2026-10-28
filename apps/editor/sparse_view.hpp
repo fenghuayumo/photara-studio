@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace photara::project { struct CameraKeyframe; }
+namespace photara::io { struct RgbImage; }
 
 namespace editor {
 
@@ -385,6 +386,17 @@ struct ViewOptions {
     float view_scale = 0.045F;
 };
 
+struct ProjectedCloudPoint {
+    float x{}, y{}, depth{};
+    ImU32 colour{};
+};
+
+// Offscreen point-cloud frame, using the viewport's projection, sampling,
+// colours and square point size. Scene/camera editing overlays are excluded.
+photara::io::RgbImage render_point_cloud_image(
+    const SparseScene& scene, const OrbitCamera& camera,
+    const ViewOptions& options, unsigned width, unsigned height);
+
 struct SceneDrawStats {
     struct CameraHit {
         int index{-1};
@@ -415,11 +427,6 @@ public:
     [[nodiscard]] int hovered_view() const { return hovered_view_; }
 
 private:
-    struct Projected {
-        float x{};
-        float y{};
-        float depth{};
-    };
     struct MeshTri {
         ImVec2 a{};
         ImVec2 b{};
@@ -428,8 +435,7 @@ private:
         ImU32 colour{};
     };
 
-    std::vector<Projected> scratch_;
-    std::vector<std::uint32_t> colour_scratch_;
+    std::vector<ProjectedCloudPoint> scratch_;
     std::vector<MeshTri> mesh_scratch_;
     struct MarkerCache {
         std::array<std::uint32_t, 17> calibration{};

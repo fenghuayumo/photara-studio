@@ -382,6 +382,8 @@ std::string render_video_worker(
     std::shared_ptr<const photara::splat::GaussianModel> model,
     std::vector<splat_render::ModelTransform> transforms, std::vector<Key> keys,
     OrbitCamera orbit, float near_clip, int width, int height, int fps, int codec,
+    VisualizationMode view_mode, std::shared_ptr<const SparseScene> point_scene,
+    ViewOptions view_options,
     std::filesystem::path destination, std::filesystem::path ffmpeg,
     photara::vk::Device runtime, const std::shared_ptr<App::VideoRenderProgress>& progress) {
     try {
@@ -396,20 +398,22 @@ std::string render_video_worker(
         if (temp.path.empty()) throw std::runtime_error("Cannot create temporary video render directory");
         if (progress->cancel) return "Cancelled";
         splat_render::Renderer renderer;
-        renderer.attach(runtime);
-        splat_render::GaussianCloud cloud;
-        cloud.count = static_cast<std::uint32_t>(model->size());
-        cloud.sh_degree = model->sh_degree;
-        cloud.sh_bases = model->sh.is_valid() ? static_cast<std::uint32_t>(model->sh.shape()[1]) : 1U;
-        cloud.render_method = static_cast<splat_render::RenderMethod>(model->render_method);
-        cloud.filter_mode = static_cast<splat_render::FilterMode>(model->filter_mode);
-        cloud.means = model->means.ptr<float>(); cloud.log_scales = model->log_scales.ptr<float>();
-        cloud.quaternions = model->quaternions.ptr<float>(); cloud.opacity_logits = model->opacity_logits.ptr<float>();
-        cloud.sh = model->sh.is_valid() ? model->sh.ptr<float>() : nullptr;
-        cloud.filter_3d = model->filter_3d.is_valid() && model->filter_3d.numel() == model->size()
-            ? model->filter_3d.ptr<float>() : nullptr;
-        if (!renderer.upload(cloud, "video-render") || !renderer.set_model_transforms(transforms))
-            throw std::runtime_error(renderer.failure());
+        if (view_mode != VisualizationMode::points) {
+            renderer.attach(runtime);
+            splat_render::GaussianCloud cloud;
+            cloud.count = static_cast<std::uint32_t>(model->size());
+            cloud.sh_degree = model->sh_degree;
+            cloud.sh_bases = model->sh.is_valid() ? static_cast<std::uint32_t>(model->sh.shape()[1]) : 1U;
+            cloud.render_method = static_cast<splat_render::RenderMethod>(model->render_method);
+            cloud.filter_mode = static_cast<splat_render::FilterMode>(model->filter_mode);
+            cloud.means = model->means.ptr<float>(); cloud.log_scales = model->log_scales.ptr<float>();
+            cloud.quaternions = model->quaternions.ptr<float>(); cloud.opacity_logits = model->opacity_logits.ptr<float>();
+            cloud.sh = model->sh.is_valid() ? model->sh.ptr<float>() : nullptr;
+            cloud.filter_3d = model->filter_3d.is_valid() && model->filter_3d.numel() == model->size()
+                ? model->filter_3d.ptr<float>() : nullptr;
+            if (!renderer.upload(cloud, "video-render") || !renderer.set_model_transforms(transforms))
+                throw std::runtime_error(renderer.failure());
+        }
         splat_render::DisplayOptions display;
         display.near_clip = near_clip;
         const float duration = keys.back().time - keys.front().time;
@@ -439,12 +443,19 @@ std::string render_video_worker(
             case EditorProjection::panorama: camera.model = splat_render::k_camera_equirectangular; break;
             default: camera.model = splat_render::k_camera_pinhole; break;
             }
-            splat_render::FrameTarget frame;
-            if (!renderer.draw(camera, frame, splat_render::Shading::gaussian, display))
-                throw std::runtime_error(renderer.failure());
             photara::io::RgbImage image;
-            if (!renderer.download_rgb(image.pixels, image.width, image.height))
-                throw std::runtime_error("Cannot download a rendered video frame");
+            if (view_mode == VisualizationMode::points) {
+                image = render_point_cloud_image(*point_scene, orbit, view_options, width, height);
+            } else {
+                splat_render::FrameTarget frame;
+                const auto shading = view_mode == VisualizationMode::rings
+                    ? splat_render::Shading::rings : splat_render::Shading::gaussian;
+                camera.ring_sigma = view_options.ring_scale;
+                if (!renderer.draw(camera, frame, shading, display))
+                    throw std::runtime_error(renderer.failure());
+                if (!renderer.download_rgb(image.pixels, image.width, image.height))
+                    throw std::runtime_error("Cannot download a rendered video frame");
+            }
             char filename[32]; std::snprintf(filename, sizeof(filename), "frame_%08d.png", i);
             photara::io::save_rgb_png(image, temp.path / filename);
             progress->completed = i + 1;
@@ -566,6 +577,10 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
     try {
         if (render.job.valid()) throw std::runtime_error("A video render is already running");
         if (app.camera_path_recording.active || app.camera_path_recording.review) throw std::runtime_error("Stop camera path recording before rendering");
+        const auto view_mode = app.view_mode;
+        if (view_mode != VisualizationMode::points && view_mode != VisualizationMode::splat &&
+            view_mode != VisualizationMode::rings)
+            throw std::runtime_error("Select Point Cloud, 3DGS, or Rings before rendering video");
         if (ffmpeg.empty()) throw std::runtime_error("ffmpeg was not found");
         if (render.width < 2 || render.width > 8192 || render.width % 2 ||
             render.height < 2 || render.height > 8192 || render.height % 2 ||
@@ -585,28 +600,50 @@ bool start_video_render(App& app, const std::filesystem::path& output, const std
         std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (extension != ".mp4") throw std::runtime_error("Video output must use the .mp4 extension");
         std::shared_ptr<const photara::splat::GaussianModel> model;
+        std::shared_ptr<const SparseScene> point_scene;
         std::vector<splat_render::ModelTransform> transforms;
-        if (!app.gaussian_models.empty() && !app.gaussian_preview_baked && !app.splat_edit.dirty()) {
-            model = app.composed_model;
-            transforms = app.gaussian_placements;
+        if (view_mode == VisualizationMode::points) {
+            if (app.loading_scene || !app.scene.has_points())
+                throw std::runtime_error("Wait for a point cloud to load before rendering video");
+            auto snapshot = std::make_shared<SparseScene>();
+            snapshot->points = app.scene.points;
+            snapshot->colours = app.scene.colours;
+            snapshot->placements = app.scene.placements;
+            point_scene = std::move(snapshot);
         } else {
-            auto editable = std::make_shared<photara::splat::GaussianModel>();
-            if (app.splat_edit.copy_model(*editable)) model = std::move(editable);
+            if (!app.gaussian_models.empty() && !app.gaussian_preview_baked &&
+                !app.splat_edit.dirty() && app.composed_model) {
+                model = app.composed_model;
+                transforms = app.gaussian_placements;
+            } else if (app.final_splat_ready || app.gaussian_preview_baked || app.splat_edit.dirty()) {
+                auto editable = std::make_shared<photara::splat::GaussianModel>();
+                if (app.splat_edit.copy_model(*editable)) model = std::move(editable);
+                else if (app.splat_edit.dirty())
+                    throw std::runtime_error("Cannot snapshot the edited 3DGS model");
+            }
+            // Export can start before the viewport has uploaded/synced its model.
+            if (!model)
+                model = std::make_shared<photara::splat::GaussianModel>(
+                    load_export_model(app, tinytensor::Device::CPU));
+            if (model->size() == 0) throw std::runtime_error("No 3DGS model is available to render");
         }
-        if (!model || model->size() == 0) throw std::runtime_error("No 3DGS model is available to render");
         auto keys = app.camera_keyframes;
         for (auto& key : keys) key.thumbnail_rgb.clear();
         const auto progress = std::make_shared<App::VideoRenderProgress>();
         render.progress = progress; render.output = output;
-        const auto runtime = gpu::runtime();
+        const auto runtime = view_mode == VisualizationMode::points
+            ? photara::vk::Device{} : gpu::runtime();
         const auto orbit = app.camera;
         const auto near_clip = app.navigation_near_clip;
         const auto width = render.width, height = render.height, fps = render.fps, codec = render.codec;
+        const auto view_options = app.view_options;
         render.job = std::async(std::launch::async,
             [model, transforms = std::move(transforms), keys = std::move(keys), orbit,
-             near_clip, width, height, fps, codec, output, ffmpeg, runtime, progress]() mutable {
+             near_clip, width, height, fps, codec, view_mode, point_scene, view_options,
+             output, ffmpeg, runtime, progress]() mutable {
                 return render_video_worker(model, std::move(transforms), std::move(keys), orbit,
-                    near_clip, width, height, fps, codec, output, ffmpeg, runtime, progress);
+                    near_clip, width, height, fps, codec, view_mode, point_scene, view_options,
+                    output, ffmpeg, runtime, progress);
             });
         app.camera_path_playing = false;
         return true;
