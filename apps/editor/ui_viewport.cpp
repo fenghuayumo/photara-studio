@@ -136,8 +136,21 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
     const float x = std::max(controls_end + 8.F, width - button_width - 12.F);
     const bool show_render = app.workspace == ViewportWorkspace::scene_3d && x - controls_end >= 76.F;
     if (show_render) {
-        const bool can_capture = app.has_model && app.view_mode == VisualizationMode::splat &&
-            app.splat_renderer && app.splat_renderer->splat_count() > 0;
+        const bool point_image = app.view_mode==VisualizationMode::points;
+        const bool gaussian_image = app.view_mode==VisualizationMode::splat || app.view_mode==VisualizationMode::rings;
+        // Vulkan training displays the static scene in Point Cloud mode;
+        // CUDA training displays streamed Gaussian centres instead.
+        const bool live_point_view = point_image && live_preview_active(app) &&
+            app.settings.training_backend != 1;
+        const bool live_image = live_preview_active(app) &&
+            (!point_image || live_point_view) && app.preview.display.descriptor &&
+            gpu::consumed_timeline_value()>0;
+        const bool can_capture = point_image ? live_image || (app.scene.has_points() && !app.loading_scene)
+            : gaussian_image && ((app.has_model && app.splat_renderer && app.splat_renderer->splat_count()>0) || live_image);
+        const char* image_hint=can_capture ? "Render image" : point_image
+            ? "Load a point cloud before rendering an image." : gaussian_image
+            ? "Wait for the current 3DGS or Rings preview to be ready."
+            : "Image rendering supports Point Cloud, 3DGS and Rings.";
         const ImVec2 group_min{origin.x + x - 74.F, origin.y + 4.F};
         auto* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(group_min, {group_min.x + 66.F, group_min.y + 28.F}, theme::u32(theme::surface_1), 5.F);
@@ -145,20 +158,15 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
         draw->AddLine({group_min.x + 33.F, group_min.y + 7.F}, {group_min.x + 33.F, group_min.y + 21.F}, theme::u32(theme::border));
         ImGui::SetCursorScreenPos({group_min.x + 1.F, group_min.y + 1.F});
         if (render_toolbar_button("##render_image", icons::Icon::render_image,
-                can_capture, tr("Render image"))) {
-            std::array<char, 1024> output{};
-            if (pick_export_path(L"Render image", output, FilePickKind::image, L"render.png", L"png")) {
-                try {
-                    photara::io::RgbImage image;
-                    if (!app.splat_renderer->download_rgb(image.pixels, image.width, image.height))
-                        throw std::runtime_error("No rendered 3DGS preview is available");
-                    auto path = path_from_utf8_field(output.data());
-                    if (path.extension().empty()) path.replace_extension(".png");
-                    photara::io::save_rgb_png(image, path);
-                    set_message(app, std::string(tr("Rendered image")) + ": " + path_to_utf8(path), theme::success);
-                } catch (const std::exception& error) {
-                    set_message(app, error.what(), theme::danger);
-                }
+                can_capture, tr(image_hint))) {
+            std::array<char,1024> output{};
+            if (pick_export_path(L"Render image",output,FilePickKind::image,L"render.png",L"png")) {
+                app.image_export={};
+                app.image_export.path=path_from_utf8_field(output.data());
+                if (app.image_export.path.extension().empty()) app.image_export.path.replace_extension(".png");
+                app.image_export.mode=app.view_mode;
+                app.image_export.camera=app.camera;
+                app.image_export.options=app.view_options;
             }
         }
         ImGui::SameLine(0.F, 2.F);
@@ -170,8 +178,14 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
             app.camera_keyframes.size() >= 2 &&
             !app.video_render.job.valid() && !live_preview_active(app) &&
             !app.camera_path_recording.active && !app.camera_path_recording.review;
+        const char* video_hint=can_video ? "Render video" : !video_scene_ready
+            ? "Load a Point Cloud, 3DGS or Rings scene before rendering video."
+            : app.camera_keyframes.size()<2 ? "Add at least two camera views to render video"
+            : live_preview_active(app) ? "Finish training before rendering video."
+            : app.video_render.job.valid() ? "A video render is already running."
+            : "Use or discard the path preview before rendering video.";
         if (render_toolbar_button("##render_video", icons::Icon::render_video,
-            can_video, tr(can_video ? "Render video" : "Add at least two camera views to render video")))
+            can_video, tr(video_hint)))
             app.video_render.show_settings = true;
     }
     ImGui::SetCursorScreenPos({origin.x + x, origin.y + 4.F});
@@ -1336,6 +1350,10 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         draw->AddImage(
             reinterpret_cast<ImTextureID>(app.preview.display.descriptor),
             min, max);
+        if (!app.image_export.path.empty() && app.image_export.mode==app.view_mode) {
+            app.image_export.frame_ready=true;
+            app.image_export.live_frame=true;
+        }
     }
 
     ViewOptions overlay = app.view_options;
@@ -1578,6 +1596,8 @@ bool draw_splat_image(
     const VkDescriptorSet set = splat_preview_texture(app, target);
     if (!set) return false;
     texture = reinterpret_cast<ImTextureID>(set);
+    if (orbit && !app.image_export.path.empty() && app.image_export.mode==app.view_mode)
+        app.image_export.frame_ready=true;
     return true;
 }
 
@@ -1761,6 +1781,32 @@ bool handle_view_camera_shortcuts(App& app, const bool viewport_hot) {
     }
     app.preview_follow_view = false;
     return true;
+}
+
+void finish_viewport_image_export(App& app,ImVec2 min,ImVec2 max) {
+    auto& request=app.image_export;
+    if (request.path.empty()) return;
+    const auto path=std::exchange(request.path,{});
+    try {
+        photara::io::RgbImage image;
+        if (request.live_frame) {
+            if (!request.frame_ready) throw std::runtime_error(tr("No rendered image is available for the current view."));
+            if (!app.preview.display.download_rgb(image)) throw std::runtime_error(tr("Cannot read the current preview image."));
+        } else if (request.mode==VisualizationMode::points) {
+            const auto scale=ImGui::GetIO().DisplayFramebufferScale;
+            const auto width=static_cast<unsigned>(std::clamp(std::lround((max.x-min.x)*scale.x),1L,8192L));
+            const auto height=static_cast<unsigned>(std::clamp(std::lround((max.y-min.y)*scale.y),1L,8192L));
+            auto options=request.options;
+            options.point_size*=std::max(scale.x,scale.y);
+            image=render_point_cloud_image(app.scene,request.camera,options,width,height);
+        } else {
+            if (!request.frame_ready) throw std::runtime_error(tr("No rendered image is available for the current view."));
+            if (!app.splat_renderer->download_rgb(image.pixels,image.width,image.height))
+                throw std::runtime_error(tr("Cannot read the current preview image."));
+        }
+        photara::io::save_rgb_png(image,path);
+        set_message(app,std::string(tr("Rendered image"))+": "+path_to_utf8(path),theme::success);
+    } catch (const std::exception& error) {set_message(app,error.what(),theme::danger);}
 }
 
 void draw_viewport_panel(App& app) {
@@ -1974,6 +2020,7 @@ void draw_viewport_panel(App& app) {
             draw_scene_toggle_rail(app, view_min);
         }
     }
+    if (app.workspace==ViewportWorkspace::scene_3d) finish_viewport_image_export(app,view_min,view_max);
     ImGui::EndChild();
     ImGui::End();
 }

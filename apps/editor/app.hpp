@@ -231,6 +231,13 @@ struct App {
     };
     std::vector<CameraThumbnail> camera_thumbnails;
     ViewOptions view_options;
+    struct ImageExportRequest {
+        std::filesystem::path path;
+        VisualizationMode mode{VisualizationMode::points};
+        OrbitCamera camera;
+        ViewOptions options;
+        bool frame_ready{},live_frame{};
+    } image_export;
     ViewportGizmoState gizmo;
     ReconstructionBox reconstruction_box;
     ReconstructionBox published_reconstruction_box;

@@ -9,6 +9,7 @@
 #include "studio_image_qa_test.hpp"
 #include "../src/splat/checkpoint.hpp"
 #include <filesystem>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -91,6 +92,14 @@ void test_point_cloud_video_frames() {
     const auto placed = editor::render_point_cloud_image(scene, camera, options, 64, 48);
     require(red_count(placed) == 16 && placed.pixels != visible.pixels,
         "export keeps the current point-cloud placement");
+    const auto image_path=std::filesystem::temp_directory_path()/
+        ("photara-point-image-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
+    const auto wide_frame=editor::render_point_cloud_image(scene,camera,options,320,90);
+    photara::io::save_rgb_png(wide_frame,image_path);
+    const auto saved_frame=photara::io::load_rgb(image_path);
+    std::filesystem::remove(image_path);
+    require(saved_frame.width==320 && saved_frame.height==90 && saved_frame.pixels==wide_frame.pixels,
+        "point cloud image export saves PNG pixels and the viewport aspect without a 3DGS renderer");
 }
 void test_camera_navigation() {
     auto* context = ImGui::CreateContext();
