@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -35,6 +37,56 @@ GaussianModel fixture(unsigned n, unsigned degree) {
     m.opacity_logits = tinytensor::Tensor::zeros({n, 1}, cpu);
     m.sh = tinytensor::Tensor::from_vector(sh, {n, bases, 3}, cpu);
     return m;
+}
+void antialias_metadata(const std::filesystem::path& folder) {
+    for (auto mode : {SplatFilterMode::classic, SplatFilterMode::mip_2d}) {
+        auto model = fixture(17, 0);
+        model.filter_mode = mode;
+        const bool aa = mode == SplatFilterMode::mip_2d;
+        const auto sog = folder / (aa ? "aa.sog" : "classic.sog");
+        const auto spz = folder / (aa ? "aa.spz" : "classic.spz");
+        const auto unbundled = folder / (aa ? "aa" : "classic");
+        save_gaussians(model, sog, GaussianFormat::sog);
+        save_gaussians(model, spz, GaussianFormat::spz);
+        save_sog_unbundled(model, unbundled);
+        std::ifstream meta_file(unbundled / "meta.json", std::ios::binary);
+        const std::string meta((std::istreambuf_iterator<char>(meta_file)), {});
+        require((meta.find("\"model\":\"antialiased\"") != std::string::npos) == aa,
+                "SOG antialias metadata is wrong");
+        std::ifstream spz_file(spz, std::ios::binary);
+        spz_file.seekg(14);
+        const int flags = spz_file.get();
+        require(flags != EOF && ((flags & 1) != 0) == aa, "SPZ antialias flag is wrong");
+        for (const auto& file : {sog, spz, unbundled})
+            require(load_gaussians(file, tinytensor::Device::CPU).filter_mode == mode,
+                    "Antialias filter mode did not survive round trip");
+    }
+    auto lod_model = fixture(17, 0);
+    lod_model.filter_mode = SplatFilterMode::mip_2d;
+    LodOptions lod_options;
+    lod_options.levels = 2;
+    lod_options.vulkan = false;
+    const auto lod = folder / "aa-lod";
+    export_streamed_sog(lod_model, lod, lod_options);
+    require(load_gaussians(lod / "0_0", tinytensor::Device::CPU).filter_mode == SplatFilterMode::mip_2d,
+            "Streamed SOG lost antialias metadata");
+    auto model = fixture(17, 0);
+    for (auto mode : {SplatFilterMode::mip_3d, SplatFilterMode::mip}) {
+        model.filter_mode = mode;
+        for (auto format : {GaussianFormat::sog, GaussianFormat::spz, GaussianFormat::glb, GaussianFormat::usdc}) {
+            bool rejected = false;
+            try { save_gaussians(model, folder / "rejected", format); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Export discarded a Mip3D filter");
+        }
+    }
+    model.filter_mode = SplatFilterMode::mip_2d;
+    for (auto format : {GaussianFormat::glb, GaussianFormat::usdc}) {
+        bool rejected = false;
+        try { save_gaussians(model, folder / "rejected", format); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "Export discarded Mip2D metadata");
+    }
 }
 void scalar_quantization() {
     std::vector<float> sparse{-.5F, 0, .5F, 0, .5F};
@@ -182,6 +234,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Vulkan test requires Vulkan build");
 #endif
         } else {
+            antialias_metadata(folder);
             scalar_quantization();
             for (unsigned d = 0; d <= 3; ++d) {
                 roundtrip(folder, 17, d, GaussianFormat::sog);

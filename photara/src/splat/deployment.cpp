@@ -62,9 +62,10 @@ struct Host {
     std::vector<float> means, logs, quats, opacity, sh;
     unsigned degree{};
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
+    SplatFilterMode filter_mode{SplatFilterMode::classic};
     std::size_t n{}, bases{};
     explicit Host(const GaussianModel &m)
-        : degree(m.sh_degree), render_method(m.render_method), n(m.size()), bases((degree + 1) * (degree + 1)) {
+        : degree(m.sh_degree), render_method(m.render_method), filter_mode(m.filter_mode), n(m.size()), bases((degree + 1) * (degree + 1)) {
         means = m.means.to_vector();
         logs = m.log_scales.to_vector();
         quats = m.quaternions.to_vector();
@@ -110,6 +111,7 @@ struct Host {
         GaussianModel m;
         m.sh_degree = degree;
         m.render_method = render_method;
+        m.filter_mode = filter_mode;
         m.means = tensor(means, 3, {ids.size(), 3});
         m.log_scales = tensor(logs, 3, {ids.size(), 3});
         m.quaternions = tensor(quats, 4, {ids.size(), 4});

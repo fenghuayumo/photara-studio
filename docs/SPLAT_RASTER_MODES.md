@@ -86,9 +86,11 @@ resolution changes, periodically refresh after growth ends, and serialize
 Native non-pinhole training retains the pre-existing 3D-filter restriction.
 
 PLY and project model data store the filter mode; untagged models use Classic.
-Studio uses the stored screen kernel and 2D compensation. Non-Classic modes
-require PLY export to preserve the mode. Third-party readers must support
-`filter_3D` to reproduce the 3D floor.
+Studio uses the stored screen kernel and 2D compensation. Mip2D can also be
+exported to SOG and SPZ using their antialias metadata; readers must honor the
+metadata to apply compensation. Mip3D and combined Mip require PLY to preserve
+`filter_3D`, which third-party readers must support to reproduce the 3D floor.
+GLB and USDC currently require PLY for any non-Classic mode.
 
 The ordinary pinhole 2D Mip opacity compensation remains detached from the
 covariance gradient. Native fisheye differentiates its exact compensation.

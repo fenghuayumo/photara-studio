@@ -693,7 +693,11 @@ void validate_model_shape(
             }
         }
     }
-    return make_model(count, degree, means, log_scales, rotations, opacities, sh, device);
+    auto model = make_model(count, degree, means, log_scales, rotations, opacities, sh, device);
+    if (meta.get<std::string>("model", "") == "antialiased" ||
+        meta.get<bool>("antialias", false))
+        model.filter_mode = SplatFilterMode::mip_2d;
+    return model;
 }
 
 [[nodiscard]] std::uint8_t spz_quantize_sh(
@@ -969,7 +973,7 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     append_u32(output, static_cast<std::uint32_t>(count));
     output.push_back(static_cast<std::uint8_t>(model.sh_degree));
     output.push_back(12U);
-    output.push_back(0U);
+    output.push_back(model.filter_mode == SplatFilterMode::mip_2d ? 1U : 0U);
     output.push_back(static_cast<std::uint8_t>(streams.size()));
     append_u32(output, 32U);
     output.insert(output.end(), 12U, 0U);
@@ -1127,10 +1131,12 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         }
         if (compressed_offset != file.size())
             throw std::runtime_error("SPZ v4 has trailing bytes");
-        return decode_spz_packed(
+        auto model = decode_spz_packed(
             version, count, degree, fractional_bits,
             streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
             device);
+        if ((flags & 0x1U) != 0) model.filter_mode = SplatFilterMode::mip_2d;
+        return model;
     }
     if (file[0] != 0x1fU || file[1] != 0x8bU)
         throw std::runtime_error("Unrecognized SPZ file");
@@ -1168,10 +1174,12 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
             unpacked.begin() + static_cast<std::ptrdiff_t>(offset + sizes[index]));
         offset += sizes[index];
     }
-    return decode_spz_packed(
+    auto model = decode_spz_packed(
         version, count, degree, fractional_bits,
         streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
         device);
+    if ((flags & 0x1U) != 0) model.filter_mode = SplatFilterMode::mip_2d;
+    return model;
 }
 
 [[nodiscard]] Bytes save_sog(const GaussianModel& model) {
@@ -1351,7 +1359,9 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         sh0_image.data(), static_cast<int>(width), static_cast<int>(height), 4, sh0_name);
     std::ostringstream meta;
     meta << "{\"version\":2,\"asset\":{\"generator\":\"Photara\"},"
-         << "\"count\":" << count << ",\"antialias\":false,\"means\":{\"mins\":["
+         << "\"count\":" << count
+         << (model.filter_mode == SplatFilterMode::mip_2d ? ",\"model\":\"antialiased\"" : "")
+         << ",\"means\":{\"mins\":["
          << json_float(position_mins[0]) << ',' << json_float(position_mins[1]) << ','
          << json_float(position_mins[2]) << "],\"maxs\":["
          << json_float(position_maxs[0]) << ',' << json_float(position_maxs[1]) << ','
@@ -1446,8 +1456,9 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
 void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
     if (model.render_method == RenderMethod::gaussian_3dgut)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
-    if (model.filter_mode != SplatFilterMode::classic)
-        throw std::invalid_argument("Non-Classic filter modes require PLY to preserve rendering metadata");
+    if (model.filter_mode != SplatFilterMode::classic &&
+        model.filter_mode != SplatFilterMode::mip_2d)
+        throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
     const auto files = read_sog_zip(save_sog(model));
     std::filesystem::create_directories(directory);
     for (const auto& [name, bytes] : files) write_file(directory / name, bytes);
@@ -1706,8 +1717,10 @@ void save_gaussians(
     GaussianFormat format) {
     if (format == GaussianFormat::auto_detect)
         format = gaussian_format_from_path(path);
-    if (model.filter_mode != SplatFilterMode::classic && format != GaussianFormat::ply)
-        throw std::invalid_argument("Non-Classic filter modes require PLY to preserve rendering metadata");
+    if (format != GaussianFormat::ply && model.filter_mode != SplatFilterMode::classic &&
+        !(model.filter_mode == SplatFilterMode::mip_2d &&
+          (format == GaussianFormat::sog || format == GaussianFormat::spz)))
+        throw std::invalid_argument("This filter mode requires PLY; Mip2D also supports SOG and SPZ");
     if (model.render_method == RenderMethod::gaussian_3dgut && format != GaussianFormat::ply)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
     switch (format) {
