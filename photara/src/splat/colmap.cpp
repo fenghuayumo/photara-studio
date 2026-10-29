@@ -327,7 +327,8 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
         view.source_model = CameraModel::equirectangular;
         const float width = static_cast<float>(view.width);
         const float height = static_cast<float>(view.height);
-        view.fx = view.fy = width / (2.F * 3.14159265358979323846F);
+        view.fx = width / (2.F * 3.14159265358979323846F);
+        view.fy = height / 3.14159265358979323846F;
         view.cx = 0.5F * width;
         view.cy = 0.5F * height;
     } else {

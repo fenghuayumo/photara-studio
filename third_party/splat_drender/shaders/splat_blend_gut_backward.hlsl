@@ -72,7 +72,7 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
     uint id=instances[begin+position],base=id*pc.u19;
     float4 a=gauss_f[base+3u],b=gauss_f[base+4u],c=gauss_f[base+5u];
     float4 rgb=gauss_f[base+2u];
-    float2 refine=gauss_f[base+6u].xy;
+    float4 refine=gauss_f[base+6u];
     float3 acc_o=0.0f,acc_a=0.0f,acc_b=0.0f,acc_c=0.0f,acc_rgb=0.0f;
     float acc_opacity=0.0f,acc_refine=0.0f;
     [loop] for (uint local=0u;local<256u;++local) {
@@ -118,7 +118,9 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
         acc_rgb+=T*alpha*dl;
         if (raw<kAlphaClip) acc_opacity+=da*G;
         float3 gm=-(a.xyz*go.x+b.xyz*go.y+c.xyz*go.z);
-        acc_refine+=length(gm.xy*refine*float2(width,height))/max(1.0f-final_T,1.0e-6f);
+        float score=pc.u3==kModeEquirect ? refine.w*length(cross(refine.xyz,gm))
+                       : length(gm.xy*refine.xy*float2(width,height));
+        acc_refine+=score/max(1.0f-final_T,1.0e-6f);
     }
     [unroll] for(uint axis=0u;axis<3u;++axis) {
         atomic_add(3u*id+axis,acc_o[axis]);

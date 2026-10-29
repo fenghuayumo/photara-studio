@@ -19,8 +19,16 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
   st.radius[i] = radii[i] = 0;
   const float3 mean =
       make_float3(g.means[3 * i], g.means[3 * i + 1], g.means[3 * i + 2]);
-  const auto center = project(mat::xform_point(mean, cam.world_to_camera), K,
-                              cam.width, cam.height);
+  const auto t = mat::xform_point(mean, cam.world_to_camera);
+  auto center = project(t, K, cam.width, cam.height);
+  // Longitude has no unique value on the pole; the 3D Gaussian remains
+  // renderable. Give its UT a conservative fallback instead of culling it.
+  const bool pole = is_equirect(K.mode) && !center.valid && camera_visible(t, K.mode);
+  if (pole) {
+    center.pixel_x = cam.width * .5f;
+    center.pixel_y = t.y > 0.f ? float(cam.height) : 0.f;
+    center.valid = true;
+  }
   if (!center.valid || !(g.opacities[i] >= cfg::kAlphaFloor))
     return;
   const auto R =
@@ -28,7 +36,24 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
   float2 points[7];
   points[0] = make_float2(center.pixel_x, center.pixel_y);
   float2 mu = make_float2(.25f * points[0].x, .25f * points[0].y);
-  bool boundary = false;
+  bool boundary = pole;
+  if (is_equirect(K.mode)) {
+    // A support ellipsoid crossing a pole spans every longitude, even if
+    // none of the seven sigma points lands exactly on that singularity.
+    const float3 up = mat::xform_dir_transpose(make_float3(0, 1, 0), cam.world_to_camera);
+    const float3 delta = make_float3(cam.center[0]-mean.x, cam.center[1]-mean.y, cam.center[2]-mean.z);
+    float o[3], d[3], od = 0.f, dd = 0.f;
+    for (int a = 0; a < 3; ++a) {
+      const float inv = 1.f / (settings.scale_modifier * g.scales[3*i+a]);
+      o[a] = (R.m[a][0]*delta.x + R.m[a][1]*delta.y + R.m[a][2]*delta.z)*inv;
+      d[a] = (R.m[a][0]*up.x + R.m[a][1]*up.y + R.m[a][2]*up.z)*inv;
+      od += o[a]*d[a]; dd += d[a]*d[a];
+    }
+    const float peak = -od / dd;
+    float distance = 0.f;
+    for (int a = 0; a < 3; ++a) { const float q = o[a]+peak*d[a]; distance += q*q; }
+    boundary |= dd > 0.f && distance <= -2.f*logf(cfg::kAlphaFloor/g.opacities[i])*1.001f;
+  }
   // Symmetric seven-point UT: lambda=1, weights 1/4 and 1/8.
   for (int a = 0; a < 3; ++a)
     for (int b = 0; b < 2; ++b) {
@@ -70,7 +95,9 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
   const float det = xx * yy - xy * xy;
   if (!(det > 0.f) || !isfinite(det))
     return;
-  const float4 co = make_float4(yy / det, -xy / det, xx / det, g.opacities[i]);
+  const float4 co = boundary && is_equirect(K.mode)
+      ? make_float4(-1.f, 0.f, -1.f, g.opacities[i])
+      : make_float4(yy / det, -xy / det, xx / det, g.opacities[i]);
   const int wrap = is_equirect(K.mode) ? cam.width : 0;
   const unsigned touched =
       tiles::enumerate(mu, co, gx, gy, i, 0, nullptr, nullptr, wrap);
@@ -78,7 +105,6 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
     return;
   st.mean2d[i] = mu;
   st.conic_opacity[i] = co;
-  const auto t = mat::xform_point(mean, cam.world_to_camera);
   st.depth_key[i] = __float_as_uint(norm3df(t.x, t.y, t.z));
   st.tiles_touched[i] = touched;
   st.visible_flag[i] = 1;
@@ -90,8 +116,10 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
         st.clamped);
   const float3 origin = make_float3(
       cam.center[0] - mean.x, cam.center[1] - mean.y, cam.center[2] - mean.z);
-  st.gut_refine[i] = make_float2(1.f / (fabsf(center.J.du[0]) + 1e-6f),
-                                 1.f / (fabsf(center.J.dv[1]) + 1e-6f));
+  st.gut_refine[i] = is_equirect(K.mode)
+      ? make_float2(6.28318530718f * norm3df(t.x, t.y, t.z), 0.f)
+      : make_float2(1.f / (fabsf(center.J.du[0]) + 1e-6f),
+                    1.f / (fabsf(center.J.dv[1]) + 1e-6f));
   for (int a = 0; a < 3; ++a) {
     const float inv = 1.f / (settings.scale_modifier * g.scales[3 * i + a]);
     const float3 b =
@@ -209,21 +237,29 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
       if (raw < cam.alpha_clip)
         atomicAdd(&grad.d_conic[i].w, da * r.weight);
       if (model_grad.refine_weight) {
-        const auto proj =
-            project(mat::xform_point(make_float3(p[0], p[1], p[2]),
-                                     cam.world_to_camera),
-                    K, cam.width, cam.height);
         const float3 gm =
             mat::transpose(
                 mat::world_rotation_transposed(cam.world_to_camera)) *
             make_float3(derivatives[0], derivatives[1], derivatives[2]);
-        // Convert the world mean derivative to a screen displacement
-        // proxy used only by the adaptive density controller.
-        const float dx = gm.x / (fabsf(proj.J.du[0]) + 1e-6f),
-                    dy = gm.y / (fabsf(proj.J.dv[1]) + 1e-6f);
+        // This proxy belongs only to ADC; it does not change the optimizer's
+        // world-space parameter derivative.
+        float score;
+        if (is_equirect(K.mode)) {
+          const float3 t = mat::xform_point(make_float3(p[0],p[1],p[2]), cam.world_to_camera);
+          // Angular displacement lives in the tangent plane, not in the
+          // longitude chart. Discard radial gradients and normalize by one
+          // full turn so rotations and the poles have the same ADC metric.
+          const float3 cross = make_float3(t.y*gm.z-t.z*gm.y,
+                                           t.z*gm.x-t.x*gm.z, t.x*gm.y-t.y*gm.x);
+          score = 6.28318530718f * norm3df(cross.x,cross.y,cross.z);
+        } else {
+          const auto proj = project(mat::xform_point(make_float3(p[0],p[1],p[2]),cam.world_to_camera),K,cam.width,cam.height);
+          const float dx = gm.x/(fabsf(proj.J.du[0])+1e-6f);
+          const float dy = gm.y/(fabsf(proj.J.dv[1])+1e-6f);
+          score = hypotf(dx*cam.width,dy*cam.height);
+        }
         atomicAdd(model_grad.refine_weight + i,
-                  hypotf(dx * cam.width, dy * cam.height) /
-                      fmaxf(alpha_total, 1e-6f));
+                  score / fmaxf(alpha_total, 1e-6f));
       }
       if (loss.densify_map && model_grad.densify_weight &&
           model_grad.densify_weight_den) {
@@ -294,7 +330,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
   float T = 1.f;
   float3 color = make_float3(0, 0, 0);
   unsigned last = 0;
-  bool done = !inside;
+  bool done = !inside || !(mat::dot3(dir, dir) > 0.f);
   for (unsigned base = range.x; base < range.y; base += batch_size) {
     if (__syncthreads_count(!done) == 0)
       break;
@@ -416,6 +452,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
   const unsigned id = valid ? ids[range.x + position] : 0;
   float4 a{}, b{}, c{}, rgb{};
   float2 rf{};
+  float3 radial{};
   if (valid) {
     a = st.gut_rows[3 * id];
     b = st.gut_rows[3 * id + 1];
@@ -424,6 +461,11 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
         g.colors ? reinterpret_cast<const float3 *>(g.colors)[id] : st.rgb[id];
     rgb = make_float4(color.x, color.y, color.z, g.opacities[id]);
     rf = st.gut_refine[id];
+    if (is_equirect(K.mode)) {
+      const float3 t = mat::xform_point(make_float3(g.means[3*id],g.means[3*id+1],g.means[3*id+2]),cam.world_to_camera);
+      const float inv = 6.28318530718f / rf.x;
+      radial = make_float3(t.x*inv,t.y*inv,t.z*inv);
+    }
   }
   const int grid_x = (cam.width + 15) / 16;
   const int x0 = (tile % grid_x) * 16, y0 = (tile / grid_x) * 16;
@@ -580,8 +622,13 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
       const float3 gm =
           mat::transpose(mat::world_rotation_transposed(cam.world_to_camera)) *
           dm;
-      acc_refine += hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height) /
-                    fmaxf(1.f - final_T, 1e-6f);
+      float score = hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height);
+      if (is_equirect(K.mode)) {
+        const float3 cross = make_float3(radial.y*gm.z-radial.z*gm.y,
+            radial.z*gm.x-radial.x*gm.z, radial.x*gm.y-radial.y*gm.x);
+        score = rf.x*norm3df(cross.x,cross.y,cross.z);
+      }
+      acc_refine += score / fmaxf(1.f - final_T, 1e-6f);
     }
     if (loss.densify_map) {
       acc_error += weight * error;

@@ -134,7 +134,8 @@ void orbit_intrinsics(
     model = photara::CameraModel::pinhole;
     if (camera.projection == EditorProjection::panorama) {
         model = photara::CameraModel::equirectangular;
-        fx = fy = w / (2.F * k_pi);
+        fx = w / (2.F * k_pi);
+        fy = h / k_pi;
         return;
     }
     if (camera.projection == EditorProjection::fisheye) {
@@ -3265,8 +3266,8 @@ SplatPreviewCamera make_preview_camera_from_view(
     preview.k3 = pose.k3;
     preview.k4 = pose.k4;
     if (preview.model == photara::CameraModel::equirectangular) {
-        preview.fx = preview.fy =
-            static_cast<float>(preview.width) / (2.F * k_pi);
+        preview.fx = static_cast<float>(preview.width) / (2.F * k_pi);
+        preview.fy = static_cast<float>(preview.height) / k_pi;
         preview.cx = static_cast<float>(preview.width) * 0.5F;
         preview.cy = static_cast<float>(preview.height) * 0.5F;
         preview.k1 = preview.k2 = preview.k3 = preview.k4 = 0.F;

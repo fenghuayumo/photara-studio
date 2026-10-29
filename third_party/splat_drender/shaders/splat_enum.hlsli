@@ -142,6 +142,18 @@ uint walk_tiles(float2 center, int grid_x, int grid_y, float a, float b, float c
 
 uint enumerate_tiles(float2 mean, float4 conic, int grid_x, int grid_y, uint gaussian_id, uint offset,
                      int wrap_width, uint depth, uint emit_mode) {
+    // Reserved GUT full-domain footprint. Never wrap/duplicate these tiles.
+    if (wrap_width > 0 && conic.x == -1.0f && conic.y == 0.0f && conic.z == -1.0f && conic.w >= kAlphaFloor) {
+        uint count = uint(grid_x)*uint(grid_y);
+        if (emit_mode != 0u) {
+            [loop] for (uint tile=0u;tile<count;++tile) {
+                key_lo[offset+tile] = emit_mode==2u ? depth : tile;
+                if (emit_mode==2u) key_hi[offset+tile] = tile;
+                values[offset+tile] = gaussian_id;
+            }
+        }
+        return count;
+    }
     float a = conic.x;
     float b = conic.y;
     float c = conic.z;

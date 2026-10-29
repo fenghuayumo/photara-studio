@@ -14,8 +14,55 @@ void require(bool ok, const char *message) {
     throw std::runtime_error(message);
 }
 #include "splat_gut_vulkan.hpp"
+void native_projection_regressions() {
+  const auto root=std::filesystem::temp_directory_path()/"photara_gut_projection_test";
+  std::filesystem::create_directories(root/"masks");
+  mvs::MvsView view;view.id=0;view.path=root/"native.png";
+  view.width=view.src_width=96;view.height=view.src_height=64;
+  view.source_model=CameraModel::equirectangular;
+  io::save_rgb_png({96,64,std::vector<std::uint8_t>(96*64*3,128)},view.path);
+  TrainingOptions options;options.use_mask=false;
+  for(unsigned resolution:{96U,53U}) {
+    options.max_image_dimension=resolution;
+    const auto camera=make_training_view(view,options).camera;
+    require(std::abs(camera.fx-camera.width/(2.F*3.14159265359F))<1e-5F &&
+            std::abs(camera.fy-camera.height/3.14159265359F)<1e-5F,
+            "Non-2:1 panorama intrinsics are inconsistent");
+  }
+  view.source_model=CameraModel::opencv_fisheye;
+  view.src_fx=view.src_fy=view.fx=view.fy=20;
+  view.src_cx=view.cx=48;view.src_cy=view.cy=32;
+  options.max_image_dimension=96;
+  auto target=make_training_view(view,options);
+  auto validity=target.mask.to_vector();
+  require(target.has_mask && target.mask_is_validity && validity[32*96+95]==0.F && validity[32*96+48]==1.F,
+          "Native fisheye must exclude lens-invalid pixels even with use_mask=false");
+  io::GrayImage mask{96,64,std::vector<std::uint8_t>(96*64,255)};
+  mask.pixels[32*96+48]=0;io::save_gray_png(mask,root/"masks/native.png");
+  options.use_mask=true;options.mask_dir=root/"masks";
+  target=make_training_view(view,options);validity=target.mask.to_vector();
+  require(target.has_mask && !target.mask_is_validity && validity[32*96+95]==0.F &&
+          validity[32*96+48]==0.F && validity[32*96+50]==1.F,"Fisheye lens and person masks did not intersect");
+  for(auto device:{tinytensor::Device::CUDA,tinytensor::Device::Vulkan}) {
+    auto seed=gut_validation::model(device,false,1);
+    seed.means=tinytensor::Tensor::from_vector(std::vector<float>{2,0,.0001F},{1U,3U},device);
+    seed.log_scales=tinytensor::Tensor::from_vector(std::vector<float>(3,std::log(.2F)),{1U,3U},device);
+    Rasterizer raster;RasterizeOptions raster_options;raster_options.require_depth=false;
+    const auto frame=raster.forward(seed,target.camera,raster_options);
+    require(frame.alpha.to_vector()[32*96+95]==0.F,"Invalid fisheye ray is opaque");
+    std::vector<float> dc(3*96*64,0.F);dc[32*96+95]=1.F;
+    auto derivative=tinytensor::Tensor::from_vector(dc,{3U,64U,96U},device);
+    const auto gradients=raster.backward(seed,frame,derivative,tinytensor::Tensor::zeros({64U,96U},device),{},{});
+    for(const auto* tensor:{&gradients.means,&gradients.log_scales,&gradients.quaternions,&gradients.opacity_logits,&gradients.sh,&gradients.refine_weight})
+      for(float value:tensor->to_vector())require(value==0.F,"Invalid fisheye ray produced parameter gradients");
+  }
+  std::cout<<"Native fisheye lens/mask/backward and non-2:1 panorama intrinsics passed\n";
+}
 int main() {
   try {
+    native_projection_regressions();
+    gut_validation::panorama_adc_regression();
+    gut_validation::panorama_pole_backward_regression();
     gut_validation::run();
     const auto root =
         std::filesystem::temp_directory_path() / "photara_3dgut_test";

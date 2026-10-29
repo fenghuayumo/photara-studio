@@ -120,8 +120,8 @@ std::size_t available_system_memory_bytes() {
 }
 
 void finalize_equirect_intrinsics(Camera& camera) {
-    camera.fx = camera.fy =
-        static_cast<float>(camera.width) / (2.F * 3.14159265358979323846F);
+    camera.fx = static_cast<float>(camera.width) / (2.F * 3.14159265358979323846F);
+    camera.fy = static_cast<float>(camera.height) / 3.14159265358979323846F;
     camera.cx = 0.5F * static_cast<float>(camera.width);
     camera.cy = 0.5F * static_cast<float>(camera.height);
     camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
@@ -792,11 +792,16 @@ HostTrainingView load_host_training_view(
         ? 1.F
         : 255.F;
     std::vector<int> rgba(pixels);
-    const bool validity_only = options.ignore_undistortion_border &&
-        !has_source_mask && !has_projected_mask &&
-        !uses_native_splat_projection(camera.model) &&
-        (view.source_model == CameraModel::opencv_fisheye ||
-         view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F || view.p2 != 0.F);
+    const bool native_fisheye = camera.model == CameraModel::opencv_fisheye;
+    const bool validity_only = !has_source_mask && !has_projected_mask &&
+        (native_fisheye || (options.ignore_undistortion_border &&
+         !uses_native_splat_projection(camera.model) &&
+         (view.source_model == CameraModel::opencv_fisheye ||
+          view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F || view.p2 != 0.F)));
+    constexpr float half_pi = 1.57079632679F;
+    constexpr float h2 = half_pi * half_pi;
+    const float fisheye_limit = half_pi * (1.F + h2 * (camera.k1 +
+        h2 * (camera.k2 + h2 * (camera.k3 + h2 * camera.k4))));
     const bool direct_source =
         camera.width == source.width && camera.height == source.height &&
         (uses_native_splat_projection(camera.model) ||
@@ -816,6 +821,13 @@ HostTrainingView load_host_training_view(
         std::uint8_t green{};
         std::uint8_t blue{};
         std::uint8_t alpha{255};
+        bool lens_valid = true;
+        if (native_fisheye) {
+            const float px = (float(x) + options.rasterization.pixel_center_offset - camera.cx) / camera.fx;
+            const float py = (float(y) + options.rasterization.pixel_center_offset - camera.cy) / camera.fy;
+            lens_valid = camera.fx > 0.F && camera.fy > 0.F && fisheye_limit > 0.F &&
+                px*px + py*py < fisheye_limit*fisheye_limit;
+        }
         if (direct_source) {
             red = source.pixels[3 * pixel];
             green = source.pixels[3 * pixel + 1];
@@ -839,7 +851,7 @@ HostTrainingView load_host_training_view(
                         sample_projected_foreground_coverage(
                             view, camera, x, y,
                             projected_mask_denominator)));
-            rgba[pixel] = pack_rgba(red, green, blue, alpha);
+            rgba[pixel] = pack_rgba(red, green, blue, lens_valid ? alpha : 0);
             continue;
         }
         const auto [sx, sy] =
@@ -858,7 +870,7 @@ HostTrainingView load_host_training_view(
                     sample_projected_foreground_coverage(
                         view, camera, x, y,
                         projected_mask_denominator)));
-        rgba[pixel] = pack_rgba(red, green, blue, alpha);
+        rgba[pixel] = pack_rgba(red, green, blue, lens_valid ? alpha : 0);
     }
 
     std::vector<float> depth;
@@ -886,7 +898,7 @@ HostTrainingView load_host_training_view(
                     view.depth_map.normal[pixel](axis);
         }
     }
-    const bool has_mask = has_source_mask || has_projected_mask || validity_only;
+    const bool has_mask = has_source_mask || has_projected_mask || validity_only || native_fisheye;
 
     return {
         camera, std::move(rgba), std::move(depth), std::move(normals),

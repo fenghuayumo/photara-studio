@@ -15,10 +15,10 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
     bool valid=begin+position<end;
     uint id=valid ? instances[begin+position] : 0u,base=id*pc.u19;
     float4 a=0.0f,b=0.0f,c=0.0f,rgb=0.0f;
-    float2 refine=0.0f;
+    float4 refine=0.0f;
     if(valid) {
         a=gauss_f[base+3u];b=gauss_f[base+4u];c=gauss_f[base+5u];
-        rgb=gauss_f[base+2u];refine=gauss_f[base+6u].xy;
+        rgb=gauss_f[base+2u];refine=gauss_f[base+6u];
     }
     float fx=asfloat(pc.u9),fy=asfloat(pc.u10),cx=asfloat(pc.u11),cy=asfloat(pc.u12);
     float3 acc_o=0.0f,acc_a=0.0f,acc_b=0.0f,acc_c=0.0f,acc_rgb=0.0f;
@@ -76,7 +76,9 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
             acc_rgb+=weight*dl.xyz;
             if(raw<kAlphaClip) acc_opacity+=da*G;
             float3 gm=-(a.xyz*go.x+b.xyz*go.y+c.xyz*go.z);
-            acc_refine+=length(gm.xy*refine*float2(width,height))/max(state.x,1.0e-6f);
+            float score=pc.u3==kModeEquirect ? refine.w*length(cross(refine.xyz,gm))
+                            : length(gm.xy*refine.xy*float2(width,height));
+            acc_refine+=score/max(state.x,1.0e-6f);
         }
     }
     if(!valid) return;

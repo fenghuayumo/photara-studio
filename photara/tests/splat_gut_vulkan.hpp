@@ -152,7 +152,7 @@ inline void run() {
             compare("SH",cg.sh.to_vector(),vg.sh.to_vector());
             compare("ADC",cg.refine_weight.to_vector(),vg.refine_weight.to_vector(),.006,2e-5);
         }
-        if(mode==0 && filter) finite_difference(vk,camera,options);
+        if(filter) finite_difference(vk,camera,options);
         if(mode==0 && !filter) {
             bool rejected=false;
             try { (void)vr.sample_depth(vk,Tensor::zeros({1U,3U},Device::Vulkan),camera,options); }
@@ -163,5 +163,51 @@ inline void run() {
     for(const auto& [name,error] : parity_errors)
         std::cout<<"GUT parity "<<name<<" worst_relative_l2="<<error.first<<" worst_absolute="<<error.second<<'\n';
     std::cout<<"GUT Vulkan/CUDA forward, masked L1/SSIM, alpha and model-gradient parity passed\n";
+}
+
+inline void panorama_adc_regression() {
+    Camera camera;camera.width=128;camera.height=64;camera.model=CameraModel::equirectangular;
+    camera.world_to_camera={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    camera.fx=camera.fy=128.F/(2.F*3.14159265359F);camera.cx=64;camera.cy=32;
+    std::vector<float> scores;
+    for(auto device:{Device::CUDA,Device::Vulkan}) for(unsigned side=0;side<2;++side) {
+        auto seed=model(device,false,1);
+        seed.means=Tensor::from_vector(side ? std::vector<float>{2,0,0}:std::vector<float>{0,0,2},{1U,3U},device);
+        seed.log_scales=Tensor::from_vector(std::vector<float>(3,std::log(.25F)),{1U,3U},device);
+        seed.opacity_logits=Tensor::from_vector(std::vector<float>{1.F},{1U,1U},device);
+        Rasterizer raster;RasterizeOptions options;options.require_depth=false;
+        auto frame=raster.forward(seed,camera,options);
+        auto dc=Tensor::from_vector(std::vector<float>(3*128*64,1.F/(128*64)),{3U,64U,128U},device);
+        auto gradients=raster.backward(seed,frame,dc,Tensor::zeros({64U,128U},device),{},{});
+        scores.push_back(gradients.refine_weight.to_vector()[0]);
+        require(std::isfinite(scores.back()) && scores.back()>1.F && scores.back()<100.F,"Panorama ADC score is degenerate");
+    }
+    for(float score:scores)
+        require(std::abs(score-scores[0])<.001F*scores[0],"Panorama ADC depends on longitude/backend");
+    std::cout<<"Panorama ADC rotational invariance passed, score="<<scores[0]<<'\n';
+}
+
+inline void panorama_pole_backward_regression() {
+    Camera camera;camera.width=96;camera.height=64;camera.model=CameraModel::equirectangular;
+    camera.world_to_camera={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    camera.fx=96.F/(2.F*3.14159265359F);camera.fy=64.F/3.14159265359F;camera.cx=48;camera.cy=32;
+    std::vector<std::vector<float>> expected;
+    for(auto device:{Device::CUDA,Device::Vulkan}) {
+        auto seed=model(device,false,1);
+        seed.means=Tensor::from_vector(std::vector<float>{0,2,0},{1U,3U},device);
+        seed.log_scales=Tensor::from_vector(std::vector<float>(3,std::log(.2F)),{1U,3U},device);
+        Rasterizer raster;RasterizeOptions options;options.require_depth=false;
+        auto frame=raster.forward(seed,camera,options);
+        auto alpha=frame.alpha.to_vector();
+        require(*std::max_element(alpha.begin(),alpha.end())>.02F,"Panorama pole has no contribution");
+        auto dc=Tensor::from_vector(std::vector<float>(3*96*64,1.F/(96*64)),{3U,64U,96U},device);
+        auto gradients=raster.backward(seed,frame,dc,Tensor::zeros({64U,96U},device),{},{});
+        std::vector<std::vector<float>> actual={frame.color.to_vector(),alpha,
+            gradients.means.to_vector(),gradients.log_scales.to_vector(),gradients.quaternions.to_vector(),
+            gradients.opacity_logits.to_vector(),gradients.sh.to_vector(),gradients.refine_weight.to_vector()};
+        if(device==Device::CUDA) expected=std::move(actual);
+        else for(std::size_t i=0;i<actual.size();++i)compare("pole forward/backward",actual[i],expected[i],.003,2e-5);
+    }
+    std::cout<<"Panorama pole CUDA/Vulkan forward, backward and ADC passed\n";
 }
 }

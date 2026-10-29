@@ -113,6 +113,8 @@ SplatForwardOutput reference(const Scene &scene, const SplatCamera &c, const Spl
             else if (c.mode == 1) {
                 const double r = std::hypot(u, v);
                 double lo = 0, hi = 1.57079632679;
+                const double h2 = hi*hi;
+                const double limit = hi*(1+h2*(c.k1+h2*(c.k2+h2*(c.k3+h2*c.k4))));
                 for (int k = 0; k < 40; ++k) {
                     const double t = (lo + hi) * .5, q = t * t;
                     const double td = t * (1 + q * (c.k1 + q * (c.k2 + q * (c.k3 + q * c.k4))));
@@ -123,6 +125,7 @@ SplatForwardOutput reference(const Scene &scene, const SplatCamera &c, const Spl
                 }
                 const double t = (lo + hi) * .5, scale = r > 1e-8 ? std::sin(t) / r : 1.;
                 ray = {u * scale, v * scale, std::cos(t)};
+                if (!(r < limit)) ray = {0,0,0};
             } else {
                 const double n = std::sqrt(dot(ray, ray));
                 for (auto &a : ray)
@@ -209,6 +212,69 @@ void ray_tests(bool validation) {
     options.external_device.queue_family = device.queue_family();
     Context context(options);
     SplatRasterizer raster(context);
+    // Finite 3D support remains visible at the spherical chart singularity.
+    // Also cover pole-straddling ellipsoids whose centers are not singular.
+    for (float opacity : {.9F,.006F})
+    for (bool rotated : {false,true})
+    for (Vec mean : {Vec{0,2,0}, Vec{0,-2,0}, Vec{.02,2,.02}}) {
+        Scene scene;
+        scene.means={float(mean[0]),float(mean[1]),float(mean[2])};
+        scene.scales={.2F,.2F,.2F};scene.rotations={1,0,0,0};
+        scene.opacity={opacity};scene.colors={.8F,.3F,.2F};
+        if (rotated) {
+            const float co=std::cos(.3F),si=std::sin(.3F);
+            scene.view={co,si,0,0,-si,co,0,0,0,0,1,0,0,0,0,1};
+            scene.means={float(co*mean[0]+si*mean[1]),float(-si*mean[0]+co*mean[1]),float(mean[2])};
+        }
+        auto camera=scene.camera(3);camera.width=96;camera.height=64;
+        camera.fx=96.F/(2.F*3.14159265359F);camera.fy=64.F/3.14159265359F;
+        camera.cx=48;camera.cy=32;
+        SplatSettings settings;settings.primitive=SplatPrimitive::gaussian_3dgut;
+        raster.upload_model(scene.gaussians());
+        const auto expected=reference(scene,camera,settings);
+        const auto actual=raster.render(camera,settings);
+        require(*std::max_element(actual.alpha.begin(),actual.alpha.end())>opacity*.85F,"GUT culled the panorama pole");
+        close(actual.color,expected.color,1e-4,"pole RGB");
+        close(actual.alpha,expected.alpha,1e-4,"pole alpha");
+        close(actual.median_depth,expected.median_depth,1e-4,"pole depth");
+        settings.need_depth=false;
+        std::vector<std::uint8_t> rgba;raster.render_rgba(camera,settings,rgba);
+        for(unsigned p=0;p<camera.width*camera.height;++p)
+            for(unsigned channel=0;channel<3;++channel)
+                require(std::abs(int(rgba[4*p+channel])-int(std::clamp(expected.color[channel*camera.width*camera.height+p],0.F,1.F)*255.F+.5F))<=1,
+                        "pole RGBA mismatch");
+    }
+    {
+        Scene scene;scene.means={.3F,-2,0};scene.scales={.05F,.05F,.05F};
+        scene.rotations={1,0,0,0};scene.opacity={.9F};scene.colors={1,.5F,.2F};
+        auto camera=scene.camera(3);camera.width=96;camera.height=64;
+        camera.fx=96.F/(2.F*3.14159265359F);camera.fy=64.F/3.14159265359F;camera.cx=48;camera.cy=32;
+        SplatSettings settings;settings.primitive=SplatPrimitive::gaussian_3dgut;
+        settings.need_depth=false;settings.preview_rings=true;settings.preview_ring_scale=8;
+        raster.upload_model(scene.gaussians());
+        const auto actual=raster.render(camera,settings);
+        require(actual.alpha[48]>.04F,"Pole-crossing rings contour was culled");
+        std::vector<std::uint8_t> rgba;raster.render_rgba(camera,settings,rgba);
+        require(std::abs(int(rgba[4*48])-int(actual.color[48]*255.F+.5F))<=1,"Pole rings RGBA mismatch");
+    }
+    {
+        Scene scene;scene.means={2,0,.0001F};scene.scales={.2F,.2F,.2F};
+        scene.rotations={1,0,0,0};scene.opacity={.9F};scene.colors={1,0,0};
+        auto camera=scene.camera(1);camera.width=96;camera.height=64;
+        camera.fx=camera.fy=20;camera.cx=48;camera.cy=32;camera.k1=camera.k2=0;
+        SplatSettings settings;settings.primitive=SplatPrimitive::gaussian_3dgut;settings.need_depth=false;
+        settings.background[0]=.13F;settings.background[1]=.07F;settings.background[2]=.11F;
+        raster.upload_model(scene.gaussians());
+        const auto expected=reference(scene,camera,settings);
+        for(bool snapshots:{false,true}) {
+            settings.pixel_snapshots=snapshots;
+            auto actual=raster.render(camera,settings);
+            close(actual.color,expected.color,1e-4,"fisheye lens RGB");
+            require(actual.alpha[32*96+95]==0,"invalid fisheye ray rendered geometry");
+        }
+        std::vector<std::uint8_t> rgba;settings.pixel_snapshots=false;raster.render_rgba(camera,settings,rgba);
+        require(rgba[4*(32*96+95)]==std::uint8_t(.13F*255.F+.5F),"invalid fisheye RGBA is not background");
+    }
     for (unsigned mode : {0u, 1u, 3u, 4u})
         for (bool transformed : {false, true})
           for (bool dense : {false, true}) {

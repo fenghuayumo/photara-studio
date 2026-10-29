@@ -47,7 +47,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     uint begin = ranges[2u*tile], end = ranges[2u*tile+1u];
     float T = 1.0f;
     float3 rgb = 0.0f;
-    bool done = !inside;
+    bool done = !inside || !(dot(direction,direction) > 0.0f);
     if (rank == 0u) {
         plane_count = 0u;
         float2 lo = float2(group.xy*16u);

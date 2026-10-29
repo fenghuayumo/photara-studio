@@ -42,7 +42,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     float T = 1.0f, depth = 0.0f;
     float3 rgb = 0.0f, normal = 0.0f;
     uint last = 0u;
-    bool done = !inside;
+    bool done = !inside || !(dot(direction,direction) > 0.0f);
     [loop] for (uint base = begin; base < end; base += 256u) {
         if (rank == 0u) alive = 0u;
         GroupMemoryBarrierWithGroupSync();

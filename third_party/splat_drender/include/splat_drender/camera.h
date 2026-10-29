@@ -185,7 +185,7 @@ SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K)
     const float x = (px - K.cx) / K.fx;
     const float y = (py - K.cy) / K.fy;
     if (is_equirect(K.mode)) {
-        // The panorama convention (fx = fy = width / 2pi, cx = width / 2)
+        // Full-sphere intrinsics are fx = width / 2pi, fy = height / pi.
         // makes those offsets the azimuth and elevation in radians, so the ray
         // is the spherical direction rather than a perspective (x, y, 1).
         const float cos_elevation = cosf(y);
@@ -198,12 +198,21 @@ SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K)
     }
     const float r = hypotf(x, y);
     float lo = 0.f, hi = 1.57079632679f;
+    const float h2 = hi * hi;
+    const float limit = hi * (1.f + h2 * (K.k1 + h2 * (K.k2 + h2 * (K.k3 + h2 * K.k4))));
+    // A failed inverse must not collapse all out-of-lens pixels onto the
+    // horizon. Zero denotes an invalid ray (and produces background only).
+    if (!(K.fx > 0.f && K.fy > 0.f && r < limit) || !isfinite(r))
+        return make_float3(0.f, 0.f, 0.f);
     for (int i = 0; i < 28; ++i) {
         const float t = 0.5f * (lo + hi), q = t * t;
         const float td = t * (1.f + q * (K.k1 + q * (K.k2 + q * (K.k3 + q * K.k4))));
         if (td < r) lo = t; else hi = t;
     }
     const float theta = 0.5f * (lo + hi);
+    const float t2 = theta * theta;
+    const float derivative = 1.f + t2 * (3.f * K.k1 + t2 * (5.f * K.k2 + t2 * (7.f * K.k3 + 9.f * t2 * K.k4)));
+    if (!(derivative > 1.e-6f)) return make_float3(0.f, 0.f, 0.f);
     const float scale = r > 1.0e-8f ? sinf(theta) / r : 1.f;
     return make_float3(x * scale, y * scale, fmaxf(0.f, cosf(theta)));
 }

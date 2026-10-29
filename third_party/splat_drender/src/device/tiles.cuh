@@ -19,6 +19,20 @@ SD_D2 inline unsigned enumerate(
     unsigned gaussian_id, unsigned offset, unsigned* tile_out,
     unsigned* value_out, int wrap_width,
     unsigned long long* packed_out = nullptr, unsigned depth = 0) {
+    // GUT's full-sphere fallback has no finite longitude ellipse. Emit each
+    // tile once: wrapping a huge ellipse can duplicate its Gaussian and
+    // composite opacity repeatedly, and a low-opacity ellipse need not cover
+    // the whole image even when its covariance was expanded to screen size.
+    if (wrap_width > 0 && conic_opacity.x == -1.f && conic_opacity.y == 0.f &&
+        conic_opacity.z == -1.f && conic_opacity.w >= 1.f/255.f) {
+        const unsigned count = unsigned(grid_x)*unsigned(grid_y);
+        if (tile_out || packed_out) for (unsigned tile=0;tile<count;++tile) {
+            if (packed_out) packed_out[offset+tile] = (static_cast<unsigned long long>(tile)<<32)|depth;
+            else tile_out[offset+tile] = tile;
+            value_out[offset+tile] = gaussian_id;
+        }
+        return count;
+    }
     const float a = conic_opacity.x, b = conic_opacity.y, c = conic_opacity.z;
     const float det = a * c - b * b;
     if (!(a > 0.f && c > 0.f) || !(conic_opacity.w >= 1.f / 255.f) ||

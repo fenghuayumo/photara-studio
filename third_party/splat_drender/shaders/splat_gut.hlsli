@@ -17,12 +17,29 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     float k3 = asfloat(pc.u14), k4 = asfloat(pc.u15);
     float modifier = asfloat(pc.u18);
     Projection center = gut_project(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4);
+    bool pole = mode == kModeEquirect && !center.valid && camera_visible(t, mode);
+    if (pole) {
+        center.pixel_x = float(width)*0.5f;
+        center.pixel_y = t.y > 0.0f ? float(height) : 0.0f;
+        center.valid = true;
+    }
     if (!center.valid || !(opacity >= kAlphaFloor) || any(scale <= 0.0f) || !(modifier > 0.0f)) return;
     Mat3 R = quat_rotation(rotation);
     float2 points[7];
     points[0] = float2(center.pixel_x, center.pixel_y);
     float2 mu = 0.25f * points[0];
-    bool boundary = false;
+    bool boundary = pole;
+    if (mode == kModeEquirect) {
+        float3 eye = float3(camera[16],camera[17],camera[18]);
+        float3 up = float3(camera[1],camera[5],camera[9]);
+        float3 o = mat_mul_vec(R,eye-mean)/(scale*modifier);
+        float3 d = mat_mul_vec(R,up)/(scale*modifier);
+        float dd = dot(d,d), peak = -dot(o,d)/dd;
+        float3 q = o+peak*d;
+        float contour = float((pc.u3>>16u)&4095u)/256.0f;
+        float support2 = (pc.u3 & 64u)!=0u ? contour*contour : -2.0f*log(kAlphaFloor/opacity);
+        boundary = boundary || (dd > 0.0f && dot(q,q) <= support2*1.001f);
+    }
     // Seven-point UT, lambda=1: central weight 1/4, others 1/8.
     [unroll] for (int axis = 0; axis < 3; ++axis) {
         [unroll] for (int side = 0; side < 2; ++side) {
@@ -50,6 +67,7 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     float det = cov.x*cov.z - cov.y*cov.y;
     if (!(det > 0.0f) || !finite1(det)) return;
     float4 conic = float4(cov.z/det, -cov.y/det, cov.x/det, opacity);
+    if (boundary && mode == kModeEquirect) conic.xyz = float3(-1.0f,0.0f,-1.0f);
     float radius = ceil(3.0f * sqrt(max(cov.x, cov.z)));
     // Rings use a proxy bin opacity to cover their requested contour.
     if ((pc.u3 & 64u) != 0u) {
@@ -94,11 +112,14 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     gauss_f[base+4u] = float4(A.m[1][0], A.m[1][1], A.m[1][2], origin.y);
     gauss_f[base+5u] = float4(A.m[2][0], A.m[2][1], A.m[2][2], origin.z);
     gauss_f[base+6u] = float4(normal, 0.0f);
-    // Appearance training uses this slot for the same ADC screen-space
-    // derivative conversion as CUDA. Inference retains its surface normal.
-    if ((pc.u3 & 8u) != 0u)
-        gauss_f[base+6u] = float4(1.0f/(abs(center.du0)+1.0e-6f),
-                                 1.0f/(abs(center.dv1)+1.0e-6f), 0.0f, 0.0f);
+    // Panorama ADC uses a sphere tangent plane; its longitude chart is
+    // singular at the sides/poles. Inference retains its surface normal.
+    if ((pc.u3 & 8u) != 0u) {
+        if (mode == kModeEquirect)
+            gauss_f[base+6u] = float4(t/length(t), 6.28318530718f*length(t));
+        else gauss_f[base+6u] = float4(1.0f/(abs(center.du0)+1.0e-6f),
+                                      1.0f/(abs(center.dv1)+1.0e-6f), 0.0f, 0.0f);
+    }
     // Cache the support test itself, not only the source transform. Count and
     // emit must make bit-identical discrete decisions across shader variants.
     if ((pc.u3 & 512u)!=0u) {

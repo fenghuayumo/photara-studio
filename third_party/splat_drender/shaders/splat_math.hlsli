@@ -350,6 +350,9 @@ float3 pixel_unit_ray(float px, float py, uint mode, float fx, float fy, float c
     float r = sqrt(x * x + y * y);
     float lo = 0.0f;
     float hi = 1.57079632679f;
+    float h2 = hi * hi;
+    float limit = hi * (1.0f + h2 * (k1 + h2 * (k2 + h2 * (k3 + h2 * k4))));
+    if (!(fx > 0.0f && fy > 0.0f && r < limit) || !finite1(r)) return 0.0f;
     [loop] for (int i = 0; i < 28; ++i) {
         float mid = 0.5f * (lo + hi);
         float q = mid * mid;
@@ -358,6 +361,9 @@ float3 pixel_unit_ray(float px, float py, uint mode, float fx, float fy, float c
         else hi = mid;
     }
     float theta = 0.5f * (lo + hi);
+    float t2 = theta * theta;
+    float derivative = 1.0f + t2 * (3.0f*k1 + t2 * (5.0f*k2 + t2 * (7.0f*k3 + 9.0f*t2*k4)));
+    if (!(derivative > 1.0e-6f)) return 0.0f;
     float scale = r > 1.0e-8f ? sin(theta) / r : 1.0f;
     return float3(x * scale, y * scale, max(0.0f, cos(theta)));
 }

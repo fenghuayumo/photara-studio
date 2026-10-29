@@ -56,6 +56,70 @@ ill-conditioned, extremely thin Gaussians; bitwise equivalence is not promised.
 Conservative UT bins remain unchanged. Performance parity with optimized 3DGS
 or NVIDIA's implementation has not been established.
 
+## Native camera boundaries and densification
+
+Panorama ADC uses the tangential part of the camera-space mean gradient:
+`2*pi*length(cross(camera_mean, mean_gradient))`, divided by accumulated
+alpha. The full-turn normalization matches the existing horizontal metric;
+the spherical tangent norm removes the radial component without dividing by
+longitude-Jacobian entries that vanish at side views. CUDA reference/optimized
+and all Vulkan backward paths share this metric. It does not change the
+photometric parameter gradients themselves.
+
+The UT treats a panorama pole as a chart singularity, not an invisible
+Gaussian. Centers on a pole and finite alpha support crossing either pole
+use conservative full-image bins, because such support spans every longitude.
+This can increase candidate counts for large particles near poles. Full-sphere
+intrinsics are `fx=width/(2*pi)`, `fy=height/pi` at import, training resize and
+viewport creation; the image need not have a 2:1 pixel aspect ratio.
+
+OpenCV fisheye currently supports the monotonic front hemisphere (`theta <
+pi/2`). Pixels outside the distorted image of that domain produce background
+and zero GUT gradients, rather than repeated horizon rays. Native training
+intersects this lens validity with the source/person mask, including when
+semantic masking is disabled. This does not add support for lenses whose
+field of view extends into the rear hemisphere.
+
+## Controlling extremely thin particles
+
+The existing optional `--splat-shape-axis-ratio-reg W` penalizes only log-axis
+ratios above `--splat-shape-max-axis-ratio R`. With `l=log(scale)` its penalty
+is `W/(2*N) * sum(max(max(l)-min(l)-log(R),0)^2)`. Its gradients shorten the
+longest axis and thicken the shortest axis; it is a soft threshold, not a
+hard cap. It also affects pancake-like surface particles, so a low threshold
+can remove real surface detail.
+
+For testing numerical anisotropy, compare a moderate threshold such as 1000
+and weights 0.001/0.01 against an unregularized run with identical data, seed,
+iteration budget and held-out views. A separate scene-relative minimum scale
+is available through `--splat-constrain-scales` and
+`--splat-min-scale-fraction`; that option also changes initialization scale
+clamping, so test it separately. Do not clamp or delete thin particles in an
+already trained model and interpret the changed render as a training result.
+
+Measured on 2026-10-29: two native 2:1 panorama datasets, CUDA, ADC+, seed 42,
+5000 iterations, fixed 1000x500 resolution, 500000-particle cap, source person
+masks with `alpha_mode=masked`, and every tenth registered view held out (38
+office views and 65 bedroom views). All variants below use 500000 particles.
+PSNR measures only valid static pixels; training geometry losses are disabled.
+
+| Variant | Office PSNR | Office axes >10000 | Bedroom PSNR | Bedroom axes >10000 |
+| --- | ---: | ---: | ---: | ---: |
+| Before camera/ADC fixes | 26.1184 | 327 | 24.8363 | 1 |
+| Camera/ADC fixes | 26.2392 | 88 | 24.9229 | 4 |
+| Fixes + ratio 1000, weight 0.001 | 26.2401 | 0 | 24.9861 | 0 |
+| Fixes + ratio 1000, weight 0.01 | 26.2208 | 0 | 24.9908 | 0 |
+
+For these two scenes, `--splat-shape-axis-ratio-reg 0.001
+--splat-shape-max-axis-ratio 1000` removes the extreme anisotropy with no
+measured PSNR loss versus fixes alone. The largest final ratios remain 1374
+and 1766 because this is a soft penalty. The stronger weight gives no
+consistent quality advantage. Keep the constraint opt-in: these single-seed,
+short-run panorama measurements do not establish a universal default or
+real-fisheye quality improvement. Commands, model files, held-out renders,
+parameter statistics and CSVs are in
+`build/3dgut-camera-fixes-20261029/` (local experimental outputs).
+
 ## Persistence
 
 PLY keeps the existing vertex properties and adds one of these header comments:
