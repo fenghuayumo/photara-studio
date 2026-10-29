@@ -13,7 +13,8 @@ namespace splat_drender::tiles {
 // Walks the AccuTile footprint. When `emit` is null only the touched-tile
 // count is produced; otherwise (tile_id, gaussian_id) pairs are written to
 // `tile_out` / `value_out` starting at `offset`. `wrap_width` > 0 adds the
-// seam-crossing duplicates for equirectangular images.
+// seam-crossing coverage for equirectangular images. Each Gaussian/tile pair
+// must occur once, even when its footprint covers more than one panorama.
 SD_D2 inline unsigned enumerate(
     float2 mean, float4 conic_opacity, int grid_x, int grid_y,
     unsigned gaussian_id, unsigned offset, unsigned* tile_out,
@@ -42,6 +43,57 @@ SD_D2 inline unsigned enumerate(
     if (!(threshold >= 0.f)) return 0;
 
     unsigned count = 0;
+    if (wrap_width > 0) {
+        // Slice by tile row, where a convex ellipse has one horizontal
+        // interval. Wrap that interval in pixel coordinates before converting
+        // it to tiles, then union its at most two tile ranges. Walking shifted
+        // ellipses separately duplicates candidates when ranges overlap (also
+        // for sub-tile seams and widths not divisible by the tile size).
+        const float w = float(wrap_width);
+        const float ey = sqrtf(threshold * a / det);
+        const float ex = sqrtf(threshold * c / det);
+        const float arg_min = mean.y + b * ex / c;
+        const float arg_max = mean.y - b * ex / c;
+        const int y_min = max(0, min(grid_y, int(floorf((mean.y-ey)/cfg::kTileHeight))));
+        const int y_max = max(0, min(grid_y, int(floorf((mean.y+ey)/cfg::kTileHeight))+1));
+        auto emit_range = [&](int begin, int end, int ty) {
+            for (int tx=begin;tx<end;++tx) {
+                const unsigned tile = unsigned(ty)*unsigned(grid_x)+unsigned(tx);
+                if (tile_out || packed_out) {
+                    if (packed_out) packed_out[offset+count] = (static_cast<unsigned long long>(tile)<<32)|depth;
+                    else tile_out[offset+count] = tile;
+                    value_out[offset+count] = gaussian_id;
+                }
+                ++count;
+            }
+        };
+        for (int ty=y_min;ty<y_max;++ty) {
+            const float s0 = fmaxf(mean.y-ey,float(ty*cfg::kTileHeight));
+            const float s1 = fminf(mean.y+ey,float((ty+1)*cfg::kTileHeight));
+            const float d0=s0-mean.y,d1=s1-mean.y;
+            const float r0=sqrtf(fmaxf(0.f,a*threshold-det*d0*d0));
+            const float r1=sqrtf(fmaxf(0.f,a*threshold-det*d1*d1));
+            const float left = arg_min>=s0 && arg_min<=s1 ? mean.x-ex
+                : fminf(mean.x+(-b*d0-r0)/a,mean.x+(-b*d1-r1)/a);
+            const float right = arg_max>=s0 && arg_max<=s1 ? mean.x+ex
+                : fmaxf(mean.x+(-b*d0+r0)/a,mean.x+(-b*d1+r1)/a);
+            const float span=fmaxf(0.f,right-left);
+            if (span>=w) { emit_range(0,grid_x,ty); continue; }
+            float lo=left-w*floorf(left/w);
+            if (lo>=w) lo=0.f;
+            if (lo<0.f) lo+=w;
+            const float hi=lo+span;
+            const int begin=max(0,min(grid_x,int(floorf(lo/cfg::kTileWidth))));
+            if (hi<w) {
+                emit_range(begin,max(0,min(grid_x,int(floorf(hi/cfg::kTileWidth))+1)),ty);
+            } else {
+                const int end=max(0,min(grid_x,int(floorf((hi-w)/cfg::kTileWidth))+1));
+                if (end>=begin) emit_range(0,grid_x,ty);
+                else { emit_range(0,end,ty); emit_range(begin,grid_x,ty); }
+            }
+        }
+        return count;
+    }
     auto walk = [&](float2 center) {
         // Iterate along the shorter screen axis so the per-slice interval
         // on the long axis is exact and tight.
@@ -102,14 +154,6 @@ SD_D2 inline unsigned enumerate(
     };
 
     walk(mean);
-    if (wrap_width > 0) {
-        const float radius = 3.f * sqrtf(fmaxf(c / det, 0.f));
-        const float w = float(wrap_width);
-        if (mean.x - radius < 0.f)
-            walk(make_float2(mean.x + w, mean.y));
-        if (mean.x + radius > w)
-            walk(make_float2(mean.x - w, mean.y));
-    }
     return count;
 }
 

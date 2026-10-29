@@ -199,6 +199,8 @@ void close(const std::vector<float> &actual, const std::vector<float> &expected,
         throw std::runtime_error("Vulkan 3DGUT differs from ray oracle");
     }
 }
+#include "panorama_ewa_oracle.hpp"
+
 void ray_tests(bool validation) {
     photara::vk::DeviceRequest request;
     request.validation = validation;
@@ -667,6 +669,7 @@ void viewport_tests(bool validation) {
 int main(int argc, char** argv) {
     try {
         const bool validation = argc == 2 && std::string_view(argv[1]) == "--validation";
+        panorama_ewa_tests(validation);
         placement_tests(validation);
         ray_tests(validation);
         viewport_tests(validation);

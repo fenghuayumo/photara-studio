@@ -140,6 +140,66 @@ uint walk_tiles(float2 center, int grid_x, int grid_y, float a, float b, float c
     return count;
 }
 
+uint emit_periodic_range(int begin, int end, int ty, int grid_x, uint gaussian_id,
+                         uint offset, uint depth, uint emit_mode) {
+    uint count=0u;
+    [loop] for (int tx=begin;tx<end;++tx) {
+        if (!gut_accept_tile(tx,ty)) continue;
+        if (emit_mode!=0u) {
+            uint tile=uint(ty)*uint(grid_x)+uint(tx),slot=offset+count;
+            key_lo[slot]=emit_mode==2u ? depth : tile;
+            if (emit_mode==2u) key_hi[slot]=tile;
+            values[slot]=gaussian_id;
+        }
+        ++count;
+    }
+    return count;
+}
+
+// Wrap the ellipse's horizontal interval per row, then union tile ranges.
+// All count/emit variants use this walk so a Gaussian/tile pair occurs once.
+uint periodic_tiles(float2 mean, float4 conic, int grid_x, int grid_y, int wrap_width,
+                     float det, float threshold, uint gaussian_id, uint offset, uint depth, uint emit_mode) {
+    float a=conic.x,b=conic.y,c=conic.z,w=float(wrap_width);
+    float ey=sqrt(threshold*a/det),ex=sqrt(threshold*c/det);
+    float arg_min=mean.y+b*ex/c,arg_max=mean.y-b*ex/c;
+    int y_min=max(0,min(grid_y,int(floor((mean.y-ey)/kTileSize))));
+    int y_max=max(0,min(grid_y,int(floor((mean.y+ey)/kTileSize))+1));
+    uint count=0u;
+    [loop] for (int ty=y_min;ty<y_max;++ty) {
+        float s0=max(mean.y-ey,float(ty)*kTileSize),s1=min(mean.y+ey,float(ty+1)*kTileSize);
+        float d0=s0-mean.y,d1=s1-mean.y;
+        float r0=sqrt(max(0.0f,a*threshold-det*d0*d0));
+        float r1=sqrt(max(0.0f,a*threshold-det*d1*d1));
+        float left=arg_min>=s0 && arg_min<=s1 ? mean.x-ex
+            : min(mean.x+(-b*d0-r0)/a,mean.x+(-b*d1-r1)/a);
+        float right=arg_max>=s0 && arg_max<=s1 ? mean.x+ex
+            : max(mean.x+(-b*d0+r0)/a,mean.x+(-b*d1+r1)/a);
+        float span=max(0.0f,right-left);
+        if (span>=w) {
+            count+=emit_periodic_range(0,grid_x,ty,grid_x,gaussian_id,offset+count,depth,emit_mode);
+            continue;
+        }
+        float lo=left-w*floor(left/w);
+        if (lo>=w) lo=0.0f;
+        if (lo<0.0f) lo+=w;
+        float hi=lo+span;
+        int begin=max(0,min(grid_x,int(floor(lo/kTileSize))));
+        if (hi<w) {
+            int end=max(0,min(grid_x,int(floor(hi/kTileSize))+1));
+            count+=emit_periodic_range(begin,end,ty,grid_x,gaussian_id,offset+count,depth,emit_mode);
+        } else {
+            int end=max(0,min(grid_x,int(floor((hi-w)/kTileSize))+1));
+            if (end>=begin) count+=emit_periodic_range(0,grid_x,ty,grid_x,gaussian_id,offset+count,depth,emit_mode);
+            else {
+                count+=emit_periodic_range(0,end,ty,grid_x,gaussian_id,offset+count,depth,emit_mode);
+                count+=emit_periodic_range(begin,grid_x,ty,grid_x,gaussian_id,offset+count,depth,emit_mode);
+            }
+        }
+    }
+    return count;
+}
+
 uint enumerate_tiles(float2 mean, float4 conic, int grid_x, int grid_y, uint gaussian_id, uint offset,
                      int wrap_width, uint depth, uint emit_mode) {
     // Reserved GUT full-domain footprint. Never wrap/duplicate these tiles.
@@ -161,20 +221,11 @@ uint enumerate_tiles(float2 mean, float4 conic, int grid_x, int grid_y, uint gau
     if (!(a > 0.0f && c > 0.0f) || !(conic.w >= kAlphaFloor) || !(det > 0.0f)) return 0;
     float threshold = 2.0f * log(conic.w * 255.0f);
     if (!(threshold >= 0.0f)) return 0;
-    uint total = walk_tiles(mean, grid_x, grid_y, a, b, c, det, threshold, gaussian_id, offset, depth, emit_mode);
     if (wrap_width > 0) {
-        float radius = 3.0f * sqrt(max(c / det, 0.0f));
-        float w = float(wrap_width);
-        if (mean.x - radius < 0.0f) {
-            total += walk_tiles(float2(mean.x + w, mean.y), grid_x, grid_y, a, b, c, det, threshold,
-                                gaussian_id, offset + total, depth, emit_mode);
-        }
-        if (mean.x + radius > w) {
-            total += walk_tiles(float2(mean.x - w, mean.y), grid_x, grid_y, a, b, c, det, threshold,
-                                gaussian_id, offset + total, depth, emit_mode);
-        }
+        return periodic_tiles(mean,conic,grid_x,grid_y,wrap_width,det,threshold,
+                              gaussian_id,offset,depth,emit_mode);
     }
-    return total;
+    return walk_tiles(mean, grid_x, grid_y, a, b, c, det, threshold, gaussian_id, offset, depth, emit_mode);
 }
 
 #endif

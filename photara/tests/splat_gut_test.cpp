@@ -14,6 +14,7 @@ void require(bool ok, const char *message) {
     throw std::runtime_error(message);
 }
 #include "splat_gut_vulkan.hpp"
+#include "splat_panorama_tiles.hpp"
 void native_projection_regressions() {
   const auto root=std::filesystem::temp_directory_path()/"photara_gut_projection_test";
   std::filesystem::create_directories(root/"masks");
@@ -60,6 +61,7 @@ void native_projection_regressions() {
 }
 int main() {
   try {
+    panorama_single_contributor_regression();
     native_projection_regressions();
     gut_validation::panorama_adc_regression();
     gut_validation::panorama_pole_backward_regression();
