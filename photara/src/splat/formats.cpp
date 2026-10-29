@@ -1453,6 +1453,38 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
     return "";
 }
 
+void bake_gaussian_3d_filter(GaussianModel& model) {
+    if (model.filter_mode != SplatFilterMode::mip_3d && model.filter_mode != SplatFilterMode::mip) return;
+    if (model.filter_3d.is_valid()) {
+        const auto n = model.size();
+        auto scales = model.log_scales.to_vector();
+        auto opacity = model.opacity_logits.to_vector();
+        const auto filter = model.filter_3d.to_vector();
+        if (filter.size() != n || scales.size() != n * 3 || opacity.size() != n)
+            throw std::invalid_argument("Invalid Mip3D filter shape");
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!std::isfinite(filter[i]) || filter[i] < 0)
+                throw std::invalid_argument("Invalid Mip3D filter radius");
+            double compensation = 0;
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                auto& log_scale = scales[i * 3 + axis];
+                const double scale = std::exp(double(log_scale));
+                const double baked = std::log(std::hypot(scale, double(filter[i])));
+                compensation += double(log_scale) - baked;
+                log_scale = static_cast<float>(baked);
+            }
+            const double v = opacity[i];
+            const double alpha = (v >= 0 ? 1.0 / (1.0 + std::exp(-v)) : std::exp(v) / (1.0 + std::exp(v))) * std::exp(compensation);
+            const double clamped = std::clamp(alpha, 1e-12, 1.0 - 1e-12);
+            opacity[i] = static_cast<float>(std::log(clamped / (1.0 - clamped)));
+        }
+        model.log_scales = tinytensor::Tensor::from_vector(scales, {n, 3}, model.log_scales.device());
+        model.opacity_logits = tinytensor::Tensor::from_vector(opacity, {n, 1}, model.opacity_logits.device());
+    }
+    model.filter_3d = {};
+    model.filter_mode = model.filter_mode == SplatFilterMode::mip ? SplatFilterMode::mip_2d : SplatFilterMode::classic;
+}
+
 void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
     if (model.render_method == RenderMethod::gaussian_3dgut)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
@@ -1718,9 +1750,8 @@ void save_gaussians(
     if (format == GaussianFormat::auto_detect)
         format = gaussian_format_from_path(path);
     if (format != GaussianFormat::ply && model.filter_mode != SplatFilterMode::classic &&
-        !(model.filter_mode == SplatFilterMode::mip_2d &&
-          (format == GaussianFormat::sog || format == GaussianFormat::spz)))
-        throw std::invalid_argument("This filter mode requires PLY; Mip2D also supports SOG and SPZ");
+        model.filter_mode != SplatFilterMode::mip_2d)
+        throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
     if (model.render_method == RenderMethod::gaussian_3dgut && format != GaussianFormat::ply)
         throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
     switch (format) {
@@ -1759,10 +1790,12 @@ GaussianModel load_gaussians(
         case GaussianFormat::spz: return load_spz(path, device);
         case GaussianFormat::glb: {
             auto decoded = detail::load_glb(path);
-            return make_model(
+            auto model = make_model(
                 decoded.count, decoded.degree, decoded.means,
                 decoded.log_scales, decoded.rotations,
                 decoded.opacity_logits, decoded.sh, device);
+            if (decoded.antialiased) model.filter_mode = SplatFilterMode::mip_2d;
+            return model;
         }
         case GaussianFormat::usdc: return detail::load_usdc(read_file(path), device);
         case GaussianFormat::auto_detect: break;

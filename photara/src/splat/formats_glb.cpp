@@ -272,7 +272,7 @@ void append_output_accessor(
 
 [[nodiscard]] std::string glb_json(
     const std::size_t count, const Bytes& binary,
-    const std::vector<OutputAccessor>& accessors) {
+    const std::vector<OutputAccessor>& accessors, const bool antialiased) {
     std::ostringstream json;
     json << std::setprecision(9)
          << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Photara\"},"
@@ -286,6 +286,7 @@ void append_output_accessor(
     }
     json << "},\"extensions\":{\"KHR_gaussian_splatting\":{"
          << "\"kernel\":\"ellipse\",\"colorSpace\":\"srgb_rec709_display\"}}"
+         << (antialiased ? ",\"extras\":{\"photara\":{\"antialias\":true}}" : "")
          << "}]}],\"buffers\":[{\"byteLength\":" << binary.size() << "}],"
          << "\"bufferViews\":[";
     for (std::size_t i = 0; i < accessors.size(); ++i) {
@@ -407,7 +408,7 @@ Bytes save_glb(const GaussianModel& model) {
         }
     if (binary.size() > std::numeric_limits<std::uint32_t>::max())
         throw std::runtime_error("GLB Gaussian binary payload exceeds 4 GiB");
-    std::string json = glb_json(count, binary, accessors);
+    std::string json = glb_json(count, binary, accessors, model.filter_mode == SplatFilterMode::mip_2d);
     while (json.size() % 4U != 0U) json.push_back(' ');
     while (binary.size() % 4U != 0U) binary.push_back(0U);
     const std::uint64_t total = 12ULL + 8ULL + json.size() + 8ULL + binary.size();
@@ -589,6 +590,7 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
     DecodedGlbGaussians result;
     result.count = count;
     result.degree = degree;
+    result.antialiased = primitive->get<bool>("extras.photara.antialias", false);
     result.means.resize(count * 3U);
     result.log_scales.resize(count * 3U);
     result.rotations.resize(count * 4U);

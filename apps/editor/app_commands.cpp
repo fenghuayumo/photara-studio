@@ -2609,6 +2609,12 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
                 app, app.splat_export.format >= 4 ? tinytensor::Device::CPU
                                                   : tinytensor::Device::CUDA);
         }
+        if (app.splat_export.bake_mip3d)
+            photara::splat::bake_gaussian_3d_filter(model);
+        else if ((model.filter_mode == photara::splat::SplatFilterMode::mip_3d ||
+                  model.filter_mode == photara::splat::SplatFilterMode::mip) &&
+                 app.splat_export.format != 0 && app.splat_export.format != 5)
+            throw std::invalid_argument("Enable Bake Mip3D filter, or select PLY to preserve original parameters");
         const unsigned export_degree =
             std::min(model.sh_degree,
                      static_cast<unsigned>(app.splat_export.sh_degree));
@@ -2637,7 +2643,9 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
         }
         const auto dest_ext = lower_path_extension(out);
         const auto source_ext = lower_path_extension(source);
-        if (!from_edit && !composed_export &&
+        // Baking changes the exported representation, so it must be serialized
+        // even when the source and destination use the same file format.
+        if (!app.splat_export.bake_mip3d && !from_edit && !composed_export &&
             export_degree >= model.sh_degree && !source.empty() &&
             source_ext == dest_ext && copy_existing_file(source, out)) {
             app.settings.splat_format =

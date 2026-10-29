@@ -429,6 +429,7 @@ struct App {
         int format{0};
         int path_format{-1};
         int sh_degree{3};
+        bool bake_mip3d{};
         std::array<char, 1024> path{};
         photara::splat::LodOptions lod;
         photara::splat::CollisionOptions collision;

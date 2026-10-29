@@ -90,7 +90,9 @@ Studio uses the stored screen kernel and 2D compensation. Mip2D can also be
 exported to SOG and SPZ using their antialias metadata; readers must honor the
 metadata to apply compensation. Mip3D and combined Mip require PLY to preserve
 `filter_3D`, which third-party readers must support to reproduce the 3D floor.
-GLB and USDC currently require PLY for any non-Classic mode.
+GLB stores Mip2D in `extras.photara.antialias`, and USDC stores it in the
+custom `photara:antialias` attribute. These are Photara-specific hints; other
+readers may ignore them and require the user to enable antialiasing manually.
 
 The ordinary pinhole 2D Mip opacity compensation remains detached from the
 covariance gradient. Native fisheye differentiates its exact compensation.
@@ -120,3 +122,5 @@ initialization, not an independently reconstructed test scene.
 
 Brush reference used to derive the numerical preset:
 [`1388f74`](https://github.com/ArthurBrussee/brush/tree/1388f74c6fe0236f68ee4915564bf00e9d2e3747).
+
+Studio's Bake Mip3D filter export option merges the world-space radius into scale and opacity on an export copy. It clears the 3D filter and preserves Mip2D for combined Mip. Without baking, choose PLY to retain the original parameters; viewers must interpret filter_3D.

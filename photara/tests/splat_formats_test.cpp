@@ -46,8 +46,10 @@ void antialias_metadata(const std::filesystem::path& folder) {
         const auto sog = folder / (aa ? "aa.sog" : "classic.sog");
         const auto spz = folder / (aa ? "aa.spz" : "classic.spz");
         const auto unbundled = folder / (aa ? "aa" : "classic");
+        const auto glb = folder / (aa ? "aa.glb" : "classic.glb");
         save_gaussians(model, sog, GaussianFormat::sog);
         save_gaussians(model, spz, GaussianFormat::spz);
+        save_gaussians(model, glb, GaussianFormat::glb);
         save_sog_unbundled(model, unbundled);
         std::ifstream meta_file(unbundled / "meta.json", std::ios::binary);
         const std::string meta((std::istreambuf_iterator<char>(meta_file)), {});
@@ -57,10 +59,35 @@ void antialias_metadata(const std::filesystem::path& folder) {
         spz_file.seekg(14);
         const int flags = spz_file.get();
         require(flags != EOF && ((flags & 1) != 0) == aa, "SPZ antialias flag is wrong");
-        for (const auto& file : {sog, spz, unbundled})
+        std::ifstream glb_file(glb, std::ios::binary);
+        const std::string glb_bytes((std::istreambuf_iterator<char>(glb_file)), {});
+        require((glb_bytes.find("\"photara\":{\"antialias\":true}") != std::string::npos) == aa,
+                "GLB antialias metadata is wrong");
+        for (const auto& file : {sog, spz, unbundled, glb})
             require(load_gaussians(file, tinytensor::Device::CPU).filter_mode == mode,
                     "Antialias filter mode did not survive round trip");
     }
+    auto baked = fixture(1, 0);
+    const auto original_scales = baked.log_scales;
+    baked.filter_mode = SplatFilterMode::mip;
+    baked.filter_3d = tinytensor::Tensor::from_vector({.2F}, {1, 1}, tinytensor::Device::CPU);
+    bake_gaussian_3d_filter(baked);
+    const double expected_scale = std::sqrt(std::exp(-4.0) + .04);
+    require(std::abs(std::exp(baked.log_scales.to_vector()[0]) - expected_scale) < 1e-6,
+            "Mip3D bake changed effective scale");
+    const double expected_alpha = .5 * std::pow(std::exp(-2.0) / expected_scale, 3);
+    require(std::abs(1.0 / (1.0 + std::exp(-baked.opacity_logits.to_vector()[0])) - expected_alpha) < 1e-6,
+            "Mip3D bake changed effective opacity");
+    require(original_scales.to_vector()[0] == -2.F && !baked.filter_3d.is_valid() &&
+            baked.filter_mode == SplatFilterMode::mip_2d, "Bake changed source storage or lost Mip2D");
+    const auto baked_ply = folder / "baked.ply";
+    save_gaussians(baked, baked_ply);
+    const auto restored_baked = load_gaussians(baked_ply, tinytensor::Device::CPU);
+    require(!restored_baked.filter_3d.is_valid() &&
+            restored_baked.filter_mode == SplatFilterMode::mip_2d &&
+            std::abs(std::exp(restored_baked.log_scales.to_vector()[0]) - expected_scale) < 1e-6 &&
+            std::abs(1.0 / (1.0 + std::exp(-restored_baked.opacity_logits.to_vector()[0])) - expected_alpha) < 1e-6,
+            "Baked PLY did not preserve effective scale, opacity and filter mode");
     auto lod_model = fixture(17, 0);
     lod_model.filter_mode = SplatFilterMode::mip_2d;
     LodOptions lod_options;
@@ -80,13 +107,7 @@ void antialias_metadata(const std::filesystem::path& folder) {
             require(rejected, "Export discarded a Mip3D filter");
         }
     }
-    model.filter_mode = SplatFilterMode::mip_2d;
-    for (auto format : {GaussianFormat::glb, GaussianFormat::usdc}) {
-        bool rejected = false;
-        try { save_gaussians(model, folder / "rejected", format); }
-        catch (const std::invalid_argument&) { rejected = true; }
-        require(rejected, "Export discarded Mip2D metadata");
-    }
+
 }
 void scalar_quantization() {
     std::vector<float> sparse{-.5F, 0, .5F, 0, .5F};

@@ -78,6 +78,7 @@ int main(int argc, char **argv) {
             input.read(header, 8);
             require(std::string(header, 8) == "PXR-USDC", "USDC file is not binary crate");
             auto restored = load_gaussians(file, tinytensor::Device::CPU);
+            require(restored.filter_mode == SplatFilterMode::classic, "USDC changed Classic filter mode");
             require(restored.size() == source.size() && restored.sh_degree == degree,
                     "USDC shape or SH degree changed");
             near(source.means.to_vector(), restored.means.to_vector(), 1e-6F);
@@ -87,6 +88,12 @@ int main(int argc, char **argv) {
             auto q = restored.quaternions.to_vector();
             near(q, {1, 0, 0, 0, std::sqrt(.5F), 0, 0, std::sqrt(.5F), .5F, .5F, .5F, .5F}, 1e-6F);
         }
+        auto aa = fixture(0);
+        aa.filter_mode = SplatFilterMode::mip_2d;
+        const auto aa_file = folder / "antialiased.usdc";
+        save_gaussians(aa, aa_file);
+        require(load_gaussians(aa_file, tinytensor::Device::CPU).filter_mode == SplatFilterMode::mip_2d,
+                "USDC lost antialias metadata");
         auto bad = fixture(0);
         bad.quaternions = tinytensor::Tensor::zeros({3, 4}, tinytensor::Device::CPU);
         bool rejected = false;

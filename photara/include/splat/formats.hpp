@@ -30,6 +30,9 @@ void save_gaussians(
     const GaussianModel& model, const std::filesystem::path& path,
     GaussianFormat format = GaussianFormat::auto_detect);
 
+// Replaces scale/opacity tensors without modifying shared source storage.
+void bake_gaussian_3d_filter(GaussianModel& model);
+
 void save_sog_unbundled(const GaussianModel&, const std::filesystem::path& directory);
 
 // Keep bands 0..degree and drop the rest. No-op when `degree` is already

@@ -12,6 +12,7 @@ namespace photara::splat::detail {
 struct DecodedGlbGaussians {
     std::size_t count{};
     unsigned degree{};
+    bool antialiased{};
     std::vector<float> means;
     std::vector<float> log_scales;
     std::vector<float> rotations;

@@ -16,6 +16,7 @@ namespace {
 namespace usd = lightusd::next;
 constexpr const char *sh_name = "radiance:sphericalHarmonicsCoefficients";
 constexpr const char *degree_name = "radiance:sphericalHarmonicsDegree";
+constexpr const char *antialias_name = "photara:antialias";
 constexpr const char *legacy_comment = "Photara native C++ 3D Gaussian export";
 constexpr const char *y_up_comment = "Photara native C++ 3D Gaussian export; coordinates=RUB-v1";
 void finite(const std::vector<float> &values) {
@@ -104,6 +105,11 @@ std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
     auto *p = layer.prim_mutable(id);
     if (!p)
         throw std::runtime_error("Cannot create USD Gaussian prim");
+    if (model.filter_mode == SplatFilterMode::mip_2d) {
+        p->add_property(antialias_name, usd::Value(true),
+                        usd::PropSlot::kFlagCustom | usd::PropSlot::kFlagUniform);
+        p->set_property_type_name(antialias_name, "bool");
+    }
     attribute(*p, "positions", "point3f[]",
               usd::Value::MakeFloatCompArray(std::move(positions), usd::TypeId::Point3f, 3));
     attribute(*p, "scales", "float3[]", usd::Value::MakeFloat3Array(std::move(scales)));
@@ -196,6 +202,11 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
         convert_rdf_rub(positions, wxyz, sh, bases);
     GaussianModel m;
     m.sh_degree = static_cast<unsigned>(*degree);
+    if (const auto *value = p->property_value(antialias_name)) {
+        const auto *antialias = value->as_bool();
+        if (!antialias) throw std::runtime_error("Invalid USDC photara:antialias attribute");
+        if (*antialias) m.filter_mode = SplatFilterMode::mip_2d;
+    }
     m.means = tinytensor::Tensor::from_vector(positions, {n, 3}, device);
     m.log_scales = tinytensor::Tensor::from_vector(scales, {n, 3}, device);
     m.quaternions = tinytensor::Tensor::from_vector(wxyz, {n, 4}, device);
