@@ -443,6 +443,12 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     for (const auto& view : scene.views) {
         paths.push_back(view.path);
         const auto camera = camera_from_mvs_view(view);
+        // CUDA RGB-only spherical derivatives must avoid unused perspective
+        // singularities on side rays; do not resume older native-GS state.
+        if (camera.model == CameraModel::equirectangular &&
+            options.render_method == RenderMethod::gaussian_3dgs &&
+            options.backend == TrainingBackend::cuda && !options.undistort_to_pinhole)
+            hash.append_string("native_panorama_side_ray_backward_v2");
         hash.append_bytes(camera.world_to_camera.data(), sizeof(float) * 16);
         hash.append_bytes(camera.position.data(), sizeof(float) * 3);
         hash.append(camera.fx); hash.append(camera.fy); hash.append(camera.cx); hash.append(camera.cy);

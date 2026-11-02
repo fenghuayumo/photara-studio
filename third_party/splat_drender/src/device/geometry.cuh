@@ -819,8 +819,6 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     const float dL_dJ01 = W.at(1, 0) * dL_dT00 + W.at(1, 1) * dL_dT01 + W.at(1, 2) * dL_dT02;
     const float dL_dJ10 = W.at(0, 0) * dL_dT10 + W.at(0, 1) * dL_dT11 + W.at(0, 2) * dL_dT12;
 
-    const float tz = 1.f / t.z;
-    const float tz2 = tz * tz;
     float dL_dtx = 0.f, dL_dty = 0.f, dL_dtz = 0.f;
     if (!PinholeRGB && is_equirect(io.K.mode)) {
         // Polar projection: every Jacobian entry is live and its position
@@ -833,8 +831,16 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         // The u/v terms below stay in the perspective (x/z) parameterization
         // the ray-plane and footprint-normal branches are written in; those
         // branches are opt-in and unused by the native-camera presets.
-        float gradient[3] = {dL_du * tz, dL_dv * tz,
-                             -(dL_du * t.x + dL_dv * t.y) * tz2 + dL_dz};
+        float gradient[3] = {0.f, 0.f, 0.f};
+        // RGB covariance/mean derivatives use the polar mapping only. A
+        // valid side-looking ray may have t.z == 0; evaluating the unused
+        // perspective geometry chain there would turn 0 * inf into NaN.
+        if (dL_du != 0.f || dL_dv != 0.f || dL_dz != 0.f) {
+            const float tz = 1.f / t.z;
+            gradient[0] = dL_du * tz;
+            gradient[1] = dL_dv * tz;
+            gradient[2] = -(dL_du * t.x + dL_dv * t.y) * tz * tz + dL_dz;
+        }
         if (jacobian.valid) {
 #pragma unroll
             for (int row = 0; row < 2; ++row)
@@ -849,6 +855,8 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         dL_dty = gradient[1];
         dL_dtz = gradient[2];
     } else {
+        const float tz = 1.f / t.z;
+        const float tz2 = tz * tz;
         const float tz3 = tz2 * tz;
         dL_dtx = x_mul * (-h_x * tz2 * dL_dJ02 + dL_du * tz);
         dL_dty = y_mul * (-h_y * tz2 * dL_dJ12 + dL_dv * tz);

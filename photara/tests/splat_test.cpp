@@ -8220,7 +8220,18 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 #include "splat_rings_vulkan.hpp"
 #include "splat_raster_policy.hpp"
 
+#include "splat_panorama_backward.hpp"
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--panorama-backward-only") {
+        try {
+            test_panorama_side_ray_backward();
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
         try {
             test_ssim_metric_large_reduction();
