@@ -175,6 +175,7 @@ struct ForwardResult {
     // CUB DoubleBuffer selector after the tile-id sort (0 or 1).
     int instance_selector = 0;
     int snapshot_buckets = 0;
+    int snapshot_bucket_size = 32;
     bool compact_instances = false;
 };
 

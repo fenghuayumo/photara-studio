@@ -452,12 +452,31 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
                                                gst, tst, ist, out.radii);
 
     if (g.primitive == Primitive::gaussian_3dgut) {
-        const std::size_t snapshot_buckets = gut::use_rgb_snapshots(s)
+        std::size_t snapshot_buckets = gut::use_rgb_snapshots(s)
             ? bucket_upper_bound(counts.instances, tiles) : 0;
+        const std::size_t pixels = std::size_t(cam.width) * cam.height;
+        const bool compact_snapshots = snapshot_buckets > 0 &&
+            s.compact_pixel_snapshots &&
+            PixelState::bytes(pixels, snapshot_buckets, false, true) >
+                s.snapshot_compaction_threshold;
+        const int bucket_size = compact_snapshots ? 128 : 32;
+        if (compact_snapshots) {
+            gut::count_contributors(g, cam, s, K, gst, tst,
+                                    ist.instance_value[counts.instance_selector]);
+            check_cuda(cudaGetLastError(), "3DGUT snapshot contributor prepass");
+        }
         if (snapshot_buckets > 0) {
             launch::bucket_offsets(tiles, int(snapshot_buckets), tst.range,
-                tst.bucket_count, tst.bucket_offset, tst.bucket_tile, nullptr);
+                tst.bucket_count, tst.bucket_offset, tst.bucket_tile,
+                compact_snapshots ? tst.max_contributor : nullptr, bucket_size);
             check_cuda(cudaGetLastError(), "3DGUT bucket offsets");
+        }
+        if (compact_snapshots) {
+            unsigned exact_buckets = 0;
+            check_cuda(cudaMemcpy(&exact_buckets, tst.bucket_offset + tiles - 1,
+                                  sizeof(exact_buckets), cudaMemcpyDeviceToHost),
+                       "3DGUT snapshot bucket count readback");
+            snapshot_buckets = exact_buckets;
         }
         PixelState ps;
         if (s.record_backward_state) {
@@ -465,11 +484,12 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
             ps = PixelState::from_pool(pool, std::size_t(cam.width)*cam.height, snapshot_buckets, false, snapshot_buckets > 0);
             if (snapshot_buckets == 0) ps.snap_ct = nullptr;
         }
-        gut::forward(g, cam, s, K, gst, tst, ist.instance_value[counts.instance_selector], ps, out);
+        gut::forward(g, cam, s, K, gst, tst, ist.instance_value[counts.instance_selector], ps, out, bucket_size);
         check_cuda(cudaGetLastError(), "3DGUT forward");
         ForwardResult r;
         r.instance_count=counts.instances; r.visible_count=counts.visible;
         r.instance_selector=counts.instance_selector; r.snapshot_buckets=int(snapshot_buckets);
+        r.snapshot_bucket_size=bucket_size;
         r.compact_instances=s.record_backward_state && compact_draw_indices(pools, ist, counts);
         if(r.compact_instances) r.instance_selector=0;
         return r;
@@ -574,7 +594,8 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
         // Direct ray derivatives use the geometry slots as mean/scale/rotation scratch.
         GradState gs = zero_grad_state(pools, g.count, true);
         gut::backward(g, cam, s, intrinsics_of(cam), gst, tst,
-            ist.instance_value[fwd.instance_selector], pst, fo, dL, gs, grads, fwd.snapshot_buckets);
+            ist.instance_value[fwd.instance_selector], pst, fo, dL, gs, grads,
+            fwd.snapshot_buckets, fwd.snapshot_bucket_size);
         check_cuda(cudaGetLastError(), "3DGUT backward");
         run_gaussian_backward(g, cam, s, gst, gs, grads, fo.radii, g.sh != nullptr);
         return;

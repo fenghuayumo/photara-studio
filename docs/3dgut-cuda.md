@@ -48,6 +48,22 @@ Gaussians. Snapshot storage trades additional memory and forward writes for
 much faster backward; its size follows conservative tile instance counts.
 Inference does not allocate snapshots or cached pixel rays.
 
+CUDA RGB training honors `compact_pixel_snapshots` and
+`snapshot_compaction_threshold` (enabled by default, 512 MiB). When the
+estimated pixel workspace exceeds that threshold, a contributor-only pass
+finds each tile's last accepted contribution. Snapshots are allocated only
+for the resulting bucket prefixes, including zero buckets for empty tiles.
+These larger workspaces also use one global snapshot per 128 Gaussians.
+Backward processes four 32-Gaussian passes with intermediate pixel state in
+shared memory, reducing long-list snapshot storage by approximately fourfold
+without replaying extra Gaussian responses. Smaller workspaces keep the
+32-Gaussian layout. The matching forward records the bucket size for backward.
+The prepass uses the same ray response and termination rules as RGB blending.
+It adds a forward pass and a bucket-count readback, while reducing snapshot
+storage and backward work on views with long occluded or rejected tails.
+Smaller workspaces retain the single-pass path. Tile sorting memory still
+depends on the conservative projected instance count.
+
 Depth/normal attachments retain the original forward-mode derivative path.
 For diagnostic comparisons, `PHOTARA_GUT_REFERENCE=1` selects the original
 pixel implementation for RGB as well; set it consistently across forward and

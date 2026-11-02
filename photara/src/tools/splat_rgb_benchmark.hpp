@@ -46,7 +46,7 @@ int run_rgb_benchmark(int argc, char** argv) {
     using namespace photara::splat;
     using tinytensor::Device;
     using tinytensor::Tensor;
-    require(argc >= 6 && argc <= 12, "Usage: --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW] [phases|pipeline|streamed|readback] [cuda-first|vulkan-first] [compact|uncompressed] [default|retain]");
+    require(argc >= 6 && argc <= 15, "Usage: --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW] [phases|pipeline|streamed|readback] [cuda-first|vulkan-first] [compact|uncompressed] [default|retain] [model|3dgut] [MAX_RESOLUTION] [both|cuda]");
     const std::filesystem::path output(argv[4]);
     std::filesystem::create_directories(output);
     const auto views = load_views(argv[3], argv[5]);
@@ -56,6 +56,11 @@ int run_rgb_benchmark(int argc, char** argv) {
     const std::string order = argc > 9 ? argv[9] : "cuda-first";
     const std::string snapshots = argc > 10 ? argv[10] : "compact";
     const std::string pool_policy = argc > 11 ? argv[11] : "default";
+    const std::string method = argc > 12 ? argv[12] : "model";
+    const unsigned resolution = argc > 13 ? std::stoul(argv[13]) : 1920;
+    const std::string backends = argc > 14 ? argv[14] : "both";
+    require(method == "model" || method == "3dgut", "Invalid RGB benchmark method");
+    require(backends == "both" || backends == "cuda", "Invalid RGB benchmark backends");
     require(timing == "phases" || timing == "pipeline" || timing == "streamed" || timing == "readback",
             "Invalid RGB benchmark timing mode");
     require(order == "cuda-first" || order == "vulkan-first", "Invalid RGB benchmark order");
@@ -76,12 +81,14 @@ int run_rgb_benchmark(int argc, char** argv) {
                            order == "cuda-first" ? Device::Vulkan : Device::CUDA};
     for (const auto device : devices) {
         const bool vk = device == Device::Vulkan;
+        if (vk && backends == "cuda") continue;
         const char* name = vk ? "Vulkan" : "CUDA";
         auto model = load_gaussians(argv[2], device);
+        if (method == "3dgut") model.render_method = RenderMethod::gaussian_3dgut;
         TrainingOptions o;
         o.backend = vk ? TrainingBackend::vulkan : TrainingBackend::cuda;
         o.use_mask = false; o.use_source_resolution = true;
-        o.max_image_dimension = 1920; o.ignore_undistortion_border = true;
+        o.max_image_dimension = resolution; o.ignore_undistortion_border = true;
         o.progressive_resolution = false; o.use_depth_normal_loss = false;
         o.use_normal_field = false; o.multi_view_geo_weight = o.multi_view_ncc_weight = 0.F;
         const auto view = make_training_view(views[index], o);
@@ -124,6 +131,14 @@ int run_rgb_benchmark(int argc, char** argv) {
             else require(cudaDeviceSynchronize() == cudaSuccess, "RGB benchmark CUDA sync failed");
         };
         std::vector<double> times[6];
+        if (!vk) {
+            require(cudaDeviceSynchronize() == cudaSuccess, "RGB memory baseline sync failed");
+            // Reset high water marks after loading the resident model/Adam/target.
+            std::uint64_t zero = 0;
+            require(cudaMemPoolSetAttribute(cuda_pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess &&
+                    cudaMemPoolSetAttribute(cuda_pool, cudaMemPoolAttrReservedMemHigh, &zero) == cudaSuccess,
+                    "Cannot reset CUDA pool high water marks");
+        }
         std::cout << name << " RGB benchmark gaussians=" << model.size() << " view=" << index
                   << " size=" << view.camera.width << 'x' << view.camera.height
                   << " timing=" << timing << " order=" << order
@@ -206,6 +221,14 @@ int run_rgb_benchmark(int argc, char** argv) {
                 << "fused," << pool_policy << ',' << iterations << ',' << loop_average << '\n';
         if (!vk) {
             std::uint64_t reserved = 0, used = 0;
+            std::uint64_t used_high = 0, reserved_high = 0;
+            require(cudaMemPoolGetAttribute(cuda_pool, cudaMemPoolAttrUsedMemHigh, &used_high) == cudaSuccess &&
+                    cudaMemPoolGetAttribute(cuda_pool, cudaMemPoolAttrReservedMemHigh, &reserved_high) == cudaSuccess,
+                    "Cannot inspect CUDA peak pool memory");
+            std::ofstream memory(output / ("rgb_memory_view_" + std::to_string(index) + ".csv"));
+            memory << "used_high_bytes,reserved_high_bytes\n" << used_high << ',' << reserved_high << '\n';
+            std::cout << "CUDA used_high_bytes=" << used_high
+                      << " reserved_high_bytes=" << reserved_high << std::endl;
             require(cudaMemPoolGetAttribute(cuda_pool, cudaMemPoolAttrReservedMemCurrent,
                                            &reserved) == cudaSuccess &&
                     cudaMemPoolGetAttribute(cuda_pool, cudaMemPoolAttrUsedMemCurrent,

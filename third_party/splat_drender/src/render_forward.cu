@@ -220,7 +220,8 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
                                       unsigned* __restrict__ bucket_count,
                                       unsigned* __restrict__ bucket_offset,
                                       unsigned* __restrict__ bucket_tile,
-                                      const unsigned* __restrict__ max_contributor) {
+                                      const unsigned* __restrict__ max_contributor,
+                                      unsigned bucket_size) {
     using Scan = cub::BlockScan<unsigned, cfg::kTileThreads>;
     __shared__ Scan::TempStorage scan;
     const int tid = threadIdx.x;
@@ -230,7 +231,7 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
         unsigned v = 0;
         if (t < tiles) {
             v = ((max_contributor ? max_contributor[t] :
-                  range[t].y - range[t].x) + 31u) >> 5;
+                  range[t].y - range[t].x) + bucket_size - 1) / bucket_size;
             bucket_count[t] = v;
         }
         // CUB preserves the inclusive integer offsets without the eight
@@ -582,10 +583,11 @@ void extract_ranges(int instance_count, const unsigned* tile_key,
 
 void bucket_offsets(int tiles, int buckets, const uint2* range,
                     unsigned* bucket_count, unsigned* bucket_offset,
-                    unsigned* bucket_tile, const unsigned* max_contributor) {
+                    unsigned* bucket_tile, const unsigned* max_contributor,
+                    unsigned bucket_size) {
     kernels::bucket_offsets_kernel<<<1, cfg::kTileThreads>>>(
         tiles, buckets, range, bucket_count, bucket_offset, bucket_tile,
-        max_contributor);
+        max_contributor, bucket_size);
 }
 
 void blend(bool need_depth, const uint2* tile_range,

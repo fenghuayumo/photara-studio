@@ -298,10 +298,12 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
       ps.n_contrib[pix] = last;
   }
 }
+template <bool CONTRIBUTOR_ONLY = false>
 __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
                           CameraIntrinsics K, ws::GaussianState st,
                           ws::TileState tiles, const unsigned *ids,
-                          ws::PixelState ps, RenderOutputs out) {
+                          ws::PixelState ps, RenderOutputs out,
+                          unsigned bucket_size = 32) {
   constexpr int batch_size = cfg::kTileWidth * cfg::kTileHeight;
   __shared__ float4 rows0[batch_size], rows1[batch_size], rows2[batch_size];
   __shared__ float4 colors[batch_size];
@@ -316,8 +318,8 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
   const unsigned bucket_base =
       ps.snap_ct && tile > 0 ? tiles.bucket_offset[tile - 1] : 0;
   {
-    if (ps.snap_ct) {
-      for (unsigned b = rank; b < (range.y - range.x + 31) / 32;
+    if (!CONTRIBUTOR_ONLY && ps.snap_ct) {
+      for (unsigned b = rank; b < tiles.bucket_count[tile];
            b += batch_size)
         tiles.bucket_tile[bucket_base + b] = tile;
     }
@@ -342,16 +344,20 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
       rows0[rank] = st.gut_rows[3 * i];
       rows1[rank] = st.gut_rows[3 * i + 1];
       rows2[rank] = st.gut_rows[3 * i + 2];
-      const float3 c =
-          g.colors ? reinterpret_cast<const float3 *>(g.colors)[i] : st.rgb[i];
+      float3 c = make_float3(0, 0, 0);
+      if constexpr (!CONTRIBUTOR_ONLY)
+        c = g.colors ? reinterpret_cast<const float3 *>(g.colors)[i] : st.rgb[i];
       colors[rank] = make_float4(c.x, c.y, c.z, g.opacities[i]);
     }
     __syncthreads();
     for (unsigned j = 0; j < batch && !done; ++j) {
       {
-        if (ps.snap_ct && (j & 31) == 0) {
+        // A tile may keep processing rejected candidates after its last
+        // contribution. Compact storage has no snapshots for that tail.
+        if (!CONTRIBUTOR_ONLY && ps.snap_ct && (j % bucket_size) == 0 &&
+            (base - range.x + j) / bucket_size < tiles.bucket_count[tile]) {
           const std::size_t slot =
-              (std::size_t(bucket_base + (base - range.x + j) / 32) << 8) +
+              (std::size_t(bucket_base + (base - range.x + j) / bucket_size) << 8) +
               rank;
           ps.snap_ct[slot] = make_float4(color.x, color.y, color.z, T);
         }
@@ -382,7 +388,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
       }
       const float weight = T * alpha;
       const unsigned i = gaussian_ids[j];
-      {
+      if constexpr (!CONTRIBUTOR_ONLY) {
         color.x += weight * rgb.x;
         color.y += weight * rgb.y;
         color.z += weight * rgb.z;
@@ -397,7 +403,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
     __syncthreads();
   }
   {
-    if (ps.snap_ct) {
+    if (CONTRIBUTOR_ONLY || ps.snap_ct) {
       __shared__ unsigned tile_max[8];
       unsigned maximum = last;
       for (int offset = 16; offset > 0; offset >>= 1)
@@ -412,7 +418,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
         tiles.max_contributor[tile] = maximum;
       }
     }
-    if (inside) {
+    if (!CONTRIBUTOR_ONLY && inside) {
       if (ps.gut_rays)
         ps.gut_rays[pix] = make_float4(dir.x, dir.y, dir.z, 0.f);
       out.alpha[pix] = 1.f - T;
@@ -433,6 +439,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
 // One lane owns one Gaussian. Pixel state flows through its 32-Gaussian
 // bucket, so gradients stay in registers and commit once per tile instance.
 // This replaces atomics per accepted pixel with atomics per Gaussian/tile.
+template <int BUCKET_SIZE = 32>
 __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                                  CameraIntrinsics K, ws::GaussianState st,
                                  ws::TileState ts, const unsigned *ids,
@@ -440,233 +447,288 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                                  LossGradients loss, ws::GradState grad,
                                  ModelGradients mg, int buckets) {
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int bucket = blockIdx.x * 8 + warp;
+  constexpr int warps = BUCKET_SIZE > 32 ? 4 : 8;
+  const int bucket = blockIdx.x * warps + warp;
   if (bucket >= buckets)
     return;
   const unsigned tile = ts.bucket_tile[bucket];
   const uint2 range = ts.range[tile];
   const unsigned first = tile == 0 ? 0 : ts.bucket_offset[tile - 1];
-  const unsigned position = (bucket - first) * 32 + lane;
-  if ((bucket - first) * 32 >= ts.max_contributor[tile])
+  if ((bucket - first) * BUCKET_SIZE >= ts.max_contributor[tile])
     return;
-  const bool valid = position < range.y - range.x;
-  const unsigned id = valid ? ids[range.x + position] : 0;
-  float4 a{}, b{}, c{}, rgb{};
-  float2 rf{};
-  float3 radial{};
-  ProjectionJacobian refine_basis{};
-  if (valid) {
-    a = st.gut_rows[3 * id];
-    b = st.gut_rows[3 * id + 1];
-    c = st.gut_rows[3 * id + 2];
-    const float3 color =
-        g.colors ? reinterpret_cast<const float3 *>(g.colors)[id] : st.rgb[id];
-    rgb = make_float4(color.x, color.y, color.z, g.opacities[id]);
-    rf = st.gut_refine[id];
-    if (is_fisheye(K.mode)) {
-      const auto t=mat::xform_point(make_float3(g.means[3*id],g.means[3*id+1],g.means[3*id+2]),cam.world_to_camera);
-      refine_basis=projection_tangent_basis(project_fisheye(t,K).J);
-    }
-    if (is_equirect(K.mode)) {
-      const float3 t = mat::xform_point(make_float3(g.means[3*id],g.means[3*id+1],g.means[3*id+2]),cam.world_to_camera);
-      const float inv = 6.28318530718f / rf.x;
-      radial = make_float3(t.x*inv,t.y*inv,t.z*inv);
-    }
-  }
-  const int grid_x = (cam.width + 15) / 16;
-  const int x0 = (tile % grid_x) * 16, y0 = (tile / grid_x) * 16;
-  const int pixels = cam.width * cam.height;
-  __shared__ float4 state[8][32], constants[8][32], directions[8][32],
-      offsets[8][32];
-  __shared__ unsigned limits[8][32];
-  float T = 0, rx = 0, ry = 0, rz = 0, gx = 0, gy = 0, gz = 0, dfinal = 0,
-        final_T = 0;
-  float dx = 0, dy = 0, dz = 0, ox = 0, oy = 0, oz = 0, error = 0;
-  unsigned limit = 0;
-  float acc_color[3] = {}, acc_rows[9] = {}, acc_o[3] = {};
-  float acc_opacity = 0, acc_refine = 0, acc_error = 0, acc_den = 0;
-  for (int step = 0; step < 256 + 31; ++step) {
-    if ((step & 31) == 0 && step < 256) {
-      // All lanes must finish consuming the previous stage before any lane
-      // overwrites it; independent thread scheduling can run ahead otherwise.
-      __syncwarp();
-      const int local = step + lane, x = x0 + (local & 15),
-                y = y0 + (local >> 4);
-      const bool pin = x < cam.width && y < cam.height;
-      const int pix = y * cam.width + x;
-      const unsigned last = pin ? ps.n_contrib[pix] : 0;
-      float4 initial = make_float4(0, 0, 0, 0),
-             constant = make_float4(0, 0, 0, 0);
-      float4 direction = make_float4(0, 0, 0, 1),
-             offset = make_float4(0, 0, 0, 0);
-      // Inactive snapshots are deliberately uninitialized; never load
-      // them unless this pixel reached at least one lane of the bucket.
-      if (pin && last > (bucket - first) * 32) {
-        const float4 snap = ps.snap_ct[(std::size_t(bucket) << 8) + local];
-        initial = make_float4(
-            ps.total_color[pix] - snap.x, ps.total_color[pixels + pix] - snap.y,
-            ps.total_color[2 * pixels + pix] - snap.z, snap.w);
-        constant = make_float4(loss.color[pix], loss.color[pixels + pix],
-                               loss.color[2 * pixels + pix], 0);
-        constant.w = s.background[0] * constant.x +
-                     s.background[1] * constant.y +
-                     s.background[2] * constant.z - loss.alpha[pix];
-        direction = ps.gut_rays[pix];
-        direction.w = 1.f - fo.alpha[pix];
-        if (is_orthographic(K.mode)) {
-          const float3 off = mat::xform_dir_transpose(
-              make_float3((x - K.cx) / K.fx, (y - K.cy) / K.fy, 0),
-              cam.world_to_camera);
-          offset = make_float4(off.x, off.y, off.z, 0);
-        }
-        if (loss.densify_map)
-          offset.w = loss.densify_map[pix];
-      }
-      state[warp][lane] = initial;
-      constants[warp][lane] = constant;
-      directions[warp][lane] = direction;
-      offsets[warp][lane] = offset;
-      limits[warp][lane] = last;
-      __syncwarp();
-    }
-    if (step > 0) {
-      T = __shfl_up_sync(0xffffffffu, T, 1);
-      rx = __shfl_up_sync(0xffffffffu, rx, 1);
-      ry = __shfl_up_sync(0xffffffffu, ry, 1);
-      rz = __shfl_up_sync(0xffffffffu, rz, 1);
-      gx = __shfl_up_sync(0xffffffffu, gx, 1);
-      gy = __shfl_up_sync(0xffffffffu, gy, 1);
-      gz = __shfl_up_sync(0xffffffffu, gz, 1);
-      dfinal = __shfl_up_sync(0xffffffffu, dfinal, 1);
-      final_T = __shfl_up_sync(0xffffffffu, final_T, 1);
-      dx = __shfl_up_sync(0xffffffffu, dx, 1);
-      dy = __shfl_up_sync(0xffffffffu, dy, 1);
-      dz = __shfl_up_sync(0xffffffffu, dz, 1);
-      ox = __shfl_up_sync(0xffffffffu, ox, 1);
-      oy = __shfl_up_sync(0xffffffffu, oy, 1);
-      oz = __shfl_up_sync(0xffffffffu, oz, 1);
-      limit = __shfl_up_sync(0xffffffffu, limit, 1);
-      error = __shfl_up_sync(0xffffffffu, error, 1);
-    }
-    const int pixel = step - lane;
-    if (lane == 0 && pixel >= 0 && pixel < 256) {
-      const float4 v = state[warp][pixel & 31],
-                   co = constants[warp][pixel & 31];
-      const float4 d = directions[warp][pixel & 31],
-                   o = offsets[warp][pixel & 31];
-      T = v.w;
-      rx = v.x;
-      ry = v.y;
-      rz = v.z;
-      gx = co.x;
-      gy = co.y;
-      gz = co.z;
-      dfinal = co.w;
-      dx = d.x;
-      dy = d.y;
-      dz = d.z;
-      final_T = d.w;
-      ox = o.x;
-      oy = o.y;
-      oz = o.z;
-      error = o.w;
-      limit = limits[warp][pixel & 31];
-    }
-    if (!valid || pixel < 0 || pixel >= 256 || position >= limit)
-      continue;
-    const float3 o = make_float3(a.w + a.x * ox + a.y * oy + a.z * oz,
-                                 b.w + b.x * ox + b.y * oy + b.z * oz,
-                                 c.w + c.x * ox + c.y * oy + c.z * oz);
-    const float3 d = make_float3(a.x * dx + a.y * dy + a.z * dz,
-                                 b.x * dx + b.y * dy + b.z * dz,
-                                 c.x * dx + c.y * dy + c.z * dz);
-    const float dd = mat::dot3(d, d), peak = -mat::dot3(o, d) / dd;
-    if (!(peak > 0.f) || !(dd > 0.f))
-      continue;
-    const float3 q =
-        make_float3(o.x + peak * d.x, o.y + peak * d.y, o.z + peak * d.z);
-    const float response = expf(-.5f * mat::dot3(q, q));
-    const float raw = rgb.w * response, alpha = fminf(cam.alpha_clip, raw);
-    if (!(alpha >= cfg::kAlphaFloor))
-      continue;
-    const float weight = T * alpha;
-    rx -= weight * rgb.x;
-    ry -= weight * rgb.y;
-    rz -= weight * rgb.z;
-    const float da =
-        T * (gx * rgb.x + gy * rgb.y + gz * rgb.z) -
-        (gx * rx + gy * ry + gz * rz + final_T * dfinal) / (1.f - alpha);
-    const float factor = raw < cam.alpha_clip ? -da * raw : 0.f;
-    // Retain the floating-point orthogonality residual. Dropping this
-    // term is exact algebraically, but destabilizes very thin Gaussians.
-    const float h = factor * mat::dot3(q, d) / dd;
-    const float3 go = make_float3(
-        factor * q.x - h * d.x, factor * q.y - h * d.y, factor * q.z - h * d.z);
-    const float3 v =
-        make_float3(ox + peak * dx, oy + peak * dy, oz + peak * dz);
-    acc_color[0] += weight * gx;
-    acc_color[1] += weight * gy;
-    acc_color[2] += weight * gz;
-    acc_o[0] += go.x;
-    acc_o[1] += go.y;
-    acc_o[2] += go.z;
-    acc_rows[0] += go.x * v.x - h * q.x * dx;
-    acc_rows[1] += go.x * v.y - h * q.x * dy;
-    acc_rows[2] += go.x * v.z - h * q.x * dz;
-    acc_rows[3] += go.y * v.x - h * q.y * dx;
-    acc_rows[4] += go.y * v.y - h * q.y * dy;
-    acc_rows[5] += go.y * v.z - h * q.y * dz;
-    acc_rows[6] += go.z * v.x - h * q.z * dx;
-    acc_rows[7] += go.z * v.y - h * q.z * dy;
-    acc_rows[8] += go.z * v.z - h * q.z * dz;
-    if (raw < cam.alpha_clip)
-      acc_opacity += da * response;
-    if (mg.refine_weight) {
-      const float3 dm = make_float3(-a.x * go.x - b.x * go.y - c.x * go.z,
-                                    -a.y * go.x - b.y * go.y - c.y * go.z,
-                                    -a.z * go.x - b.z * go.y - c.z * go.z);
-      const float3 gm =
-          mat::transpose(mat::world_rotation_transposed(cam.world_to_camera)) *
-          dm;
-      float score = hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height);
+  // Keep the intermediate pixel state on chip across four 32-Gaussian
+  // passes. Only the 128-Gaussian checkpoint occupies global memory.
+  __shared__ float4 carry[BUCKET_SIZE > 32 ? 4 : 1][256];
+  for (unsigned phase = 0; phase < BUCKET_SIZE / 32; ++phase) {
+    const unsigned position =
+        (bucket - first) * BUCKET_SIZE + phase * 32 + lane;
+    if (position - lane >= ts.max_contributor[tile])
+      break;
+    const bool valid = position < range.y - range.x;
+    const unsigned id = valid ? ids[range.x + position] : 0;
+    float4 a{}, b{}, c{}, rgb{};
+    float2 rf{};
+    float3 radial{};
+    ProjectionJacobian refine_basis{};
+    if (valid) {
+      a = st.gut_rows[3 * id];
+      b = st.gut_rows[3 * id + 1];
+      c = st.gut_rows[3 * id + 2];
+      const float3 color = g.colors
+                               ? reinterpret_cast<const float3 *>(g.colors)[id]
+                               : st.rgb[id];
+      rgb = make_float4(color.x, color.y, color.z, g.opacities[id]);
+      rf = st.gut_refine[id];
       if (is_fisheye(K.mode)) {
-        const float dx=refine_basis.du[0]*gm.x+refine_basis.du[1]*gm.y+refine_basis.du[2]*gm.z;
-        const float dy=refine_basis.dv[0]*gm.x+refine_basis.dv[1]*gm.y+refine_basis.dv[2]*gm.z;
-        score=hypotf(dx*cam.width,dy*cam.height);
+        const auto t =
+            mat::xform_point(make_float3(g.means[3 * id], g.means[3 * id + 1],
+                                         g.means[3 * id + 2]),
+                             cam.world_to_camera);
+        refine_basis = projection_tangent_basis(project_fisheye(t, K).J);
       }
       if (is_equirect(K.mode)) {
-        const float3 cross = make_float3(radial.y*gm.z-radial.z*gm.y,
-            radial.z*gm.x-radial.x*gm.z, radial.x*gm.y-radial.y*gm.x);
-        score = rf.x*norm3df(cross.x,cross.y,cross.z);
+        const float3 t =
+            mat::xform_point(make_float3(g.means[3 * id], g.means[3 * id + 1],
+                                         g.means[3 * id + 2]),
+                             cam.world_to_camera);
+        const float inv = 6.28318530718f / rf.x;
+        radial = make_float3(t.x * inv, t.y * inv, t.z * inv);
       }
-      acc_refine += score / fmaxf(1.f - final_T, 1e-6f);
     }
-    if (loss.densify_map) {
-      acc_error += weight * error;
-      acc_den += weight;
+    const int grid_x = (cam.width + 15) / 16;
+    const int x0 = (tile % grid_x) * 16, y0 = (tile / grid_x) * 16;
+    const int pixels = cam.width * cam.height;
+    __shared__ float4 state[warps][32], constants[warps][32],
+        directions[warps][32], offsets[warps][32];
+    __shared__ unsigned limits[warps][32];
+    __shared__ float4 prefixes[BUCKET_SIZE > 32 ? 4 : 1][32];
+    float prefix_x = 0, prefix_y = 0, prefix_z = 0;
+    float T = 0, rx = 0, ry = 0, rz = 0, gx = 0, gy = 0, gz = 0, dfinal = 0,
+          final_T = 0;
+    float dx = 0, dy = 0, dz = 0, ox = 0, oy = 0, oz = 0, error = 0;
+    unsigned limit = 0;
+    float acc_color[3] = {}, acc_rows[9] = {}, acc_o[3] = {};
+    float acc_opacity = 0, acc_refine = 0, acc_error = 0, acc_den = 0;
+    for (int step = 0; step < 256 + 31; ++step) {
+      if ((step & 31) == 0 && step < 256) {
+        // All lanes must finish consuming the previous stage before any lane
+        // overwrites it; independent thread scheduling can run ahead otherwise.
+        __syncwarp();
+        const int local = step + lane, x = x0 + (local & 15),
+                  y = y0 + (local >> 4);
+        const bool pin = x < cam.width && y < cam.height;
+        const int pix = y * cam.width + x;
+        const unsigned last = pin ? ps.n_contrib[pix] : 0;
+        float4 initial = make_float4(0, 0, 0, 0),
+               constant = make_float4(0, 0, 0, 0);
+        float4 prefix = make_float4(0, 0, 0, 0);
+        float4 direction = make_float4(0, 0, 0, 1),
+               offset = make_float4(0, 0, 0, 0);
+        // Inactive snapshots are deliberately uninitialized; never load
+        // them unless this pixel reached at least one lane of the bucket.
+        if (pin && last > position - lane) {
+          prefix = phase == 0
+              ? ps.snap_ct[(std::size_t(bucket) << 8) + local]
+              : carry[warp][local];
+          initial = make_float4(ps.total_color[pix] - prefix.x,
+                               ps.total_color[pixels + pix] - prefix.y,
+                               ps.total_color[2 * pixels + pix] - prefix.z, prefix.w);
+          constant = make_float4(loss.color[pix], loss.color[pixels + pix],
+                                 loss.color[2 * pixels + pix], 0);
+          constant.w = s.background[0] * constant.x +
+                       s.background[1] * constant.y +
+                       s.background[2] * constant.z - loss.alpha[pix];
+          direction = ps.gut_rays[pix];
+          direction.w = 1.f - fo.alpha[pix];
+          if (is_orthographic(K.mode)) {
+            const float3 off = mat::xform_dir_transpose(
+                make_float3((x - K.cx) / K.fx, (y - K.cy) / K.fy, 0),
+                cam.world_to_camera);
+            offset = make_float4(off.x, off.y, off.z, 0);
+          }
+          if (loss.densify_map)
+            offset.w = loss.densify_map[pix];
+        }
+        state[warp][lane] = initial;
+        constants[warp][lane] = constant;
+        directions[warp][lane] = direction;
+        offsets[warp][lane] = offset;
+        limits[warp][lane] = last;
+        if constexpr (BUCKET_SIZE > 32)
+          prefixes[warp][lane] = prefix;
+        __syncwarp();
+      }
+      if (step > 0) {
+        T = __shfl_up_sync(0xffffffffu, T, 1);
+        rx = __shfl_up_sync(0xffffffffu, rx, 1);
+        ry = __shfl_up_sync(0xffffffffu, ry, 1);
+        rz = __shfl_up_sync(0xffffffffu, rz, 1);
+        gx = __shfl_up_sync(0xffffffffu, gx, 1);
+        gy = __shfl_up_sync(0xffffffffu, gy, 1);
+        gz = __shfl_up_sync(0xffffffffu, gz, 1);
+        dfinal = __shfl_up_sync(0xffffffffu, dfinal, 1);
+        final_T = __shfl_up_sync(0xffffffffu, final_T, 1);
+        dx = __shfl_up_sync(0xffffffffu, dx, 1);
+        dy = __shfl_up_sync(0xffffffffu, dy, 1);
+        dz = __shfl_up_sync(0xffffffffu, dz, 1);
+        ox = __shfl_up_sync(0xffffffffu, ox, 1);
+        oy = __shfl_up_sync(0xffffffffu, oy, 1);
+        oz = __shfl_up_sync(0xffffffffu, oz, 1);
+        limit = __shfl_up_sync(0xffffffffu, limit, 1);
+        error = __shfl_up_sync(0xffffffffu, error, 1);
+        if constexpr (BUCKET_SIZE > 32) {
+          prefix_x = __shfl_up_sync(0xffffffffu, prefix_x, 1);
+          prefix_y = __shfl_up_sync(0xffffffffu, prefix_y, 1);
+          prefix_z = __shfl_up_sync(0xffffffffu, prefix_z, 1);
+        }
+      }
+      const int pixel = step - lane;
+      if (lane == 0 && pixel >= 0 && pixel < 256) {
+        const float4 v = state[warp][pixel & 31],
+                     co = constants[warp][pixel & 31];
+        const float4 d = directions[warp][pixel & 31],
+                     o = offsets[warp][pixel & 31];
+        T = v.w;
+        rx = v.x;
+        ry = v.y;
+        rz = v.z;
+        gx = co.x;
+        gy = co.y;
+        gz = co.z;
+        dfinal = co.w;
+        dx = d.x;
+        dy = d.y;
+        dz = d.z;
+        final_T = d.w;
+        ox = o.x;
+        oy = o.y;
+        oz = o.z;
+        error = o.w;
+        limit = limits[warp][pixel & 31];
+        if constexpr (BUCKET_SIZE > 32) {
+          const float4 prefix = prefixes[warp][pixel & 31];
+          prefix_x = prefix.x;
+          prefix_y = prefix.y;
+          prefix_z = prefix.z;
+        }
+      }
+      do {
+        if (!valid || pixel < 0 || pixel >= 256 || position >= limit)
+          break;
+        const float3 o = make_float3(a.w + a.x * ox + a.y * oy + a.z * oz,
+                                     b.w + b.x * ox + b.y * oy + b.z * oz,
+                                     c.w + c.x * ox + c.y * oy + c.z * oz);
+        const float3 d = make_float3(a.x * dx + a.y * dy + a.z * dz,
+                                     b.x * dx + b.y * dy + b.z * dz,
+                                     c.x * dx + c.y * dy + c.z * dz);
+        const float dd = mat::dot3(d, d), peak = -mat::dot3(o, d) / dd;
+        if (!(peak > 0.f) || !(dd > 0.f))
+          break;
+        const float3 q =
+            make_float3(o.x + peak * d.x, o.y + peak * d.y, o.z + peak * d.z);
+        const float response = expf(-.5f * mat::dot3(q, q));
+        const float raw = rgb.w * response, alpha = fminf(cam.alpha_clip, raw);
+        if (!(alpha >= cfg::kAlphaFloor))
+          break;
+        const float weight = T * alpha;
+        if constexpr (BUCKET_SIZE > 32) {
+          // Preserve forward's prefix accumulation and subtraction at every
+          // 32-Gaussian boundary, including its floating-point rounding.
+          prefix_x += weight * rgb.x;
+          prefix_y += weight * rgb.y;
+          prefix_z += weight * rgb.z;
+        }
+        rx -= weight * rgb.x;
+        ry -= weight * rgb.y;
+        rz -= weight * rgb.z;
+        const float da =
+            T * (gx * rgb.x + gy * rgb.y + gz * rgb.z) -
+            (gx * rx + gy * ry + gz * rz + final_T * dfinal) / (1.f - alpha);
+        const float factor = raw < cam.alpha_clip ? -da * raw : 0.f;
+        // Retain the floating-point orthogonality residual. Dropping this
+        // term is exact algebraically, but destabilizes very thin Gaussians.
+        const float h = factor * mat::dot3(q, d) / dd;
+        const float3 go =
+            make_float3(factor * q.x - h * d.x, factor * q.y - h * d.y,
+                        factor * q.z - h * d.z);
+        const float3 v =
+            make_float3(ox + peak * dx, oy + peak * dy, oz + peak * dz);
+        acc_color[0] += weight * gx;
+        acc_color[1] += weight * gy;
+        acc_color[2] += weight * gz;
+        acc_o[0] += go.x;
+        acc_o[1] += go.y;
+        acc_o[2] += go.z;
+        acc_rows[0] += go.x * v.x - h * q.x * dx;
+        acc_rows[1] += go.x * v.y - h * q.x * dy;
+        acc_rows[2] += go.x * v.z - h * q.x * dz;
+        acc_rows[3] += go.y * v.x - h * q.y * dx;
+        acc_rows[4] += go.y * v.y - h * q.y * dy;
+        acc_rows[5] += go.y * v.z - h * q.y * dz;
+        acc_rows[6] += go.z * v.x - h * q.z * dx;
+        acc_rows[7] += go.z * v.y - h * q.z * dy;
+        acc_rows[8] += go.z * v.z - h * q.z * dz;
+        if (raw < cam.alpha_clip)
+          acc_opacity += da * response;
+        if (mg.refine_weight) {
+          const float3 dm = make_float3(-a.x * go.x - b.x * go.y - c.x * go.z,
+                                        -a.y * go.x - b.y * go.y - c.y * go.z,
+                                        -a.z * go.x - b.z * go.y - c.z * go.z);
+          const float3 gm = mat::transpose(mat::world_rotation_transposed(
+                                cam.world_to_camera)) *
+                            dm;
+          float score =
+              hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height);
+          if (is_fisheye(K.mode)) {
+            const float dx = refine_basis.du[0] * gm.x +
+                             refine_basis.du[1] * gm.y +
+                             refine_basis.du[2] * gm.z;
+            const float dy = refine_basis.dv[0] * gm.x +
+                             refine_basis.dv[1] * gm.y +
+                             refine_basis.dv[2] * gm.z;
+            score = hypotf(dx * cam.width, dy * cam.height);
+          }
+          if (is_equirect(K.mode)) {
+            const float3 cross = make_float3(radial.y * gm.z - radial.z * gm.y,
+                                             radial.z * gm.x - radial.x * gm.z,
+                                             radial.x * gm.y - radial.y * gm.x);
+            score = rf.x * norm3df(cross.x, cross.y, cross.z);
+          }
+          acc_refine += score / fmaxf(1.f - final_T, 1e-6f);
+        }
+        if (loss.densify_map) {
+          acc_error += weight * error;
+          acc_den += weight;
+        }
+        T *= 1.f - alpha;
+      } while (false);
+      if constexpr (BUCKET_SIZE > 32) {
+        if (lane == 31 && pixel >= 0 && pixel < 256)
+          carry[warp][pixel] = make_float4(prefix_x, prefix_y, prefix_z, T);
+      }
     }
-    T *= 1.f - alpha;
-  }
-  if (valid) {
-    for (int k = 0; k < 3; ++k) {
-      atomicAdd(reinterpret_cast<float *>(grad.d_color) + 3 * id + k,
-                acc_color[k]);
-      atomicAdd(reinterpret_cast<float *>(grad.d_conic) + 4 * id + k,
-                acc_rows[k]);
-      atomicAdd(reinterpret_cast<float *>(grad.d_ray_plane) + 4 * id + k,
-                acc_rows[3 + k]);
-      atomicAdd(reinterpret_cast<float *>(grad.d_normal) + 3 * id + k,
-                acc_rows[6 + k]);
-      atomicAdd(reinterpret_cast<float *>(grad.d_mean2d) + 3 * id + k,
-                acc_o[k]);
+    if (valid) {
+      for (int k = 0; k < 3; ++k) {
+        atomicAdd(reinterpret_cast<float *>(grad.d_color) + 3 * id + k,
+                  acc_color[k]);
+        atomicAdd(reinterpret_cast<float *>(grad.d_conic) + 4 * id + k,
+                  acc_rows[k]);
+        atomicAdd(reinterpret_cast<float *>(grad.d_ray_plane) + 4 * id + k,
+                  acc_rows[3 + k]);
+        atomicAdd(reinterpret_cast<float *>(grad.d_normal) + 3 * id + k,
+                  acc_rows[6 + k]);
+        atomicAdd(reinterpret_cast<float *>(grad.d_mean2d) + 3 * id + k,
+                  acc_o[k]);
+      }
+      atomicAdd(&grad.d_conic[id].w, acc_opacity);
+      if (mg.refine_weight)
+        atomicAdd(mg.refine_weight + id, acc_refine);
+      if (mg.densify_weight && mg.densify_weight_den) {
+        atomicAdd(mg.densify_weight + id, acc_error);
+        atomicAdd(mg.densify_weight_den + id, acc_den);
+      }
     }
-    atomicAdd(&grad.d_conic[id].w, acc_opacity);
-    if (mg.refine_weight)
-      atomicAdd(mg.refine_weight + id, acc_refine);
-    if (mg.densify_weight && mg.densify_weight_den) {
-      atomicAdd(mg.densify_weight + id, acc_error);
-      atomicAdd(mg.densify_weight_den + id, acc_den);
-    }
+    __syncwarp();
   }
 }
 
@@ -729,6 +791,15 @@ bool reference_mode() {
 bool use_rgb_snapshots(const RenderSettings &s) {
   return s.record_backward_state && !s.need_depth && !reference_mode();
 }
+void count_contributors(const Gaussians &g, const CameraView &c,
+                        const RenderSettings &s, CameraIntrinsics K,
+                        ws::GaussianState st, ws::TileState ts,
+                        const unsigned *ids) {
+  blend_rgb<true><<<dim3((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
+                          (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight),
+                     dim3(cfg::kTileWidth, cfg::kTileHeight)>>>(
+      g, c, s, K, st, ts, ids, {}, {});
+}
 void preprocess(const Gaussians &g, const CameraView &c,
                 const RenderSettings &s, CameraIntrinsics K, int gx, int gy,
                 ws::GaussianState st, int *radii) {
@@ -736,12 +807,13 @@ void preprocess(const Gaussians &g, const CameraView &c,
 }
 void forward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
              CameraIntrinsics K, ws::GaussianState st, ws::TileState ts,
-             const unsigned *ids, ws::PixelState ps, const RenderOutputs &out) {
+             const unsigned *ids, ws::PixelState ps, const RenderOutputs &out,
+             int bucket_size) {
   if (!s.need_depth && !reference_mode()) {
-    blend_rgb<<<dim3((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
+    blend_rgb<><<<dim3((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
                      (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight),
                 dim3(cfg::kTileWidth, cfg::kTileHeight)>>>(g, c, s, K, st, ts,
-                                                           ids, ps, out);
+                                                           ids, ps, out, bucket_size);
     return;
   }
   reference_blend<false>
@@ -754,10 +826,17 @@ void backward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
               CameraIntrinsics K, ws::GaussianState st, ws::TileState ts,
               const unsigned *ids, ws::PixelState ps,
               const ForwardOutputsView &fo, const LossGradients &loss,
-              ws::GradState gs, const ModelGradients &mg, int buckets) {
+              ws::GradState gs, const ModelGradients &mg, int buckets,
+              int bucket_size) {
   if (!s.need_depth && !reference_mode()) {
-    backward_buckets<<<(buckets + 7) / 8, 256>>>(g, c, s, K, st, ts, ids, ps,
-                                                 fo, loss, gs, mg, buckets);
+    if (buckets > 0) {
+      if (bucket_size == 128)
+        backward_buckets<128><<<(buckets + 3) / 4, 128>>>(
+            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+      else
+        backward_buckets<32><<<(buckets + 7) / 8, 256>>>(
+            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+    }
     transform_backward<<<(g.count + 255) / 256, 256>>>(g, c, s, st, gs);
     return;
   }

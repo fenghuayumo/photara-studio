@@ -999,7 +999,9 @@ int run_cuda_method_benchmark(int argc, char** argv) {
     options.use_source_resolution = true;
     options.progressive_resolution = false;
     options.max_image_dimension = resolution;
-    const auto target = photara::splat::make_training_view(views.front(), options);
+    const std::size_t view_index = argc >= 9 ? std::stoul(argv[8]) : 0;
+    require(view_index < views.size(), "benchmark view outside dataset");
+    const auto target = photara::splat::make_training_view(views[view_index], options);
     const auto& camera = target.camera;
     const std::size_t pixels = std::size_t(camera.width)*camera.height;
     std::vector<float> color_gradient(3*pixels);
@@ -1010,6 +1012,55 @@ int run_cuda_method_benchmark(int argc, char** argv) {
     const auto da = tinytensor::Tensor::zeros({camera.height,camera.width},tinytensor::Device::CUDA);
     const std::filesystem::path output(argv[4]);
     std::filesystem::create_directories(output);
+    if (std::string(argv[1]) == "--bench-gut-memory") {
+        // Additional arguments: [VIEW] [compact|uncompressed] [dump|timing].
+        require(argc < 10 || std::string(argv[9]) == "compact" ||
+                std::string(argv[9]) == "uncompressed", "Invalid GUT snapshot mode");
+        require(argc < 11 || std::string(argv[10]) == "dump" ||
+                std::string(argv[10]) == "timing", "Invalid GUT memory output mode");
+        const bool compact = argc < 10 || std::string(argv[9]) == "compact";
+        model.render_method = photara::splat::RenderMethod::gaussian_3dgut;
+        photara::splat::Rasterizer rasterizer;
+        photara::splat::RasterizeOptions raster;
+        raster.active_sh_degree = model.sh_degree;
+        raster.require_depth = false;
+        raster.compact_pixel_snapshots = compact;
+        cudaMemPool_t pool{};
+        require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "memory benchmark pool");
+        std::uint64_t zero = 0, used_high = 0;
+        require(cudaDeviceSynchronize() == cudaSuccess &&
+                cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess,
+                "memory benchmark reset");
+        auto frame = rasterizer.forward(model, camera, raster);
+        auto gradient = rasterizer.backward(model, frame, dc, da, {}, {});
+        require(cudaDeviceSynchronize() == cudaSuccess &&
+                cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &used_high) == cudaSuccess,
+                "memory benchmark peak");
+        const tinytensor::Tensor* channels[]{&frame.color, &frame.alpha, &gradient.means,
+            &gradient.log_scales, &gradient.quaternions, &gradient.opacity_logits, &gradient.sh};
+        const char* names[]{"rgb", "alpha", "means", "scales", "rotations", "opacity", "sh"};
+        if (argc < 11 || std::string(argv[10]) == "dump") {
+            for (unsigned k = 0; k < 7; ++k) {
+                const auto values = channels[k]->to_vector();
+                dump_channel(output, names[k], values.data(), values.size(), sizeof(float));
+            }
+        }
+        const auto instances = frame.rendered_instances;
+        frame = {};
+        gradient = {};
+        const double elapsed = time_ms([&] {
+            auto rendered = rasterizer.forward(model, camera, raster);
+            auto gradients = rasterizer.backward(model, rendered, dc, da, {}, {});
+            require(cudaDeviceSynchronize() == cudaSuccess, "memory benchmark timing sync");
+        }, 3, iterations);
+        std::ofstream csv(output / "memory.csv");
+        csv << "gaussians,width,height,view,compact,instances,used_high_bytes,forward_backward_ms\n"
+            << model.size() << ',' << camera.width << ',' << camera.height << ',' << view_index
+            << ',' << compact << ',' << instances << ',' << used_high << ',' << elapsed << '\n';
+        std::cout << "GUT memory compact=" << compact << " peak_bytes=" << used_high
+                  << " forward_backward_ms=" << elapsed << std::endl;
+        return 0;
+    }
     if(std::string(argv[1]) == "--compare-gut-paths") {
         struct ReferenceMode {
             std::string previous;
@@ -1180,6 +1231,7 @@ int run_cuda_method_benchmark(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && (std::string(argv[1]) == "--bench-cuda-methods" ||
+                        std::string(argv[1]) == "--bench-gut-memory" ||
                         std::string(argv[1]) == "--bench-gut-backends" ||
                         std::string(argv[1]) == "--compare-gut-paths"))
             return run_cuda_method_benchmark(argc, argv);

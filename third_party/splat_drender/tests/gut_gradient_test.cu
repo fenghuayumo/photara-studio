@@ -42,7 +42,7 @@ struct Buffer {
 bool sanitizer_smoke = false;
 void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
          bool transformed = false, bool tiled = false, bool many = false,
-         bool thin = false) {
+         bool thin = false, bool occluded = false) {
   const int N = many ? 300 : 2;
   const int W = tiled ? 35 : 16, H = tiled ? 29 : 12, P = W * H;
   std::array<Buffer, 6> workspace;
@@ -74,15 +74,15 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     means.resize(3 * N);
     scales.resize(3 * N);
     rotations.resize(4 * N);
-    opacity.assign(N, .01f);
+    opacity.assign(N, occluded ? .95f : .01f);
     colors.resize(3 * N);
     const float q[4] = {rotations[0], rotations[1], rotations[2], rotations[3]};
     for (int i = 0; i < N; ++i) {
       means[3 * i] = -.12f;
       means[3 * i + 1] = .08f;
       means[3 * i + 2] = 2.f + .002f * i;
-      scales[3 * i] = .36f;
-      scales[3 * i + 1] = .28f;
+      scales[3 * i] = occluded ? 10.f : .36f;
+      scales[3 * i + 1] = occluded ? 10.f : .28f;
       scales[3 * i + 2] = .2f;
       for (int a = 0; a < 4; ++a)
         rotations[4 * i + a] = q[a];
@@ -142,6 +142,8 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   }
   RenderSettings s;
   s.need_depth = geometry;
+  // Exercise compaction even on the small finite-difference fixtures.
+  s.snapshot_compaction_threshold = 0;
   s.background[0] = .13f;
   s.background[1] = .07f;
   s.background[2] = .11f;
@@ -267,6 +269,42 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     for (float value : values)
       if (!std::isfinite(value))
         throw std::runtime_error("Nonfinite GUT gradient");
+  if (!geometry) {
+    const auto compact_color = output[0].get(3 * P);
+    s.compact_pixel_snapshots = false;
+    for (int k = 0; k < 5; ++k)
+      check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
+    const auto full = Rasterizer::forward(pools, g, cam, s, out);
+    Rasterizer::backward(pools, g, cam, s, full, fo, loss, grad);
+    if (fwd.snapshot_buckets > full.snapshot_buckets)
+      throw std::runtime_error("GUT compaction increased snapshot storage");
+    if (occluded) {
+      if (fwd.snapshot_buckets * 2 >= full.snapshot_buckets)
+        throw std::runtime_error("GUT occlusion did not reduce snapshot storage");
+      std::cout << "GUT occluded snapshot bytes "
+                << full.snapshot_buckets * 4096ull << " -> "
+                << fwd.snapshot_buckets * 4096ull << '\n';
+    }
+    if (compact_color != output[0].get(3 * P))
+      throw std::runtime_error("GUT compact color mismatch");
+    for (int k = 0; k < 5; ++k) {
+      const auto full_gradient = grads[k].get(gs[k]);
+      for (int j = 0; j < gs[k]; ++j) {
+        if (!std::isfinite(full_gradient[j]))
+          throw std::runtime_error("Nonfinite uncompressed GUT gradient");
+        // The existing 1e-8-scale case checks finiteness only, because its
+        // ray transforms are ill-conditioned in float (as with the oracle below).
+        if (!thin && std::abs(full_gradient[j] - analytic[k][j]) >
+            1e-6f + 1e-5f * std::abs(full_gradient[j])) {
+          std::cerr << "compact gradient thin=" << thin << " group=" << k
+                    << " index=" << j << " full=" << full_gradient[j]
+                    << " compact=" << analytic[k][j] << '\n';
+          throw std::runtime_error("GUT compact gradient mismatch");
+        }
+      }
+    }
+    s.compact_pixel_snapshots = true;
+  }
   // Extreme 1e-8 scales are a finiteness stress case: float ray transforms
   // suffer cancellation and cannot use the old float AD path as an oracle.
   if (!geometry && !thin &&
@@ -356,7 +394,8 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     const double after = objective();
     if (!std::isfinite(before) || !std::isfinite(after))
       throw std::runtime_error("Nonfinite GUT objective");
-    if (after < before || thin) {
+    // Broad opaque splats have a locally flat position objective in float.
+    if (after < before || thin || occluded) {
       decreased = true;
       break;
     }
@@ -370,6 +409,24 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   for (int k = 0; k < 3 * P; ++k)
     if (std::abs(training_color[k] - inference_color[k]) > 1e-6f)
       throw std::runtime_error("3DGUT inference differs from training forward");
+  if (!geometry) {
+    s.record_backward_state = true;
+    // Keep nonempty draw lists but reject every candidate at the alpha floor.
+    const float alpha_clip = cam.alpha_clip;
+    cam.alpha_clip = 1e-4f;
+    for (int k = 0; k < 5; ++k)
+      check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
+    const auto empty = Rasterizer::forward(pools, g, cam, s, out);
+    if (empty.instance_count == 0 || empty.snapshot_buckets != 0)
+      throw std::runtime_error("GUT empty contribution compaction failed");
+    Rasterizer::backward(pools, g, cam, s, empty, fo, loss, grad);
+    for (int k = 0; k < 5; ++k)
+      for (float value : grads[k].get(gs[k]))
+        if (value != 0.f)
+          throw std::runtime_error("GUT empty contributions produced gradients");
+    cam.alpha_clip = alpha_clip;
+    s.record_backward_state = false;
+  }
   opacity.assign(N, 0.f);
   input[3].put(opacity);
   objective();
@@ -396,6 +453,7 @@ int main(int argc, char** argv) {
     run(CameraMode::pinhole, false, true, false, false, true);
     run(CameraMode::pinhole, false, true, false, false, true, true);
     run(CameraMode::pinhole, false, true, false, false, false, false, true);
+    run(CameraMode::pinhole, false, true, false, false, true, true, false, true);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';
