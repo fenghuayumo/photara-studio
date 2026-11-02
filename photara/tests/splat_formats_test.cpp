@@ -109,6 +109,30 @@ void antialias_metadata(const std::filesystem::path& folder) {
     }
 
 }
+void gut_exports(const std::filesystem::path& folder) {
+    auto model = fixture(17, 1);
+    model.render_method = RenderMethod::gaussian_3dgut;
+    for (auto mode : {SplatFilterMode::classic, SplatFilterMode::mip_2d}) {
+        model.filter_mode = mode;
+        for (auto format : {GaussianFormat::sog, GaussianFormat::spz, GaussianFormat::glb}) {
+            const auto path = folder / (std::string("gut-") + filter_mode_name(mode) + "." + gaussian_format_extension(format));
+            save_gaussians(model, path, format);
+            const auto restored = load_gaussians(path, tinytensor::Device::CPU);
+            require(restored.size() == model.size() && restored.sh_degree == model.sh_degree &&
+                    restored.filter_mode == mode, "3DGUT export lost shape or filter mode");
+            const auto values = restored.sh.to_vector();
+            const auto expected = model.sh.to_vector();
+            for (std::size_t i = 0; i < values.size(); ++i)
+                require(std::abs(values[i] - expected[i]) < .04F, "3DGUT export changed SH data");
+        }
+    }
+    LodOptions options;
+    options.vulkan = false;
+    options.levels = 2;
+    export_streamed_sog(model, folder / "gut-lod", options);
+    require(load_gaussians(folder / "gut-lod" / "0_0", tinytensor::Device::CPU).filter_mode == SplatFilterMode::mip_2d,
+            "3DGUT streamed SOG lost antialias metadata");
+}
 void scalar_quantization() {
     std::vector<float> sparse{-.5F, 0, .5F, 0, .5F};
     auto book = detail::sog_codebook(sparse, "test");
@@ -256,6 +280,7 @@ int main(int argc, char** argv) {
 #endif
         } else {
             antialias_metadata(folder);
+            gut_exports(folder);
             scalar_quantization();
             for (unsigned d = 0; d <= 3; ++d) {
                 roundtrip(folder, 17, d, GaussianFormat::sog);

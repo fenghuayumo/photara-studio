@@ -130,8 +130,10 @@ comment photara_render_method 3dgs
 ```
 
 Only one is written per file. Untagged legacy PLY files load as 3DGS. Unknown
-method tags are rejected. PLY is currently the supported export format for
-3DGUT; other export formats are rejected rather than losing the method.
+method tags are rejected. 3DGUT models can also export their shared Gaussian
+parameters to SOG (including streamed SOG), SPZ, GLB and USDC. These formats
+do not retain Photara's rendering-method tag; the consuming renderer chooses
+how to render the Gaussians. Mip3D export still requires baking or PLY.
 The embedded Gaussian archive uses payload v2 for GUT and retains v1 for GS.
 Project settings v21 preserve the method selection; older settings default to
 3DGS. Merging models with different rendering methods is rejected.

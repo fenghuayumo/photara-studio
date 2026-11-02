@@ -1486,8 +1486,6 @@ void bake_gaussian_3d_filter(GaussianModel& model) {
 }
 
 void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
-    if (model.render_method == RenderMethod::gaussian_3dgut)
-        throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
     if (model.filter_mode != SplatFilterMode::classic &&
         model.filter_mode != SplatFilterMode::mip_2d)
         throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
@@ -1752,8 +1750,6 @@ void save_gaussians(
     if (format != GaussianFormat::ply && model.filter_mode != SplatFilterMode::classic &&
         model.filter_mode != SplatFilterMode::mip_2d)
         throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
-    if (model.render_method == RenderMethod::gaussian_3dgut && format != GaussianFormat::ply)
-        throw std::invalid_argument("3DGUT export currently requires PLY to preserve rendering metadata");
     switch (format) {
         case GaussianFormat::ply:
             save_gaussians_ply(model, path);

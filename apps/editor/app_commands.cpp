@@ -2462,6 +2462,19 @@ void poll_gaussian_merge(App& app) {
 
 void open_splat_export_panel(App& app) {
     if (app.job.running() || !can_export_model(app)) return;
+    try {
+        const auto model = load_export_model(app, tinytensor::Device::CPU);
+        app.splat_export.has_mip3d_filter =
+            (model.filter_mode == photara::splat::SplatFilterMode::mip_3d ||
+             model.filter_mode == photara::splat::SplatFilterMode::mip) &&
+            model.size() != 0 && model.filter_3d.is_valid() &&
+            model.filter_3d.numel() == model.size();
+        if (!app.splat_export.has_mip3d_filter)
+            app.splat_export.bake_mip3d = false;
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+        return;
+    }
     if (!app.splat_export.initialized) {
         app.splat_export.format =
             splat_export_format_from_settings(app.settings.splat_format);

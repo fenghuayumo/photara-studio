@@ -302,9 +302,11 @@ void draw_splat_export_modal(App& app) {
         theme::caption("Standard 3DGS PLY.");
 
     ImGui::Spacing();
-    ImGui::Checkbox("Bake Mip3D filter", &state.bake_mip3d);
-    theme::caption("Bake merges the 3D filter into scale and opacity for export.");
-    theme::caption("Without baking, Mip3D requires PLY; viewers must support filter_3D.");
+    if (state.has_mip3d_filter) {
+        ImGui::Checkbox("Bake Mip3D filter", &state.bake_mip3d);
+        theme::caption("Bake merges the 3D filter into scale and opacity for export.");
+        theme::caption("Without baking, Mip3D requires PLY; viewers must support filter_3D.");
+    }
     ImGui::Spacing();
     theme::caption("SH degree");
     ImGui::SetNextItemWidth(-1.F);
