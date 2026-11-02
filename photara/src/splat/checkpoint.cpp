@@ -443,6 +443,9 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
     for (const auto& view : scene.views) {
         paths.push_back(view.path);
         const auto camera = camera_from_mvs_view(view);
+        if (camera.model == CameraModel::opencv_fisheye &&
+            options.render_method == RenderMethod::gaussian_3dgut && !options.undistort_to_pinhole)
+            hash.append_string("gut_fisheye_tangent_adc_v1");
         // CUDA RGB-only spherical derivatives must avoid unused perspective
         // singularities on side rays; do not resume older native-GS state.
         if (camera.model == CameraModel::equirectangular &&

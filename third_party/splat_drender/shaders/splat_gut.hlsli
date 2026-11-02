@@ -117,6 +117,8 @@ void gut_preprocess(uint index, float3 mean, float3 t, float3 scale,
     if ((pc.u3 & 8u) != 0u) {
         if (mode == kModeEquirect)
             gauss_f[base+6u] = float4(t/length(t), 6.28318530718f*length(t));
+        else if (mode == kModeFisheye)
+            gauss_f[base+6u] = float4(t,0.0f);
         else gauss_f[base+6u] = float4(1.0f/(abs(center.du0)+1.0e-6f),
                                       1.0f/(abs(center.dv1)+1.0e-6f), 0.0f, 0.0f);
     }

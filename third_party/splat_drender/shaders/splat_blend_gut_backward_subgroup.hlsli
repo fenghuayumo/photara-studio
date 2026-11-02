@@ -21,6 +21,7 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
         rgb=gauss_f[base+2u];refine=gauss_f[base+6u];
     }
     float fx=asfloat(pc.u9),fy=asfloat(pc.u10),cx=asfloat(pc.u11),cy=asfloat(pc.u12);
+    float3 bu,bv;fisheye_refine_basis(refine.xyz,bu,bv);
     float3 acc_o=0.0f,acc_a=0.0f,acc_b=0.0f,acc_c=0.0f,acc_rgb=0.0f;
     float acc_opacity=0.0f,acc_refine=0.0f;
     [loop] for(uint pixel_base=0u;pixel_base<256u;pixel_base+=32u) {
@@ -78,6 +79,7 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
             float3 gm=-(a.xyz*go.x+b.xyz*go.y+c.xyz*go.z);
             float score=pc.u3==kModeEquirect ? refine.w*length(cross(refine.xyz,gm))
                             : length(gm.xy*refine.xy*float2(width,height));
+            if(pc.u3==kModeFisheye) score=length(float2(dot(bu,gm)*width,dot(bv,gm)*height));
             acc_refine+=score/max(state.x,1.0e-6f);
         }
     }

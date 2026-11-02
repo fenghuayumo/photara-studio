@@ -61,6 +61,27 @@ struct Projection {
     bool valid = false;
 };
 
+// Columns of the inverse projection restricted to the sphere tangent plane:
+// B = J^T (J J^T)^-1. B^T maps a camera-space loss gradient to pixel space.
+// Using only 1/Jxx and 1/Jyy drops cross/Z derivatives and becomes singular
+// near a fisheye horizon even though its full projection remains regular.
+SD_HD inline ProjectionJacobian projection_tangent_basis(const ProjectionJacobian& J) {
+    ProjectionJacobian B{};
+    float scale = 0.f;
+    for (int k=0;k<3;++k) scale=fmaxf(scale,fmaxf(fabsf(J.du[k]),fabsf(J.dv[k])));
+    if (!(scale>0.f) || !isfinite(scale)) return B;
+    float u[3],v[3],n[3];
+    for(int k=0;k<3;++k) {u[k]=J.du[k]/scale;v[k]=J.dv[k]/scale;}
+    for(int k=0;k<3;++k) n[k]=u[(k+1)%3]*v[(k+2)%3]-u[(k+2)%3]*v[(k+1)%3];
+    const float det=n[0]*n[0]+n[1]*n[1]+n[2]*n[2];
+    if (!(det>0.f) || !isfinite(det)) return B;
+    for(int k=0;k<3;++k) {
+        B.du[k]=(v[(k+1)%3]*n[(k+2)%3]-v[(k+2)%3]*n[(k+1)%3])/det/scale;
+        B.dv[k]=(n[(k+1)%3]*u[(k+2)%3]-n[(k+2)%3]*u[(k+1)%3])/det/scale;
+    }
+    return B;
+}
+
 SD_HD inline Projection project_pinhole(float3 t, const CameraIntrinsics& K) {
     Projection p;
     if (!(t.z > K.near_plane)) return p;

@@ -14,6 +14,7 @@ void require(bool ok, const char *message) {
     throw std::runtime_error(message);
 }
 #include "splat_gut_vulkan.hpp"
+#include "splat_gut_fisheye_adc.hpp"
 #include "splat_panorama_tiles.hpp"
 void native_projection_regressions() {
   const auto root=std::filesystem::temp_directory_path()/"photara_gut_projection_test";
@@ -59,8 +60,10 @@ void native_projection_regressions() {
   }
   std::cout<<"Native fisheye lens/mask/backward and non-2:1 panorama intrinsics passed\n";
 }
-int main() {
+int main(int argc,char** argv) {
   try {
+    fisheye_adc_regression();
+    if(argc==2&&std::string(argv[1])=="--fisheye-adc-only")return 0;
     panorama_single_contributor_regression();
     native_projection_regressions();
     gut_validation::panorama_adc_regression();

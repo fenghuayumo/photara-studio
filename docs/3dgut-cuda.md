@@ -282,3 +282,19 @@ against the unfiltered original float blender and reports original/filtered
 candidate counts. Near-camera regression fixtures compare RGB, alpha, normals
 and depth with a double-precision all-Gaussian ray oracle, and rings at sigma
 0.5, 2.828427 and 8 against the unfiltered path.
+
+### Fisheye densification gradients
+
+Native fisheye ADC uses the complete inverse projection restricted to the
+sphere tangent plane, `B = J^T (J J^T)^-1`. The image-space gradient is
+`B^T g_camera`, scaled by image width/height before the existing norm and
+alpha normalization. Dividing camera X/Y gradients by only the two diagonal
+Jacobian entries loses cross/Z terms near the lens boundary.
+
+CUDA fast/reference and Vulkan subgroup/reference backward paths use this
+mapping. The regression test differentiates an independent double-precision
+inverse camera map, including rotated/translated poses, four distortion
+coefficients and near-horizon rays. Run `photara_splat_gut_test
+--fisheye-adc-only` for the focused check. Native fisheye GUT checkpoint
+fingerprints are versioned because refinement scores change. This is a
+gradient correctness fix; it does not establish a final image-quality gain.

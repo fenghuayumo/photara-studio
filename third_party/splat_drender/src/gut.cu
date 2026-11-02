@@ -254,8 +254,9 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
           score = 6.28318530718f * norm3df(cross.x,cross.y,cross.z);
         } else {
           const auto proj = project(mat::xform_point(make_float3(p[0],p[1],p[2]),cam.world_to_camera),K,cam.width,cam.height);
-          const float dx = gm.x/(fabsf(proj.J.du[0])+1e-6f);
-          const float dy = gm.y/(fabsf(proj.J.dv[1])+1e-6f);
+          const auto B = is_fisheye(K.mode) ? projection_tangent_basis(proj.J) : ProjectionJacobian{};
+          const float dx = is_fisheye(K.mode) ? B.du[0]*gm.x+B.du[1]*gm.y+B.du[2]*gm.z : gm.x/(fabsf(proj.J.du[0])+1e-6f);
+          const float dy = is_fisheye(K.mode) ? B.dv[0]*gm.x+B.dv[1]*gm.y+B.dv[2]*gm.z : gm.y/(fabsf(proj.J.dv[1])+1e-6f);
           score = hypotf(dx*cam.width,dy*cam.height);
         }
         atomicAdd(model_grad.refine_weight + i,
@@ -453,6 +454,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
   float4 a{}, b{}, c{}, rgb{};
   float2 rf{};
   float3 radial{};
+  ProjectionJacobian refine_basis{};
   if (valid) {
     a = st.gut_rows[3 * id];
     b = st.gut_rows[3 * id + 1];
@@ -461,6 +463,10 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
         g.colors ? reinterpret_cast<const float3 *>(g.colors)[id] : st.rgb[id];
     rgb = make_float4(color.x, color.y, color.z, g.opacities[id]);
     rf = st.gut_refine[id];
+    if (is_fisheye(K.mode)) {
+      const auto t=mat::xform_point(make_float3(g.means[3*id],g.means[3*id+1],g.means[3*id+2]),cam.world_to_camera);
+      refine_basis=projection_tangent_basis(project_fisheye(t,K).J);
+    }
     if (is_equirect(K.mode)) {
       const float3 t = mat::xform_point(make_float3(g.means[3*id],g.means[3*id+1],g.means[3*id+2]),cam.world_to_camera);
       const float inv = 6.28318530718f / rf.x;
@@ -623,6 +629,11 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
           mat::transpose(mat::world_rotation_transposed(cam.world_to_camera)) *
           dm;
       float score = hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height);
+      if (is_fisheye(K.mode)) {
+        const float dx=refine_basis.du[0]*gm.x+refine_basis.du[1]*gm.y+refine_basis.du[2]*gm.z;
+        const float dy=refine_basis.dv[0]*gm.x+refine_basis.dv[1]*gm.y+refine_basis.dv[2]*gm.z;
+        score=hypotf(dx*cam.width,dy*cam.height);
+      }
       if (is_equirect(K.mode)) {
         const float3 cross = make_float3(radial.y*gm.z-radial.z*gm.y,
             radial.z*gm.x-radial.x*gm.z, radial.x*gm.y-radial.y*gm.x);
