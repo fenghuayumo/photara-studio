@@ -5876,6 +5876,36 @@ void test_ssim_metric_large_reduction() {
     }
 }
 
+void test_ssim_loss_large_reduction() {
+    using namespace photara::splat;
+    // Non-tile-aligned dimensions exercise partial blocks and valid cropping.
+    constexpr std::size_t width = 2051, height = 1027;
+    constexpr float predicted = 0.25F, reference = 0.75F;
+    const auto shape = tinytensor::TensorShape{3, height, width};
+    const auto prediction = tinytensor::Tensor::from_vector(
+        std::vector<float>(3 * width * height, predicted), shape,
+        tinytensor::Device::CUDA);
+    const auto target = tinytensor::Tensor::from_vector(
+        std::vector<float>(3 * width * height, reference), shape,
+        tinytensor::Device::CUDA);
+    auto reported_gradient = tinytensor::Tensor::zeros_like(prediction);
+    auto silent_gradient = tinytensor::Tensor::zeros_like(prediction);
+    auto terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
+    const tinytensor::Tensor mask;
+    detail::fused_l1_ssim_loss(prediction, target, mask, false, .2F, 1.F,
+        reported_gradient, terms.ptr<float>(), width, height);
+    detail::fused_l1_ssim_loss(prediction, target, mask, false, .2F, 1.F,
+        silent_gradient, nullptr, width, height);
+    const double expected_ssim = (2.0 * predicted * reference + .0001) /
+        (predicted * predicted + reference * reference + .0001);
+    const double expected_loss = .8 * (reference - predicted) +
+        .2 * (1.0 - expected_ssim);
+    require(std::abs(terms.to_vector()[0] - expected_loss) < 3e-5,
+        "High-resolution L1+SSIM scalar reduction lost accuracy");
+    require(reported_gradient.to_vector() == silent_gradient.to_vector(),
+        "Scalar reporting changed the photometric training gradient");
+}
+
 void test_ssim_loss() {
     using namespace photara::splat;
     constexpr std::size_t side = 13;
@@ -8235,6 +8265,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--ssim-metric-only") {
         try {
             test_ssim_metric_large_reduction();
+            test_ssim_loss_large_reduction();
             test_ssim_loss();
             test_masked_photometric_gradient();
             std::cout << "SSIM metric tests passed\n";
@@ -8666,6 +8697,7 @@ int main(int argc, char** argv) {
         test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
         test_ssim_metric_large_reduction();
+        test_ssim_loss_large_reduction();
         test_ssim_loss();
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();

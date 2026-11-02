@@ -875,7 +875,9 @@ __global__ void loss_kernel(
         grad_color[offset] = photo_weight * l1_weight * valid * inverse_pixels /
                              3.F * ((difference > 0.F) - (difference < 0.F));
     }
-    if (terms)
+    // The fused SSIM path owns the RGB scalar and passes zero here. Even
+    // atomicAdd(0) serializes the entire image on that accumulator.
+    if (terms && photo_weight != 0.F)
         atomicAdd(
             terms + 0,
             photo_weight * l1_weight * valid * rgb_loss * inverse_pixels / 3.F);

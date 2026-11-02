@@ -133,6 +133,7 @@ __global__ void fused_l1_ssim_forward_kernel(
     __shared__ float metric_partials[2][k_block_x * k_block_y];
     float local_metric_sum = 0.F;
     float local_metric_count = 0.F;
+    float local_loss = 0.F;
 
     for (int channel = 0; channel < channels; ++channel) {
         const int tile_size = k_shared_y * k_shared_x;
@@ -243,7 +244,7 @@ __global__ void fused_l1_ssim_forward_kernel(
                 if (scalar_terms != nullptr && valid_window) {
                     const float loss_value =
                         ssim_weight * (1.F - ssim) + (1.F - ssim_weight) * l1;
-                    atomicAdd(scalar_terms, normalization * loss_value);
+                    local_loss += normalization * loss_value;
                 }
                 if constexpr (AccumulateMetric) {
                     const int mask_index = pixel_y * width + pixel_x;
@@ -266,6 +267,24 @@ __global__ void fused_l1_ssim_forward_kernel(
         }
         block.sync();
     }
+    // Reporting must not serialize every channel/pixel on one global FP32
+    // accumulator. Reuse the metric scratch for one block sum across channels;
+    // this also avoids the rounding bias of millions of small atomic adds.
+    if (scalar_terms != nullptr) {
+        const int rank = block.thread_rank();
+        metric_partials[0][rank] = local_loss;
+        block.sync();
+        for (int stride = k_block_x * k_block_y / 2; stride; stride /= 2) {
+            if (rank < stride)
+                metric_partials[0][rank] += metric_partials[0][rank + stride];
+            block.sync();
+        }
+        if (rank == 0) {
+            const int index = (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+            scalar_terms[index] = metric_partials[0][0];
+        }
+        block.sync();
+    }
     if constexpr (AccumulateMetric) {
         const int rank = block.thread_rank();
         metric_partials[0][rank] = local_metric_sum;
@@ -284,6 +303,22 @@ __global__ void fused_l1_ssim_forward_kernel(
             metric_count[index] = metric_partials[1][0];
         }
     }
+}
+
+__global__ void reduce_loss_blocks_kernel(
+    const float* blocks, const std::size_t count, float* result) {
+    __shared__ double partials[256];
+    double sum = 0.0;
+    for (std::size_t i = threadIdx.x; i < count; i += blockDim.x)
+        sum += blocks[i];
+    partials[threadIdx.x] = sum;
+    __syncthreads();
+    for (unsigned stride = 128; stride; stride >>= 1) {
+        if (threadIdx.x < stride)
+            partials[threadIdx.x] += partials[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) *result += static_cast<float>(partials[0]);
 }
 
 // A fixed reduction avoids the rounding bias from millions of unordered
@@ -441,6 +476,13 @@ void fused_l1_ssim_loss(
     auto dm_dmu1 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     auto dm_dsigma1_sq = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     auto dm_dsigma12 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    const std::size_t loss_block_count =
+        ((width + k_block_x - 1) / k_block_x) *
+        ((height + k_block_y - 1) / k_block_y);
+    tinytensor::Tensor loss_blocks;
+    if (scalar_terms != nullptr)
+        loss_blocks = tinytensor::Tensor::empty(
+            {loss_block_count}, tinytensor::Device::CUDA);
     tinytensor::Tensor masked_prediction;
     tinytensor::Tensor masked_target;
     if (mask_enabled) {
@@ -484,8 +526,12 @@ void fused_l1_ssim_loss(
     fused_l1_ssim_forward_kernel<true, false><<<grid, block, 0, stream>>>(
         ssim_weight, static_cast<int>(height), static_cast<int>(width),
         channels, c1, c2, image1, image2, dm_dmu1.ptr<float>(),
-        dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>(), scalar_terms,
+        dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>(),
+        scalar_terms != nullptr ? loss_blocks.ptr<float>() : nullptr,
         normalization, nullptr, false, nullptr, nullptr);
+    if (scalar_terms != nullptr)
+        reduce_loss_blocks_kernel<<<1, 256, 0, stream>>>(
+            loss_blocks.ptr<float>(), loss_block_count, scalar_terms);
 
     // The valid-crop chain is a constant inside the crop and zero outside, and
     // the mask multiply folds into the same pass: the backward writes the

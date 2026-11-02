@@ -754,7 +754,7 @@ int pack_rgba(
 
 HostTrainingView load_host_training_view(
     const mvs::MvsView& view, const TrainingOptions& options,
-    const float resolution_scale = 1.F) {
+    const float resolution_scale = 1.F, const bool parallel_pack = true) {
     tinytensor::TraceScope load_scope("data.host_load_pack");
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument(
@@ -808,7 +808,7 @@ HostTrainingView load_host_training_view(
          (view.k1 == 0.F && view.k2 == 0.F &&
           view.p1 == 0.F && view.p2 == 0.F));
 #if defined(PHOTARA_HAS_OPENMP)
-#pragma omp parallel for schedule(static) if (pixels >= 4096)
+#pragma omp parallel for schedule(static) if (parallel_pack && pixels >= 4096)
 #endif
     for (std::int64_t linear = 0;
          linear < static_cast<std::int64_t>(pixels); ++linear) {
@@ -1170,7 +1170,10 @@ struct TrainingDataLoader::Impl {
                     HostTrainingLoad load;
                     const auto start = std::chrono::steady_clock::now();
                     load.view = std::make_shared<HostTrainingView>(
-                        load_host_training_view(source_[index], options_, scale));
+                        // Prefetch already parallelizes across images. A full
+                        // OpenMP team per short-lived async task oversubscribes
+                        // the CPU and competes with the training submit thread.
+                        load_host_training_view(source_[index], options_, scale, false));
                     load.host_load_ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - start).count();
                     return load;
