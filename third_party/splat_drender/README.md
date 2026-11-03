@@ -4,6 +4,12 @@ Differentiable 3D Gaussian splatting backends, built for Photara. CUDA and
 Vulkan both implement the training-critical forward/backward path; Vulkan can
 also draw a trained model without creating a CUDA context.
 
+3DGS sorts Gaussian centers by radial camera distance for perspective, fisheye
+and equirectangular cameras on both backends. Orthographic 3DGS uses camera Z.
+Forward, backward and point-query draw lists share that order. 3DGUT retains
+radial sorting. This policy differs from original 3DGS's perspective Z order;
+historical reference-parity measurements below predate this sort-policy change.
+
 Both paths render RGB, alpha, accumulated surface normals and median depth and
 propagate their gradients through compositing, median-depth bisection,
 projection, covariance/scale/rotation, opacity activation and SH. Vulkan also

@@ -71,9 +71,33 @@ inline void test_raster_policy(tinytensor::Device device) {
     options.colors_precomp = Tensor::from_vector(
         std::vector<float>{1,0,0, 0,0,1}, {2,3}, device);
     const float a = .6F * std::exp(-.5F * 15.F*15.F / 625.F);
-    const auto z_sorted = rasterizer.forward(model, camera, options).color.to_vector();
-    close(z_sorted[center], a, "Camera-Z sorting did not place the red Gaussian first");
-    close(z_sorted[2*32*32+center], (1-a)*.6F, "Camera-Z compositing differs from oracle");
+    // Red has smaller camera Z but greater radial distance (2.5 vs 2.2).
+    // Blue must occlude red under the shared training/preview sort policy.
+    rendered = rasterizer.forward(model, camera, options);
+    const auto radial_sorted = rendered.color.to_vector();
+    close(radial_sorted[center], (1-.6F)*a, "Radial sorting did not place the blue Gaussian first");
+    close(radial_sorted[2*32*32+center], .6F, "Radial compositing differs from oracle");
+    std::vector<float> red_loss(3*32*32, 0.F);
+    red_loss[center] = 1.F;
+    const auto sorted_grad = rasterizer.backward(model, rendered,
+        Tensor::from_vector(red_loss, {3,32,32}, device),
+        Tensor::zeros({32,32}, device), {}, {}).colors_precomp.to_vector();
+    close(sorted_grad[0], (1-.6F)*a, "Backward did not retain radial-order red visibility");
+    close(sorted_grad[3], .6F, "Backward did not retain radial-order blue visibility");
+
+    camera.model = photara::CameraModel::opencv_fisheye;
+    const float theta = std::atan2(1.5F, 2.F);
+    const float fisheye_alpha = .6F * std::exp(-.5F * theta*theta * 2.5F*2.5F / 4.F);
+    const auto fish_sorted = rasterizer.forward(model, camera, options).color.to_vector();
+    close(fish_sorted[center], (1-.6F)*fisheye_alpha, "Fisheye radial order differs from oracle");
+    close(fish_sorted[2*32*32+center], .6F, "Fisheye did not place the radially nearer Gaussian first");
+    camera.model = photara::CameraModel::pinhole;
+    camera.orthographic = true;
+    const float ortho_alpha = .6F * std::exp(-.5F * 1.5F*1.5F / 4.F);
+    const auto ortho_sorted = rasterizer.forward(model, camera, options).color.to_vector();
+    close(ortho_sorted[center], ortho_alpha, "Orthographic rays must retain camera-Z order");
+    close(ortho_sorted[2*32*32+center], (1-ortho_alpha)*.6F, "Orthographic compositing differs from oracle");
+    camera.orthographic = false;
     Camera second = camera;
     camera.fx = camera.fy = 100.F;
     second.fx = second.fy = 1000.F;

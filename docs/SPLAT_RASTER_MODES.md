@@ -8,15 +8,20 @@ do not select or execute the Brush application.
 
 | Control | Standard | Mip Splatting numerical preset |
 |---|---|---|
-| 3DGS sort key | Camera-space Z | Camera-space Z |
+| 3DGS sort key | Radial distance | Radial distance |
 | Per-contributor alpha ceiling | 0.99 | 0.999 |
 | Pinhole near plane | 0.2 scene units | 0.01 scene units |
 | Pixel sample location | Integer | Half-integer |
 
 Select the preset with `--splat-raster-profile mip-splatting`. Alpha ceiling, near plane and pixel sample location can be overridden with
 `--splat-alpha-clip`, `--splat-near-plane`, and `--splat-pixel-center 0|0.5`.
-3DGS uses camera-space Z except for equirectangular cameras, which use radial
-distance. 3DGUT retains radial sorting.
+3DGS uses radial center distance for perspective, fisheye and equirectangular
+cameras in both CUDA and Vulkan. Training, evaluation and Studio share this
+order. Orthographic 3DGS previews retain camera-space Z because their rays are
+parallel. 3DGUT retains its existing radial sorting.
+This changes the rendered output of existing perspective/fisheye 3DGS models;
+re-render evaluation metrics under the new policy before comparing them.
+Sorting changes do not change near-plane clipping or cap projected footprints.
 The preset is experimental; filter modes do not select it. Compare filter
 modes under the default standard raster policy before attributing changes to
 filtering. The benchmark defaults to `classic mip2d mip3d`; select
@@ -42,8 +47,9 @@ path is corrected; the ORI raster and mesh benchmark uses CUDA.
 A 30,000-step ori_img comparison using Classic and TSDF produced different
 artifacts across sorting choices, but a repeated radial run also showed
 severe artifacts. Two paired Mip3D runs produced similar meshes with both
-orders. These observations do not establish a general quality advantage;
-camera-space Z is the default for 3DGS, as in the original implementation.
+orders. These observations do not establish a general quality advantage.
+Photara now selects radial ordering consistently for its central-camera paths;
+the original 3DGS implementation's camera-Z ordering is no longer the default.
 
 In an earlier 8,000-step, single-seed room-scene diagnosis, individual held-out
 views showed strong sensitivity to the preset even when mean PSNR changed
@@ -102,7 +108,8 @@ ones; the Mip Splatting numerical preset is not a claim of complete bitwise pari
 ## Validation and experiments
 
 `photara_splat_test --raster-policy-only` checks CUDA and Vulkan against
-independent analytic Gaussian/compositing oracles. Tests check camera-Z sorting,
+independent analytic Gaussian/compositing oracles. Tests check radial sorting,
+matching backward visibility and orthographic camera-Z sorting,
 sample positions and near planes, both alpha ceilings,
 Classic opacity backward, 2D/3D compensation, and mixed-focal 3D radii.
 

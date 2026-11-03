@@ -24,8 +24,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 camera = transform_point(frame, placement_point(model_placement(frame, index), centers[index].xyz));
     uint key = 0xffffffffu;
     if (camera_in_front(frame, camera)) {
-        // Camera-space Z matches 3DGS; panoramic views use radial distance.
-        float depth = camera_model(frame) == k_model_equirect ? length(camera) : camera.z;
+        // Match the shared rasterizer, including orthographic parallel rays.
+        float depth = camera_model(frame) == k_model_ortho ? camera.z : length(camera);
         key = ~depth_sort_key(depth);
     }
     keys0[index] = key;

@@ -92,9 +92,9 @@ __global__ void preprocess_gaussians(
     }
 
     st.mean2d[i] = make_float2(p.pixel_x, p.pixel_y);
-    // Camera-space Z matches standard 3DGS. A panoramic camera uses radial
-    // distance because points behind its camera plane remain visible.
-    st.depth_key[i] = depth_bits(is_equirect(K.mode) ? norm3df(t.x, t.y, t.z) : t.z);
+    // Central cameras share radial ordering in training, evaluation and preview.
+    // Parallel orthographic rays retain camera-Z ordering.
+    st.depth_key[i] = depth_bits(is_orthographic(K.mode) ? t.z : norm3df(t.x, t.y, t.z));
     if constexpr (GEOMETRY) {
         st.ray_plane[i] = splat.ray_plane;
         st.normal[i] = splat.normal;

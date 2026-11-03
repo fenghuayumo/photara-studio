@@ -184,8 +184,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > .5f && (selection_depth < camera[20] || selection_depth > camera[21]))
         rgb *= .18f;
-    // Camera-space Z for 3DGS; panoramas need radial distance.
-    float depth = mode == kModeEquirect ? length(t) : t.z;
+    // Match CUDA: radial for central cameras, camera Z for parallel rays.
+    float depth = mode == kModeOrtho ? t.z : length(t);
     uint depth_key = asuint(depth);
     uint gaussian_slots = geometry ? 7u : 5u;
     uint gaussian_base = index * gaussian_slots;
