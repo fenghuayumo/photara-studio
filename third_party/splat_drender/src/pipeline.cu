@@ -460,7 +460,17 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
             PixelState::bytes(pixels, snapshot_buckets, false, true) >
                 s.snapshot_compaction_threshold;
         const int bucket_size = compact_snapshots ? 128 : 32;
-        if (compact_snapshots) {
+        if (compact_snapshots)
+            snapshot_buckets =
+                (std::size_t(counts.instances) + 127 * std::size_t(tiles)) / 128 + 1;
+        // Grouping already removes most of the snapshot cost. Avoid a second
+        // raster pass and host fence when the grouped workspace fits within
+        // four times the compaction threshold (2 GiB with default settings).
+        // A zero threshold still forces contributor compaction for diagnostics.
+        const bool compact_contributors = compact_snapshots &&
+            PixelState::bytes(pixels, snapshot_buckets, false, true) / 4 >
+                s.snapshot_compaction_threshold;
+        if (compact_contributors) {
             gut::count_contributors(g, cam, s, K, gst, tst,
                                     ist.instance_value[counts.instance_selector]);
             check_cuda(cudaGetLastError(), "3DGUT snapshot contributor prepass");
@@ -468,10 +478,10 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
         if (snapshot_buckets > 0) {
             launch::bucket_offsets(tiles, int(snapshot_buckets), tst.range,
                 tst.bucket_count, tst.bucket_offset, tst.bucket_tile,
-                compact_snapshots ? tst.max_contributor : nullptr, bucket_size);
+                compact_contributors ? tst.max_contributor : nullptr, bucket_size);
             check_cuda(cudaGetLastError(), "3DGUT bucket offsets");
         }
-        if (compact_snapshots) {
+        if (compact_contributors) {
             unsigned exact_buckets = 0;
             check_cuda(cudaMemcpy(&exact_buckets, tst.bucket_offset + tiles - 1,
                                   sizeof(exact_buckets), cudaMemcpyDeviceToHost),

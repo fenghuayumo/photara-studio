@@ -1,4 +1,5 @@
 #include "splat_drender/api.h"
+#include "splat_drender/buffers.h"
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -304,6 +305,26 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
       }
     }
     s.compact_pixel_snapshots = true;
+    s.snapshot_compaction_threshold = ws::PixelState::bytes(
+        P, full.snapshot_buckets, false, true) / 2;
+    for (int k = 0; k < 5; ++k)
+      check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
+    const auto grouped = Rasterizer::forward(pools, g, cam, s, out);
+    if (grouped.snapshot_bucket_size != 128)
+      throw std::runtime_error("GUT grouped snapshot path was not selected");
+    Rasterizer::backward(pools, g, cam, s, grouped, fo, loss, grad);
+    if (compact_color != output[0].get(3 * P))
+      throw std::runtime_error("GUT grouped color mismatch");
+    for (int k = 0; k < 5; ++k) {
+      const auto values = grads[k].get(gs[k]);
+      for (int j = 0; j < gs[k]; ++j) {
+        if (!std::isfinite(values[j]) ||
+            (!thin && std::abs(values[j] - analytic[k][j]) >
+                1e-6f + 1e-5f * std::abs(analytic[k][j])))
+          throw std::runtime_error("GUT grouped gradient mismatch");
+      }
+    }
+    s.snapshot_compaction_threshold = 0;
   }
   // Extreme 1e-8 scales are a finiteness stress case: float ray transforms
   // suffer cancellation and cannot use the old float AD path as an oracle.

@@ -50,10 +50,13 @@ Inference does not allocate snapshots or cached pixel rays.
 
 CUDA RGB training honors `compact_pixel_snapshots` and
 `snapshot_compaction_threshold` (enabled by default, 512 MiB). When the
-estimated pixel workspace exceeds that threshold, a contributor-only pass
-finds each tile's last accepted contribution. Snapshots are allocated only
-for the resulting bucket prefixes, including zero buckets for empty tiles.
-These larger workspaces also use one global snapshot per 128 Gaussians.
+estimated pixel workspace exceeds that threshold, training uses one global
+snapshot per 128 Gaussians. If the grouped pixel workspace exceeds four times
+the threshold (2 GiB with defaults), a contributor-only pass finds each tile's
+last accepted contribution and allocates only those bucket prefixes, including
+zero buckets for empty tiles. Grouped workspaces within that budget use the
+conservative bucket bound, saving a raster pass and a host readback. A zero
+threshold forces contributor compaction for diagnostics.
 Backward processes four 32-Gaussian passes with intermediate pixel state in
 shared memory, reducing long-list snapshot storage by approximately fourfold
 without replaying extra Gaussian responses. Smaller workspaces keep the
@@ -63,6 +66,23 @@ It adds a forward pass and a bucket-count readback, while reducing snapshot
 storage and backward work on views with long occluded or rejected tails.
 Smaller workspaces retain the single-pass path. Tile sorting memory still
 depends on the conservative projected instance count.
+
+RGB blending has separate compiled 32- and 128-Gaussian variants so snapshot
+indexing uses constant divisors. Perspective, fisheye and panorama rays reuse
+the preprocessed camera origin in Gaussian coordinates. Only orthographic
+rays need the per-pixel origin transform in the forward and backward loops.
+
+On 2026-11-03, a matched CUDA RGB training-loop benchmark on an RTX 5090 D v2
+used the 2,957,438-Gaussian `splat_cleaned.ply` and camera 0 from
+`VID_20260911_145523_00_007_dataset`. Relative to commit `274375a`, 40 measured
+steps after three warmups, including photometric loss and fused Adam, averaged
+57.53 to 45.07 ms at 1920x960, 123.91 to 97.60 ms at 3840x1920, and 400.22 to
+342.51 ms at 7680x3840. CUDA pool high-water usage was unchanged at 1920 and
+7680; at 3840 it increased by 256 MiB because contributor compaction was skipped.
+This fixed-view benchmark excludes densification and full-dataset loading.
+The imported model was explicitly run with GUT and was not a GUT checkpoint.
+Use `--bench-rgb` for the training loop and `--bench-gut-memory` for fixed
+forward/backward comparisons.
 
 Depth/normal attachments retain the original forward-mode derivative path.
 For diagnostic comparisons, `PHOTARA_GUT_REFERENCE=1` selects the original

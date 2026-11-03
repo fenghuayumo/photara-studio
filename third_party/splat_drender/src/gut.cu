@@ -298,12 +298,11 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
       ps.n_contrib[pix] = last;
   }
 }
-template <bool CONTRIBUTOR_ONLY = false>
+template <bool CONTRIBUTOR_ONLY = false, unsigned BUCKET_SIZE = 32>
 __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
                           CameraIntrinsics K, ws::GaussianState st,
                           ws::TileState tiles, const unsigned *ids,
-                          ws::PixelState ps, RenderOutputs out,
-                          unsigned bucket_size = 32) {
+                          ws::PixelState ps, RenderOutputs out) {
   constexpr int batch_size = cfg::kTileWidth * cfg::kTileHeight;
   __shared__ float4 rows0[batch_size], rows1[batch_size], rows2[batch_size];
   __shared__ float4 colors[batch_size];
@@ -354,19 +353,20 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
       {
         // A tile may keep processing rejected candidates after its last
         // contribution. Compact storage has no snapshots for that tail.
-        if (!CONTRIBUTOR_ONLY && ps.snap_ct && (j % bucket_size) == 0 &&
-            (base - range.x + j) / bucket_size < tiles.bucket_count[tile]) {
+        if (!CONTRIBUTOR_ONLY && ps.snap_ct && (j % BUCKET_SIZE) == 0 &&
+            (base - range.x + j) / BUCKET_SIZE < tiles.bucket_count[tile]) {
           const std::size_t slot =
-              (std::size_t(bucket_base + (base - range.x + j) / bucket_size) << 8) +
+              (std::size_t(bucket_base + (base - range.x + j) / BUCKET_SIZE) << 8) +
               rank;
           ps.snap_ct[slot] = make_float4(color.x, color.y, color.z, T);
         }
       }
       const float4 a = rows0[j], b = rows1[j], c = rows2[j];
-      const float3 o =
-          make_float3(a.w + a.x * offset.x + a.y * offset.y + a.z * offset.z,
-                      b.w + b.x * offset.x + b.y * offset.y + b.z * offset.z,
-                      c.w + c.x * offset.x + c.y * offset.y + c.z * offset.z);
+      float3 o = make_float3(a.w, b.w, c.w);
+      if (is_orthographic(K.mode))
+        o = make_float3(a.w + a.x * offset.x + a.y * offset.y + a.z * offset.z,
+                        b.w + b.x * offset.x + b.y * offset.y + b.z * offset.z,
+                        c.w + c.x * offset.x + c.y * offset.y + c.z * offset.z);
       const float3 d = make_float3(a.x * dir.x + a.y * dir.y + a.z * dir.z,
                                    b.x * dir.x + b.y * dir.y + b.z * dir.z,
                                    c.x * dir.x + c.y * dir.y + c.z * dir.z);
@@ -447,7 +447,9 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                                  LossGradients loss, ws::GradState grad,
                                  ModelGradients mg, int buckets) {
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  constexpr int warps = BUCKET_SIZE > 32 ? 4 : 8;
+  // Smaller grouped blocks reduce per-block shared memory and register use,
+  // allowing more independent tile buckets to reside on each SM.
+  constexpr int warps = BUCKET_SIZE > 32 ? 2 : 8;
   const int bucket = blockIdx.x * warps + warp;
   if (bucket >= buckets)
     return;
@@ -458,7 +460,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     return;
   // Keep the intermediate pixel state on chip across four 32-Gaussian
   // passes. Only the 128-Gaussian checkpoint occupies global memory.
-  __shared__ float4 carry[BUCKET_SIZE > 32 ? 4 : 1][256];
+  __shared__ float4 carry[BUCKET_SIZE > 32 ? warps : 1][256];
   for (unsigned phase = 0; phase < BUCKET_SIZE / 32; ++phase) {
     const unsigned position =
         (bucket - first) * BUCKET_SIZE + phase * 32 + lane;
@@ -501,7 +503,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     __shared__ float4 state[warps][32], constants[warps][32],
         directions[warps][32], offsets[warps][32];
     __shared__ unsigned limits[warps][32];
-    __shared__ float4 prefixes[BUCKET_SIZE > 32 ? 4 : 1][32];
+    __shared__ float4 prefixes[BUCKET_SIZE > 32 ? warps : 1][32];
     float prefix_x = 0, prefix_y = 0, prefix_z = 0;
     float T = 0, rx = 0, ry = 0, rz = 0, gx = 0, gy = 0, gz = 0, dfinal = 0,
           final_T = 0;
@@ -615,9 +617,11 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
       do {
         if (!valid || pixel < 0 || pixel >= 256 || position >= limit)
           break;
-        const float3 o = make_float3(a.w + a.x * ox + a.y * oy + a.z * oz,
-                                     b.w + b.x * ox + b.y * oy + b.z * oz,
-                                     c.w + c.x * ox + c.y * oy + c.z * oz);
+        float3 o = make_float3(a.w, b.w, c.w);
+        if (is_orthographic(K.mode))
+          o = make_float3(a.w + a.x * ox + a.y * oy + a.z * oz,
+                          b.w + b.x * ox + b.y * oy + b.z * oz,
+                          c.w + c.x * ox + c.y * oy + c.z * oz);
         const float3 d = make_float3(a.x * dx + a.y * dy + a.z * dz,
                                      b.x * dx + b.y * dy + b.z * dz,
                                      c.x * dx + c.y * dy + c.z * dz);
@@ -810,10 +814,13 @@ void forward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
              const unsigned *ids, ws::PixelState ps, const RenderOutputs &out,
              int bucket_size) {
   if (!s.need_depth && !reference_mode()) {
-    blend_rgb<><<<dim3((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
-                     (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight),
-                dim3(cfg::kTileWidth, cfg::kTileHeight)>>>(g, c, s, K, st, ts,
-                                                           ids, ps, out, bucket_size);
+    const dim3 grid((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
+                    (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight);
+    const dim3 block(cfg::kTileWidth, cfg::kTileHeight);
+    if (bucket_size == 128)
+      blend_rgb<false, 128><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
+    else
+      blend_rgb<false, 32><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
     return;
   }
   reference_blend<false>
@@ -831,7 +838,7 @@ void backward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
   if (!s.need_depth && !reference_mode()) {
     if (buckets > 0) {
       if (bucket_size == 128)
-        backward_buckets<128><<<(buckets + 3) / 4, 128>>>(
+        backward_buckets<128><<<(buckets + 1) / 2, 64>>>(
             g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
       else
         backward_buckets<32><<<(buckets + 7) / 8, 256>>>(
