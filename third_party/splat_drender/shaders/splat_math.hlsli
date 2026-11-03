@@ -49,6 +49,36 @@ struct PushConstants {
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc;
 
+struct FootprintCap { float q, lambda; float3 derivative; };
+
+FootprintCap footprint_policy(float3 cov, int width, int height) {
+    float half_diff = .5f * (cov.x-cov.z);
+    float radius = length(float2(half_diff,cov.y));
+    float lambda = .5f*cov.x + .5f*cov.z + radius;
+    float limit = min(1024.0f,float(min(width,height)));
+    float variance = .125f*limit*limit;
+    FootprintCap cap;
+    cap.q = 1.0f; cap.lambda = lambda; cap.derivative = 0.0f;
+    if (lambda > variance && isfinite(lambda)) {
+        cap.q = variance/lambda;
+        float h = radius > 0.0f ? half_diff/radius : 0.0f;
+        cap.derivative = float3(.5f+.5f*h, radius > 0.0f ? cov.y/radius : 0.0f, .5f-.5f*h);
+    }
+    return cap;
+}
+
+float3 footprint_conic_backward(float3 cov, FootprintCap cap, float4 g) {
+    float3 c = cov*cap.q;
+    float det = c.x*c.z-c.y*c.y;
+    float u=c.z/det, v=-c.y/det, w=c.x/det;
+    float3 grad = float3(
+        -(u*u*g.x+2.0f*u*v*g.y+v*v*g.z),
+        -2.0f*(u*v*g.x+(u*w+v*v)*g.y+v*w*g.z),
+        -(v*v*g.x+2.0f*v*w*g.y+w*w*g.z));
+    float pull = dot(grad,cov)/cap.lambda;
+    return cap.q*(grad-pull*cap.derivative);
+}
+
 struct Mat3 {
     float m[3][3];
 };

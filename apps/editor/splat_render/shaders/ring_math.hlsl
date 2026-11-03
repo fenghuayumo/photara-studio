@@ -248,7 +248,7 @@ bool project_pixel(SplatFrame f, float3 world, out float2 pixel) {
 }
 
 bool ellipse_from_axes(
-    float2 p0, float2 p1, float2 p2, float cutoff, float kernel, out float2 axis1, out float2 axis2) {
+    float2 p0, float2 p1, float2 p2, float cutoff, float kernel, float limit, out float2 axis1, out float2 axis2) {
     axis1 = 0.0;
     axis2 = 0.0;
     float a = dot(float3(p0.x, p1.x, p2.x), float3(p0.x, p1.x, p2.x)) + kernel;
@@ -261,8 +261,9 @@ bool ellipse_from_axes(
     float2 eigen = float2(b, lambda1 - a);
     float eigen_len = length(eigen);
     float2 direction = eigen_len > 1e-6 ? eigen / eigen_len : float2(1.0, 0.0);
-    float len1 = cutoff * sqrt(lambda1);
-    float len2 = cutoff * sqrt(lambda2);
+    float factor = min(1.0,limit/sqrt(8.0*lambda1));
+    float len1 = cutoff * sqrt(lambda1) * factor;
+    float len2 = cutoff * sqrt(lambda2) * factor;
     if (!(len1 > 1.0e-4) || !(len1 < 1.0e6)) return false;
     axis1 = len1 * direction;
     axis2 = len2 * float2(direction.y, -direction.x);
@@ -294,7 +295,8 @@ bool project_axes(
     }
     float cutoff = 2.0 * log(opacity / k_alpha_floor);
     if (!(cutoff > 0.0)) return false;
-    return ellipse_from_axes(projected[0], projected[1], projected[2], sqrt(cutoff), kernel, axis1, axis2);
+    float limit = min(1024.0,min(f.viewport.x,f.viewport.y));
+    return ellipse_from_axes(projected[0], projected[1], projected[2], sqrt(cutoff), kernel, limit, axis1, axis2);
 }
 
 #endif

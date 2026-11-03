@@ -685,6 +685,12 @@ void project_backward(uint3 dispatch_id) {
     float ga = denom2inv * (-c * c * gc.x + 2.0f * b * c * gc.y + (denom - a * c) * gc.z);
     float gcc = denom2inv * (-a * a * gc.z + 2.0f * a * b * gc.y + (denom - a * c) * gc.x);
     float gb = denom2inv * 2.0f * (b * c * gc.x - (denom + 2.0f * b * b) * gc.y + a * b * gc.z);
+    float3 screen_cov = float3(a,b,c);
+    FootprintCap cap = footprint_policy(screen_cov,int(width),int(height));
+    if (cap.q < 1.0f) {
+        float3 gradient = footprint_conic_backward(screen_cov,cap,gc);
+        ga=gradient.x; gb=gradient.y; gcc=gradient.z;
+    }
     float det0 = max(1.0e-6f, a0 * c0v - b * b);
     float det1 = max(1.0e-6f, denom);
     float coef = pc.u22 != 0u ? sqrt(det0 / det1) : 1.0f;

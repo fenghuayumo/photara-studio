@@ -13,6 +13,7 @@
 
 #include "equirect.cuh"
 #include "fisheye.cuh"
+#include "footprint.cuh"
 #include "matrix.cuh"
 #include "sh.cuh"
 #include "splat_drender/camera.h"
@@ -522,11 +523,21 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         const auto native = fisheye::evaluate(position, covariance, W, io.K,
                                                io.kernel_size);
         // The raster kernel stores half of the off-diagonal conic gradient.
-        fisheye::Dual loss =
+        fisheye::Dual loss;
+        const auto cap = footprint::policy(native.cov[0].v, native.cov[1].v,
+                                            native.cov[2].v, io.width, io.height);
+        if (cap.q < 1.f) {
+            const float3 gc = footprint::conic_backward(native.cov[0].v,
+                native.cov[1].v, native.cov[2].v, cap, io.d_conic);
+            loss = native.cov[0]*fisheye::Dual(gc.x) +
+                   native.cov[1]*fisheye::Dual(gc.y) + native.cov[2]*fisheye::Dual(gc.z);
+        } else {
+            loss =
             native.conic[0] * fisheye::Dual(io.d_conic.x) +
             native.conic[1] * fisheye::Dual(2.f * io.d_conic.y) +
-            native.conic[2] * fisheye::Dual(io.d_conic.z) +
-            (io.K.compensate_2d ? native.coefficient : fisheye::Dual(1.f)) * fisheye::Dual(io.opacity * io.d_conic.w);
+            native.conic[2] * fisheye::Dual(io.d_conic.z);
+        }
+        loss = loss + (io.K.compensate_2d ? native.coefficient : fisheye::Dual(1.f)) * fisheye::Dual(io.opacity * io.d_conic.w);
         loss = loss + native.plane[0] * fisheye::Dual(d_ray_plane_raw.x) +
                native.plane[1] * fisheye::Dual(d_ray_plane_raw.y) +
                native.plane[2] * fisheye::Dual(d_ray_plane_raw.z) +
@@ -732,7 +743,8 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     const float denom2inv = 1.f / (denom * denom + 1.0e-7f);
     float dL_da = 0.f, dL_db = 0.f, dL_dc = 0.f;
     float dL_dcov_local[6];
-    if (denom2inv != 0.f) {
+    const auto cap = footprint::policy(a,b,c,io.width,io.height);
+    if (denom2inv != 0.f || cap.q < 1.f) {
         dL_da = denom2inv * (-c * c * io.d_conic.x + 2.f * b * c * io.d_conic.y +
                              (denom - a * c) * io.d_conic.z);
         dL_dc = denom2inv * (-a * a * io.d_conic.z + 2.f * a * b * io.d_conic.y +
@@ -740,6 +752,11 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
         dL_db = denom2inv * 2.f * (b * c * io.d_conic.x -
                                    (denom + 2.f * b * b) * io.d_conic.y +
                                    a * b * io.d_conic.z);
+
+        if (cap.q < 1.f) {
+            const float3 gradient = footprint::conic_backward(a,b,c,cap,io.d_conic);
+            dL_da = gradient.x; dL_db = gradient.y; dL_dc = gradient.z;
+        }
 
         io.grad_opacity = io.d_conic.w * coef;
         // The Mip opacity compensation stays detached from the covariance

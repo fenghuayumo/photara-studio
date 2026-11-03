@@ -21,7 +21,21 @@ order. Orthographic 3DGS previews retain camera-space Z because their rays are
 parallel. 3DGUT retains its existing radial sorting.
 This changes the rendered output of existing perspective/fisheye 3DGS models;
 re-render evaluation metrics under the new policy before comparing them.
-Sorting changes do not change near-plane clipping or cap projected footprints.
+Sorting changes do not change near-plane clipping.
+
+3DGS screen covariance now also has a shared CUDA/Vulkan footprint limit:
+`q = min(1, min(1024,width,height)^2 / (8*lambda_max(C)))`, `C' = q*C`.
+The kernel-inflated covariance is scaled equally on both axes; the reference
+semi-major axis at `sqrt(8)` sigma is bounded by the smaller viewport dimension
+and 1024 pixels. Alpha-floor contours can extend beyond that reference ellipse.
+Training, evaluation, point queries and Studio use this rule for all 3DGS camera
+models. Backward differentiates the cap factor as well as the covariance;
+camera-Z clipping and the pre-cap Mip compensation convention are unchanged.
+3DGUT remains unchanged. This is a rendering policy, not a world-space scale
+regularizer; saturated overall footprint growth has no image gradient.
+Existing model outputs and metrics change when the cap activates. Full retraining
+quality, including near-surface coverage, must be evaluated separately from
+forward/backward numerical correctness.
 The preset is experimental; filter modes do not select it. Compare filter
 modes under the default standard raster policy before attributing changes to
 filtering. The benchmark defaults to `classic mip2d mip3d`; select
@@ -110,6 +124,8 @@ ones; the Mip Splatting numerical preset is not a claim of complete bitwise pari
 `photara_splat_test --raster-policy-only` checks CUDA and Vulkan against
 independent analytic Gaussian/compositing oracles. Tests check radial sorting,
 matching backward visibility and orthographic camera-Z sorting,
+footprint-capped compositing and end-to-end finite-difference gradients for
+position, log-scale, raw quaternion and opacity (pinhole/fisheye/panorama),
 sample positions and near planes, both alpha ceilings,
 Classic opacity backward, 2D/3D compensation, and mixed-focal 3D radii.
 

@@ -541,9 +541,9 @@ OccupancyResult vulkan_occupancy(
         tinytensor::DataType::Int32);
     if(points.shape()[0]) {
         auto backend=get_backend(backend_value);
-        tinytensor::vulkan::submit_async();
         if (!reuse_prepared_view)
             backend->rasterizer.bind_model_device(device_gaussians(backend,model,options));
+        tinytensor::vulkan::submit_async();
         backend->rasterizer.occupancy_device(buffer_view(points),
             static_cast<std::uint32_t>(points.shape()[0]),camera_view(camera),raster_settings(model, options),
             buffer_view(result.occupancy),buffer_view(inside),reuse_prepared_view);
@@ -571,8 +571,10 @@ DepthSampleResult vulkan_sample_depth(
     result.camera_points = tinytensor::Tensor::empty(points.shape(), tinytensor::Device::Vulkan);
     result.inside = tinytensor::Tensor::empty({points.shape()[0]}, tinytensor::Device::Vulkan,
         tinytensor::DataType::Int32);
-    tinytensor::vulkan::submit_async();
     backend->rasterizer.bind_model_device(device_gaussians(backend, model, options));
+    // Binding can create the zero 3D-filter tensor. Submit its initialization
+    // before the independent rasterizer queue submission reads that buffer.
+    tinytensor::vulkan::submit_async();
     backend->rasterizer.sample_depth_device(buffer_view(points),
         static_cast<std::uint32_t>(points.shape()[0]), camera_view(camera), raster_settings(model, options),
         buffer_view(result.camera_points), buffer_view(result.inside));

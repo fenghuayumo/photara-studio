@@ -1,5 +1,71 @@
+// End-to-end finite differences exercise the cap through projection, parameter
+// activation and the actual compositor, including native fisheye duals.
+inline void test_footprint_gradients(tinytensor::Device device) {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    Rasterizer rasterizer;
+    for (const auto mode : {photara::CameraModel::pinhole,
+                           photara::CameraModel::opencv_fisheye,
+                           photara::CameraModel::equirectangular}) {
+        Camera camera;
+        camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        camera.width = mode == photara::CameraModel::equirectangular ? 64 : 32;
+        camera.height = 32; camera.model = mode;
+        camera.fx = camera.fy = mode == photara::CameraModel::equirectangular
+            ? 32.F/3.141592653589793F : 20.F;
+        camera.cx = camera.width*.5F; camera.cy = 16.F;
+        const std::size_t area = camera.width*camera.height;
+        for (bool capped : {false,true}) {
+            const float size = capped ? (mode == photara::CameraModel::equirectangular ? 8.F : 2.F) : .06F;
+            std::vector<float> p{.23F,.17F,2.2F,std::log(size),std::log(size*.6F),std::log(size*.3F),.9F,.1F,.2F,-.1F,.4F};
+            const auto make = [&](const std::vector<float>& values) {
+                GaussianModel m;
+                m.means=Tensor::from_vector(std::vector<float>(values.begin(),values.begin()+3),{1,3},device);
+                m.log_scales=Tensor::from_vector(std::vector<float>(values.begin()+3,values.begin()+6),{1,3},device);
+                m.quaternions=Tensor::from_vector(std::vector<float>(values.begin()+6,values.begin()+10),{1,4},device);
+                m.opacity_logits=Tensor::full({1,1},values[10],device);
+                m.sh=Tensor::zeros({1,1,3},device);
+                return m;
+            };
+            const unsigned px = mode == photara::CameraModel::equirectangular ? 33 : 18;
+            const unsigned py = mode == photara::CameraModel::equirectangular ? 17 : 18;
+            const std::size_t pixel = py*camera.width+px;
+            std::vector<float> loss(3*area,0.F);loss[pixel]=1.F;
+            RasterizeOptions options; options.require_depth=false;
+            options.kernel_size=.3F;options.rasterization.compensate_2d=false;
+            auto m=make(p);
+            auto frame=rasterizer.forward(m,camera,options);
+            const int radius=frame.radii.to_vector()[0];
+            require(capped ? radius == 34 : radius < 34,
+                    "Footprint finite-difference fixture did not exercise the requested cap branch");
+            require(frame.color.to_vector()[pixel] > .005F,
+                    "Footprint finite-difference fixture has no useful image gradient");
+            const auto g=rasterizer.backward(m,frame,Tensor::from_vector(loss,{3,camera.height,camera.width},device),
+                Tensor::zeros({camera.height,camera.width},device),{},{});
+            std::vector<float> analytic;
+            for (const auto* tensor : {&g.means,&g.log_scales,&g.quaternions,&g.opacity_logits}) {
+                const auto values=tensor->to_vector();analytic.insert(analytic.end(),values.begin(),values.end());
+            }
+            for (std::size_t k=0;k<p.size();++k) {
+                constexpr float step=.002F;
+                auto plus=p,minus=p;plus[k]+=step;minus[k]-=step;
+                const auto sample=[&](const std::vector<float>& values) {
+                    return rasterizer.forward(make(values),camera,options).color.to_vector()[pixel];
+                };
+                const float numerical=(sample(plus)-sample(minus))/(2*step);
+                if (!std::isfinite(analytic[k]) || std::abs(analytic[k]-numerical)>.001F+.02F*std::abs(numerical)) {
+                    std::cerr << "Footprint gradient mode=" << int(mode) << " capped=" << capped
+                              << " parameter=" << k << " analytic=" << analytic[k] << " numerical=" << numerical << '\n';
+                    throw std::runtime_error("Footprint gradient differs from finite differences");
+                }
+            }
+        }
+    }
+}
+
 // Independent single-pixel projection/compositing oracles for raster policy.
 inline void test_raster_policy(tinytensor::Device device) {
+    test_footprint_gradients(device);
     using namespace photara::splat;
     using tinytensor::Tensor;
     Camera camera;
@@ -70,7 +136,8 @@ inline void test_raster_policy(tinytensor::Device device) {
     model = make({1.5F,0,2, 0,0,2.2F}, 2.F, .6F);
     options.colors_precomp = Tensor::from_vector(
         std::vector<float>{1,0,0, 0,0,1}, {2,3}, device);
-    const float a = .6F * std::exp(-.5F * 15.F*15.F / 625.F);
+    // min(width,height)^2/8 = 128 caps both isotropic footprints.
+    const float a = .6F * std::exp(-.5F * 15.F*15.F / 128.F);
     // Red has smaller camera Z but greater radial distance (2.5 vs 2.2).
     // Blue must occlude red under the shared training/preview sort policy.
     rendered = rasterizer.forward(model, camera, options);
@@ -87,13 +154,16 @@ inline void test_raster_policy(tinytensor::Device device) {
 
     camera.model = photara::CameraModel::opencv_fisheye;
     const float theta = std::atan2(1.5F, 2.F);
-    const float fisheye_alpha = .6F * std::exp(-.5F * theta*theta * 2.5F*2.5F / 4.F);
+    // The fisheye transverse eigenvalue is larger than the horizontal one.
+    const float fish_vertical_variance = std::pow(40.F*theta/1.5F,2.F);
+    const float fish_horizontal_variance = 256.F*(128.F/fish_vertical_variance);
+    const float fisheye_alpha = .6F * std::exp(-.5F * 20.F*20.F * theta*theta / fish_horizontal_variance);
     const auto fish_sorted = rasterizer.forward(model, camera, options).color.to_vector();
     close(fish_sorted[center], (1-.6F)*fisheye_alpha, "Fisheye radial order differs from oracle");
     close(fish_sorted[2*32*32+center], .6F, "Fisheye did not place the radially nearer Gaussian first");
     camera.model = photara::CameraModel::pinhole;
     camera.orthographic = true;
-    const float ortho_alpha = .6F * std::exp(-.5F * 1.5F*1.5F / 4.F);
+    const float ortho_alpha = .6F * std::exp(-.5F * 30.F*30.F / 128.F);
     const auto ortho_sorted = rasterizer.forward(model, camera, options).color.to_vector();
     close(ortho_sorted[center], ortho_alpha, "Orthographic rays must retain camera-Z order");
     close(ortho_sorted[2*32*32+center], (1-ortho_alpha)*.6F, "Orthographic compositing differs from oracle");
@@ -116,6 +186,11 @@ inline void test_raster_policy(tinytensor::Device device) {
     require(depth > 0.F, "Half-pixel geometry render has no median surface");
     const auto query = Tensor::from_vector(std::vector<float>{.025F*depth,.025F*depth,depth}, {1,3}, device);
     const auto sampled = rasterizer.sample_depth(model,query,camera,options).camera_points.to_vector();
+    if (!(std::abs(sampled[2]-depth) < .003F &&
+          std::abs(sampled[0]-.025F*sampled[2]) < 1e-5F &&
+          std::abs(sampled[1]-.025F*sampled[2]) < 1e-5F))
+        std::cerr << "Point-query device=" << int(device) << " rendered=" << depth
+                  << " sampled=" << sampled[0] << ',' << sampled[1] << ',' << sampled[2] << '\n';
     require(std::abs(sampled[2]-depth) < .003F &&
             std::abs(sampled[0]-.025F*sampled[2]) < 1e-5F &&
             std::abs(sampled[1]-.025F*sampled[2]) < 1e-5F,

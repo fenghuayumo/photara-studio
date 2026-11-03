@@ -29,6 +29,10 @@ SplatForwardOutput panorama_ewa_reference(const Scene& scene,const SplatCamera& 
             const double variance=std::pow(double(scene.scales[3*i+axis])*s.scale_modifier,2);
             xx+=variance*u[axis]*u[axis];xy+=variance*u[axis]*v[axis];yy+=variance*v[axis]*v[axis];
         }
+        const double lambda = .5*(xx+yy) + std::hypot(.5*(xx-yy),xy);
+        const double limit = std::min(1024.0,double(std::min(c.width,c.height)));
+        const double scale = std::min(1.0,limit*limit/(8*lambda));
+        xx*=scale; xy*=scale; yy*=scale;
         const double det=xx*yy-xy*xy;
         projected.push_back({(std::atan2(t[0],t[2])/(2*3.141592653589793)+.5)*c.width,
             (std::atan2(t[1],h)/3.141592653589793+.5)*c.height,

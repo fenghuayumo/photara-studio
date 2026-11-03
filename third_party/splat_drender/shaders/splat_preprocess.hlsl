@@ -140,6 +140,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, geometry);
     if (!geom.ok) return;
 
+    float3 screen_cov = float3(geom.cov0,geom.cov1,geom.cov2);
+    FootprintCap cap = footprint_policy(screen_cov,int(width),int(height));
+    if (cap.q < 1.0f) {
+        screen_cov *= cap.q;
+        geom.cov0=screen_cov.x; geom.cov1=screen_cov.y; geom.cov2=screen_cov.z;
+    }
+
     Projection projected;
     if (mode == kModeOrtho) projected = project_ortho(t, fx, fy, cx, cy);
     else projected = project_camera(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4);

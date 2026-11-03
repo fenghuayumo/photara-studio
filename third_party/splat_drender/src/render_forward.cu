@@ -59,6 +59,7 @@ __global__ void preprocess_gaussians(
                             splat))
         return;
 
+    footprint::apply(splat.cov2d[0], splat.cov2d[1], splat.cov2d[2], width, height);
     const Projection p = project(t, K, width, height);
     if (!p.valid) return;
 

@@ -3350,14 +3350,15 @@ void test_sample_depth_batch_boundary() {
 
 void test_contribution_visibility_rejects_occluded_gaussians() {
     using namespace photara::splat;
-    constexpr std::size_t count = 4;
+    // The footprint cap reduces alpha at the corners. A stack of 63 front
+    // splats still occludes the last splat across the whole viewport.
+    constexpr std::size_t count = 64;
     GaussianModel model;
+    std::vector<float> means(count * 3, 0.F);
+    for (std::size_t i = 0; i < count; ++i)
+        means[3*i+2] = i+1 == count ? 2.F : 1.F+.001F*float(i);
     model.means = tinytensor::Tensor::from_vector(
-        std::vector<float>{
-            0.F, 0.F, 1.F,
-            0.F, 0.F, 1.1F,
-            0.F, 0.F, 1.2F,
-            0.F, 0.F, 2.F},
+        means,
         {count, std::size_t{3}}, tinytensor::Device::CUDA);
     model.log_scales = tinytensor::Tensor::from_vector(
         std::vector<float>(count * 3, std::log(10.F)),
@@ -3415,8 +3416,10 @@ void test_compact_pixel_snapshots() {
     camera.world_to_camera[0] = camera.world_to_camera[5] =
         camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
     camera.fx = camera.fy = 40.F;
-    camera.cx = 23.5F; camera.cy = 15.5F;
-    camera.width = 48; camera.height = 32;
+    // Keep the corners opaque enough to terminate the front stack even after
+    // the viewport-sized footprint cap; a wide image leaves a visible tail.
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = 32;
     Rasterizer rasterizer;
     auto& profiler = tinytensor::VramProfiler::instance();
     struct RestoreProfiler {

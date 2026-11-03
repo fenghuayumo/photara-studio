@@ -10,6 +10,18 @@ Forward, backward and point-query draw lists share that order. 3DGUT retains
 radial sorting. This policy differs from original 3DGS's perspective Z order;
 historical reference-parity measurements below predate this sort-policy change.
 
+3DGS also bounds its screen covariance on both backends, for every camera model:
+`C' = q*C`, `q = min(1, min(1024,width,height)^2 / (8*lambda_max(C)))`.
+Here `C` includes the screen kernel; both axes shrink equally, preserving the
+ellipse's aspect ratio. This bounds the `sqrt(8)`-sigma reference semi-major
+axis, not every opacity-dependent alpha-floor contour. Near clipping, the
+Gaussian alpha formula and the existing pre-cap Mip compensation are unchanged.
+Backward includes the derivative of `q` through the maximum eigenvalue;
+isotropic capped covariances use the symmetric eigenvalue subgradient. Tile
+membership and alpha-threshold decisions remain piecewise constant. GUT's ray
+response and its candidate footprints are unchanged. Re-evaluate old models
+with this policy before comparing metrics or resuming optimization.
+
 Both paths render RGB, alpha, accumulated surface normals and median depth and
 propagate their gradients through compositing, median-depth bisection,
 projection, covariance/scale/rotation, opacity activation and SH. Vulkan also
