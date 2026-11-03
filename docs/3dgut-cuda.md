@@ -72,6 +72,22 @@ indexing uses constant divisors. Perspective, fisheye and panorama rays reuse
 the preprocessed camera origin in Gaussian coordinates. Only orthographic
 rays need the per-pixel origin transform in the forward and backward loops.
 
+CUDA panorama RGB forward, contributor prepass and backward also have
+camera-specialized variants. Their compile-time camera mode removes the
+fisheye/orthographic branches and associated live state. Panorama ADC computes
+its tangential-gradient cross product in world coordinates, using rotational
+invariance to omit a camera-space gradient transform for each contribution.
+Rotated, translated cameras are covered by the ADC CUDA/Vulkan parity test.
+
+A subsequent matched 7000-step masked training comparison on the same dataset
+(1920x960, initial budget 100,000, growth cap 3,000,000, seed 42, 18 held-out
+views) reduced optimization time from 162.642 to 137.230 seconds. Foreground
+PSNR changed from 26.0309 to 25.9865 dB and full-image SSIM from 0.834809 to
+0.835113. This is a single run per variant, including densification and
+checkpoint evaluation, and does not establish 30,000-step quality parity.
+Fixed-parameter tests on the trained 3,000,000-Gaussian model preserve RGB and
+alpha exactly and keep finite parameter-gradient relative L2 below 1e-4.
+
 On 2026-11-03, a matched CUDA RGB training-loop benchmark on an RTX 5090 D v2
 used the 2,957,438-Gaussian `splat_cleaned.ply` and camera 0 from
 `VID_20260911_145523_00_007_dataset`. Relative to commit `274375a`, 40 measured

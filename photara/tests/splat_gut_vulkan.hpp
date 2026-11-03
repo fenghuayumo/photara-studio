@@ -170,12 +170,18 @@ inline void panorama_adc_regression() {
     camera.world_to_camera={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     camera.fx=camera.fy=128.F/(2.F*3.14159265359F);camera.cx=64;camera.cy=32;
     std::vector<float> scores;
-    for(auto device:{Device::CUDA,Device::Vulkan}) for(unsigned side=0;side<2;++side) {
+    for(auto device:{Device::CUDA,Device::Vulkan}) for(unsigned side=0;side<2;++side)
+      for(unsigned rotated=0;rotated<2;++rotated) {
+        camera.position={3,-2,5};
+        camera.world_to_camera=rotated
+          ? std::array<float,16>{0,0,-1,0, 0,1,0,0, 1,0,0,0, -5,2,3,1}
+          : std::array<float,16>{1,0,0,0, 0,1,0,0, 0,0,1,0, -3,2,-5,1};
         auto seed=model(device,false,1);
-        seed.means=Tensor::from_vector(side ? std::vector<float>{2,0,0}:std::vector<float>{0,0,2},{1U,3U},device);
+        seed.means=Tensor::from_vector(side ? std::vector<float>{5,-2,5}:std::vector<float>{3,-2,7},{1U,3U},device);
         seed.log_scales=Tensor::from_vector(std::vector<float>(3,std::log(.25F)),{1U,3U},device);
         seed.opacity_logits=Tensor::from_vector(std::vector<float>{1.F},{1U,1U},device);
         Rasterizer raster;RasterizeOptions options;options.require_depth=false;
+        if (rotated) options.snapshot_compaction_threshold=0;
         auto frame=raster.forward(seed,camera,options);
         auto dc=Tensor::from_vector(std::vector<float>(3*128*64,1.F/(128*64)),{3U,64U,128U},device);
         auto gradients=raster.backward(seed,frame,dc,Tensor::zeros({64U,128U},device),{},{});

@@ -298,11 +298,14 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s,
       ps.n_contrib[pix] = last;
   }
 }
-template <bool CONTRIBUTOR_ONLY = false, unsigned BUCKET_SIZE = 32>
+template <bool CONTRIBUTOR_ONLY = false, unsigned BUCKET_SIZE = 32,
+          bool PANORAMA = false>
 __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
                           CameraIntrinsics K, ws::GaussianState st,
                           ws::TileState tiles, const unsigned *ids,
                           ws::PixelState ps, RenderOutputs out) {
+  if constexpr (PANORAMA)
+    K.mode = CameraMode::equirectangular;
   constexpr int batch_size = cfg::kTileWidth * cfg::kTileHeight;
   __shared__ float4 rows0[batch_size], rows1[batch_size], rows2[batch_size];
   __shared__ float4 colors[batch_size];
@@ -439,13 +442,15 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
 // One lane owns one Gaussian. Pixel state flows through its 32-Gaussian
 // bucket, so gradients stay in registers and commit once per tile instance.
 // This replaces atomics per accepted pixel with atomics per Gaussian/tile.
-template <int BUCKET_SIZE = 32>
+template <int BUCKET_SIZE = 32, bool PANORAMA = false>
 __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                                  CameraIntrinsics K, ws::GaussianState st,
                                  ws::TileState ts, const unsigned *ids,
                                  ws::PixelState ps, ForwardOutputsView fo,
                                  LossGradients loss, ws::GradState grad,
                                  ModelGradients mg, int buckets) {
+  if constexpr (PANORAMA)
+    K.mode = CameraMode::equirectangular;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // Smaller grouped blocks reduce per-block shared memory and register use,
   // allowing more independent tile buckets to reside on each SM.
@@ -489,12 +494,19 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
         refine_basis = projection_tangent_basis(project_fisheye(t, K).J);
       }
       if (is_equirect(K.mode)) {
-        const float3 t =
-            mat::xform_point(make_float3(g.means[3 * id], g.means[3 * id + 1],
-                                         g.means[3 * id + 2]),
-                             cam.world_to_camera);
         const float inv = 6.28318530718f / rf.x;
-        radial = make_float3(t.x * inv, t.y * inv, t.z * inv);
+        if constexpr (PANORAMA) {
+          // Cross-product norms are invariant under camera rotation. Keep
+          // both vectors in world space to avoid a matrix multiply per hit.
+          radial = make_float3((g.means[3 * id] - cam.center[0]) * inv,
+                               (g.means[3 * id + 1] - cam.center[1]) * inv,
+                               (g.means[3 * id + 2] - cam.center[2]) * inv);
+        } else {
+          const float3 t = mat::xform_point(
+              make_float3(g.means[3 * id], g.means[3 * id + 1], g.means[3 * id + 2]),
+              cam.world_to_camera);
+          radial = make_float3(t.x * inv, t.y * inv, t.z * inv);
+        }
       }
     }
     const int grid_x = (cam.width + 15) / 16;
@@ -678,9 +690,10 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
           const float3 dm = make_float3(-a.x * go.x - b.x * go.y - c.x * go.z,
                                         -a.y * go.x - b.y * go.y - c.y * go.z,
                                         -a.z * go.x - b.z * go.y - c.z * go.z);
-          const float3 gm = mat::transpose(mat::world_rotation_transposed(
-                                cam.world_to_camera)) *
-                            dm;
+          float3 gm = dm;
+          if constexpr (!PANORAMA)
+            gm = mat::transpose(mat::world_rotation_transposed(
+                     cam.world_to_camera)) * dm;
           float score =
               hypotf(gm.x * rf.x * cam.width, gm.y * rf.y * cam.height);
           if (is_fisheye(K.mode)) {
@@ -799,10 +812,13 @@ void count_contributors(const Gaussians &g, const CameraView &c,
                         const RenderSettings &s, CameraIntrinsics K,
                         ws::GaussianState st, ws::TileState ts,
                         const unsigned *ids) {
-  blend_rgb<true><<<dim3((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
-                          (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight),
-                     dim3(cfg::kTileWidth, cfg::kTileHeight)>>>(
-      g, c, s, K, st, ts, ids, {}, {});
+  const dim3 grid((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
+                  (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight);
+  const dim3 block(cfg::kTileWidth, cfg::kTileHeight);
+  if (is_equirect(K.mode))
+    blend_rgb<true, 32, true><<<grid, block>>>(g, c, s, K, st, ts, ids, {}, {});
+  else
+    blend_rgb<true><<<grid, block>>>(g, c, s, K, st, ts, ids, {}, {});
 }
 void preprocess(const Gaussians &g, const CameraView &c,
                 const RenderSettings &s, CameraIntrinsics K, int gx, int gy,
@@ -817,8 +833,12 @@ void forward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
     const dim3 grid((c.width + cfg::kTileWidth - 1) / cfg::kTileWidth,
                     (c.height + cfg::kTileHeight - 1) / cfg::kTileHeight);
     const dim3 block(cfg::kTileWidth, cfg::kTileHeight);
-    if (bucket_size == 128)
+    if (bucket_size == 128 && is_equirect(K.mode))
+      blend_rgb<false, 128, true><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
+    else if (bucket_size == 128)
       blend_rgb<false, 128><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
+    else if (is_equirect(K.mode))
+      blend_rgb<false, 32, true><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
     else
       blend_rgb<false, 32><<<grid, block>>>(g, c, s, K, st, ts, ids, ps, out);
     return;
@@ -837,8 +857,14 @@ void backward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
               int bucket_size) {
   if (!s.need_depth && !reference_mode()) {
     if (buckets > 0) {
-      if (bucket_size == 128)
+      if (bucket_size == 128 && is_equirect(K.mode))
+        backward_buckets<128, true><<<(buckets + 1) / 2, 64>>>(
+            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+      else if (bucket_size == 128)
         backward_buckets<128><<<(buckets + 1) / 2, 64>>>(
+            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+      else if (is_equirect(K.mode))
+        backward_buckets<32, true><<<(buckets + 7) / 8, 256>>>(
             g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
       else
         backward_buckets<32><<<(buckets + 7) / 8, 256>>>(
