@@ -43,7 +43,8 @@ struct Buffer {
 bool sanitizer_smoke = false;
 void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
          bool transformed = false, bool tiled = false, bool many = false,
-         bool thin = false, bool occluded = false, int boundary = 0) {
+         bool thin = false, bool occluded = false, int boundary = 0,
+         bool auxiliary = false) {
   const int N = many ? 300 : 2;
   const int W = boundary ? 193 : tiled ? 35 : 16;
   const int H = boundary ? 129 : tiled ? 29 : 12, P = W * H;
@@ -218,6 +219,37 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     grad.sh = grads[4].floats();
   else
     grad.colors = grads[4].floats();
+  Buffer densify_map;
+  std::array<Buffer, 3> auxiliary_grads;
+  if (auxiliary) {
+    std::vector<float> map(P);
+    for (int pixel = 0; pixel < P; ++pixel)
+      map[pixel] = .2f + .6f * float(pixel % 17) / 16.f;
+    densify_map.put(map);
+    loss.densify_map = densify_map.floats();
+    for (auto &buffer : auxiliary_grads)
+      buffer.resize(N * sizeof(float));
+    grad.refine_weight = auxiliary_grads[0].floats();
+    grad.densify_weight = auxiliary_grads[1].floats();
+    grad.densify_weight_den = auxiliary_grads[2].floats();
+  }
+  auto zero_auxiliary = [&] {
+    if (auxiliary)
+      for (auto &buffer : auxiliary_grads)
+        check(cudaMemset(buffer.p, 0, N * sizeof(float)));
+  };
+  std::array<std::vector<float>, 3> analytic_auxiliary;
+  auto compare_auxiliary = [&](float absolute, float relative) {
+    if (auxiliary)
+      for (int k = 0; k < 3; ++k) {
+        const auto values = auxiliary_grads[k].get(N);
+        for (int i = 0; i < N; ++i)
+          if (!std::isfinite(values[i]) ||
+              std::abs(values[i] - analytic_auxiliary[k][i]) >
+                  absolute + relative * std::abs(analytic_auxiliary[k][i]))
+            throw std::runtime_error("GUT ADC/densify output mismatch");
+      }
+  };
   auto fwd = Rasterizer::forward(pools, g, cam, s, out);
   if (fwd.instance_count == 0)
     throw std::runtime_error("3DGUT produced no draw list");
@@ -285,8 +317,27 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   fo.median_depth = out.median_depth;
   fo.normal = out.normal;
   fo.radii = out.radii;
+  zero_auxiliary();
   Rasterizer::backward(pools, g, cam, s, fwd, fo, loss, grad);
   check(cudaDeviceSynchronize());
+  if (auxiliary) {
+    for (int k = 0; k < 3; ++k)
+      analytic_auxiliary[k] = auxiliary_grads[k].get(N);
+    bool contributed = false;
+    for (int i = 0; i < N; ++i) {
+      const float refine = analytic_auxiliary[0][i];
+      const float weight = analytic_auxiliary[1][i];
+      const float denominator = analytic_auxiliary[2][i];
+      if (!std::isfinite(refine) || !std::isfinite(weight) ||
+          !std::isfinite(denominator) || refine < 0.f || denominator < 0.f ||
+          weight < .2f * denominator - 1e-6f ||
+          weight > .8f * denominator + 1e-6f)
+        throw std::runtime_error("Invalid GUT ADC/densify output");
+      contributed |= refine > 0.f && denominator > 0.f;
+    }
+    if (!contributed)
+      throw std::runtime_error("GUT auxiliary fixture produced no contributions");
+  }
   std::array<std::vector<float>, 5> analytic;
   for (int k = 0; k < 5; ++k)
     analytic[k] = grads[k].get(gs[k]);
@@ -300,7 +351,9 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     for (int k = 0; k < 5; ++k)
       check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
     const auto full = Rasterizer::forward(pools, g, cam, s, out);
+    zero_auxiliary();
     Rasterizer::backward(pools, g, cam, s, full, fo, loss, grad);
+    compare_auxiliary(1e-6f, 1e-5f);
     if (fwd.snapshot_buckets > full.snapshot_buckets)
       throw std::runtime_error("GUT compaction increased snapshot storage");
     if (occluded) {
@@ -336,7 +389,9 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     const auto grouped = Rasterizer::forward(pools, g, cam, s, out);
     if (grouped.snapshot_bucket_size != 128)
       throw std::runtime_error("GUT grouped snapshot path was not selected");
+    zero_auxiliary();
     Rasterizer::backward(pools, g, cam, s, grouped, fo, loss, grad);
+    compare_auxiliary(1e-6f, 1e-5f);
     if (compact_color != output[0].get(3 * P))
       throw std::runtime_error("GUT grouped color mismatch");
     for (int k = 0; k < 5; ++k) {
@@ -364,7 +419,9 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     for (int k = 0; k < 5; ++k)
       check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
     const auto reference_forward = Rasterizer::forward(pools, g, cam, s, out);
+    zero_auxiliary();
     Rasterizer::backward(pools, g, cam, s, reference_forward, fo, loss, grad);
+    compare_auxiliary(3e-5f, .01f);
     const auto reference_color = output[0].get(3 * P);
     double color_error = 0, color_norm = 0;
     for (int k = 0; k < 3 * P; ++k) {
@@ -464,7 +521,13 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     const auto empty = Rasterizer::forward(pools, g, cam, s, out);
     if (empty.instance_count == 0 || empty.snapshot_buckets != 0)
       throw std::runtime_error("GUT empty contribution compaction failed");
+    zero_auxiliary();
     Rasterizer::backward(pools, g, cam, s, empty, fo, loss, grad);
+    if (auxiliary)
+      for (auto &buffer : auxiliary_grads)
+        for (float value : buffer.get(N))
+          if (value != 0.f)
+            throw std::runtime_error("Empty GUT contributions produced ADC/densify output");
     for (int k = 0; k < 5; ++k)
       for (float value : grads[k].get(gs[k]))
         if (value != 0.f)
@@ -505,6 +568,11 @@ int main(int argc, char** argv) {
         false, false, false, false, false, true);
     run(CameraMode::opencv_fisheye, false, true, false,
         false, false, false, false, false, 2);
+    // Multi-phase 128 buckets and 32 buckets, rotated/translated cameras,
+    // partial tiles, orthographic origins and nonconstant densification maps.
+    for (auto mode : {CameraMode::pinhole, CameraMode::opencv_fisheye,
+                      CameraMode::equirectangular, CameraMode::orthographic})
+      run(mode, false, true, true, true, true, true, false, false, 0, true);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

@@ -743,7 +743,8 @@ __device__ inline void update_structure_adam_row(
                 a.epsilon, -12.f, 12.f);
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false>
+template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false,
+          bool Gut = false>
 __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
 gaussian_backward(
     const int count, const int sh_degree, const int sh_bases,
@@ -758,7 +759,7 @@ gaussian_backward(
     float* __restrict__ grad_sh, float* __restrict__ grad_colors,
     float* __restrict__ grad_opacity, float* __restrict__ grad_scale,
     float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam,
-    StructureAdam structure_adam, bool gut) {
+    StructureAdam structure_adam) {
     // Fused SH keeps the coefficients of this thread's Gaussian in a shared
     // tile instead of a 48-register row: the warp then updates all 32 rows it
     // owns with one lane per column, which is the coalesced pattern the
@@ -784,7 +785,7 @@ gaussian_backward(
     // standalone optimizer on a zeroed gradient buffer.
     if (i < count && radius[i] > 0) {
 
-        if (gut) {
+        if constexpr (Gut) {
             d_mean = gs.d_mean2d[i];
             d_scale = make_float3(gs.d_conic[i].x, gs.d_conic[i].y, gs.d_conic[i].z);
             d_opacity = gs.d_conic[i].w;
@@ -982,26 +983,35 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
         constexpr bool kFused = decltype(fused_c)::value;
-        auto launch_kernel = [&](auto rgb_c) {
+        auto launch_kernel = [&](auto rgb_c, auto gut_c) {
             constexpr bool kPinholeRGB = decltype(rgb_c)::value;
-            kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB>
+            constexpr bool kGut = decltype(gut_c)::value;
+            kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB, kGut>
                 <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
                     cfg::kGaussianBlock>>>(
                     count, sh_degree, sh_bases, means, sh, opacities, scales,
                     rotations, cov6, view, camera_center, K, width, height,
                     kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
                     grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                    grad_cov, sh_adam, structure_adam, gut);
+                    grad_cov, sh_adam, structure_adam);
         };
+        // GUT already differentiated the 3D response in gut::backward. Keep
+        // EWA projection backward out of its SH/Adam kernel's compiled state.
+        if constexpr (!kCov) {
+            if (gut) {
+                launch_kernel(std::false_type{}, std::true_type{});
+                return;
+            }
+        }
         // Select only when geometry scratch is absent, not merely when this
         // particular Gaussian happens to receive zero geometry gradients.
         if constexpr (kSH && !kCov) {
             if (is_pinhole(K.mode) && !gs.d_ray_plane && !gs.d_normal) {
-                launch_kernel(std::true_type{});
+                launch_kernel(std::true_type{}, std::false_type{});
                 return;
             }
         }
-        launch_kernel(std::false_type{});
+        launch_kernel(std::false_type{}, std::false_type{});
     };
     const auto off = std::false_type{};
     const auto on = std::true_type{};

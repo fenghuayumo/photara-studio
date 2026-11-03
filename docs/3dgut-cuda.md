@@ -138,6 +138,61 @@ The imported model was explicitly run with GUT and was not a GUT checkpoint.
 Use `--bench-rgb` for the training loop and `--bench-gut-memory` for fixed
 forward/backward comparisons.
 
+GUT's post-blend SH/parameter backward and fused Adam now select a compiled
+GUT variant, removing the EWA projection backward branch from that kernel.
+On the same RTX 5090 D v2 and imported 2,957,438-Gaussian model, its fused
+kernel uses 88 rather than 255 registers per thread; measured occupancy rose
+from 16.21% to 32.64%. Three alternating original/specialized runs, each with
+three warmups and 40 streamed training steps, gave these median loop averages:
+
+| Image | View | Before | Specialized | Time reduction |
+| --- | ---: | ---: | ---: | ---: |
+| 1920 x 960 | 0 | 41.28 ms | 38.86 ms | 5.85% |
+| 1920 x 960 | 100 | 34.39 ms | 32.51 ms | 5.48% |
+| 1920 x 960 | 200 | 37.36 ms | 35.32 ms | 5.47% |
+| 3840 x 1920 | 0 | 83.78 ms | 81.83 ms | 2.32% |
+
+These loops include loss, fused Adam and ADC statistics/noise, but exclude
+loading, topology changes and evaluation. Pool high-water usage was unchanged.
+On a deterministic 100,000-particle subset with log scales in the benchmark
+optimizer's [-12, 4] range, fixed RGB/alpha match exactly and worst full
+parameter-gradient relative L2 is 1.55e-6, comparable to repeat-run atomic
+variation. This does not establish long-run convergence parity. The unfiltered
+legacy model also contains extremely thin particles with log scales near -44;
+an unfiltered subset produces nonfinite gradients in both versions, so it is
+not a finite-gradient quality baseline. Raw measurements and reproduction
+scripts are in `artifact/3dgut_cuda_opt_20261103/` (local experimental outputs).
+
+The RGB bucket backward also specializes orthographic origins and optional
+densification maps. Central-camera variants omit the origin-offset staging
+and shuffles; variants without a map omit its error state. Each lane keeps
+its staged pixel's color prefix in registers, selected with a warp shuffle
+at pipeline injection, replacing the shared prefix array. The prefix
+accumulation order and ray orthogonality residual are retained. On the same
+GPU, the panorama 128-bucket kernel uses 11,520 rather than 13,568 bytes of
+static shared memory and 116 rather than 124 registers per thread. Measured
+occupancy rose from 27.19% to 30.23%.
+
+Relative to the SH/Adam specialization above, three alternating runs of 40
+streamed steps after three warmups measured these median loop averages:
+
+| Image | View | Snapshot bucket | Before | Optimized | Time reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1920 x 960 | 0 | 128 | 38.67 ms | 36.60 ms | 5.34% |
+| 1920 x 960 | 100 | 128 | 32.23 ms | 30.42 ms | 5.61% |
+| 1920 x 960 | 200 | 128 | 35.28 ms | 33.56 ms | 4.88% |
+| 3840 x 1920 | 0 | 128 | 81.56 ms | 76.76 ms | 5.89% |
+| 1920 x 960 | 0 | 32 | 37.50 ms | 35.15 ms | 6.29% |
+
+Pool high-water usage was unchanged in every case. The same training-range
+100,000-particle fixture preserves RGB/alpha exactly; worst full gradient
+relative L2 is 2.14e-6. Tests cover both bucket sizes, rotated/translated
+cameras, partial tiles and ADC/densification outputs on all four camera
+models against the pixel reference. Memcheck reports zero errors; racecheck
+and synccheck of `backward_buckets` report zero hazards/errors. These remain
+fixed-model/fixed-view measurements, without long-run convergence validation.
+Raw results are in `artifact/3dgut_bucket_opt_20261103/`.
+
 Depth/normal attachments retain the original forward-mode derivative path.
 For diagnostic comparisons, `PHOTARA_GUT_REFERENCE=1` selects the original
 pixel implementation for RGB as well; set it consistently across forward and

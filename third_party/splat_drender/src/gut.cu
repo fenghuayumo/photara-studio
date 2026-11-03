@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <stdexcept>
+#include <type_traits>
 
 namespace splat_drender::gut {
 namespace {
@@ -496,7 +497,8 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s,
 // One lane owns one Gaussian. Pixel state flows through its 32-Gaussian
 // bucket, so gradients stay in registers and commit once per tile instance.
 // This replaces atomics per accepted pixel with atomics per Gaussian/tile.
-template <int BUCKET_SIZE = 32, bool PANORAMA = false>
+template <int BUCKET_SIZE = 32, bool PANORAMA = false,
+          bool ORTHOGRAPHIC = false, bool DENSIFY_MAP = false>
 __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                                  CameraIntrinsics K, ws::GaussianState st,
                                  ws::TileState ts, const unsigned *ids,
@@ -567,9 +569,14 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
     const int x0 = (tile % grid_x) * 16, y0 = (tile / grid_x) * 16;
     const int pixels = cam.width * cam.height;
     __shared__ float4 state[warps][32], constants[warps][32],
-        directions[warps][32], offsets[warps][32];
+        directions[warps][32];
+    __shared__ float3 offsets[ORTHOGRAPHIC ? warps : 1][32];
+    __shared__ float errors[DENSIFY_MAP ? warps : 1][32];
     __shared__ unsigned limits[warps][32];
-    __shared__ float4 prefixes[BUCKET_SIZE > 32 ? warps : 1][32];
+    // Each lane holds the prefix for its staged pixel. Only lane zero needs
+    // that prefix when injecting a pixel into the Gaussian pipeline; select
+    // it from the owning lane instead of duplicating it in shared memory.
+    float3 staged_prefix = make_float3(0, 0, 0);
     float prefix_x = 0, prefix_y = 0, prefix_z = 0;
     float T = 0, rx = 0, ry = 0, rz = 0, gx = 0, gy = 0, gz = 0, dfinal = 0,
           final_T = 0;
@@ -608,22 +615,25 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
                        s.background[2] * constant.z - loss.alpha[pix];
           direction = ps.gut_rays[pix];
           direction.w = 1.f - fo.alpha[pix];
-          if (is_orthographic(K.mode)) {
+          if constexpr (ORTHOGRAPHIC) {
             const float3 off = mat::xform_dir_transpose(
                 make_float3((x - K.cx) / K.fx, (y - K.cy) / K.fy, 0),
                 cam.world_to_camera);
             offset = make_float4(off.x, off.y, off.z, 0);
           }
-          if (loss.densify_map)
+          if constexpr (DENSIFY_MAP)
             offset.w = loss.densify_map[pix];
         }
         state[warp][lane] = initial;
         constants[warp][lane] = constant;
         directions[warp][lane] = direction;
-        offsets[warp][lane] = offset;
+        if constexpr (ORTHOGRAPHIC)
+          offsets[warp][lane] = make_float3(offset.x, offset.y, offset.z);
+        if constexpr (DENSIFY_MAP)
+          errors[warp][lane] = offset.w;
         limits[warp][lane] = last;
         if constexpr (BUCKET_SIZE > 32)
-          prefixes[warp][lane] = prefix;
+          staged_prefix = make_float3(prefix.x, prefix.y, prefix.z);
         __syncwarp();
       }
       if (step > 0) {
@@ -639,23 +649,33 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
         dx = __shfl_up_sync(0xffffffffu, dx, 1);
         dy = __shfl_up_sync(0xffffffffu, dy, 1);
         dz = __shfl_up_sync(0xffffffffu, dz, 1);
-        ox = __shfl_up_sync(0xffffffffu, ox, 1);
-        oy = __shfl_up_sync(0xffffffffu, oy, 1);
-        oz = __shfl_up_sync(0xffffffffu, oz, 1);
+        if constexpr (ORTHOGRAPHIC) {
+          ox = __shfl_up_sync(0xffffffffu, ox, 1);
+          oy = __shfl_up_sync(0xffffffffu, oy, 1);
+          oz = __shfl_up_sync(0xffffffffu, oz, 1);
+        }
         limit = __shfl_up_sync(0xffffffffu, limit, 1);
-        error = __shfl_up_sync(0xffffffffu, error, 1);
+        if constexpr (DENSIFY_MAP)
+          error = __shfl_up_sync(0xffffffffu, error, 1);
         if constexpr (BUCKET_SIZE > 32) {
           prefix_x = __shfl_up_sync(0xffffffffu, prefix_x, 1);
           prefix_y = __shfl_up_sync(0xffffffffu, prefix_y, 1);
           prefix_z = __shfl_up_sync(0xffffffffu, prefix_z, 1);
         }
       }
+      float3 injected_prefix = make_float3(0, 0, 0);
+      if constexpr (BUCKET_SIZE > 32) {
+        // All lanes must participate, including the pipeline's drain steps.
+        injected_prefix = make_float3(
+            __shfl_sync(0xffffffffu, staged_prefix.x, step & 31),
+            __shfl_sync(0xffffffffu, staged_prefix.y, step & 31),
+            __shfl_sync(0xffffffffu, staged_prefix.z, step & 31));
+      }
       const int pixel = step - lane;
       if (lane == 0 && pixel >= 0 && pixel < 256) {
         const float4 v = state[warp][pixel & 31],
                      co = constants[warp][pixel & 31];
-        const float4 d = directions[warp][pixel & 31],
-                     o = offsets[warp][pixel & 31];
+        const float4 d = directions[warp][pixel & 31];
         T = v.w;
         rx = v.x;
         ry = v.y;
@@ -668,23 +688,26 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
         dy = d.y;
         dz = d.z;
         final_T = d.w;
-        ox = o.x;
-        oy = o.y;
-        oz = o.z;
-        error = o.w;
+        if constexpr (ORTHOGRAPHIC) {
+          const float3 o = offsets[warp][pixel & 31];
+          ox = o.x;
+          oy = o.y;
+          oz = o.z;
+        }
+        if constexpr (DENSIFY_MAP)
+          error = errors[warp][pixel & 31];
         limit = limits[warp][pixel & 31];
         if constexpr (BUCKET_SIZE > 32) {
-          const float4 prefix = prefixes[warp][pixel & 31];
-          prefix_x = prefix.x;
-          prefix_y = prefix.y;
-          prefix_z = prefix.z;
+          prefix_x = injected_prefix.x;
+          prefix_y = injected_prefix.y;
+          prefix_z = injected_prefix.z;
         }
       }
       do {
         if (!valid || pixel < 0 || pixel >= 256 || position >= limit)
           break;
         float3 o = make_float3(a.w, b.w, c.w);
-        if (is_orthographic(K.mode))
+        if constexpr (ORTHOGRAPHIC)
           o = make_float3(a.w + a.x * ox + a.y * oy + a.z * oz,
                           b.w + b.x * ox + b.y * oy + b.z * oz,
                           c.w + c.x * ox + c.y * oy + c.z * oz);
@@ -767,7 +790,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s,
           }
           acc_refine += score / fmaxf(1.f - final_T, 1e-6f);
         }
-        if (loss.densify_map) {
+        if constexpr (DENSIFY_MAP) {
           acc_error += weight * error;
           acc_den += weight;
         }
@@ -929,18 +952,34 @@ void backward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
               int bucket_size) {
   if (!s.need_depth && !reference_mode()) {
     if (buckets > 0) {
-      if (bucket_size == 128 && is_equirect(K.mode))
-        backward_buckets<128, true><<<(buckets + 1) / 2, 64>>>(
-            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
-      else if (bucket_size == 128)
-        backward_buckets<128><<<(buckets + 1) / 2, 64>>>(
-            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
-      else if (is_equirect(K.mode))
-        backward_buckets<32, true><<<(buckets + 7) / 8, 256>>>(
-            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
-      else
-        backward_buckets<32><<<(buckets + 7) / 8, 256>>>(
-            g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+      auto dispatch = [&](auto ortho_c, auto densify_c) {
+        constexpr bool ortho = decltype(ortho_c)::value;
+        constexpr bool densify = decltype(densify_c)::value;
+        if constexpr (!ortho) {
+          if (is_equirect(K.mode)) {
+            if (bucket_size == 128)
+              backward_buckets<128, true, false, densify><<<(buckets + 1) / 2, 64>>>(
+                  g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+            else
+              backward_buckets<32, true, false, densify><<<(buckets + 7) / 8, 256>>>(
+                  g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+            return;
+          }
+        }
+        if (bucket_size == 128)
+          backward_buckets<128, false, ortho, densify><<<(buckets + 1) / 2, 64>>>(
+              g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+        else
+          backward_buckets<32, false, ortho, densify><<<(buckets + 7) / 8, 256>>>(
+              g, c, s, K, st, ts, ids, ps, fo, loss, gs, mg, buckets);
+      };
+      if (is_orthographic(K.mode)) {
+        if (loss.densify_map) dispatch(std::true_type{}, std::true_type{});
+        else dispatch(std::true_type{}, std::false_type{});
+      } else {
+        if (loss.densify_map) dispatch(std::false_type{}, std::true_type{});
+        else dispatch(std::false_type{}, std::false_type{});
+      }
     }
     transform_backward<<<(g.count + 255) / 256, 256>>>(g, c, s, st, gs);
     return;
