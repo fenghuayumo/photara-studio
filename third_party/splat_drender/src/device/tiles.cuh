@@ -19,7 +19,8 @@ SD_D2 inline unsigned enumerate(
     float2 mean, float4 conic_opacity, int grid_x, int grid_y,
     unsigned gaussian_id, unsigned offset, unsigned* tile_out,
     unsigned* value_out, int wrap_width,
-    unsigned long long* packed_out = nullptr, unsigned depth = 0) {
+    unsigned long long* packed_out = nullptr, unsigned depth = 0,
+    const ushort4* clip = nullptr) {
     // GUT's full-sphere fallback has no finite longitude ellipse. Emit each
     // tile once: wrapping a huge ellipse can duplicate its Gaussian and
     // composite opacity repeatedly, and a low-opacity ellipse need not cover
@@ -113,8 +114,12 @@ SD_D2 inline unsigned enumerate(
 
         const float eu = sqrtf(threshold * av / det);
         const float ev = sqrtf(threshold * au / det);
-        const int u_min = max(0, min(gu, int(floorf((cu - eu) / blk_u))));
-        const int u_max = max(0, min(gu, int(floorf((cu + eu) / blk_u)) + 1));
+        const int clip_u_min = clip ? (iterate_x ? clip->x : clip->z) : 0;
+        const int clip_u_max = clip ? (iterate_x ? clip->y : clip->w) : gu;
+        const int clip_v_min = clip ? (iterate_x ? clip->z : clip->x) : 0;
+        const int clip_v_max = clip ? (iterate_x ? clip->w : clip->y) : gv;
+        const int u_min = max(clip_u_min, min(gu, int(floorf((cu - eu) / blk_u))));
+        const int u_max = min(clip_u_max, min(gu, int(floorf((cu + eu) / blk_u)) + 1));
         if (u_min >= u_max) return;
 
         // u coordinates where the v extrema of the ellipse occur.
@@ -135,8 +140,8 @@ SD_D2 inline unsigned enumerate(
                 (arg_v_min >= s0 && arg_v_min <= s1) ? cv - ev : fminf(lo0, lo1);
             const float sv_max =
                 (arg_v_max >= s0 && arg_v_max <= s1) ? cv + ev : fmaxf(hi0, hi1);
-            const int v_min = max(0, min(gv, int(floorf(sv_min / blk_v))));
-            const int v_max = max(0, min(gv, int(floorf(sv_max / blk_v)) + 1));
+            const int v_min = max(clip_v_min, min(gv, int(floorf(sv_min / blk_v))));
+            const int v_max = min(clip_v_max, min(gv, int(floorf(sv_max / blk_v)) + 1));
             for (int tv = v_min; tv < v_max; ++tv) {
                 if (tile_out || packed_out) {
                     const int tx = iterate_x ? tu : tv;

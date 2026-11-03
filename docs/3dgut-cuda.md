@@ -30,6 +30,26 @@ nonlinear tails; sigma points crossing the projection boundary fall back to
 full-image bins. This remains approximate culling, as in other UT rasterizers.
 It reuses the existing stable tile/depth sort.
 
+CUDA fisheye boundary fallbacks additionally intersect the UT tile footprint
+with a conservative screen rectangle. The opacity-truncated 3D ellipsoid is
+enclosed in a sphere using its largest activated scale. If the camera is
+outside the sphere, its angular radius is `asin(radius / distance)`. Absolute
+distortion-coefficient bounds on both radial and tangential derivatives of
+the fisheye map turn this angular cap into an outward-rounded screen bound.
+The front hemisphere is geodesically convex, so the derivative bound also
+applies when the cap crosses the camera plane. A camera inside the sphere
+retains the original fallback. No additional per-Gaussian storage is needed.
+The count, packed-sort emit and large-list emit paths share the same tile
+intersection, preserving their offsets and draw order. The bound includes
+numerical padding and is applied only to boundary fallbacks.
+
+On the saved 3-million-Gaussian Alameda fisheye checkpoint, three sampled
+1920x1280 views reduced tile instances from 30.95/75.78/49.04 million to
+10.87/10.78/10.95 million. Fixed-parameter forward/backward CUDA pool peaks
+were 2.91 GiB after clipping, versus 3.80/5.00/4.37 GiB before clipping.
+RGB and alpha matched exactly, and worst parameter-gradient relative L2 was
+4.5e-6. These are fixed-checkpoint measurements, not a new convergence run.
+
 Pixel blending evaluates the maximum 3D Gaussian response along the camera
 ray, in Gaussian principal-axis coordinates. The 2D conic is used only for
 binning. GUT does not apply the EWA `kernel_size` opacity compensation;
@@ -53,6 +73,18 @@ floating-point ray orthogonality residual is retained in the VJP for thin
 Gaussians. Snapshot storage trades additional memory and forward writes for
 much faster backward; its size follows conservative tile instance counts.
 Inference does not allocate snapshots or cached pixel rays.
+
+CUDA training compacts GUT's final draw indices immediately after sorting when
+the caller supplies `WorkspacePools::release_instance`. It releases the sort
+keys and scratch before pixel snapshots are allocated. Callers without this
+callback retain the previous allocation lifetime. The release must respect
+the CUDA stream ordering of the index copy.
+
+For binning diagnostics, set `PHOTARA_GUT_BIN_STATS=1` with
+`--bench-gut-memory`. Debug preprocessing reports regular and boundary-fallback
+Gaussian/instance counts, plus the subset with a fisheye sigma point crossing
+the camera plane. The diagnostic allocates counters and synchronizes to read
+them, so its timings are unsuitable for throughput comparisons.
 
 CUDA RGB training honors `compact_pixel_snapshots` and
 `snapshot_compaction_threshold` (enabled by default, 512 MiB). When the

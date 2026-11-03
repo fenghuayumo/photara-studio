@@ -198,7 +198,9 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
         check_cuda(cub::DeviceScan::InclusiveSum(gst.scan_scratch, gst.scan_bytes,
                        gst.tiles_touched, gst.visible_offset, g.count), "tile scan");
         launch::emit_packed_instances(g.count, gst, grid_x, grid_y, wrap_width,
-                                      ist.packed_key[0], ist.instance_value[0]);
+                                      ist.packed_key[0], ist.instance_value[0],
+                                      g.primitive == Primitive::gaussian_3dgut && is_fisheye(cam.mode) &&
+                                          grid_x <= 65535 && grid_y <= 65535);
         check_cuda(cudaGetLastError(), "emit packed instances");
         cub::DoubleBuffer<unsigned long long> keys(ist.packed_key[0], ist.packed_key[1]);
         cub::DoubleBuffer<unsigned> values(ist.instance_value[0], ist.instance_value[1]);
@@ -247,7 +249,10 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
     if (counts.visible > 0) launch::emit_instances(counts.visible, ist.depth_value[depth_selector],
                            gst.mean2d, gst.conic_opacity, ist.compact_offset,
                            grid_x, grid_y, wrap_width, ist.tile_key[0],
-                           ist.instance_value[0]);
+                           ist.instance_value[0],
+                           g.primitive == Primitive::gaussian_3dgut && is_fisheye(cam.mode) &&
+                               grid_x <= 65535 && grid_y <= 65535
+                               ? gst.screen_bounds : nullptr);
     check_cuda(cudaGetLastError(), "emit_instances");
 
     if (counts.instances > 0) {
@@ -452,6 +457,14 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
                                                gst, tst, ist, out.radii);
 
     if (g.primitive == Primitive::gaussian_3dgut) {
+        const unsigned* draw_ids = ist.instance_value[counts.instance_selector];
+        const bool early_compaction = s.record_backward_state &&
+            pools.release_instance && compact_draw_indices(pools, ist, counts);
+        if (early_compaction) {
+            draw_ids = reinterpret_cast<const unsigned*>(pools.compact_instance(
+                std::size_t(counts.instances) * sizeof(unsigned)));
+            pools.release_instance();
+        }
         std::size_t snapshot_buckets = gut::use_rgb_snapshots(s)
             ? bucket_upper_bound(counts.instances, tiles) : 0;
         const std::size_t pixels = std::size_t(cam.width) * cam.height;
@@ -472,7 +485,7 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
                 s.snapshot_compaction_threshold;
         if (compact_contributors) {
             gut::count_contributors(g, cam, s, K, gst, tst,
-                                    ist.instance_value[counts.instance_selector]);
+                                    draw_ids);
             check_cuda(cudaGetLastError(), "3DGUT snapshot contributor prepass");
         }
         if (snapshot_buckets > 0) {
@@ -494,13 +507,14 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
             ps = PixelState::from_pool(pool, std::size_t(cam.width)*cam.height, snapshot_buckets, false, snapshot_buckets > 0);
             if (snapshot_buckets == 0) ps.snap_ct = nullptr;
         }
-        gut::forward(g, cam, s, K, gst, tst, ist.instance_value[counts.instance_selector], ps, out, bucket_size);
+        gut::forward(g, cam, s, K, gst, tst, draw_ids, ps, out, bucket_size);
         check_cuda(cudaGetLastError(), "3DGUT forward");
         ForwardResult r;
         r.instance_count=counts.instances; r.visible_count=counts.visible;
         r.instance_selector=counts.instance_selector; r.snapshot_buckets=int(snapshot_buckets);
         r.snapshot_bucket_size=bucket_size;
-        r.compact_instances=s.record_backward_state && compact_draw_indices(pools, ist, counts);
+        r.compact_instances=early_compaction ||
+            (s.record_backward_state && compact_draw_indices(pools, ist, counts));
         if(r.compact_instances) r.instance_selector=0;
         return r;
     }

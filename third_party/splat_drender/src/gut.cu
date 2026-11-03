@@ -4,14 +4,46 @@
 #include "gut.h"
 #include "splat_drender/config.h"
 #include <cstdlib>
+#include <cstdio>
+#include <stdexcept>
 
 namespace splat_drender::gut {
 namespace {
 static_assert(cfg::kTileWidth == 16 && cfg::kTileHeight == 16,
               "3DGUT bucket traversal requires 16x16 tiles");
+__device__ ushort4 fisheye_support_clip(float3 t, float3 scales, float opacity,
+                                       float modifier, Projection center,
+                                       CameraIntrinsics K, int gx, int gy) {
+  ushort4 bounds = make_ushort4(0, min(gx, 65535), 0, min(gy, 65535));
+  const float radius = modifier * fmaxf(scales.x, fmaxf(scales.y, scales.z)) *
+      sqrtf(fmaxf(0.f, 2.f * logf(opacity / cfg::kAlphaFloor) + 1e-4f)) * 1.002f;
+  const float distance = norm3df(t.x, t.y, t.z);
+  if (!(modifier > 0.f && distance > radius) ||
+      !(K.fx > 0.f && K.fy > 0.f)) return bounds;
+  // The alpha-support ellipsoid lies inside a sphere. Rays intersecting that
+  // sphere form an angular cap of radius asin(radius/distance). On the front
+  // hemisphere the fisheye map has radial derivative rho' and tangential
+  // derivative rho/sin(theta). Bound both over [0, pi/2] using absolute
+  // polynomial coefficients and theta/sin(theta) <= pi/2.
+  constexpr float half_pi = 1.57079632679f;
+  constexpr float h2 = half_pi * half_pi;
+  const float k1 = fabsf(K.k1), k2 = fabsf(K.k2),
+              k3 = fabsf(K.k3), k4 = fabsf(K.k4);
+  const float radial = 1.f + h2 * (3.f*k1 + h2*(5.f*k2 + h2*(7.f*k3 + h2*9.f*k4)));
+  const float tangential = half_pi * (1.f + h2*(k1 + h2*(k2 + h2*(k3 + h2*k4))));
+  const float delta = fmaxf(radial, tangential) * asinf(fminf(1.f, radius / distance));
+  const float ex = K.fx * delta + 2.f, ey = K.fy * delta + 2.f;
+  if (!isfinite(ex) || !isfinite(ey)) return bounds;
+  bounds.x = int(fmaxf(0.f, fminf(float(gx), floorf((center.pixel_x-ex)/cfg::kTileWidth))));
+  bounds.y = int(fmaxf(0.f, fminf(float(gx), floorf((center.pixel_x+ex)/cfg::kTileWidth)+1.f)));
+  bounds.z = int(fmaxf(0.f, fminf(float(gy), floorf((center.pixel_y-ey)/cfg::kTileHeight))));
+  bounds.w = int(fmaxf(0.f, fminf(float(gy), floorf((center.pixel_y+ey)/cfg::kTileHeight)+1.f)));
+  return bounds;
+}
 __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
                         CameraIntrinsics K, int gx, int gy,
-                        ws::GaussianState st, int *radii) {
+                        ws::GaussianState st, int *radii,
+                        unsigned long long* statistics = nullptr) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= g.count)
     return;
@@ -37,6 +69,7 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
   points[0] = make_float2(center.pixel_x, center.pixel_y);
   float2 mu = make_float2(.25f * points[0].x, .25f * points[0].y);
   bool boundary = pole;
+  bool camera_plane_boundary = false;
   if (is_equirect(K.mode)) {
     // A support ellipsoid crossing a pole spans every longitude, even if
     // none of the seven sigma points lands exactly on that singularity.
@@ -62,8 +95,12 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
       const float3 sigma =
           make_float3(mean.x + spread * R.m[a][0], mean.y + spread * R.m[a][1],
                       mean.z + spread * R.m[a][2]);
-      auto p = project(mat::xform_point(sigma, cam.world_to_camera), K,
+      const auto sigma_camera = mat::xform_point(sigma, cam.world_to_camera);
+      auto p = project(sigma_camera, K,
                        cam.width, cam.height);
+      if (settings.debug && is_fisheye(K.mode) && !p.valid &&
+          sigma_camera.z <= 1e-6f)
+        camera_plane_boundary = true;
       boundary |= !p.valid;
       const int j = 1 + 2 * a + b;
       points[j] =
@@ -99,8 +136,16 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
       ? make_float4(-1.f, 0.f, -1.f, g.opacities[i])
       : make_float4(yy / det, -xy / det, xx / det, g.opacities[i]);
   const int wrap = is_equirect(K.mode) ? cam.width : 0;
+  ushort4 clip = make_ushort4(0, min(gx,65535), 0, min(gy,65535));
+  const bool use_clip = is_fisheye(K.mode) && gx <= 65535 && gy <= 65535;
+  if (use_clip && boundary)
+    clip = fisheye_support_clip(t,
+        make_float3(g.scales[3*i],g.scales[3*i+1],g.scales[3*i+2]),
+        g.opacities[i],settings.scale_modifier,center,K,gx,gy);
+  st.screen_bounds[i] = clip;
   const unsigned touched =
-      tiles::enumerate(mu, co, gx, gy, i, 0, nullptr, nullptr, wrap);
+      tiles::enumerate(mu, co, gx, gy, i, 0, nullptr, nullptr, wrap,
+                       nullptr, 0, use_clip ? &clip : nullptr);
   if (!touched)
     return;
   st.mean2d[i] = mu;
@@ -108,6 +153,15 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
   st.depth_key[i] = __float_as_uint(norm3df(t.x, t.y, t.z));
   st.tiles_touched[i] = touched;
   st.visible_flag[i] = 1;
+  if (statistics) {
+    const unsigned group = boundary ? 2 : 0;
+    atomicAdd(statistics + group, 1ull);
+    atomicAdd(statistics + group + 1, static_cast<unsigned long long>(touched));
+    if (camera_plane_boundary) {
+      atomicAdd(statistics + 4, 1ull);
+      atomicAdd(statistics + 5, static_cast<unsigned long long>(touched));
+    }
+  }
   st.radius[i] = radii[i] = int(ceilf(3.f * sqrtf(fmaxf(xx, yy))));
   if (g.sh)
     st.rgb[i] = sh::evaluate(
@@ -823,7 +877,25 @@ void count_contributors(const Gaussians &g, const CameraView &c,
 void preprocess(const Gaussians &g, const CameraView &c,
                 const RenderSettings &s, CameraIntrinsics K, int gx, int gy,
                 ws::GaussianState st, int *radii) {
-  prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii);
+  if (s.debug) {
+    unsigned long long* totals = nullptr;
+    unsigned long long host[6]{};
+    auto error = cudaMalloc(&totals, sizeof(host));
+    if (error == cudaSuccess) error = cudaMemset(totals, 0, sizeof(host));
+    if (error == cudaSuccess) {
+      prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii, totals);
+      error = cudaGetLastError();
+    }
+    if (error == cudaSuccess)
+      error = cudaMemcpy(host, totals, sizeof(host), cudaMemcpyDeviceToHost);
+    cudaFree(totals);
+    if (error != cudaSuccess)
+      throw std::runtime_error(cudaGetErrorString(error));
+    std::fprintf(stderr, "GUT bins regular_gaussians=%llu regular_instances=%llu boundary_gaussians=%llu boundary_instances=%llu plane_crossing_gaussians=%llu plane_crossing_instances=%llu\n",
+                 host[0], host[1], host[2], host[3], host[4], host[5]);
+  } else {
+    prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii);
+  }
 }
 void forward(const Gaussians &g, const CameraView &c, const RenderSettings &s,
              CameraIntrinsics K, ws::GaussianState st, ws::TileState ts,

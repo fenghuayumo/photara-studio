@@ -222,6 +222,9 @@ struct WorkspacePools {
     // Optional final draw indices; lets callers release sort preparation pools
     // after forward/sample_depth without retaining them through backward.
     std::function<char*(std::size_t)> compact_instance;
+    // Optional stream-ordered release after compact draw indices have been
+    // copied. Lets GUT discard sorting storage before allocating snapshots.
+    std::function<void()> release_instance;
 };
 
 class Rasterizer {

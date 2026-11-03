@@ -43,19 +43,30 @@ struct Buffer {
 bool sanitizer_smoke = false;
 void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
          bool transformed = false, bool tiled = false, bool many = false,
-         bool thin = false, bool occluded = false) {
+         bool thin = false, bool occluded = false, int boundary = 0) {
   const int N = many ? 300 : 2;
-  const int W = tiled ? 35 : 16, H = tiled ? 29 : 12, P = W * H;
+  const int W = boundary ? 193 : tiled ? 35 : 16;
+  const int H = boundary ? 129 : tiled ? 29 : 12, P = W * H;
   std::array<Buffer, 6> workspace;
   Buffer compact_pool;
   WorkspacePools pools;
   pools.gaussian = [&](auto n) { return workspace[0].resize(n); };
   pools.grad = [&](auto n) { return workspace[1].resize(n); };
   pools.instance = [&](auto n) { return workspace[2].resize(n); };
-  pools.pixel = [&](auto n) { return workspace[3].resize(n); };
+  pools.pixel = [&](auto n) {
+    if (compact && compact_pool.p && workspace[2].p)
+      throw std::runtime_error("GUT sorting storage retained during snapshot allocation");
+    return workspace[3].resize(n);
+  };
   pools.tile = [&](auto n) { return workspace[4].resize(n); };
-  if (compact)
+  if (compact) {
     pools.compact_instance = [&](auto n) { return compact_pool.resize(n); };
+    pools.release_instance = [&] {
+      check(cudaFree(workspace[2].p));
+      workspace[2].p = nullptr;
+      workspace[2].capacity = 0;
+    };
+  }
   std::vector<float> means = {-.12f, .08f, 2.f, .2f, -.1f, 2.6f};
   if (mode == CameraMode::equirectangular) {
     means[2] = -2.f;
@@ -71,6 +82,10 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     rotations[k] /= norm;
   std::vector<float> opacity = {.88f, .65f},
                      colors = {.8f, .2f, .4f, .1f, .6f, .3f};
+  if (boundary) {
+    means = {2.f, .1f, .08f, 2.3f, -.1f, .12f};
+    scales.assign(6, boundary == 2 ? 3.f : .2f);
+  }
   if (many) {
     means.resize(3 * N);
     scales.resize(3 * N);
@@ -129,10 +144,9 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   CameraView cam;
   cam.width = W;
   cam.height = H;
-  cam.fx = 12;
-  cam.fy = 12;
-  cam.cx = tiled ? 17.5f : 7.5f;
-  cam.cy = tiled ? 14.5f : 5.5f;
+  cam.fx = cam.fy = boundary ? 55.f : 12.f;
+  cam.cx = boundary ? W*.5f : tiled ? 17.5f : 7.5f;
+  cam.cy = boundary ? H*.5f : tiled ? 14.5f : 5.5f;
   cam.mode = mode;
   cam.k1 = .05f;
   cam.world_to_camera = view.floats();
@@ -168,11 +182,17 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     dl[k].resize(ls[k]);
     for (int j = 0; j < ls[k]; ++j) {
       const int pixel = j % P, x = pixel % W, y = pixel / W;
+      // Sample a smooth patch inside the boundary Gaussian's support. RGB
+      // and alpha exercise both attachment paths without median-depth jumps.
+      const bool outside_boundary_patch = boundary &&
+          (x < W-8 || x > W-5 || y < H/2 || y > H/2+2);
       // Keep the transformed-camera objective inside the smooth central
       // support, away from opacity-floor and median-selection boundaries.
       dl[k][j] =
-          (transformed || many) && (x < int(cam.cx) || x > int(cam.cx) + 1 ||
-                                    y < int(cam.cy) || y > int(cam.cy) + 1)
+          (boundary && k >= 2) || outside_boundary_patch ||
+              ((transformed || many) &&
+               (x < int(cam.cx) || x > int(cam.cx) + 1 ||
+                y < int(cam.cy) || y > int(cam.cy) + 1))
               ? 0.f
               : .01f * std::sin(float(j + 7 * k) * .37f);
     }
@@ -201,6 +221,10 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
   auto fwd = Rasterizer::forward(pools, g, cam, s, out);
   if (fwd.instance_count == 0)
     throw std::runtime_error("3DGUT produced no draw list");
+  if (boundary == 1 && fwd.instance_count >= N*((W+15)/16)*((H+15)/16)/2)
+    throw std::runtime_error("Fisheye boundary support did not reduce draw instances");
+  if (boundary == 2 && fwd.instance_count != N*((W+15)/16)*((H+15)/16))
+    throw std::runtime_error("Camera-inside support lost its full-image fallback");
   // Independent double-precision CPU oracle, traversing every Gaussian
   // without projected bounds or tile lists. Also checks UT culling coverage.
   if (mode == CameraMode::pinhole && !sh_colors && !thin) {
@@ -475,6 +499,12 @@ int main(int argc, char** argv) {
     run(CameraMode::pinhole, false, true, false, false, true, true);
     run(CameraMode::pinhole, false, true, false, false, false, false, true);
     run(CameraMode::pinhole, false, true, false, false, true, true, false, true);
+    run(CameraMode::opencv_fisheye, false, true, false,
+        false, false, false, false, false, true);
+    run(CameraMode::opencv_fisheye, true, false, false,
+        false, false, false, false, false, true);
+    run(CameraMode::opencv_fisheye, false, true, false,
+        false, false, false, false, false, 2);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

@@ -162,23 +162,26 @@ __global__ void emit_instances(
     const float4* __restrict__ conic_opacity,
     const unsigned* __restrict__ compact_offset, int grid_x, int grid_y,
     int wrap_width, unsigned* __restrict__ tile_key,
-    unsigned* __restrict__ instance_value) {
+    unsigned* __restrict__ instance_value, const ushort4* clip) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= visible_count) return;
     const unsigned g = depth_sorted_ids[i];
     const unsigned off = (i == 0) ? 0u : compact_offset[i - 1];
     tiles::enumerate(mean2d[g], conic_opacity[g], grid_x, grid_y, g, off,
-                     tile_key, instance_value, wrap_width);
+                     tile_key, instance_value, wrap_width, nullptr, 0,
+                     clip ? clip + g : nullptr);
 }
 
 // Small-list path: emit in Gaussian index order to preserve depth ties.
 __global__ void emit_packed_instances(int count, ws::GaussianState st,
-    int grid_x, int grid_y, int wrap_width, unsigned long long* keys, unsigned* values) {
+    int grid_x, int grid_y, int wrap_width, unsigned long long* keys, unsigned* values,
+    bool clip) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count || st.tiles_touched[i] == 0) return;
     const unsigned offset = i == 0 ? 0 : st.visible_offset[i - 1];
     tiles::enumerate(st.mean2d[i], st.conic_opacity[i], grid_x, grid_y,
-        unsigned(i), offset, nullptr, values, wrap_width, keys, st.depth_key[i]);
+        unsigned(i), offset, nullptr, values, wrap_width, keys, st.depth_key[i],
+        clip ? st.screen_bounds + i : nullptr);
 }
 
 __global__ void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range) {
@@ -555,18 +558,19 @@ void emit_instances(int visible_count, const unsigned* depth_sorted_ids,
                     const float2* mean2d, const float4* conic_opacity,
                     const unsigned* compact_offset, int grid_x, int grid_y,
                     int wrap_width, unsigned* tile_key,
-                    unsigned* instance_value) {
+                    unsigned* instance_value, const ushort4* clip) {
     kernels::emit_instances<<<(visible_count + cfg::kGaussianBlock - 1) /
                                   cfg::kGaussianBlock,
                               cfg::kGaussianBlock>>>(
         visible_count, depth_sorted_ids, mean2d, conic_opacity, compact_offset,
-        grid_x, grid_y, wrap_width, tile_key, instance_value);
+        grid_x, grid_y, wrap_width, tile_key, instance_value, clip);
 }
 
 void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y,
-                           int wrap_width, unsigned long long* keys, unsigned* values) {
+                           int wrap_width, unsigned long long* keys, unsigned* values,
+                           bool clip) {
     kernels::emit_packed_instances<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-        cfg::kGaussianBlock>>>(count, st, grid_x, grid_y, wrap_width, keys, values);
+        cfg::kGaussianBlock>>>(count, st, grid_x, grid_y, wrap_width, keys, values, clip);
 }
 void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range) {
     kernels::extract_packed_ranges<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,

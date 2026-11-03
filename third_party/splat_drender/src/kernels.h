@@ -34,10 +34,11 @@ void emit_instances(int visible_count, const unsigned* depth_sorted_ids,
                     const float2* mean2d, const float4* conic_opacity,
                     const unsigned* compact_offset, int grid_x, int grid_y,
                     int wrap_width, unsigned* tile_key,
-                    unsigned* instance_value);
+                    unsigned* instance_value, const ushort4* clip = nullptr);
 
 void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y,
-                           int wrap_width, unsigned long long* keys, unsigned* values);
+                           int wrap_width, unsigned long long* keys, unsigned* values,
+                           bool clip = false);
 void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range);
 
 void extract_ranges(int instance_count, const unsigned* tile_key,

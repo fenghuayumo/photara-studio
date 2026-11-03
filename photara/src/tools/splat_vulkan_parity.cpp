@@ -1025,6 +1025,7 @@ int run_cuda_method_benchmark(int argc, char** argv) {
         raster.active_sh_degree = model.sh_degree;
         raster.require_depth = false;
         raster.compact_pixel_snapshots = compact;
+        raster.debug = std::getenv("PHOTARA_GUT_BIN_STATS") != nullptr;
         cudaMemPool_t pool{};
         require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "memory benchmark pool");
         std::uint64_t zero = 0, used_high = 0;

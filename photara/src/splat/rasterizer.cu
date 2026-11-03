@@ -253,6 +253,7 @@ splat_drender::WorkspacePools pools_of(RasterContextImpl& context) {
     pools.instance = resize_buffer(context.instance_buffer, "workspace.instance");
     pools.pixel = resize_buffer(context.pixel_buffer, "workspace.pixel");
     pools.tile = resize_buffer(context.tile_buffer, "workspace.tile");
+    pools.release_instance = [&context] { context.instance_buffer = {}; };
     if (context.options.compact_instance_storage)
         pools.compact_instance = resize_buffer(context.compact_instance_buffer,
                                                "workspace.draw_indices");
