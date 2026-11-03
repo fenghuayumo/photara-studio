@@ -10,6 +10,12 @@ then belongs to `GaussianModel`, so CUDA/Vulkan rasterization, training previews
 evaluation, densification, cloning, transformations and PLY reloads use the
 model's method. A resumed checkpoint must use the same method.
 
+GUT checkpoint evaluation runs synchronously at iteration boundaries and
+shares the current immutable parameters. This prevents a cloned evaluation
+model and its draw-list workspace from overlapping subsequent training
+renders. CUDA 3DGS retains asynchronous checkpoint evaluation. Evaluation
+therefore contributes directly to the GUT training wall time.
+
 ## Primitive and differentiation
 
 `splat_drender::Gaussians::primitive` accepts `gaussian_3dgs` or

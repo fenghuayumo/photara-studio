@@ -109,10 +109,21 @@ int main(int argc,char** argv) {
       options.enable_densification=false;
       options.mean_noise_weight=0.F;
       options.maximum_scale_fraction=1.F;
+      options.evaluation_iterations={6};
+      unsigned completed_evaluations=0;
       trained[backend]=Trainer(options).train(scene,[&](const TrainingProgress& p) {
+        if(p.iteration>6)
+          require(completed_evaluations==1,"GUT evaluation overlapped subsequent training");
         training_losses[backend].push_back(p.loss);
         return true;
+      },[&](unsigned iteration,const GaussianModel& snapshot) {
+        require(iteration==6 && snapshot.size()>0,"GUT evaluation received invalid state");
+        const auto metrics=render_evaluation_png(snapshot,scene.views.front(),
+            root/(backend==0 ? "cuda_eval.png" : "vulkan_eval.png"),options);
+        require(std::isfinite(metrics.psnr),"GUT synchronous evaluation produced invalid metrics");
+        ++completed_evaluations;
       });
+      require(completed_evaluations==1,"GUT evaluation was skipped");
     }
     require(training_losses[0].size()==12 && training_losses[1].size()==12,
             "GUT parity training did not complete");

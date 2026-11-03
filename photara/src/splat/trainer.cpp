@@ -1334,6 +1334,18 @@ GaussianModel Trainer::train(
     const auto launch_evaluation =
         [&](const unsigned iteration, const GaussianModel& current) {
             finish_evaluation();
+            // GUT draw lists can occupy several GiB on wide-angle views.
+            // Evaluate at the iteration boundary so evaluation and training
+            // do not retain separate raster workspaces concurrently.
+            if (current.render_method == RenderMethod::gaussian_3dgut) {
+                auto snapshot = current;
+                if (use_3d_filter)
+                    snapshot.filter_3d = detail::compute_3d_filter(
+                        snapshot.means, full_resolution_filter_cameras,
+                        filter_3d_factor);
+                evaluate(iteration, snapshot);
+                return;
+            }
             GaussianModel snapshot = refine::clone_model(current);
             if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
