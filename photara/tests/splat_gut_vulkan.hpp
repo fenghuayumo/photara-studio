@@ -151,6 +151,13 @@ inline void run() {
             compare("opacity",cg.opacity_logits.to_vector(),vg.opacity_logits.to_vector());
             compare("SH",cg.sh.to_vector(),vg.sh.to_vector());
             compare("ADC",cg.refine_weight.to_vector(),vg.refine_weight.to_vector(),.006,2e-5);
+            // Preview attachments and the training renderer must agree on RGB.
+            Rasterizer geometry_raster;
+            auto geometry_options=options;geometry_options.require_depth=true;
+            geometry_options.record_backward_state=false;
+            auto geometry_frame=geometry_raster.forward(vk,camera,geometry_options);
+            compare("geometry RGB",vf.color.to_vector(),geometry_frame.color.to_vector());
+            compare("geometry alpha",vf.alpha.to_vector(),geometry_frame.alpha.to_vector());
         }
         if(filter) finite_difference(vk,camera,options);
         if(mode==0 && !filter) {

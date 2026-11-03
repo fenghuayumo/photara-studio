@@ -8,6 +8,8 @@
 // Bucket snapshots are shared with the appearance-only training backward.
 [[vk::binding(5, 0)]] StructuredBuffer<uint> bucket_offset;
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> snap;
+[[vk::binding(7, 0)]] StructuredBuffer<float> camera;
+#include "splat_gut_ray.hlsli"
 
 groupshared float4 rows0[256];
 groupshared float4 rows1[256];
@@ -28,10 +30,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     bool snapshots = (pc.u3 & 8u) != 0u;
     uint mode = pc.u4;
     float fx = asfloat(pc.u6), fy = asfloat(pc.u7), cx = asfloat(pc.u8), cy = asfloat(pc.u9);
-    float3 direction = mode == kModeOrtho ? float3(0.0f, 0.0f, 1.0f)
+    float3 camera_direction = mode == kModeOrtho ? float3(0.0f, 0.0f, 1.0f)
         : pixel_unit_ray(float(xy.x), float(xy.y), mode, fx, fy, cx, cy,
                          asfloat(pc.u10), asfloat(pc.u11), asfloat(pc.u12), asfloat(pc.u13));
-    float3 offset = mode == kModeOrtho ? float3((float(xy.x)-cx)/fx, (float(xy.y)-cy)/fy, 0.0f) : 0.0f;
+    float3 direction = gut_world_direction(camera_direction);
+    float3 offset = mode == kModeOrtho ? gut_world_direction(float3((float(xy.x)-cx)/fx, (float(xy.y)-cy)/fy, 0.0f)) : 0.0f;
     uint tile = group.y*pc.u2 + group.x;
     uint begin = ranges[2u*tile], end = ranges[2u*tile+1u];
     uint bucket_base = snapshots && tile > 0u ? bucket_offset[tile-1u] : 0u;
@@ -42,7 +45,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     float T = 1.0f, depth = 0.0f;
     float3 rgb = 0.0f, normal = 0.0f;
     uint last = 0u;
-    bool done = !inside || !(dot(direction,direction) > 0.0f);
+    bool done = !inside || !(gut_dot(direction,direction) > 0.0f);
     [loop] for (uint base = begin; base < end; base += 256u) {
         if (rank == 0u) alive = 0u;
         GroupMemoryBarrierWithGroupSync();
@@ -64,14 +67,15 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
                 snap[(bucket_base+(base+j-begin)/32u)*256u+rank] = float4(rgb,T);
             if (done) continue;
             float4 a = rows0[j], b = rows1[j], c = rows2[j];
-            float3 o = float3(a.w, b.w, c.w) + float3(dot(a.xyz, offset), dot(b.xyz, offset), dot(c.xyz, offset));
-            float3 d = float3(dot(a.xyz, direction), dot(b.xyz, direction), dot(c.xyz, direction));
-            float dd = dot(d, d);
-            float peak = -dot(o, d)/dd;
+            float3 o = float3(a.w, b.w, c.w) + float3(gut_dot(a.xyz, offset), gut_dot(b.xyz, offset), gut_dot(c.xyz, offset));
+            float3 d = float3(gut_dot(a.xyz, direction), gut_dot(b.xyz, direction), gut_dot(c.xyz, direction));
+            float dd = gut_dot(d, d);
+            float peak = gut_div(-gut_dot(o,d),dd);
             if (!(dd > 0.0f) || !(peak > 0.0f)) continue;
-            float3 closest = o + peak*d;
-            float distance = dot(closest, closest);
-            float alpha = min(kAlphaClip, colors[j].w*exp(-0.5f*distance));
+            float3 closest = float3(gut_fma(peak,d.x,o.x),gut_fma(peak,d.y,o.y),gut_fma(peak,d.z,o.z));
+            float distance = gut_dot(closest, closest);
+            // Use the same response arithmetic as backward replay and CUDA.
+            float alpha = min(kAlphaClip, colors[j].w*gut_gaussian(closest));
             if (rings) {
                 float sigma = max(0.5f, asfloat(pc.u19));
                 float radius = distance/(sigma*sigma);
@@ -86,9 +90,9 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
             rgb += weight*colors[j].xyz;
             if (geometry) {
                 float3 n = normals[j];
-                n = dot(n, direction) > 0.0f ? -n : n;
+                n = gut_dot(n, camera_direction) > 0.0f ? -n : n;
                 normal += weight*n;
-                if (T >= 0.5f && next < 0.5f) depth = peak*(mode == kModeEquirect ? 1.0f : direction.z);
+                if (T >= 0.5f && next < 0.5f) depth = peak*(mode == kModeEquirect ? 1.0f : camera_direction.z);
             }
             if (stats) InterlockedOr(out_u[ids[j]], 1u);
             T = next;
@@ -103,6 +107,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
         out_f[pixels+pix] = rgb.y+T*asfloat(pc.u15);
         out_f[2u*pixels+pix] = rgb.z+T*asfloat(pc.u16);
         out_f[3u*pixels+pix] = 1.0f-T;
+        if (snapshots) {
+            out_f[7u*pixels+pix] = direction.x;
+            out_f[8u*pixels+pix] = direction.y;
+            out_f[9u*pixels+pix] = direction.z;
+        }
         if (geometry) {
             normal /= max(1.0f-T, 1.0e-8f);
             out_f[4u*pixels+pix] = normal.x;

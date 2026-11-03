@@ -150,7 +150,7 @@ public:
           ranges_indirect_(context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
-          blend_gut_(context.create_pipeline("splat_blend_gut.hlsl.spv", 7, sizeof(Push))),
+          blend_gut_(context.create_pipeline("splat_blend_gut.hlsl.spv", 8, sizeof(Push))),
           blend_rings_(context.create_pipeline("splat_blend_rings.hlsl.spv", 7, sizeof(Push))),
           blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
           pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
@@ -189,7 +189,7 @@ public:
             blend_gut_backward_subgroup_ = context.create_pipeline(
                 "splat_blend_gut_backward_subgroup.hlsl.spv",12,sizeof(Push));
         if (subgroup_vote_supported_ && subgroup_backward_supported_)
-            blend_gut_rgba_ = context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 7, sizeof(Push));
+            blend_gut_rgba_ = context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 8, sizeof(Push));
         if (subgroup_backward_supported_ && subgroup_size_ == 32u)
             blend_backward_geometry_subgroup_ = context.create_pipeline(
                 "splat_blend_backward_geometry_subgroup.hlsl.spv", 12, sizeof(Push));
@@ -521,6 +521,9 @@ public:
         set_float(push, 16, last_k3_);
         set_float(push, 17, last_k4_);
         push.u[19] = last_gauss_slots_;
+        set_float(push, 4, last_background_[0]);
+        set_float(push, 18, last_background_[1]);
+        set_float(push, 23, last_background_[2]);
     }
 
     // Everything the frame computes, up to the blended image. `pack_rgba` adds
@@ -968,7 +971,8 @@ public:
                                        blend_gut_rgba_.valid() && !gut_reference_;
             Buffer& out_f = gut_rgba_fast ? dummy_ : grow(
                 out_f_, static_cast<std::uint64_t>(pixels) *
-                    (pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) * sizeof(float));
+                    ((pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) +
+                     (gut && settings.pixel_snapshots ? 3u : 0u)) * sizeof(float));
             Buffer* out_u = pack_rgba
                 ? &dummy_
                 : &grow(
@@ -1027,8 +1031,12 @@ public:
                 blend_output = &grow(rgba_, static_cast<std::uint64_t>(pixels)*4,
                     BufferMemory::device_local,
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-            dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap},
-                     blend_push, grid_x, grid_y);
+            if (gut)
+                dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap, &camera_buffer},
+                         blend_push, grid_x, grid_y);
+            else
+                dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap},
+                         blend_push, grid_x, grid_y);
             if (pack_rgba && !gut_rgba_fast) {
                 Buffer& rgba = grow(
                     rgba_, static_cast<std::uint64_t>(pixels) * 4, BufferMemory::device_local,
@@ -1064,8 +1072,25 @@ public:
         // record them (and the next view's upload) while the blend still runs.
         // Profiling needs completed timestamp queries before reading them.
         // Normal rendering keeps the asynchronous submission path.
-        submit_batch(forward_profile_enabled_);
+        const char* gut_dump = gut ? std::getenv("SPLAT_DRENDER_GUT_DUMP") : nullptr;
+        submit_batch(forward_profile_enabled_ || gut_dump);
         collect_forward_timestamps();
+        if (gut_dump && *gut_dump) {
+            auto dump=[&](const char* name,const Buffer& buffer,std::size_t bytes) {
+                std::vector<unsigned char> values(bytes);
+                context_.read_buffer(buffer,values.data(),bytes);
+                const std::string path=std::string(gut_dump)+"/vk_"+name+".bin";
+                auto* file=std::fopen(path.c_str(),"wb");
+                require(file!=nullptr,"Cannot open GUT Vulkan dump");
+                const auto written=std::fwrite(values.data(),1,bytes,file);
+                std::fclose(file);
+                require(written==bytes,"Cannot write GUT Vulkan dump");
+            };
+            dump("gauss",gauss_f,std::size_t(count)*gauss_slots*4*sizeof(float));
+            dump("gauss_u",gauss_u,std::size_t(count)*4*sizeof(unsigned));
+            dump("frame",out_f_,std::size_t(pixels)*10*sizeof(float));
+            dump("ranges",tile_ranges,std::size_t(tiles)*2*sizeof(unsigned));
+        }
         last_primitive_ = settings.primitive;
         last_gauss_slots_ = gauss_slots;
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
@@ -1363,7 +1388,8 @@ public:
         dispatch(
             backward_blend_pipeline(),
             {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
-             &bucket_offsets_, &snap_, &loss_color, &loss_alpha, &loss_normal,
+             &bucket_offsets_, &snap_, &loss_color, &loss_alpha,
+             last_primitive_ == SplatPrimitive::gaussian_3dgut ? frame_camera_ : &loss_normal,
              &median_state, &grad},
             push, div_up(last_bucket_limit_, 8));
         flush_batch();
@@ -1548,7 +1574,7 @@ public:
             dL_alpha.buffer != VK_NULL_HANDLE
                 ? VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes}
                 : descriptor(dummy_),
-            normal_info, descriptor(median_state),
+            last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_) : normal_info, descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
         dispatch_infos(
             backward_blend_pipeline(), infos, push,
@@ -2482,7 +2508,7 @@ public:
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
-            alpha_info, normal_info,
+            alpha_info, last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_) : normal_info,
             descriptor(median_state), descriptor(blend_gradient)};
         const ComputePipeline& blend_pipeline = backward_blend_pipeline();
         dispatch_infos(

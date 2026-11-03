@@ -84,6 +84,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     }
     float3 t = xform_point(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
                            camera[8], camera[9], camera[10], camera[12], camera[13], camera[14]);
+    if ((flags & 256u)!=0u) t=gut_camera_point(mean);
     if (!camera_visible(t, mode)) return;
 
     float3 scale = 0.0f;
@@ -96,16 +97,22 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             float determinant_ratio = 1.0f;
             [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
                 uint offset = 3u * index + axis;
-                float raw_scale = exp(scales[offset]);
-                float filtered_scale = sqrt(raw_scale * raw_scale + filter_squared);
+                bool gut=(flags & 256u)!=0u;
+                float raw_scale = gut ? gut_exp(scales[offset]) : exp(scales[offset]);
+                float filtered_scale = gut ? gut_sqrt(gut_fma(raw_scale,raw_scale,filter_squared))
+                                          : sqrt(raw_scale * raw_scale + filter_squared);
                 scale[axis] = filtered_scale;
-                determinant_ratio *= raw_scale / filtered_scale;
+                determinant_ratio *= gut ? gut_div(raw_scale,filtered_scale) : raw_scale / filtered_scale;
             }
             rotation = float4(
                 rotations[4u * index], rotations[4u * index + 1u],
                 rotations[4u * index + 2u], rotations[4u * index + 3u]);
-            rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
-            opacity = (1.0f / (1.0f + exp(-opacity))) * determinant_ratio;
+            if ((flags & 256u)!=0u) {
+                float inv=gut_rsqrt(max(gut_dot4(rotation.x,rotation.y,rotation.z,rotation.w),1.0e-20f));
+                rotation=float4(gut_mul(rotation.x,inv),gut_mul(rotation.y,inv),gut_mul(rotation.z,inv),gut_mul(rotation.w,inv));
+            } else rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
+            opacity = ((flags & 256u)!=0u ? gut_rcp(gut_add(1.0f,gut_exp(-opacity)))
+                                         : 1.0f / (1.0f + exp(-opacity))) * determinant_ratio;
         } else {
             scale = float3(scales[3 * index], scales[3 * index + 1], scales[3 * index + 2]);
             rotation = float4(rotations[4 * index], rotations[4 * index + 1], rotations[4 * index + 2], rotations[4 * index + 3]);

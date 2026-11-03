@@ -6,6 +6,7 @@ inline void panorama_single_contributor_regression() {
     using tinytensor::Device;
     using tinytensor::Tensor;
     for (auto device : {Device::CUDA, Device::Vulkan})
+    for (auto method : {RenderMethod::gaussian_3dgs, RenderMethod::gaussian_3dgut})
     for (const unsigned width : {7U, 35U, 96U})
     for (const bool compact : {false, true})
     for (const bool pole : {false, true}) {
@@ -15,7 +16,7 @@ inline void panorama_single_contributor_regression() {
         camera.cx=width*.5F;camera.cy=32;
         camera.world_to_camera={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
         auto seed=gut_validation::model(device,false,1);
-        seed.render_method=RenderMethod::gaussian_3dgs;
+        seed.render_method=method;
         seed.means=Tensor::from_vector(pole ? std::vector<float>{0,2,.02F}
                                             : std::vector<float>{.01F,.1F,-2},{1U,3U},device);
         const float scale=pole ? .2F : .7F;
@@ -29,7 +30,11 @@ inline void panorama_single_contributor_regression() {
         auto frame=raster.forward(seed,camera,options);
         const auto alpha=frame.alpha.to_vector();
         const auto peak=std::max_element(alpha.begin(),alpha.end());
-        require(*peak>0.1F && *peak<=.90001F,"Panorama repeats a single contributor's opacity");
+        std::cout<<"Panorama single contributor backend="<<int(device)<<" method="<<int(method)<<" width="<<width
+                 <<" compact="<<compact<<" pole="<<pole<<" peak="<<*peak<<std::endl;
+        // A narrow projected pole ellipse can have no pixel near its center.
+        // Only require a visible contribution, not a resolution-dependent peak.
+        require(*peak>=1.F/255.F && *peak<=.90001F,"Panorama repeats a single contributor's opacity");
         require(frame.rendered_instances<=((width+15)/16)*4U,"Panorama emits a Gaussian/tile pair more than once");
         const auto pixel=std::size_t(peak-alpha.begin());
         std::vector<float> da(width*64,0.F);da[pixel]=1.F;

@@ -64,11 +64,13 @@ int main(int argc,char** argv) {
   try {
     fisheye_adc_regression();
     if(argc==2&&std::string(argv[1])=="--fisheye-adc-only")return 0;
-    panorama_single_contributor_regression();
+    const bool gut_parity_only = argc==2 && std::string(argv[1])=="--gut-parity-only";
+    if (!gut_parity_only) panorama_single_contributor_regression();
     native_projection_regressions();
     gut_validation::panorama_adc_regression();
     gut_validation::panorama_pole_backward_regression();
     gut_validation::run();
+    if (gut_parity_only) return 0;
     const auto root =
         std::filesystem::temp_directory_path() / "photara_3dgut_test";
     std::filesystem::create_directories(root);
@@ -127,11 +129,11 @@ int main(int argc,char** argv) {
     }
     require(training_losses[0].size()==12 && training_losses[1].size()==12,
             "GUT parity training did not complete");
-    gut_validation::compare("training loss trajectory",training_losses[0],training_losses[1],.003,2e-5);
-    gut_validation::compare("trained means",trained[0].means.to_vector(),trained[1].means.to_vector(),.003,2e-5);
-    gut_validation::compare("trained scales",trained[0].log_scales.to_vector(),trained[1].log_scales.to_vector(),.003,2e-5);
-    gut_validation::compare("trained opacity",trained[0].opacity_logits.to_vector(),trained[1].opacity_logits.to_vector(),.003,2e-5);
-    gut_validation::compare("trained SH",trained[0].sh.to_vector(),trained[1].sh.to_vector(),.003,2e-5);
+    gut_validation::compare("training loss trajectory",training_losses[0],training_losses[1],.0001,2e-5);
+    gut_validation::compare("trained means",trained[0].means.to_vector(),trained[1].means.to_vector(),.0001,2e-5);
+    gut_validation::compare("trained scales",trained[0].log_scales.to_vector(),trained[1].log_scales.to_vector(),.0001,2e-5);
+    gut_validation::compare("trained opacity",trained[0].opacity_logits.to_vector(),trained[1].opacity_logits.to_vector(),.0001,2e-5);
+    gut_validation::compare("trained SH",trained[0].sh.to_vector(),trained[1].sh.to_vector(),.0001,2e-5);
     // Initial scales are isotropic: orientation is initially unobservable,
     // and Adam with epsilon=1e-15 can amplify tiny roundoff into different
     // quaternion representatives. Compare the resulting images; anisotropic
@@ -143,10 +145,14 @@ int main(int argc,char** argv) {
       auto camera=camera_from_mvs_view(view);
       auto cuda_frame=cuda_raster.forward(trained[0],camera,raster_options);
       auto vulkan_frame=vulkan_raster.forward(trained[1],camera,raster_options);
-      gut_validation::compare("trained RGB",cuda_frame.color.to_vector(),vulkan_frame.color.to_vector(),.003,2e-5);
-      gut_validation::compare("trained alpha",cuda_frame.alpha.to_vector(),vulkan_frame.alpha.to_vector(),.003,2e-5);
+      gut_validation::compare("trained RGB",cuda_frame.color.to_vector(),vulkan_frame.color.to_vector(),.0001,2e-5);
+      gut_validation::compare("trained alpha",cuda_frame.alpha.to_vector(),vulkan_frame.alpha.to_vector(),.0001,2e-5);
     }
     require(training_losses[1].back()<training_losses[1].front(),"GUT Vulkan training did not decrease loss");
+    for (const auto& [name,error] : gut_validation::parity_errors)
+      if (name.starts_with("trained ") || name=="training loss trajectory")
+        std::cout<<"GUT CUDA training alignment "<<name<<" relative_l2="<<error.first
+                 <<" max_absolute="<<error.second<<'\n';
     for (const auto backend : {TrainingBackend::cuda, TrainingBackend::vulkan})
     for (const auto method :
          {RenderMethod::gaussian_3dgs, RenderMethod::gaussian_3dgut}) {

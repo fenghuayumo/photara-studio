@@ -821,7 +821,7 @@ int run_benchmark(int argc, char** argv) {
 // of gradient direction rather than a learning-rate tuning benchmark.
 int run_train_smoke(int argc, char** argv) {
     require(argc >= 6,
-            "Usage: photara_splat_vulkan_parity --train-smoke MODEL IMAGES OUTPUT SFM [ITERS]");
+            "Usage: photara_splat_vulkan_parity --train-smoke MODEL IMAGES OUTPUT SFM [ITERS] [MAX_RESOLUTION]");
     const std::filesystem::path model_path(argv[2]);
     const std::filesystem::path images(argv[3]);
     const std::filesystem::path output(argv[4]);
@@ -837,10 +837,9 @@ int run_train_smoke(int argc, char** argv) {
     options.use_source_resolution = true;
     options.ignore_undistortion_border = true;
     options.progressive_resolution = false;
+    if (argc >= 8) options.max_image_dimension = std::stoul(argv[7]);
     const auto view = photara::splat::make_training_view(views.front(), options);
     const photara::splat::Camera camera = view.camera;
-    require(camera.model == photara::CameraModel::pinhole,
-            "Vulkan train smoke follows the pinhole-only training path");
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     const std::vector<float> target = view.rgb.to_vector();
@@ -905,6 +904,9 @@ int run_train_smoke(int argc, char** argv) {
     rasterizer.upload_model(gaussians);
     const auto vk_camera = to_vulkan_camera(camera);
     splat_drender::vulkan::SplatSettings training_settings;
+    training_settings.primitive = model.render_method == photara::splat::RenderMethod::gaussian_3dgut
+        ? splat_drender::vulkan::SplatPrimitive::gaussian_3dgut
+        : splat_drender::vulkan::SplatPrimitive::gaussian_3dgs;
     training_settings.need_depth = false;
     training_settings.pixel_snapshots = true;
     splat_drender::vulkan::SplatSettings evaluation_settings = training_settings;
@@ -930,7 +932,11 @@ int run_train_smoke(int argc, char** argv) {
         const auto frame = rasterizer.render(vk_camera, training_settings);
         std::vector<float> color_gradient;
         current_loss = objective(frame.color, &color_gradient);
-        if (iteration == 0) first_loss = current_loss;
+        if (iteration == 0) {
+            first_loss = current_loss;
+            const auto image=to_image(frame.color,camera.width,camera.height);
+            photara::io::save_rgb_png({camera.width,camera.height,image.pixels},output/"initial.png");
+        }
         const auto gradients = rasterizer.backward(color_gradient, zero_alpha);
         require(gradients.opacities.size() == count,
                 "Vulkan train smoke returned the wrong opacity gradient shape");
@@ -967,8 +973,12 @@ int run_train_smoke(int argc, char** argv) {
     }
     require(current_loss < first_loss,
             "Vulkan train smoke did not reduce the real-image objective");
+    const auto final_frame=rasterizer.render(vk_camera,evaluation_settings);
+    const auto final_image=to_image(final_frame.color,camera.width,camera.height);
+    photara::io::save_rgb_png({camera.width,camera.height,final_image.pixels},output/"final.png");
     std::ofstream report(output / "vulkan_train_smoke.txt");
     report << "model=" << model_path.string() << '\n'
+           << "render_method=" << (model.render_method == photara::splat::RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs") << '\n'
            << "view=" << views.front().path.string() << '\n'
            << "gaussians=" << count << '\n'
            << "size=" << camera.width << 'x' << camera.height << '\n'
@@ -1012,6 +1022,104 @@ int run_cuda_method_benchmark(int argc, char** argv) {
     const auto da = tinytensor::Tensor::zeros({camera.height,camera.width},tinytensor::Device::CUDA);
     const std::filesystem::path output(argv[4]);
     std::filesystem::create_directories(output);
+    if (std::string(argv[1]) == "--compare-gut-numerics") {
+        // Report all channels before judging parity; CUDA's repeated runs
+        // establish the atomic-reduction noise instead of hiding it in a
+        // backend-specific tolerance. This is a diagnostic, not a benchmark.
+        constexpr unsigned channels = 8;
+        using Values = std::array<std::vector<float>, channels>;
+        struct Error {
+            double relative = 0, maximum = 0;
+            std::size_t nonfinite_mismatch = 0;
+        };
+        auto error = [](const std::vector<float>& a, const std::vector<float>& b) {
+            require(a.size()==b.size(), "GUT numerical channel shape mismatch");
+            Error e;
+            double difference=0, norm=0;
+            for(std::size_t i=0;i<a.size();++i) {
+                if(!std::isfinite(a[i]) || !std::isfinite(b[i])) {
+                    const bool same = (std::isnan(a[i]) && std::isnan(b[i])) ||
+                        (std::isinf(a[i]) && a[i]==b[i]);
+                    e.nonfinite_mismatch += !same;
+                    continue;
+                }
+                const double d=double(a[i])-double(b[i]);
+                difference+=d*d;norm+=double(a[i])*a[i];
+                e.maximum=std::max(e.maximum,std::abs(d));
+            }
+            e.relative=std::sqrt(difference/std::max(norm,1e-30));
+            return e;
+        };
+        auto merge = [](Error& a,const Error& b) {
+            a.relative=std::max(a.relative,b.relative);
+            a.maximum=std::max(a.maximum,b.maximum);
+            a.nonfinite_mismatch=std::max(a.nonfinite_mismatch,b.nonfinite_mismatch);
+        };
+        std::array<Error,channels> cuda_repeat{},vk_repeat{},cross{};
+        Values cuda_reference;
+        const unsigned repeats=std::max(2,std::min(iterations,10));
+        model.render_method=photara::splat::RenderMethod::gaussian_3dgut;
+        for(auto device : {tinytensor::Device::CUDA,tinytensor::Device::Vulkan}) {
+            const bool vk=device==tinytensor::Device::Vulkan;
+            auto resident=model;
+            resident.means=model.means.to(device);resident.log_scales=model.log_scales.to(device);
+            resident.quaternions=model.quaternions.to(device);resident.opacity_logits=model.opacity_logits.to(device);
+            resident.sh=model.sh.to(device);
+            if(model.filter_3d.is_valid()) resident.filter_3d=model.filter_3d.to(device);
+            auto color_derivative=dc.to(device);
+            std::vector<float> alpha_values(pixels);
+            for(std::size_t i=0;i<pixels;++i) alpha_values[i]=.1F*std::cos(float(i%997))/float(pixels);
+            auto alpha_derivative=tinytensor::Tensor::from_vector(alpha_values,
+                {camera.height,camera.width},device);
+            photara::splat::Rasterizer rasterizer;
+            photara::splat::RasterizeOptions raster;
+            raster.active_sh_degree=model.sh_degree;raster.require_depth=false;
+            raster.copy_attachments=true;raster.background={.13F,.07F,.21F};
+            Values first;
+            for(unsigned repeat=0;repeat<repeats;++repeat) {
+                auto frame=rasterizer.forward(resident,camera,raster);
+                auto gradient=rasterizer.backward(resident,frame,color_derivative,alpha_derivative,{},{});
+                Values actual{frame.color.to_vector(),frame.alpha.to_vector(),
+                    gradient.means.to_vector(),gradient.log_scales.to_vector(),
+                    gradient.quaternions.to_vector(),gradient.opacity_logits.to_vector(),
+                    gradient.sh.to_vector(),gradient.refine_weight.to_vector()};
+                if(repeat==0) if(const char* directory=std::getenv("SPLAT_DRENDER_GUT_DUMP")) {
+                    const char* labels[]{"RGB","alpha","means","scales_grad","rotations_grad","opacity_grad","SH","ADC"};
+                    for(unsigned k=0;k<channels;++k)
+                        dump_channel(directory,std::string(vk ? "vk_" : "cuda_")+labels[k],actual[k]);
+                }
+                if(vk) for(unsigned k=0;k<channels;++k) merge(cross[k],error(cuda_reference[k],actual[k]));
+                if(repeat==0) first=std::move(actual);
+                else for(unsigned k=0;k<channels;++k)
+                    merge(vk ? vk_repeat[k] : cuda_repeat[k],error(first[k],actual[k]));
+            }
+            if(!vk) cuda_reference=std::move(first);
+        }
+        const char* names[]{"RGB","alpha","means","scales","rotations","opacity","SH","ADC"};
+        std::ofstream report(output/"gut_numerics.csv");
+        report<<"channel,cuda_repeat_relative_l2,cuda_repeat_max_absolute,vulkan_repeat_relative_l2,"
+                "cross_relative_l2,cross_max_absolute,nonfinite_mismatch,within_cuda_repeat\n";
+        bool aligned=true;
+        for(unsigned k=0;k<channels;++k) {
+            const bool within=cross[k].relative<=cuda_repeat[k].relative &&
+                cross[k].maximum<=cuda_repeat[k].maximum && cross[k].nonfinite_mismatch==0;
+            report<<names[k]<<','<<cuda_repeat[k].relative<<','<<cuda_repeat[k].maximum<<','
+                  <<vk_repeat[k].relative<<','<<cross[k].relative<<','<<cross[k].maximum<<','
+                  <<cross[k].nonfinite_mismatch<<','<<within<<'\n';
+            std::cout<<"GUT numerical "<<names[k]<<" cuda_repeat="<<cuda_repeat[k].relative
+                     <<" cross="<<cross[k].relative<<" max="<<cross[k].maximum
+                     <<" nonfinite_mismatch="<<cross[k].nonfinite_mismatch
+                     <<" within_cuda_repeat="<<within<<std::endl;
+            // Cross-API arithmetic is not bit-identical. Enforce agreement
+            // against CUDA rather than merely writing a diagnostic CSV.
+            const double relative_limit=k<2 ? 1e-4 : 3e-4;
+            aligned=aligned && cross[k].nonfinite_mismatch==0 &&
+                (cross[k].relative<=relative_limit || cross[k].maximum<=2e-5);
+        }
+        report.close();
+        require(aligned,"Vulkan GUT is outside CUDA alignment tolerances; see gut_numerics.csv");
+        return 0;
+    }
     if (std::string(argv[1]) == "--bench-gut-memory") {
         // Additional arguments: [VIEW] [compact|uncompressed] [dump|timing].
         require(argc < 10 || std::string(argv[9]) == "compact" ||
@@ -1234,6 +1342,7 @@ int main(int argc, char** argv) {
         if (argc > 1 && (std::string(argv[1]) == "--bench-cuda-methods" ||
                         std::string(argv[1]) == "--bench-gut-memory" ||
                         std::string(argv[1]) == "--bench-gut-backends" ||
+                        std::string(argv[1]) == "--compare-gut-numerics" ||
                         std::string(argv[1]) == "--compare-gut-paths"))
             return run_cuda_method_benchmark(argc, argv);
         if (argc > 1 && (std::string(argv[1]) == "--bench" ||

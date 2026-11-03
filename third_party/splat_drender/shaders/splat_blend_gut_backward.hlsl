@@ -10,7 +10,8 @@
 [[vk::binding(6, 0)]] StructuredBuffer<float4> snap;
 [[vk::binding(7, 0)]] StructuredBuffer<float> loss_color;
 [[vk::binding(8, 0)]] StructuredBuffer<float> loss_alpha;
-[[vk::binding(9, 0)]] StructuredBuffer<float> unused_normal;
+[[vk::binding(9, 0)]] StructuredBuffer<float> camera;
+#include "splat_gut_ray.hlsli"
 [[vk::binding(10, 0)]] StructuredBuffer<float2> unused_median;
 #ifdef GUT_NATIVE_ATOMIC
 [[vk::binding(11, 0)]] RWStructuredBuffer<float> gradients;
@@ -23,7 +24,7 @@ float op_atomic_f_add([[vk::ext_reference]] float destination, uint scope, uint 
 #endif
 
 void atomic_add(uint index, float value) {
-    if (value == 0.0f || !finite1(value)) return;
+    if (value == 0.0f) return;
 #ifdef GUT_NATIVE_ATOMIC
     op_atomic_f_add(gradients[index],1u,0u,value);
 #else
@@ -43,12 +44,12 @@ bool response(uint id, float3 direction, float3 offset,
               out float peak, out float dd, out float weight, out float alpha) {
     uint base = id*pc.u19;
     float4 a=gauss_f[base+3u], b=gauss_f[base+4u], c=gauss_f[base+5u];
-    origin=float3(a.w,b.w,c.w)+float3(dot(a.xyz,offset),dot(b.xyz,offset),dot(c.xyz,offset));
-    ray=float3(dot(a.xyz,direction),dot(b.xyz,direction),dot(c.xyz,direction));
-    dd=dot(ray,ray);
-    peak=-dot(origin,ray)/dd;
-    closest=origin+peak*ray;
-    weight=exp(-0.5f*dot(closest,closest));
+    origin=float3(a.w,b.w,c.w)+float3(gut_dot(a.xyz,offset),gut_dot(b.xyz,offset),gut_dot(c.xyz,offset));
+    ray=float3(gut_dot(a.xyz,direction),gut_dot(b.xyz,direction),gut_dot(c.xyz,direction));
+    dd=gut_dot(ray,ray);
+    peak=gut_div(-gut_dot(origin,ray),dd);
+    closest=float3(gut_fma(peak,ray.x,origin.x),gut_fma(peak,ray.y,origin.y),gut_fma(peak,ray.z,origin.z));
+    weight=gut_gaussian(closest);
     alpha=min(kAlphaClip,gauss_f[base+2u].w*weight);
     return dd>0.0f && peak>0.0f && alpha>=kAlphaFloor;
 }
@@ -65,7 +66,7 @@ void fisheye_refine_basis(float3 t,out float3 bu,out float3 bv) {
     float scale=max(maximum.x,max(maximum.y,maximum.z));
     if(!(scale>0.0f)||!finite1(scale)) return;
     u/=scale;v/=scale;
-    float3 n=cross(u,v);float det=dot(n,n);
+    float3 n=cross(u,v);float det=gut_dot(n,n);
     if(!(det>0.0f)||!finite1(det)) return;
     bu=cross(v,n)/det/scale;bv=cross(n,u)/det/scale;
 }
@@ -99,13 +100,11 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
         uint pixel=y*width+x,last=out_u[count+pixel];
         if (position>=last) continue;
         float fx=asfloat(pc.u9),fy=asfloat(pc.u10),cx=asfloat(pc.u11),cy=asfloat(pc.u12);
-        float3 direction=pc.u3==kModeOrtho ? float3(0,0,1) : pixel_unit_ray(float(x),float(y),pc.u3,
-            fx,fy,cx,cy,asfloat(pc.u14),asfloat(pc.u15),asfloat(pc.u16),asfloat(pc.u17));
+        float3 direction=float3(out_f[7u*pixels+pixel],out_f[8u*pixels+pixel],out_f[9u*pixels+pixel]);
         float3 offset=pc.u3==kModeOrtho ? float3((float(x)-cx)/fx,(float(y)-cy)/fy,0) : 0.0f;
+        offset= gut_world_direction(offset);
         float4 state=snap[bucket*256u+local];
-        // Include the background in the remaining colour. This is equivalent
-        // to CUDA's separate final_T * dot(background, dL_rgb) term.
-        float3 remaining=float3(out_f[pixel],out_f[pixels+pixel],out_f[2u*pixels+pixel])-state.xyz;
+        float3 remaining=float3(out_f[4u*pixels+pixel],out_f[5u*pixels+pixel],out_f[6u*pixels+pixel])-state.xyz;
         float T=state.w,alpha=0.0f,G=0.0f,peak=0.0f,dd=0.0f;
         float3 o=0.0f,d=0.0f,q=0.0f;
         bool accepted=false;
@@ -122,12 +121,14 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
         if (!accepted) continue;
         float3 dl=float3(loss_color[pixel],loss_color[pixels+pixel],loss_color[2u*pixels+pixel]);
         float final_T=1.0f-out_f[3u*pixels+pixel];
-        float da=T*dot(rgb.xyz,dl)-dot(remaining,dl)/(1.0f-alpha);
-        if (pc.u13!=0u) da+=loss_alpha[pixel]*final_T/(1.0f-alpha);
+        float dfinal=asfloat(pc.u4)*dl.x+asfloat(pc.u18)*dl.y+asfloat(pc.u23)*dl.z
+                     -(pc.u13!=0u ? loss_alpha[pixel] : 0.0f);
+        float da=T*(dl.x*rgb.x+dl.y*rgb.y+dl.z*rgb.z)-
+            (dl.x*remaining.x+dl.y*remaining.y+dl.z*remaining.z+final_T*dfinal)/(1.0f-alpha);
         float raw=rgb.w*G;
         float factor=raw<kAlphaClip ? -da*raw : 0.0f;
         // Retain the orthogonality residual for very thin Gaussians.
-        float h=factor*dot(q,d)/dd;
+        float h=gut_div(gut_mul(factor,gut_dot(q,d)),dd);
         float3 go=factor*q-h*d,v=offset+peak*direction;
         acc_o+=go;
         acc_a+=go.x*v-h*q.x*direction;
@@ -136,9 +137,10 @@ void main(uint3 group : SV_GroupID, uint rank : SV_GroupIndex) {
         acc_rgb+=T*alpha*dl;
         if (raw<kAlphaClip) acc_opacity+=da*G;
         float3 gm=-(a.xyz*go.x+b.xyz*go.y+c.xyz*go.z);
+        if(pc.u3!=kModeEquirect) gm=gut_camera_direction(gm);
         float score=pc.u3==kModeEquirect ? refine.w*length(cross(refine.xyz,gm))
                        : length(gm.xy*refine.xy*float2(width,height));
-        if(pc.u3==kModeFisheye) score=length(float2(dot(bu,gm)*width,dot(bv,gm)*height));
+        if(pc.u3==kModeFisheye) score=length(float2(gut_dot(bu,gm)*width,gut_dot(bv,gm)*height));
         acc_refine+=score/max(1.0f-final_T,1.0e-6f);
     }
     [unroll] for(uint axis=0u;axis<3u;++axis) {

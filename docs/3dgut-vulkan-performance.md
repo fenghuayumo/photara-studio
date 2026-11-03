@@ -51,3 +51,36 @@ The first mode writes `gut_backends.csv` and checks real-scene numerical
 agreement. The second writes `viewport.csv` and checks RGBA parity.
 `SPLAT_DRENDER_GUT_BACKWARD_REFERENCE=1` selects portable replay;
 `SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD=1` selects subgroup CAS on capable devices.
+
+## CUDA alignment verification (2026-11-03)
+
+The Vulkan float and RGBA GUT blenders now use the same explicit Gaussian
+response arithmetic as backward replay. `--compare-gut-numerics` now fails
+when CUDA/Vulkan RGB or alpha relative L2 exceeds `1e-4`, or parameter/ADC
+gradient relative L2 exceeds `3e-4` (an absolute error of at most `2e-5` is
+accepted for near-zero gradients). The CSV also reports CUDA repeat noise;
+passing these bounds does not imply bitwise equality or CUDA-repeat equality.
+
+With `artifact/3dgut_cuda_opt_20261103/uniform_100k_training_range.ply` and the
+VID007 cameras, 1920x960 views 0, 100 and 200 passed. Worst RGB relative L2 was
+`1.03e-5`, alpha `1.32e-5`, and mean gradient `2.99e-4`. Local alpha differences
+reach `0.00387` near discrete contribution thresholds, so global L2 alone
+must not be interpreted as a per-pixel guarantee.
+
+The fixed-topology 12-step training comparison against CUDA gave loss-trajectory
+relative L2 `6.52e-8` and trained RGB `4.64e-7`. All three backward variants
+passed the complete regression, including finite differences, panorama seam
+and pole single-contributor tests for both primitives, densification and model
+round trips. Inference with geometry attachments exactly matched training RGB
+and alpha; viewport RGB and rings matched float rendering with zero byte delta
+on the 100k fixture at 1000x500.
+
+`--train-smoke MODEL IMAGES OUTPUT SFM [ITERS] [MAX_RESOLUTION]` selects the
+primitive from the model metadata and supports native panorama cameras. It
+writes initial/final PNGs and records the primitive in its report. Five opacity
+updates on the 100k fixture tagged as GUT against a real 1000x500 panorama
+reduced MSE from `0.113821` to `0.105102`. This checks gradient direction;
+it is not a full model convergence or image-quality comparison with CUDA.
+
+Logs and CSVs are under `artifact/3dgut_vulkan_parity_20261103/continuation_*`
+and `cuda_alignment_1920_v*`.

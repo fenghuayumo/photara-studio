@@ -1,4 +1,6 @@
 #include "splat_math.hlsli"
+#include "splat_gut_numerics.hlsli"
+#include "splat_gut_sh.hlsli"
 
 #ifdef SPLAT_FUSED_STRUCTURE_ADAM
 [[vk::binding(0, 0)]] RWStructuredBuffer<float> means;
@@ -228,6 +230,23 @@ static const float C3[7] = {
 
 float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 center,
                    float3 color_grad, float3 clamped, uint feature_base) {
+    if(pc.u23!=0u) {
+        float3 original=mean-center,dir=gut_unit_direction(original);
+        GutShBasis basis=gut_sh_basis(int(degree),dir.x,dir.y,dir.z);
+        float3 dl=color_grad*float3(clamped.x==0.0f,clamped.y==0.0f,clamped.z==0.0f);
+        float3 dx=0.0f,dy=0.0f,dz=0.0f;
+        uint source=index*bases*3u,active=(degree+1u)*(degree+1u);
+        [unroll] for(uint k=0u;k<16u;++k) if(k<active) {
+            write_sh_gradient(source+3u*k,gut_mul(basis.value[k],dl.x));
+            write_sh_gradient(source+3u*k+1u,gut_mul(basis.value[k],dl.y));
+            write_sh_gradient(source+3u*k+2u,gut_mul(basis.value[k],dl.z));
+            float3 coefficient=float3(color_src[source+3u*k],color_src[source+3u*k+1u],color_src[source+3u*k+2u]);
+            dx=float3(gut_fma(basis.dx[k],coefficient.x,dx.x),gut_fma(basis.dx[k],coefficient.y,dx.y),gut_fma(basis.dx[k],coefficient.z,dx.z));
+            dy=float3(gut_fma(basis.dy[k],coefficient.x,dy.x),gut_fma(basis.dy[k],coefficient.y,dy.y),gut_fma(basis.dy[k],coefficient.z,dy.z));
+            dz=float3(gut_fma(basis.dz[k],coefficient.x,dz.x),gut_fma(basis.dz[k],coefficient.y,dz.y),gut_fma(basis.dz[k],coefficient.z,dz.z));
+        }
+        return gut_unit_direction_vjp(original,float3(gut_dot(dx,dl),gut_dot(dy,dl),gut_dot(dz,dl)));
+    }
     float3 original = mean - center;
     float inv = rsqrt(dot(original, original));
     float3 dir = original * inv;
@@ -575,16 +594,17 @@ void project_backward(uint3 dispatch_id) {
             float f2 = filter_3d[index] * filter_3d[index];
             float determinant_ratio = 1.0f;
             [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
-                float raw_scale = exp(raw_log_scales[3u * index + axis]);
-                scale[axis] = sqrt(raw_scale * raw_scale + f2);
-                determinant_ratio *= raw_scale / scale[axis];
+                float raw_scale = pc.u23!=0u ? gut_exp(raw_log_scales[3u * index + axis]) : exp(raw_log_scales[3u * index + axis]);
+                scale[axis] = pc.u23!=0u ? gut_sqrt(gut_fma(raw_scale,raw_scale,f2)) : sqrt(raw_scale * raw_scale + f2);
+                determinant_ratio *= pc.u23!=0u ? gut_div(raw_scale,scale[axis]) : raw_scale / scale[axis];
             }
             rotation = float4(
                 raw_rotations[4u * index], raw_rotations[4u * index + 1u],
                 raw_rotations[4u * index + 2u], raw_rotations[4u * index + 3u]);
-            rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
-            activated_opacity =
-                (1.0f / (1.0f + exp(-opacity_logits[index]))) * determinant_ratio;
+            if(pc.u23!=0u) rotation=gut_unit_quaternion(rotation);
+            else rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
+            activated_opacity = (pc.u23!=0u ? gut_rcp(gut_add(1.0f,gut_exp(-opacity_logits[index]))) :
+                1.0f / (1.0f + exp(-opacity_logits[index]))) * determinant_ratio;
         } else {
             scale = float3(scales[3u * index], scales[3u * index + 1u], scales[3u * index + 2u]);
             rotation = float4(
@@ -614,7 +634,7 @@ void project_backward(uint3 dispatch_id) {
         V.m[2][2] = cv5;
     }
     if (pc.u23 != 0u) {
-        // The blend pass differentiates camera-space ray transforms A=B*W
+        // The blend pass differentiates world-space ray transforms B
         // and local origins B*(eye-mean). Convert once per Gaussian into the
         // activated geometry, then use the shared SH and activation chain.
         float3 go = float3(blend_grad[3u*index],blend_grad[3u*index+1u],blend_grad[3u*index+2u]);
@@ -624,26 +644,22 @@ void project_backward(uint3 dispatch_id) {
             dA.m[1][axis]=blend_grad[10u*count+4u*index+axis];
             dA.m[2][axis]=blend_grad[14u*count+3u*index+axis];
         }
-        Mat3 B=mat_mul(mat_diag(1.0f/scale_local.x,1.0f/scale_local.y,1.0f/scale_local.z),R);
+        Mat3 B=mat_zero();
+        [unroll] for(uint row=0u;row<3u;++row)
+            [unroll] for(uint col=0u;col<3u;++col)
+                B.m[row][col]=gauss_f[index*pc.u23+3u+row][col];
         float3 eye=float3(camera[16],camera[17],camera[18]);
-        Mat3 D=mat_add(mat_mul(dA,mat_transpose(W)),mat_outer(go,eye-mean));
-        float3 gs;
-        [unroll] for (uint row=0u;row<3u;++row) {
-            gs[row]=-dot(float3(D.m[row][0],D.m[row][1],D.m[row][2]),
-                         float3(B.m[row][0],B.m[row][1],B.m[row][2]))/scale[row];
-            [unroll] for(uint col=0u;col<3u;++col) D.m[row][col]/=scale_local[row];
-        }
-        float w=rotation.x,x=rotation.y,y=rotation.z,z=rotation.w;
-        float4 gr=float4(
-            2.0f*(z*(D.m[0][1]-D.m[1][0])+y*(D.m[2][0]-D.m[0][2])+x*(D.m[1][2]-D.m[2][1])),
-            2.0f*(y*(D.m[0][1]+D.m[1][0])+z*(D.m[0][2]+D.m[2][0])+w*(D.m[1][2]-D.m[2][1]))-4.0f*x*(D.m[1][1]+D.m[2][2]),
-            2.0f*(x*(D.m[0][1]+D.m[1][0])+w*(D.m[2][0]-D.m[0][2])+z*(D.m[1][2]+D.m[2][1]))-4.0f*y*(D.m[0][0]+D.m[2][2]),
-            2.0f*(w*(D.m[0][1]-D.m[1][0])+x*(D.m[2][0]+D.m[0][2])+y*(D.m[1][2]+D.m[2][1]))-4.0f*z*(D.m[0][0]+D.m[1][1]));
-        float3 gm=-mat_mul_vec(mat_transpose(B),go);
+        GutGeometryGradient geometry=gut_geometry_vjp(
+            float3(B.m[0][0],B.m[0][1],B.m[0][2]),float3(B.m[1][0],B.m[1][1],B.m[1][2]),float3(B.m[2][0],B.m[2][1],B.m[2][2]),go,
+            float3(dA.m[0][0],dA.m[0][1],dA.m[0][2]),float3(dA.m[1][0],dA.m[1][1],dA.m[1][2]),float3(dA.m[2][0],dA.m[2][1],dA.m[2][2]),
+            eye-mean,scale,scale_modifier,rotation);
+        float3 gs=geometry.scale;
+        float4 gr=geometry.rotation;
+        float3 gm=geometry.mean;
         float3 gcolor=float3(blend_grad[7u*count+3u*index],blend_grad[7u*count+3u*index+1u],blend_grad[7u*count+3u*index+2u]);
         if (has_sh) {
             float c0,c1,c2;
-            evaluate_sh(degree,mean,eye,color_src,index*bases*3u,c0,c1,c2);
+            evaluate_gut_sh_unclamped(degree,mean,eye,color_src,index*bases*3u,c0,c1,c2);
             gm+=sh_backward(index,degree,bases,mean,eye,gcolor,float3(c0,c1,c2),feature_base);
         } else {
             [unroll] for(uint channel=0u;channel<3u;++channel)
@@ -899,7 +915,7 @@ void project_backward(uint3 dispatch_id) {
             model_grad[rotation_base + 4u * gradient_index + 2u],
             model_grad[rotation_base + 4u * gradient_index + 3u]);
         float qdot = dot(qn, gq);
-        float4 grq = rinv * (gq - qn * qdot);
+        float4 grq = pc.u23!=0u ? gut_quaternion_vjp(rawq,gq) : rinv * (gq - qn * qdot);
         [unroll] for (uint qi = 0u; qi < 4u; ++qi)
             model_grad[raw_rotation_base + 4u * gradient_index + qi] = grq[qi];
         float opa = 1.0f / (1.0f + exp(-opacity_logits[index]));

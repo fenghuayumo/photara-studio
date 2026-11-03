@@ -10,6 +10,8 @@
 // Same bindings as the existing forward blender; no backward state is used.
 [[vk::binding(5, 0)]] StructuredBuffer<uint> bucket_offset;
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> snap;
+[[vk::binding(7, 0)]] StructuredBuffer<float> camera;
+#include "splat_gut_ray.hlsli"
 
 groupshared float4 rows0[64];
 groupshared float4 rows1[64];
@@ -24,11 +26,11 @@ groupshared uint plane_count;
 // finite alpha support sphere. This never replaces the per-pixel ray response.
 bool outside_plane(float3 n, float3 c0, float3 c1, float3 c2,
                    float sign_det, float3 origin, float support2) {
-    float3 local = sign_det*float3(dot(c0,n), dot(c1,n), dot(c2,n));
-    float center = -dot(local,origin);
+    float3 local = sign_det*float3(gut_dot(c0,n), gut_dot(c1,n), gut_dot(c2,n));
+    float center = -gut_dot(local,origin);
     // Expand for cancellation in the plane transform and dot product.
-    center += 1e-3f*dot(abs(local),abs(origin));
-    return center < 0.0f && center*center > support2*dot(local,local)*1.0001f;
+    center += 1e-3f*gut_dot(abs(local),abs(origin));
+    return center < 0.0f && center*center > support2*gut_dot(local,local)*1.0001f;
 }
 
 [numthreads(16, 16, 1)]
@@ -43,11 +45,13 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
         : pixel_unit_ray(float(xy.x), float(xy.y), mode, fx, fy, cx, cy,
                          asfloat(pc.u10), asfloat(pc.u11), asfloat(pc.u12), asfloat(pc.u13));
     float3 offset = mode == kModeOrtho ? float3((float(xy.x)-cx)/fx, (float(xy.y)-cy)/fy, 0.0f) : 0.0f;
+    direction = gut_world_direction(direction);
+    offset = gut_world_direction(offset);
     uint tile = group.y*pc.u2 + group.x;
     uint begin = ranges[2u*tile], end = ranges[2u*tile+1u];
     float T = 1.0f;
     float3 rgb = 0.0f;
-    bool done = !inside || !(dot(direction,direction) > 0.0f);
+    bool done = !inside || !(gut_dot(direction,direction) > 0.0f);
     if (rank == 0u) {
         plane_count = 0u;
         float2 lo = float2(group.xy*16u);
@@ -68,6 +72,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
             planes[1] = float3(-cos(right),0,sin(right));
             plane_count = 2u;
         }
+        for (uint plane=0u;plane<plane_count;++plane)
+            planes[plane] = gut_world_direction(planes[plane]);
     }
     GroupMemoryBarrierWithGroupSync();
     [loop] for (uint base = begin; base < end; base += 64u) {
@@ -85,13 +91,13 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
             colors[rank] = gauss_f[g+2u];
             rows0[rank] = gauss_f[g+3u]; rows1[rank] = gauss_f[g+4u]; rows2[rank] = gauss_f[g+5u];
             float3 a = rows0[rank].xyz, b = rows1[rank].xyz, c = rows2[rank].xyz;
-            float3 lengths = float3(dot(a,a),dot(b,b),dot(c,c));
+            float3 lengths = float3(gut_dot(a,a),gut_dot(b,b),gut_dot(c,c));
             // Ill-conditioned transforms use the original pixel evaluation;
             // their floating-point response is not a reliable support oracle.
             if (plane_count != 0u && max(lengths.x,max(lengths.y,lengths.z)) <
                 1e8f*min(lengths.x,min(lengths.y,lengths.z))) {
                 float3 c0 = cross(b,c), c1 = cross(c,a), c2 = cross(a,b);
-                float sign_det = dot(a,c0) >= 0.0f ? 1.0f : -1.0f;
+                float sign_det = gut_dot(a,c0) >= 0.0f ? 1.0f : -1.0f;
                 float3 o = float3(rows0[rank].w,rows1[rank].w,rows2[rank].w);
                 float sigma = max(0.5f,asfloat(pc.u19));
                 float support2 = rings ? sigma*sigma : -2.0f*log(kAlphaFloor/colors[rank].w);
@@ -112,14 +118,15 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
             // Perspective/fisheye/panorama rays share one origin. Avoid three
             // redundant dot products per candidate outside orthographic mode.
             if (mode == kModeOrtho)
-                o += float3(dot(a.xyz, offset), dot(b.xyz, offset), dot(c.xyz, offset));
-            float3 d = float3(dot(a.xyz, direction), dot(b.xyz, direction), dot(c.xyz, direction));
-            float dd = dot(d, d);
-            float peak = -dot(o, d)/dd;
+                o += float3(gut_dot(a.xyz, offset), gut_dot(b.xyz, offset), gut_dot(c.xyz, offset));
+            float3 d = float3(gut_dot(a.xyz, direction), gut_dot(b.xyz, direction), gut_dot(c.xyz, direction));
+            float dd = gut_dot(d, d);
+            float peak = gut_div(-gut_dot(o,d),dd);
             if (!(dd > 0.0f) || !(peak > 0.0f)) continue;
-            float3 closest = o + peak*d;
-            float distance = dot(closest, closest);
-            float alpha = min(kAlphaClip, colors[j].w*exp(-0.5f*distance));
+            float3 closest = float3(gut_fma(peak,d.x,o.x),gut_fma(peak,d.y,o.y),gut_fma(peak,d.z,o.z));
+            float distance = gut_dot(closest, closest);
+            // Keep preview and training on the CUDA-compatible response.
+            float alpha = min(kAlphaClip, colors[j].w*gut_gaussian(closest));
             if (rings) {
                 float sigma = max(0.5f, asfloat(pc.u19));
                 float radius = distance/(sigma*sigma);
