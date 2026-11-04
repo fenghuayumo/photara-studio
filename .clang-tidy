@@ -1,0 +1,24 @@
+Checks: '-*,readability-identifier-naming'
+# Naming diagnostics are advisory while the existing code is migrated.
+WarningsAsErrors: ''
+# Header diagnostics only: select project translation units explicitly when
+# invoking clang-tidy. Vendored dependency headers are outside this filter.
+HeaderFilterRegex: '(^|.*[/\\])(photara[/\\](include|src)|apps[/\\](editor|ctl)|third_party[/\\](splat_drender|photara_vk)[/\\](include|src))[/\\].*'
+SystemHeaders: false
+CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.TypeAliasCase: CamelCase
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: lower_case
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.MethodCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  # Constants already use both kName and lower_case; preserve these conventions.
+  readability-identifier-naming.ConstantCase: aNy_CasE
+  # Type parameters use T, View, Key, etc. Non-type parameters vary (N, rank).
+  readability-identifier-naming.TypeTemplateParameterCase: CamelCase
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

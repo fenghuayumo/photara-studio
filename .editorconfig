@@ -1,0 +1,26 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+tab_width = 4
+trim_trailing_whitespace = true
+
+[*.{c,cc,cpp,cxx,h,hh,hpp,hxx,cu,cuh}]
+max_line_length = 100
+
+# Basic editor whitespace settings only. HLSL attributes, semantics and
+# expression layout are maintained by scripts/format_code.py --hlsl-style.
+[*.{hlsl,hlsli}]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.{json,yml,yaml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
