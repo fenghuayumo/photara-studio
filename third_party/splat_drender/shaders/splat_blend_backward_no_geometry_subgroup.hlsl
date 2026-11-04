@@ -19,19 +19,21 @@ groupshared float3 gs_color[256];
 groupshared float4 gs_bounds[256];
 
 void atomic_add_f32(uint index, float value) {
-    if (value == 0.0f || isnan(value) || isinf(value)) return;
+    if (value == 0.0f || isnan(value) || isinf(value))
+        return;
     uint expected = grad_values[index];
     [loop] for (;;) {
         uint desired = asuint(asfloat(expected) + value);
         uint observed;
         InterlockedCompareExchange(grad_values[index], expected, desired, observed);
-        if (observed == expected) return;
+        if (observed == expected)
+            return;
         expected = observed;
     }
 }
 
-void commit_gradient(uint gaussian, uint count, float3 acc_mean,
-                     float4 acc_conic, float3 acc_color, float acc_refine) {
+void commit_gradient(uint gaussian, uint count, float3 acc_mean, float4 acc_conic, float3 acc_color,
+                     float acc_refine) {
     uint mean_base = gaussian * 3u;
     uint conic_base = count * 3u + gaussian * 4u;
     uint color_base = count * 7u + gaussian * 3u;
@@ -95,7 +97,8 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         gs_bounds[group_thread] = gauss_f[gaussian * 5u + 3u];
     }
     GroupMemoryBarrierWithGroupSync();
-    if (!bucket_active) return;
+    if (!bucket_active)
+        return;
 
     const bool entry_valid = pos < tile_n;
     const uint slot = group_thread;
@@ -133,86 +136,75 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             stage_last = out_u[count + staged_pixel];
             stage_state = snap[bucket_idx * 256u + staged_local];
             stage_final = float3(out_f[4u * pixel_count + staged_pixel],
-                out_f[5u * pixel_count + staged_pixel],
-                out_f[6u * pixel_count + staged_pixel]);
+                                 out_f[5u * pixel_count + staged_pixel],
+                                 out_f[6u * pixel_count + staged_pixel]);
             stage_alpha = out_f[3u * pixel_count + staged_pixel];
-            stage_grad = float3(loss_color[staged_pixel],
-                                loss_color[pixel_count + staged_pixel],
+            stage_grad = float3(loss_color[staged_pixel], loss_color[pixel_count + staged_pixel],
                                 loss_color[2u * pixel_count + staged_pixel]);
-            stage_loss_alpha =
-                pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
+            stage_loss_alpha = pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
         }
 
         [loop] for (uint j = 0u; j < 32u; ++j) {
-        const uint local = base + j;
-        const uint px = pix_min_x + (local & 15u);
-        const uint py = pix_min_y + (local >> 4u);
-        const uint last = WaveReadLaneAt(stage_last, j);
-        const float4 state = WaveReadLaneAt(stage_state, j);
-        const float3 final_color = WaveReadLaneAt(stage_final, j);
-        const float alpha_final = WaveReadLaneAt(stage_alpha, j);
-        const float3 pixel_grad = WaveReadLaneAt(stage_grad, j);
-        const float loss_alpha_value = WaveReadLaneAt(stage_loss_alpha, j);
+            const uint local = base + j;
+            const uint px = pix_min_x + (local & 15u);
+            const uint py = pix_min_y + (local >> 4u);
+            const uint last = WaveReadLaneAt(stage_last, j);
+            const float4 state = WaveReadLaneAt(stage_state, j);
+            const float3 final_color = WaveReadLaneAt(stage_final, j);
+            const float alpha_final = WaveReadLaneAt(stage_alpha, j);
+            const float3 pixel_grad = WaveReadLaneAt(stage_grad, j);
+            const float loss_alpha_value = WaveReadLaneAt(stage_loss_alpha, j);
 
-        const bool pixel_active = entry_valid && px < width && py < height &&
-            pos < last &&
-            (wrap_width != 0 ||
-             (px >= bounds.x && px < bounds.y && py >= bounds.z && py < bounds.w));
-        float2 qdelta = float2(
-            wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
-            gs_mean[slot].y - float(py));
-        float power = gaussian_power(gs_conic[slot], qdelta.x, qdelta.y);
-        float qG = power <= 0.0f ? exp(power) : 0.0f;
-        float qalpha = pixel_active && qG > 0.0f
-            ? min(kAlphaClip, gs_conic[slot].w * qG)
-            : 0.0f;
-        qalpha = qalpha >= kAlphaFloor ? qalpha : 0.0f;
+            const bool pixel_active = entry_valid && px < width && py < height && pos < last &&
+                                      (wrap_width != 0 || (px >= bounds.x && px < bounds.y &&
+                                                           py >= bounds.z && py < bounds.w));
+            float2 qdelta = float2(wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
+                                   gs_mean[slot].y - float(py));
+            float power = gaussian_power(gs_conic[slot], qdelta.x, qdelta.y);
+            float qG = power <= 0.0f ? exp(power) : 0.0f;
+            float qalpha =
+                pixel_active && qG > 0.0f ? min(kAlphaClip, gs_conic[slot].w * qG) : 0.0f;
+            qalpha = qalpha >= kAlphaFloor ? qalpha : 0.0f;
 
-        const float transmittance =
-            state.w * WavePrefixProduct(1.0f - qalpha);
-        const float blend_weight = qalpha * transmittance;
-        // The prefix color only ever reaches the gradient projected onto the
-        // pixel gradient, so the channel-wise prefix sum folds into one scalar
-        // prefix over the projected contributions.
-        const float color_after_dot =
-            dot(final_color - state.xyz - blend_weight * color, pixel_grad) -
-            WavePrefixSum(blend_weight * dot(gs_color[slot], pixel_grad));
-        if (!pixel_active || qalpha == 0.0f) continue;
+            const float transmittance = state.w * WavePrefixProduct(1.0f - qalpha);
+            const float blend_weight = qalpha * transmittance;
+            // The prefix color only ever reaches the gradient projected onto the
+            // pixel gradient, so the channel-wise prefix sum folds into one scalar
+            // prefix over the projected contributions.
+            const float color_after_dot =
+                dot(final_color - state.xyz - blend_weight * color, pixel_grad) -
+                WavePrefixSum(blend_weight * dot(gs_color[slot], pixel_grad));
+            if (!pixel_active || qalpha == 0.0f)
+                continue;
 
-        const float final_t = 1.0f - alpha_final;
-        const float d_final_t_render =
-            dot(background, pixel_grad) - loss_alpha_value;
-        const float inv_1ma = 1.0f / (1.0f - qalpha);
-        float d_opacity_render =
-            transmittance * dot(color, pixel_grad) - color_after_dot * inv_1ma;
-        float d_opacity = d_opacity_render;
-        d_opacity_render -= final_t * inv_1ma * d_final_t_render;
-        d_opacity -= final_t * inv_1ma * d_final_t_render;
-        if (mode == kModeFisheye && conic.w * qG >= kAlphaClip) {
-            d_opacity = 0.0f;
-            d_opacity_render = 0.0f;
-        }
+            const float final_t = 1.0f - alpha_final;
+            const float d_final_t_render = dot(background, pixel_grad) - loss_alpha_value;
+            const float inv_1ma = 1.0f / (1.0f - qalpha);
+            float d_opacity_render =
+                transmittance * dot(color, pixel_grad) - color_after_dot * inv_1ma;
+            float d_opacity = d_opacity_render;
+            d_opacity_render -= final_t * inv_1ma * d_final_t_render;
+            d_opacity -= final_t * inv_1ma * d_final_t_render;
+            if (mode == kModeFisheye && conic.w * qG >= kAlphaClip) {
+                d_opacity = 0.0f;
+                d_opacity_render = 0.0f;
+            }
 
-        acc_color += blend_weight * pixel_grad;
-        const float dG = conic.w * d_opacity;
-        const float dG_render = conic.w * d_opacity_render;
-        const float gdx = qG * qdelta.x, gdy = qG * qdelta.y;
-        const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y);
-        const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y);
-        acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
-        const float refine_x =
-            dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
-        const float refine_y =
-            dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
-        acc_refine += length(float2(refine_x, refine_y)) /
-                      max(alpha_final, 1.0e-5f);
-        acc_conic += float4(-0.5f * gdx * qdelta.x * dG,
-                            -0.5f * gdx * qdelta.y * dG,
-                            -0.5f * gdy * qdelta.y * dG, qG * d_opacity);
+            acc_color += blend_weight * pixel_grad;
+            const float dG = conic.w * d_opacity;
+            const float dG_render = conic.w * d_opacity_render;
+            const float gdx = qG * qdelta.x, gdy = qG * qdelta.y;
+            const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y);
+            const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y);
+            acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
+            const float refine_x = dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
+            const float refine_y = dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
+            acc_refine += length(float2(refine_x, refine_y)) / max(alpha_final, 1.0e-5f);
+            acc_conic += float4(-0.5f * gdx * qdelta.x * dG, -0.5f * gdx * qdelta.y * dG,
+                                -0.5f * gdy * qdelta.y * dG, qG * d_opacity);
         }
     }
 
     if (entry_valid)
-        commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color,
-                        acc_refine);
+        commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color, acc_refine);
 }

@@ -32,15 +32,15 @@ struct CameraView {
 
 struct Gaussians {
     int count = 0;
-    const float* means = nullptr;        // [N,3]
+    const float* means = nullptr; // [N,3]
     // Exactly one of sh / colors must be non-null.
-    const float* sh = nullptr;           // [N,sh_bases,3]
-    const float* colors = nullptr;       // [N,3] precomputed view color
-    const float* opacities = nullptr;    // [N], already activated
+    const float* sh = nullptr;        // [N,sh_bases,3]
+    const float* colors = nullptr;    // [N,3] precomputed view color
+    const float* opacities = nullptr; // [N], already activated
     // Exactly one of (scales, rotations) / covariances must be provided.
-    const float* scales = nullptr;       // [N,3], already activated
-    const float* rotations = nullptr;    // [N,4], scalar-first
-    const float* covariances = nullptr;  // [N,6], upper triangular
+    const float* scales = nullptr;      // [N,3], already activated
+    const float* rotations = nullptr;   // [N,4], scalar-first
+    const float* covariances = nullptr; // [N,6], upper triangular
     int sh_degree = 0;
     int sh_bases = 0;
     Primitive primitive = Primitive::gaussian_3dgs;
@@ -77,27 +77,27 @@ struct RenderSettings {
 };
 
 struct RenderOutputs {
-    float* color = nullptr;         // [3,H,W]
-    float* alpha = nullptr;         // [H,W]   1 - final transmittance
-    float* median_depth = nullptr;  // [H,W]   camera-space Z
-    float* normal = nullptr;        // [3,H,W] camera space, alpha-normalized
-    float* visibility = nullptr;    // [N]     contributed >=1 accepted splat
-    int* radii = nullptr;           // [N]     pixel radius, 0 = invisible
+    float* color = nullptr;        // [3,H,W]
+    float* alpha = nullptr;        // [H,W]   1 - final transmittance
+    float* median_depth = nullptr; // [H,W]   camera-space Z
+    float* normal = nullptr;       // [3,H,W] camera space, alpha-normalized
+    float* visibility = nullptr;   // [N]     contributed >=1 accepted splat
+    int* radii = nullptr;          // [N]     pixel radius, 0 = invisible
 };
 
 // Read-only view of the forward outputs consumed by backward().
 struct ForwardOutputsView {
-    const float* alpha = nullptr;         // [H,W]
-    const float* median_depth = nullptr;  // [H,W]
-    const float* normal = nullptr;        // [3,H,W]
-    const int* radii = nullptr;           // [N]
+    const float* alpha = nullptr;        // [H,W]
+    const float* median_depth = nullptr; // [H,W]
+    const float* normal = nullptr;       // [3,H,W]
+    const int* radii = nullptr;          // [N]
 };
 
 struct LossGradients {
-    const float* color = nullptr;         // [3,H,W]
-    const float* alpha = nullptr;         // [H,W]
-    const float* median_depth = nullptr;  // [H,W]
-    const float* normal = nullptr;        // [3,H,W]
+    const float* color = nullptr;        // [3,H,W]
+    const float* alpha = nullptr;        // [H,W]
+    const float* median_depth = nullptr; // [H,W]
+    const float* normal = nullptr;       // [3,H,W]
     // Optional [H,W] densify error map. Backward accumulates
     // error * alpha * T onto densify_weight / densify_weight_den.
     const float* densify_map = nullptr;
@@ -136,8 +136,7 @@ struct StructureAdam {
     float* opacity_first = nullptr;
     float* opacity_second = nullptr;
     const float* filter_3d = nullptr;
-    float means_lr = 0.f, scales_lr = 0.f, quaternions_lr = 0.f,
-          opacities_lr = 0.f;
+    float means_lr = 0.f, scales_lr = 0.f, quaternions_lr = 0.f, opacities_lr = 0.f;
     float beta1 = .9f, beta2 = .999f;
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-15f;
     float minimum_log_scale = -1.e30f, maximum_log_scale = 1.e30f;
@@ -154,18 +153,18 @@ struct StructureAdam {
 struct ModelGradients {
     SHAdam sh_adam{};
     StructureAdam structure_adam{};
-    float* means = nullptr;        // [N,3]
-    float* sh = nullptr;           // [N,sh_bases,3]
-    float* colors = nullptr;       // [N,3]
-    float* opacities = nullptr;    // [N]
-    float* scales = nullptr;       // [N,3]
-    float* rotations = nullptr;    // [N,4]
-    float* covariances = nullptr;  // [N,6]
+    float* means = nullptr;       // [N,3]
+    float* sh = nullptr;          // [N,sh_bases,3]
+    float* colors = nullptr;      // [N,3]
+    float* opacities = nullptr;   // [N]
+    float* scales = nullptr;      // [N,3]
+    float* rotations = nullptr;   // [N,4]
+    float* covariances = nullptr; // [N,6]
     // Brush-style densification signal: accumulated per-Gaussian
     // ||dL/d(mean2d)|| * (W,H) / final alpha. Null disables it.
-    float* refine_weight = nullptr;  // [N]
-    float* densify_weight = nullptr;      // [N] sum(error * alpha * T)
-    float* densify_weight_den = nullptr;  // [N] sum(alpha * T)
+    float* refine_weight = nullptr;      // [N]
+    float* densify_weight = nullptr;     // [N] sum(error * alpha * T)
+    float* densify_weight_den = nullptr; // [N] sum(alpha * T)
 };
 
 // Forward outputs that backward() needs again.
@@ -180,22 +179,22 @@ struct ForwardResult {
 };
 
 struct SampleOutputs {
-    float3* ray_points = nullptr;   // [P] median-depth point along pixel ray
-    float* median_depth = nullptr;  // [P]
-    unsigned* n_contrib = nullptr;  // [P] last contributing instance + 1
-    bool* inside = nullptr;         // [P]
+    float3* ray_points = nullptr;  // [P] median-depth point along pixel ray
+    float* median_depth = nullptr; // [P]
+    unsigned* n_contrib = nullptr; // [P] last contributing instance + 1
+    bool* inside = nullptr;        // [P]
 };
 
 // Read-only view of the sample outputs consumed by sample_depth_backward().
 struct SampleOutputsView {
-    const float* median_depth = nullptr;  // [P]
-    const unsigned* n_contrib = nullptr;  // [P]
-    const bool* inside = nullptr;         // [P]
+    const float* median_depth = nullptr; // [P]
+    const unsigned* n_contrib = nullptr; // [P]
+    const bool* inside = nullptr;        // [P]
 };
 
 struct OccupancyOutputs {
-    float* occupancy = nullptr;  // [P] 1 - transmittance along the ray
-    bool* inside = nullptr;      // [P]
+    float* occupancy = nullptr; // [P] 1 - transmittance along the ray
+    bool* inside = nullptr;     // [P]
 };
 
 // Compact immutable draw list. Storage is supplied by pools.pixel and must
@@ -207,18 +206,18 @@ struct OccupancyDrawList {
 };
 
 struct SampleGradients {
-    float3* points = nullptr;  // [P] dL/d(world query point)
+    float3* points = nullptr; // [P] dL/d(world query point)
 };
 
 // Workspace pools. Each callback grows its pool to the requested number of
 // bytes and returns the current base pointer (like a cached cudaMalloc).
 struct WorkspacePools {
-    std::function<char*(std::size_t)> gaussian;  // per-Gaussian forward state
-    std::function<char*(std::size_t)> grad;      // per-Gaussian backward scratch
-    std::function<char*(std::size_t)> instance;  // sorted draw/sort scratch
-    std::function<char*(std::size_t)> pixel;     // per-pixel forward state
-    std::function<char*(std::size_t)> tile;      // per-tile state
-    std::function<char*(std::size_t)> point;     // point-query state
+    std::function<char*(std::size_t)> gaussian; // per-Gaussian forward state
+    std::function<char*(std::size_t)> grad;     // per-Gaussian backward scratch
+    std::function<char*(std::size_t)> instance; // sorted draw/sort scratch
+    std::function<char*(std::size_t)> pixel;    // per-pixel forward state
+    std::function<char*(std::size_t)> tile;     // per-tile state
+    std::function<char*(std::size_t)> point;    // point-query state
     // Optional final draw indices; lets callers release sort preparation pools
     // after forward/sample_depth without retaining them through backward.
     std::function<char*(std::size_t)> compact_instance;
@@ -228,20 +227,19 @@ struct WorkspacePools {
 };
 
 class Rasterizer {
-public:
+  public:
     // Renders one view. Returns the number of (Gaussian, tile) instances
     // drawn; keep it for the matching backward() call.
-    static ForwardResult forward(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s, const RenderOutputs& out);
+    static ForwardResult forward(const WorkspacePools& pools, const Gaussians& g,
+                                 const CameraView& cam, const RenderSettings& s,
+                                 const RenderOutputs& out);
 
     // Consumes the pools filled by forward() plus per-pixel loss gradients
     // and accumulates model gradients (buffers are NOT zeroed here).
-    static void backward(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s, const ForwardResult& fwd,
-        const ForwardOutputsView& fwd_out, const LossGradients& dL,
-        const ModelGradients& grads);
+    static void backward(const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
+                         const RenderSettings& s, const ForwardResult& fwd,
+                         const ForwardOutputsView& fwd_out, const LossGradients& dL,
+                         const ModelGradients& grads);
 
     // Median-depth sampling of world-space query points (multi-view
     // photometric / geometric losses).
@@ -254,31 +252,32 @@ public:
         int point_selector = 0;
         bool compact_instances = false;
     };
-    static SampleCounts sample_depth(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s, const float* world_points, int point_count,
-        const SampleOutputs& out);
+    static SampleCounts sample_depth(const WorkspacePools& pools, const Gaussians& g,
+                                     const CameraView& cam, const RenderSettings& s,
+                                     const float* world_points, int point_count,
+                                     const SampleOutputs& out);
 
-    static void sample_depth_backward(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s, const float* world_points, int point_count,
-        const SampleCounts& counts, const SampleOutputsView& fwd,
-        const float3* dL_dray_points, const SampleGradients& point_grads,
-        const ModelGradients& grads);
+    static void sample_depth_backward(const WorkspacePools& pools, const Gaussians& g,
+                                      const CameraView& cam, const RenderSettings& s,
+                                      const float* world_points, int point_count,
+                                      const SampleCounts& counts, const SampleOutputsView& fwd,
+                                      const float3* dL_dray_points,
+                                      const SampleGradients& point_grads,
+                                      const ModelGradients& grads);
 
     // Occupancy = 1 - transmittance at each query point's ray position.
-    static void evaluate_occupancy(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s, const float* world_points, int point_count,
-        const OccupancyOutputs& out);
+    static void evaluate_occupancy(const WorkspacePools& pools, const Gaussians& g,
+                                   const CameraView& cam, const RenderSettings& s,
+                                   const float* world_points, int point_count,
+                                   const OccupancyOutputs& out);
 
-    static OccupancyDrawList prepare_occupancy(
-        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
-        const RenderSettings& s);
-    static void evaluate_prepared_occupancy(
-        const WorkspacePools& pools, const OccupancyDrawList& prepared,
-        const CameraView& cam, const RenderSettings& s,
-        const float* world_points, int point_count, const OccupancyOutputs& out);
+    static OccupancyDrawList prepare_occupancy(const WorkspacePools& pools, const Gaussians& g,
+                                               const CameraView& cam, const RenderSettings& s);
+    static void evaluate_prepared_occupancy(const WorkspacePools& pools,
+                                            const OccupancyDrawList& prepared,
+                                            const CameraView& cam, const RenderSettings& s,
+                                            const float* world_points, int point_count,
+                                            const OccupancyOutputs& out);
 };
 
-}  // namespace splat_drender
+} // namespace splat_drender

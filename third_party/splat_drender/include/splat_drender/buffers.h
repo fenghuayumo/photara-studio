@@ -30,19 +30,19 @@ inline char* take(char*& cursor, std::size_t bytes) {
 // too so a single pool covers preprocess + the matching backward.
 struct GaussianState {
     float2* mean2d = nullptr;
-    float4* ray_plane = nullptr;      // plane a,b,c=peak-depth fn, rsigma
-    float3* normal = nullptr;         // camera-space footprint normal
-    float4* conic_opacity = nullptr;  // conic (xx,xy,yy), opacity*coef
-    float3* rgb = nullptr;            // SH color (unused with precomp colors)
-    bool* clamped = nullptr;          // per-channel SH color clamp flags
+    float4* ray_plane = nullptr;     // plane a,b,c=peak-depth fn, rsigma
+    float3* normal = nullptr;        // camera-space footprint normal
+    float4* conic_opacity = nullptr; // conic (xx,xy,yy), opacity*coef
+    float3* rgb = nullptr;           // SH color (unused with precomp colors)
+    bool* clamped = nullptr;         // per-channel SH color clamp flags
     unsigned* tiles_touched = nullptr;
-    unsigned* visible_flag = nullptr;     // 0/1, InclusiveSum input
-    unsigned* visible_offset = nullptr;   // InclusiveSum of visible_flag
-    unsigned* depth_key = nullptr;        // ordered float bits of depth
-    ushort4* screen_bounds = nullptr;     // [x0,x1) [y0,y1) pixel bounds
-    int* radius = nullptr;                // 0 = culled
-    unsigned* n_visible = nullptr;        // device scalar
-    unsigned* n_instances = nullptr;      // device scalar
+    unsigned* visible_flag = nullptr;   // 0/1, InclusiveSum input
+    unsigned* visible_offset = nullptr; // InclusiveSum of visible_flag
+    unsigned* depth_key = nullptr;      // ordered float bits of depth
+    ushort4* screen_bounds = nullptr;   // [x0,x1) [y0,y1) pixel bounds
+    int* radius = nullptr;              // 0 = culled
+    unsigned* n_visible = nullptr;      // device scalar
+    unsigned* n_instances = nullptr;    // device scalar
     char* scan_scratch = nullptr;
     std::size_t scan_bytes = 0;
     // GUT-only principal-axis transform rows. xyz is S^-1 R, w is the
@@ -54,30 +54,24 @@ struct GaussianState {
     // median-depth and normal channels. Callers that render color only (the
     // photometric training path with need_depth = false) skip 28 bytes per
     // Gaussian of allocation and of preprocess stores.
-    static std::size_t bytes(std::size_t n, std::size_t cub_scan_bytes,
-                             bool geometry, bool gut = false) {
+    static std::size_t bytes(std::size_t n, std::size_t cub_scan_bytes, bool geometry,
+                             bool gut = false) {
         // from_pool aligns every array independently; mirror that exactly.
-        return align_up(n * sizeof(float2)) +
-               align_up(n * sizeof(float4)) * (geometry ? 2 : 1) +
-               align_up(n * sizeof(float3)) * (geometry ? 2 : 1) +
-               align_up(n * 3 * sizeof(bool)) +
-               align_up(n * sizeof(unsigned)) * 4 +
-               align_up(n * sizeof(ushort4)) +
-               align_up(n * sizeof(int)) +
-               align_up(2 * sizeof(unsigned)) +
+        return align_up(n * sizeof(float2)) + align_up(n * sizeof(float4)) * (geometry ? 2 : 1) +
+               align_up(n * sizeof(float3)) * (geometry ? 2 : 1) + align_up(n * 3 * sizeof(bool)) +
+               align_up(n * sizeof(unsigned)) * 4 + align_up(n * sizeof(ushort4)) +
+               align_up(n * sizeof(int)) + align_up(2 * sizeof(unsigned)) +
                align_up(cub_scan_bytes) +
                (gut ? align_up(n * 3 * sizeof(float4)) + align_up(n * sizeof(float2)) : 0) + kAlign;
     }
 
-    static GaussianState from_pool(char* base, std::size_t n,
-                                   std::size_t cub_scan_bytes,
+    static GaussianState from_pool(char* base, std::size_t n, std::size_t cub_scan_bytes,
                                    bool geometry, bool gut = false) {
         GaussianState s;
         char* c = base;
         s.mean2d = reinterpret_cast<float2*>(take(c, n * sizeof(float2)));
         if (geometry) {
-            s.ray_plane =
-                reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
+            s.ray_plane = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
             s.normal = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         }
         s.conic_opacity = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
@@ -105,11 +99,11 @@ struct GaussianState {
 // GUT reuses d_mean2d for world mean, d_conic for activated scale/opacity,
 // and d_ray_plane for quaternion derivatives, before the shared SH/Adam pass.
 struct GradState {
-    float4* d_conic = nullptr;     // xyz: conic grads, w: opacity grad
+    float4* d_conic = nullptr; // xyz: conic grads, w: opacity grad
     float4* d_ray_plane = nullptr;
     float3* d_normal = nullptr;
-    float3* d_mean2d = nullptr;    // xy grads, z: refine magnitude
-    float3* d_color = nullptr;     // blended RGB grads, separate from SH
+    float3* d_mean2d = nullptr; // xy grads, z: refine magnitude
+    float3* d_color = nullptr;  // blended RGB grads, separate from SH
 
     // `geometry` keeps the ray-plane / footprint-normal gradient scratch; it
     // is also what the backward memset counts, so a color-only step clears
@@ -125,10 +119,8 @@ struct GradState {
         char* c = base;
         s.d_conic = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
         if (geometry) {
-            s.d_ray_plane =
-                reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
-            s.d_normal =
-                reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
+            s.d_ray_plane = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
+            s.d_normal = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         }
         s.d_mean2d = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         s.d_color = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
@@ -144,14 +136,16 @@ struct GradState {
 //      in ForwardResult so backward() rebuilds the same current pointer.
 struct InstanceState {
     // Below this size launch/scan overhead outweighs the narrower double sort.
-    static bool single_sort(std::size_t instances) { return instances <= 131072; }
+    static bool single_sort(std::size_t instances) {
+        return instances <= 131072;
+    }
     static std::size_t key_bytes(std::size_t instances) {
         return instances * (single_sort(instances) ? sizeof(unsigned long long) : sizeof(unsigned));
     }
     unsigned long long* packed_key[2] = {nullptr, nullptr};
     unsigned* depth_key[2] = {nullptr, nullptr};
     unsigned* depth_value[2] = {nullptr, nullptr};
-    unsigned* compact_offset = nullptr;  // InclusiveSum of tiles along depth order
+    unsigned* compact_offset = nullptr; // InclusiveSum of tiles along depth order
     unsigned* tile_key[2] = {nullptr, nullptr};
     unsigned* instance_value[2] = {nullptr, nullptr};
     char* sort_scratch = nullptr;
@@ -160,14 +154,11 @@ struct InstanceState {
     static std::size_t bytes(std::size_t visible, std::size_t instances,
                              std::size_t cub_sort_bytes) {
         // from_pool aligns every array independently; mirror that exactly.
-        return align_up(visible * sizeof(unsigned)) * 5 +
-               align_up(key_bytes(instances)) * 2 +
-               align_up(instances * sizeof(unsigned)) * 2 +
-               align_up(cub_sort_bytes) + kAlign;
+        return align_up(visible * sizeof(unsigned)) * 5 + align_up(key_bytes(instances)) * 2 +
+               align_up(instances * sizeof(unsigned)) * 2 + align_up(cub_sort_bytes) + kAlign;
     }
 
-    static InstanceState from_pool(char* base, std::size_t visible,
-                                   std::size_t instances,
+    static InstanceState from_pool(char* base, std::size_t visible, std::size_t instances,
                                    std::size_t cub_sort_bytes) {
         InstanceState s;
         char* c = base;
@@ -196,27 +187,23 @@ struct InstanceState {
 // "color after" state without the rendered image; dL_dmt is backward scratch
 // holding dL_dmedian * ray_z / max(-dT_dtm, 1e-7) per pixel.
 struct PixelState {
-    unsigned* n_contrib = nullptr;   // per-pixel last contributor + 1
-    float* total_color = nullptr;    // [3,pixels] accumulated color, no bg
-    float4* snap_ct = nullptr;       // [buckets,256] rgb + T at bucket start
-    float4* snap_normal = nullptr;   // geometry: accumulated normal
-    float* dL_dmt = nullptr;         // backward: median-depth grad scale
-    float4* gut_rays = nullptr;     // cached world ray for GUT bucket backward
+    unsigned* n_contrib = nullptr; // per-pixel last contributor + 1
+    float* total_color = nullptr;  // [3,pixels] accumulated color, no bg
+    float4* snap_ct = nullptr;     // [buckets,256] rgb + T at bucket start
+    float4* snap_normal = nullptr; // geometry: accumulated normal
+    float* dL_dmt = nullptr;       // backward: median-depth grad scale
+    float4* gut_rays = nullptr;    // cached world ray for GUT bucket backward
 
-    static std::size_t bytes(std::size_t pixels, std::size_t buckets,
-                             bool geometry, bool gut = false) {
+    static std::size_t bytes(std::size_t pixels, std::size_t buckets, bool geometry,
+                             bool gut = false) {
         const std::size_t snap = buckets * 256 * sizeof(float4);
-        return align_up(pixels * sizeof(unsigned)) +
-               align_up(pixels * 3 * sizeof(float)) +
-               align_up(snap) +
-               (geometry ? align_up(snap) +
-                               align_up(pixels * sizeof(float))
-                         : 0) +
+        return align_up(pixels * sizeof(unsigned)) + align_up(pixels * 3 * sizeof(float)) +
+               align_up(snap) + (geometry ? align_up(snap) + align_up(pixels * sizeof(float)) : 0) +
                (gut ? align_up(pixels * sizeof(float4)) : 0) + kAlign;
     }
 
-    static PixelState from_pool(char* base, std::size_t pixels,
-                                std::size_t buckets, bool geometry, bool gut = false) {
+    static PixelState from_pool(char* base, std::size_t pixels, std::size_t buckets, bool geometry,
+                                bool gut = false) {
         PixelState s;
         char* c = base;
         s.n_contrib = reinterpret_cast<unsigned*>(take(c, pixels * sizeof(unsigned)));
@@ -226,27 +213,26 @@ struct PixelState {
             s.snap_normal = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
         if (geometry)
             s.dL_dmt = reinterpret_cast<float*>(take(c, pixels * sizeof(float)));
-        if (gut) s.gut_rays = reinterpret_cast<float4*>(take(c, pixels * sizeof(float4)));
+        if (gut)
+            s.gut_rays = reinterpret_cast<float4*>(take(c, pixels * sizeof(float4)));
         return s;
     }
 };
 
 // ------------------------------------------------------------------- tile --
 struct TileState {
-    uint2* range = nullptr;            // sorted instance range per tile
+    uint2* range = nullptr; // sorted instance range per tile
     unsigned* max_contributor = nullptr;
     unsigned* bucket_count = nullptr;  // ceil(instances/32) per tile
     unsigned* bucket_offset = nullptr; // inclusive scan of bucket_count
     unsigned* bucket_tile = nullptr;   // owning tile per global bucket
 
     static std::size_t bytes(std::size_t tiles, std::size_t buckets) {
-        return align_up(tiles * sizeof(uint2)) +
-               align_up(tiles * sizeof(unsigned)) * 3 +
+        return align_up(tiles * sizeof(uint2)) + align_up(tiles * sizeof(unsigned)) * 3 +
                align_up(buckets * sizeof(unsigned)) + kAlign;
     }
 
-    static TileState from_pool(char* base, std::size_t tiles,
-                               std::size_t buckets) {
+    static TileState from_pool(char* base, std::size_t tiles, std::size_t buckets) {
         TileState s;
         char* c = base;
         s.range = reinterpret_cast<uint2*>(take(c, tiles * sizeof(uint2)));
@@ -260,7 +246,8 @@ struct TileState {
 
 // Upper bound on total buckets: sum(ceil(t_i/32)) <= (instances+31*tiles)/32.
 inline std::size_t bucket_upper_bound(std::size_t instances, std::size_t tiles) {
-    if (instances == 0) return 0;
+    if (instances == 0)
+        return 0;
     return (instances + 31 * tiles) / 32 + 1;
 }
 
@@ -271,15 +258,12 @@ struct OccupancyState {
     float4* ray_plane;
     unsigned* instances;
     uint2* ranges;
-    static std::size_t bytes(std::size_t visible, std::size_t instances,
-                             std::size_t tiles) {
-        return align_up(visible * sizeof(float2)) +
-               2 * align_up(visible * sizeof(float4)) +
-               align_up(instances * sizeof(unsigned)) +
-               align_up(tiles * sizeof(uint2)) + kAlign;
+    static std::size_t bytes(std::size_t visible, std::size_t instances, std::size_t tiles) {
+        return align_up(visible * sizeof(float2)) + 2 * align_up(visible * sizeof(float4)) +
+               align_up(instances * sizeof(unsigned)) + align_up(tiles * sizeof(uint2)) + kAlign;
     }
-    static OccupancyState from_pool(char* base, std::size_t visible,
-                                    std::size_t instances, std::size_t tiles) {
+    static OccupancyState from_pool(char* base, std::size_t visible, std::size_t instances,
+                                    std::size_t tiles) {
         char* c = base;
         return {reinterpret_cast<float2*>(take(c, visible * sizeof(float2))),
                 reinterpret_cast<float4*>(take(c, visible * sizeof(float4))),
@@ -299,7 +283,7 @@ struct PointState {
     float2* grad_point2d = nullptr;
     float* point_t = nullptr;
     unsigned* touched = nullptr;
-    unsigned* tile_offset = nullptr;  // InclusiveSum of touched
+    unsigned* tile_offset = nullptr; // InclusiveSum of touched
     char* scan_scratch = nullptr;
     std::size_t scan_bytes = 0;
 
@@ -310,13 +294,10 @@ struct PointState {
 
     uint2* point_range = nullptr;
 
-    static std::size_t bytes(std::size_t points, std::size_t tiles,
-                             std::size_t cub_bytes) {
+    static std::size_t bytes(std::size_t points, std::size_t tiles, std::size_t cub_bytes) {
         // from_pool aligns every array independently; mirror that exactly.
-        return align_up(points * sizeof(float2)) * 2 +
-               align_up(points * sizeof(float)) +
-               align_up(points * sizeof(unsigned)) * 6 +
-               align_up(cub_bytes) * 2 +
+        return align_up(points * sizeof(float2)) * 2 + align_up(points * sizeof(float)) +
+               align_up(points * sizeof(unsigned)) * 6 + align_up(cub_bytes) * 2 +
                align_up(tiles * sizeof(uint2)) + kAlign;
     }
 
@@ -342,4 +323,4 @@ struct PointState {
     }
 };
 
-}  // namespace splat_drender::ws
+} // namespace splat_drender::ws

@@ -27,17 +27,16 @@ namespace splat_drender::equirect {
 
 // Forward-mode dual over a fixed 3-vector. Instantiating the value type with
 // another Dual yields the second derivatives of the same source expression.
-template <class S>
-struct Dual {
+template <class S> struct Dual {
     S v{};
     S d[3]{};
 
     Dual() = default;
     // Arithmetic-only, so the copy constructor is never shadowed and nested
     // constants (float -> Dual<float> -> Dual<Dual<float>>) build in one step.
-    template <class T, class = typename std::enable_if<
-                           std::is_arithmetic<T>::value>::type>
-    SD_D2 Dual(T value) : v(S(value)) {}
+    template <class T, class = typename std::enable_if<std::is_arithmetic<T>::value>::type>
+    SD_D2 Dual(T value) : v(S(value)) {
+    }
 };
 
 // Variables carry unit first derivatives so every expression above them also
@@ -50,66 +49,69 @@ SD_D2 inline Dual<Dual<float>> make_variable(float value, int index) {
     return x;
 }
 
-SD_D2 inline float sqrt_(float a) { return sqrtf(a); }
-SD_D2 inline float atan2_(float y, float x) { return atan2f(y, x); }
+SD_D2 inline float sqrt_(float a) {
+    return sqrtf(a);
+}
+SD_D2 inline float atan2_(float y, float x) {
+    return atan2f(y, x);
+}
 
-template <class S>
-SD_D2 inline Dual<S> operator+(const Dual<S>& a, const Dual<S>& b) {
+template <class S> SD_D2 inline Dual<S> operator+(const Dual<S>& a, const Dual<S>& b) {
     Dual<S> c;
     c.v = a.v + b.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = a.d[i] + b.d[i];
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = a.d[i] + b.d[i];
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> operator-(const Dual<S>& a, const Dual<S>& b) {
+template <class S> SD_D2 inline Dual<S> operator-(const Dual<S>& a, const Dual<S>& b) {
     Dual<S> c;
     c.v = a.v - b.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = a.d[i] - b.d[i];
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = a.d[i] - b.d[i];
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> operator-(const Dual<S>& a) {
+template <class S> SD_D2 inline Dual<S> operator-(const Dual<S>& a) {
     Dual<S> c;
     c.v = S(float(0)) - a.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = S(float(0)) - a.d[i];
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = S(float(0)) - a.d[i];
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> operator*(const Dual<S>& a, const Dual<S>& b) {
+template <class S> SD_D2 inline Dual<S> operator*(const Dual<S>& a, const Dual<S>& b) {
     Dual<S> c;
     c.v = a.v * b.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = a.d[i] * b.v + a.v * b.d[i];
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = a.d[i] * b.v + a.v * b.d[i];
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> operator/(const Dual<S>& a, const Dual<S>& b) {
+template <class S> SD_D2 inline Dual<S> operator/(const Dual<S>& a, const Dual<S>& b) {
     Dual<S> c;
     c.v = a.v / b.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = (a.d[i] - c.v * b.d[i]) / b.v;
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = (a.d[i] - c.v * b.d[i]) / b.v;
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> sqrt_(const Dual<S>& a) {
+template <class S> SD_D2 inline Dual<S> sqrt_(const Dual<S>& a) {
     Dual<S> c;
     c.v = sqrt_(a.v);
     const S half = S(0.5f) / c.v;
 #pragma unroll
-    for (int i = 0; i < 3; ++i) c.d[i] = a.d[i] * half;
+    for (int i = 0; i < 3; ++i)
+        c.d[i] = a.d[i] * half;
     return c;
 }
 
-template <class S>
-SD_D2 inline Dual<S> atan2_(const Dual<S>& y, const Dual<S>& x) {
+template <class S> SD_D2 inline Dual<S> atan2_(const Dual<S>& y, const Dual<S>& x) {
     Dual<S> c;
     c.v = atan2_(y.v, x.v);
     const S denominator = x.v * x.v + y.v * y.v;
@@ -132,11 +134,14 @@ struct Jacobian {
 // through a ray the forward rejected.
 SD_D2 inline Jacobian project_jacobian(float3 t, int width, int height) {
     Jacobian out;
-    if (width <= 0 || height <= 0) return out;
+    if (width <= 0 || height <= 0)
+        return out;
     const float l2 = t.x * t.x + t.y * t.y + t.z * t.z;
     const float horiz = sqrtf(t.x * t.x + t.z * t.z);
-    if (!(l2 > 1.0e-12f) || !(horiz >= 1.0e-5f)) return out;
-    if (!isfinite(t.x) || !isfinite(t.y) || !isfinite(t.z)) return out;
+    if (!(l2 > 1.0e-12f) || !(horiz >= 1.0e-5f))
+        return out;
+    if (!isfinite(t.x) || !isfinite(t.y) || !isfinite(t.z))
+        return out;
 
     using DD = Dual<Dual<float>>;
     constexpr float kPi = 3.14159265358979323846f;
@@ -145,10 +150,8 @@ SD_D2 inline Jacobian project_jacobian(float3 t, int width, int height) {
     const DD z = make_variable(t.z, 2);
 
     const DD horizontal = sqrt_(x * x + z * z);
-    const DD u = (atan2_(x, z) / DD(2.f * kPi) + DD(0.5f)) *
-                 DD(static_cast<float>(width));
-    const DD v = (atan2_(y, horizontal) / DD(kPi) + DD(0.5f)) *
-                 DD(static_cast<float>(height));
+    const DD u = (atan2_(x, z) / DD(2.f * kPi) + DD(0.5f)) * DD(static_cast<float>(width));
+    const DD v = (atan2_(y, horizontal) / DD(kPi) + DD(0.5f)) * DD(static_cast<float>(height));
     const DD rows[2] = {u, v};
 #pragma unroll
     for (int row = 0; row < 2; ++row) {
@@ -160,10 +163,9 @@ SD_D2 inline Jacobian project_jacobian(float3 t, int width, int height) {
                 out.dj[row][axis][other] = rows[row].d[other].d[axis];
         }
     }
-    out.valid = isfinite(out.j[0][0]) && isfinite(out.j[0][1]) &&
-                isfinite(out.j[0][2]) && isfinite(out.j[1][0]) &&
-                isfinite(out.j[1][1]) && isfinite(out.j[1][2]);
+    out.valid = isfinite(out.j[0][0]) && isfinite(out.j[0][1]) && isfinite(out.j[0][2]) &&
+                isfinite(out.j[1][0]) && isfinite(out.j[1][1]) && isfinite(out.j[1][2]);
     return out;
 }
 
-}  // namespace splat_drender::equirect
+} // namespace splat_drender::equirect

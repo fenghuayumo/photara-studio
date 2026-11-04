@@ -16,7 +16,8 @@ struct Dual {
     float d[9]{};
 
     Dual() = default;
-    SD_D2 Dual(float value) : v(value) {}
+    SD_D2 Dual(float value) : v(value) {
+    }
     SD_D2 static Dual variable(float value, int idx) {
         Dual x(value);
         x.d[idx] = 1.f;
@@ -27,40 +28,57 @@ struct Dual {
 SD_D2 inline Dual operator+(Dual a, Dual b) {
     Dual c(a.v + b.v);
 #pragma unroll
-    for (int i = 0; i < 9; ++i) c.d[i] = a.d[i] + b.d[i];
+    for (int i = 0; i < 9; ++i)
+        c.d[i] = a.d[i] + b.d[i];
     return c;
 }
 SD_D2 inline Dual operator-(Dual a, Dual b) {
     Dual c(a.v - b.v);
 #pragma unroll
-    for (int i = 0; i < 9; ++i) c.d[i] = a.d[i] - b.d[i];
+    for (int i = 0; i < 9; ++i)
+        c.d[i] = a.d[i] - b.d[i];
     return c;
 }
-SD_D2 inline Dual operator-(Dual a) { return Dual(0.f) - a; }
+SD_D2 inline Dual operator-(Dual a) {
+    return Dual(0.f) - a;
+}
 SD_D2 inline Dual operator*(Dual a, Dual b) {
     Dual c(a.v * b.v);
 #pragma unroll
-    for (int i = 0; i < 9; ++i) c.d[i] = a.d[i] * b.v + a.v * b.d[i];
+    for (int i = 0; i < 9; ++i)
+        c.d[i] = a.d[i] * b.v + a.v * b.d[i];
     return c;
 }
-SD_D2 inline Dual operator*(float k, Dual a) { return Dual(k) * a; }
+SD_D2 inline Dual operator*(float k, Dual a) {
+    return Dual(k) * a;
+}
 SD_D2 inline Dual operator/(Dual a, Dual b) {
     Dual c(a.v / b.v);
 #pragma unroll
-    for (int i = 0; i < 9; ++i) c.d[i] = (a.d[i] - c.v * b.d[i]) / b.v;
+    for (int i = 0; i < 9; ++i)
+        c.d[i] = (a.d[i] - c.v * b.d[i]) / b.v;
     return c;
 }
 
-SD_D2 inline float scalar(float a) { return a; }
-SD_D2 inline float scalar(const Dual& a) { return a.v; }
-SD_D2 inline float sqrt_(float a) { return sqrtf(a); }
+SD_D2 inline float scalar(float a) {
+    return a;
+}
+SD_D2 inline float scalar(const Dual& a) {
+    return a.v;
+}
+SD_D2 inline float sqrt_(float a) {
+    return sqrtf(a);
+}
 SD_D2 inline Dual sqrt_(const Dual& a) {
     Dual c(sqrtf(a.v));
 #pragma unroll
-    for (int i = 0; i < 9; ++i) c.d[i] = a.d[i] * 0.5f / c.v;
+    for (int i = 0; i < 9; ++i)
+        c.d[i] = a.d[i] * 0.5f / c.v;
     return c;
 }
-SD_D2 inline float atan2_(float y, float x) { return atan2f(y, x); }
+SD_D2 inline float atan2_(float y, float x) {
+    return atan2f(y, x);
+}
 SD_D2 inline Dual atan2_(const Dual& y, const Dual& x) {
     Dual c(atan2f(y.v, x.v));
 #pragma unroll
@@ -68,11 +86,11 @@ SD_D2 inline Dual atan2_(const Dual& y, const Dual& x) {
         c.d[i] = (x.v * y.d[i] - y.v * x.d[i]) / (x.v * x.v + y.v * y.v);
     return c;
 }
-template <class S>
-SD_D2 S clamp_min(S a, float lo) { return scalar(a) > lo ? a : S(lo); }
+template <class S> SD_D2 S clamp_min(S a, float lo) {
+    return scalar(a) > lo ? a : S(lo);
+}
 
-template <class S>
-struct Result {
+template <class S> struct Result {
     S cov[3], conic[3], coefficient, plane[4], normal[3];
 };
 
@@ -95,15 +113,24 @@ SD_D2 Result<S> evaluate(const S* t, const S* covariance, const mat::Mat3& W,
         const S s = iz * (S(1) + S(a) * q + S(b) * q * q);
         const S ds = S(2) * iz * iz * iz * (S(a) + S(2 * b) * q);
         const S dz = -iz * iz * (S(1) + S(3 * a) * q + S(5 * b) * q * q);
-        j00 = S(K.fx) * (s + x * x * ds); j01 = S(K.fx) * x * y * ds; j02 = S(K.fx) * x * dz;
-        j10 = S(K.fy) * x * y * ds;       j11 = S(K.fy) * (s + y * y * ds); j12 = S(K.fy) * y * dz;
+        j00 = S(K.fx) * (s + x * x * ds);
+        j01 = S(K.fx) * x * y * ds;
+        j02 = S(K.fx) * x * dz;
+        j10 = S(K.fy) * x * y * ds;
+        j11 = S(K.fy) * (s + y * y * ds);
+        j12 = S(K.fy) * y * dz;
     } else {
         const S r = sqrt_(r2), theta = atan2_(r, z), q = theta * theta;
         const S td = theta * (S(1) + q * (S(K.k1) + q * (S(K.k2) + q * (S(K.k3) + q * S(K.k4)))));
-        const S dt = S(1) + q * (S(3 * K.k1) + q * (S(5 * K.k2) + q * (S(7 * K.k3) + q * S(9 * K.k4))));
+        const S dt =
+            S(1) + q * (S(3 * K.k1) + q * (S(5 * K.k2) + q * (S(7 * K.k3) + q * S(9 * K.k4))));
         const S s = td / r, ds = (dt * z / l2 - s) / r2;
-        j00 = S(K.fx) * (s + x * x * ds); j01 = S(K.fx) * x * y * ds; j02 = -S(K.fx) * dt * x / l2;
-        j10 = S(K.fy) * x * y * ds;       j11 = S(K.fy) * (s + y * y * ds); j12 = -S(K.fy) * dt * y / l2;
+        j00 = S(K.fx) * (s + x * x * ds);
+        j01 = S(K.fx) * x * y * ds;
+        j02 = -S(K.fx) * dt * x / l2;
+        j10 = S(K.fy) * x * y * ds;
+        j11 = S(K.fy) * (s + y * y * ds);
+        j12 = -S(K.fy) * dt * y / l2;
     }
 
     // Camera-space covariance C = W^T Sigma W expanded over 6 entries.
@@ -164,13 +191,15 @@ SD_D2 Result<S> evaluate(const S* t, const S* covariance, const mat::Mat3& W,
     for (int i = 0; i < 3; ++i) {
         qv[i] = S(0);
 #pragma unroll
-        for (int j = 0; j < 3; ++j) qv[i] = qv[i] + A[i][j] * n[j] / determinant;
+        for (int j = 0; j < 3; ++j)
+            qv[i] = qv[i] + A[i][j] * n[j] / determinant;
         vb = vb + n[i] * qv[i];
         qlen = qlen + qv[i] * qv[i];
     }
     qlen = sqrt_(qlen);
 #pragma unroll
-    for (int i = 0; i < 3; ++i) out.normal[i] = -qv[i] / qlen;
+    for (int i = 0; i < 3; ++i)
+        out.normal[i] = -qv[i] / qlen;
 
     // J annihilates the center ray, so J^+ (J J^T)^-1 inverts it on the
     // tangent plane: the radial peak-depth slope is (J^+)^T (C^-1 n) /
@@ -194,4 +223,4 @@ SD_D2 Result<S> evaluate(const S* t, const S* covariance, const mat::Mat3& W,
     return out;
 }
 
-}  // namespace splat_drender::fisheye
+} // namespace splat_drender::fisheye

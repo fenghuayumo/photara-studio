@@ -27,60 +27,49 @@ void audit(const char* name, std::size_t claimed, Args... args) {
     std::vector<char> big(1 << 20, 0);
     State s2 = State::from_pool(big.data(), args...);
     const char* p2 = reinterpret_cast<const char*>(&s2);
-    for (std::size_t off = 0; off + sizeof(void*) <= sizeof(State);
-         off += sizeof(void*)) {
+    for (std::size_t off = 0; off + sizeof(void*) <= sizeof(State); off += sizeof(void*)) {
         const void* v;
         std::memcpy(&v, p2 + off, sizeof(v));
         fields[n++] = static_cast<const char*>(v);
     }
     // Deduplicate nulls and check bounds.
     for (int i = 0; i < n; ++i) {
-        if (!fields[i]) continue;
+        if (!fields[i])
+            continue;
         if (fields[i] < base || fields[i] >= end) {
-            printf("%s: field %d at %td outside [%td, %td)\n", name, i,
-                   fields[i] - base, base - base, end - base);
+            printf("%s: field %d at %td outside [%td, %td)\n", name, i, fields[i] - base,
+                   base - base, end - base);
             ++bad;
         }
     }
-    if (!bad) printf("%s: OK (%zu bytes)\n", name, claimed);
+    if (!bad)
+        printf("%s: OK (%zu bytes)\n", name, claimed);
 }
 
 int main() {
-    audit<GaussianState>("GaussianState n=1",
-                         GaussianState::bytes(1, 4096, true), 1, 4096, true);
-    audit<GaussianState>("GaussianState n=1 rgb-only",
-                         GaussianState::bytes(1, 4096, false), 1, 4096, false);
-    audit<GaussianState>("GaussianState n=1000",
-                         GaussianState::bytes(1000, 4096, true), 1000, 4096,
+    audit<GaussianState>("GaussianState n=1", GaussianState::bytes(1, 4096, true), 1, 4096, true);
+    audit<GaussianState>("GaussianState n=1 rgb-only", GaussianState::bytes(1, 4096, false), 1,
+                         4096, false);
+    audit<GaussianState>("GaussianState n=1000", GaussianState::bytes(1000, 4096, true), 1000, 4096,
                          true);
-    audit<GaussianState>("GaussianState n=1000 rgb-only",
-                         GaussianState::bytes(1000, 4096, false), 1000, 4096,
-                         false);
+    audit<GaussianState>("GaussianState n=1000 rgb-only", GaussianState::bytes(1000, 4096, false),
+                         1000, 4096, false);
     audit<GradState>("GradState n=1", GradState::bytes(1, true), 1, true);
-    audit<GradState>("GradState n=1 rgb-only", GradState::bytes(1, false), 1,
-                     false);
-    audit<GradState>("GradState n=1000", GradState::bytes(1000, true), 1000,
-                     true);
-    audit<GradState>("GradState n=1000 rgb-only",
-                     GradState::bytes(1000, false), 1000, false);
-    audit<InstanceState>("InstanceState v=1 i=1",
-                         InstanceState::bytes(1, 1, 4096), 1, 1, 4096);
-    audit<InstanceState>("InstanceState v=999 i=1000",
-                         InstanceState::bytes(999, 1000, 4096), 999, 1000, 4096);
-    audit<PixelState>("PixelState p=1 b=0", PixelState::bytes(1, 0, false),
-                      1, 0, false);
-    audit<PixelState>("PixelState p=100000 b=4096 geom",
-                      PixelState::bytes(100000, 4096, true),
+    audit<GradState>("GradState n=1 rgb-only", GradState::bytes(1, false), 1, false);
+    audit<GradState>("GradState n=1000", GradState::bytes(1000, true), 1000, true);
+    audit<GradState>("GradState n=1000 rgb-only", GradState::bytes(1000, false), 1000, false);
+    audit<InstanceState>("InstanceState v=1 i=1", InstanceState::bytes(1, 1, 4096), 1, 1, 4096);
+    audit<InstanceState>("InstanceState v=999 i=1000", InstanceState::bytes(999, 1000, 4096), 999,
+                         1000, 4096);
+    audit<PixelState>("PixelState p=1 b=0", PixelState::bytes(1, 0, false), 1, 0, false);
+    audit<PixelState>("PixelState p=100000 b=4096 geom", PixelState::bytes(100000, 4096, true),
                       100000, 4096, true);
-    audit<PixelState>("PixelState p=100000 b=4096 rgb",
-                      PixelState::bytes(100000, 4096, false),
+    audit<PixelState>("PixelState p=100000 b=4096 rgb", PixelState::bytes(100000, 4096, false),
                       100000, 4096, false);
     audit<TileState>("TileState t=1 b=0", TileState::bytes(1, 0), 1, 0);
-    audit<TileState>("TileState t=1000 b=4096",
-                     TileState::bytes(1000, 4096), 1000, 4096);
-    audit<PointState>("PointState p=1 t=1", PointState::bytes(1, 1, 4096),
-                      1, 1, 4096);
-    audit<PointState>("PointState p=1000 t=1000",
-                      PointState::bytes(1000, 1000, 4096), 1000, 1000, 4096);
+    audit<TileState>("TileState t=1000 b=4096", TileState::bytes(1000, 4096), 1000, 4096);
+    audit<PointState>("PointState p=1 t=1", PointState::bytes(1, 1, 4096), 1, 1, 4096);
+    audit<PointState>("PointState p=1000 t=1000", PointState::bytes(1000, 1000, 4096), 1000, 1000,
+                      4096);
     return 0;
 }

@@ -155,15 +155,15 @@ struct SplatModelGradients {
 };
 
 struct SplatDepthSamples {
-    std::vector<float> camera_points;  // [P,3]
-    std::vector<float> median_depth;   // [P], ray length
+    std::vector<float> camera_points; // [P,3]
+    std::vector<float> median_depth;  // [P], ray length
     std::vector<std::uint32_t> n_contrib;
     std::vector<std::uint32_t> inside;
 };
 
 struct SplatDepthSampleGradients {
     SplatModelGradients model;
-    std::vector<float> points;  // [P,3] world-space query-point gradient
+    std::vector<float> points; // [P,3] world-space query-point gradient
 };
 
 // Inputs and weights for the GGGS multi-view round-trip and planar-NCC loss.
@@ -173,14 +173,14 @@ struct SplatDepthSampleGradients {
 struct SplatMultiViewInput {
     SplatCamera reference_camera;
     SplatCamera neighbour_camera;
-    std::span<const float> reference_depth;   // [P]
-    std::span<const float> reference_normal;  // [3,P]
-    std::span<const float> reference_gray;    // [P]
-    std::span<const float> neighbour_gray;    // [Hn,Wn]
-    std::span<const float> sampled_neighbour_points;  // [P,3]
-    std::span<const std::uint32_t> sampled_inside;    // [P]
-    std::span<const float> reference_mask;    // optional [P]
-    std::span<const float> neighbour_mask;    // optional [Hn,Wn]
+    std::span<const float> reference_depth;          // [P]
+    std::span<const float> reference_normal;         // [3,P]
+    std::span<const float> reference_gray;           // [P]
+    std::span<const float> neighbour_gray;           // [Hn,Wn]
+    std::span<const float> sampled_neighbour_points; // [P,3]
+    std::span<const std::uint32_t> sampled_inside;   // [P]
+    std::span<const float> reference_mask;           // optional [P]
+    std::span<const float> neighbour_mask;           // optional [Hn,Wn]
     float geometry_weight = 0.0F;
     float ncc_weight = 0.0F;
     float pixel_noise_threshold = 1.0F;
@@ -198,14 +198,14 @@ struct SplatMultiViewOutput {
     std::uint64_t ncc_pixels = 0;
     // Already multiplied by geometry_weight / ncc_weight and normalized by
     // their respective accepted-pixel counts, exactly like CUDA.
-    std::vector<float> reference_depth_gradient;   // [P]
-    std::vector<float> reference_normal_gradient;  // [3,P]
-    std::vector<float> sampled_point_gradient;     // [P,3]
+    std::vector<float> reference_depth_gradient;  // [P]
+    std::vector<float> reference_normal_gradient; // [3,P]
+    std::vector<float> sampled_point_gradient;    // [P,3]
 };
 
 struct SplatPhotometricOutput {
     float loss = 0.0F;
-    std::vector<float> gradient;  // [3,H,W]
+    std::vector<float> gradient; // [3,H,W]
 };
 
 // Non-owning storage-buffer slice for zero-copy interop (for example with a
@@ -245,11 +245,11 @@ struct SplatColorCorrectionCommand {
 // slices are owned by the rasterizer and remain valid until its next render.
 // Empty geometry slices mean the render used need_depth=false.
 struct SplatDeviceFrame {
-    SplatBufferView color;         // [3,H,W]
-    SplatBufferView alpha;         // [H,W]
-    SplatBufferView normal;        // [3,H,W], optional
-    SplatBufferView median_depth;  // [H,W], optional
-    SplatBufferView radii;         // [N], int32
+    SplatBufferView color;        // [3,H,W]
+    SplatBufferView alpha;        // [H,W]
+    SplatBufferView normal;       // [3,H,W], optional
+    SplatBufferView median_depth; // [H,W], optional
+    SplatBufferView radii;        // [N], int32
     // Raw uint32 contribution flags. A non-zero value means visible.
     SplatBufferView visibility_bits; // [N], uint32
     std::uint32_t width = 0;
@@ -262,9 +262,9 @@ struct SplatDeviceFrame {
 // directly by backward_device(); `loss_scalar` contains one reduced float and
 // is intended for the occasional logging readback only.
 struct SplatDevicePhotometricOutput {
-    SplatBufferView gradient;     // [3,H,W]
-    SplatBufferView loss_map;     // [3,H,W]
-    SplatBufferView loss_scalar;  // [1]
+    SplatBufferView gradient;    // [3,H,W]
+    SplatBufferView loss_map;    // [3,H,W]
+    SplatBufferView loss_scalar; // [1]
 };
 
 // Raw trainable Gaussian parameters owned by the caller. This is the Vulkan
@@ -272,12 +272,12 @@ struct SplatDevicePhotometricOutput {
 // quaternion normalization and filtered sigmoid opacity) happens in the
 // raster shaders, so Adam can update these exact buffers in place.
 struct SplatDeviceGaussians {
-    SplatBufferView means;           // [N,3]
-    SplatBufferView sh;              // [N,B,3], or signed [N,3] if colors_precomputed
-    SplatBufferView log_scales;      // [N,3]
-    SplatBufferView raw_rotations;   // [N,4]
-    SplatBufferView opacity_logits;  // [N]
-    SplatBufferView filter_3d;       // [N]
+    SplatBufferView means;          // [N,3]
+    SplatBufferView sh;             // [N,B,3], or signed [N,3] if colors_precomputed
+    SplatBufferView log_scales;     // [N,3]
+    SplatBufferView raw_rotations;  // [N,4]
+    SplatBufferView opacity_logits; // [N]
+    SplatBufferView filter_3d;      // [N]
     std::uint32_t count = 0;
     std::uint32_t sh_degree = 0;
     std::uint32_t sh_bases = 0;
@@ -318,7 +318,10 @@ struct ExternalDevice {
     // gradients with hardware float atomics instead of a CAS retry loop.
     bool buffer_float32_atomic_add = false;
 
-    [[nodiscard]] bool valid() const noexcept { return device != VK_NULL_HANDLE; }
+    [[nodiscard]]
+    bool valid() const noexcept {
+        return device != VK_NULL_HANDLE;
+    }
 };
 
 struct ContextOptions {
@@ -338,7 +341,7 @@ struct DeviceInfo {
 // Owns the Vulkan instance, device, queue and descriptor pool the Vulkan
 // backend runs on. Create one, then build rasterizers against it.
 class Context {
-public:
+  public:
     class Impl;
 
     explicit Context(const ContextOptions& options = {});
@@ -349,18 +352,25 @@ public:
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
 
-    [[nodiscard]] const DeviceInfo& device_info() const noexcept;
-    [[nodiscard]] static std::vector<DeviceInfo> enumerate_devices();
+    [[nodiscard]]
+    const DeviceInfo& device_info() const noexcept;
+    [[nodiscard]]
+    static std::vector<DeviceInfo> enumerate_devices();
 
     // Handles every rasterizer built on this Context submits to. They are the
     // adopted ones when ContextOptions::external_device was set.
-    [[nodiscard]] VkInstance instance() const noexcept;
-    [[nodiscard]] VkPhysicalDevice physical_device() const noexcept;
-    [[nodiscard]] VkDevice device() const noexcept;
-    [[nodiscard]] VkQueue queue() const noexcept;
-    [[nodiscard]] std::uint32_t queue_family() const noexcept;
+    [[nodiscard]]
+    VkInstance instance() const noexcept;
+    [[nodiscard]]
+    VkPhysicalDevice physical_device() const noexcept;
+    [[nodiscard]]
+    VkDevice device() const noexcept;
+    [[nodiscard]]
+    VkQueue queue() const noexcept;
+    [[nodiscard]]
+    std::uint32_t queue_family() const noexcept;
 
-private:
+  private:
     std::unique_ptr<Impl> impl_;
 
     friend class SplatRasterizer;
@@ -386,7 +396,7 @@ struct SplatStructureAdamUpdate {
 // Vulkan EWA forward rasterizer. The per-Gaussian state, sorted instances, and
 // pixel snapshots from the latest forward() stay alive for a later backward pass.
 class SplatRasterizer {
-public:
+  public:
     explicit SplatRasterizer(Context& context);
     ~SplatRasterizer();
 
@@ -395,10 +405,9 @@ public:
     SplatRasterizer(const SplatRasterizer&) = delete;
     SplatRasterizer& operator=(const SplatRasterizer&) = delete;
 
-    [[nodiscard]] SplatForwardOutput forward(
-        const SplatGaussians& gaussians,
-        const SplatCamera& camera,
-        const SplatSettings& settings);
+    [[nodiscard]]
+    SplatForwardOutput forward(const SplatGaussians& gaussians, const SplatCamera& camera,
+                               const SplatSettings& settings);
 
     // Keeps the activated Gaussian attributes on the device. render() and
     // render_rgba() reuse them until the next upload or clear.
@@ -406,34 +415,33 @@ public:
     // Zero-copy training model. The caller retains ownership and must keep all
     // views alive until another model is bound or clear_model() is called.
     void bind_model_device(const SplatDeviceGaussians& gaussians);
-    void update_means_and_opacities(
-        std::span<const float> means, std::span<const float> opacities);
+    void update_means_and_opacities(std::span<const float> means, std::span<const float> opacities);
     void clear_model();
-    [[nodiscard]] bool has_model() const noexcept;
-    [[nodiscard]] SplatForwardOutput render(
-        const SplatCamera& camera, const SplatSettings& settings);
+    [[nodiscard]]
+    bool has_model() const noexcept;
+    [[nodiscard]]
+    SplatForwardOutput render(const SplatCamera& camera, const SplatSettings& settings);
     // Render without downloading color, alpha, depth, normals, visibility or
     // radii. The returned attachments can feed loss/backward passes directly.
-    [[nodiscard]] SplatDeviceFrame render_device(
-        const SplatCamera& camera, const SplatSettings& settings);
+    [[nodiscard]]
+    SplatDeviceFrame render_device(const SplatCamera& camera, const SplatSettings& settings);
     // Same as render_device(), but records the selected attachment copies into
     // the frame's final command buffer. The caller preallocates destination
     // buffers and retains them until the call returns.
-    [[nodiscard]] SplatDeviceFrame render_device_copy(
-        const SplatCamera& camera, const SplatSettings& settings,
-        const SplatDeviceFrame& destination);
+    [[nodiscard]]
+    SplatDeviceFrame render_device_copy(const SplatCamera& camera, const SplatSettings& settings,
+                                        const SplatDeviceFrame& destination);
     // Reblend precomputed colors using the latest geometry projection/sort.
     // Consume primary backward first and keep model parameters unchanged.
     // Overwrites the previous colors, attachments and snapshots.
-    [[nodiscard]] SplatDeviceFrame render_colors_device_copy(
-        const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
-        const SplatSettings& settings, const SplatDeviceFrame& destination);
+    [[nodiscard]]
+    SplatDeviceFrame
+    render_colors_device_copy(const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
+                              const SplatSettings& settings, const SplatDeviceFrame& destination);
     // Copies selected attachments into caller-owned VkBuffer slices on the
     // adopted device. Empty destination slices are skipped. This is the bridge
     // used by backend-neutral tensor code without staging through the CPU.
-    void copy_frame_device(
-        const SplatDeviceFrame& source,
-        const SplatDeviceFrame& destination);
+    void copy_frame_device(const SplatDeviceFrame& source, const SplatDeviceFrame& destination);
     // Score the latest render()/render_device() frame. Clears and
     // writes N Float32 values: sum_pixels (opacity * d(sum RGB)/d alpha)^2.
     // Uses canonical rendered colour/background and never updates model/Adam
@@ -444,26 +452,27 @@ public:
     // Loss images are channel-major: color/normal [3,H,W], alpha/depth [H,W].
     // The geometry losses may be empty only when the matching forward used
     // need_depth=false; otherwise an empty span means a zero upstream gradient.
-    [[nodiscard]] SplatBlendGradients backward_blend(
-        std::span<const float> dL_color, std::span<const float> dL_alpha,
-        std::span<const float> dL_median_depth = {},
-        std::span<const float> dL_normal = {});
+    [[nodiscard]]
+    SplatBlendGradients backward_blend(std::span<const float> dL_color,
+                                       std::span<const float> dL_alpha,
+                                       std::span<const float> dL_median_depth = {},
+                                       std::span<const float> dL_normal = {});
     // Full RGB/alpha/depth/normal backward through compositing,
     // projection/covariance, SH, and the optional model activation chain.
-    [[nodiscard]] SplatModelGradients backward(
-        std::span<const float> dL_color, std::span<const float> dL_alpha,
-        std::span<const float> dL_median_depth = {},
-        std::span<const float> dL_normal = {});
+    [[nodiscard]]
+    SplatModelGradients backward(std::span<const float> dL_color, std::span<const float> dL_alpha,
+                                 std::span<const float> dL_median_depth = {},
+                                 std::span<const float> dL_normal = {});
     // Device-resident form of backward_blend. `packed_gradients` contains
     // [mean2d:3*N, conic_opacity:4*N, colors:3*N, ray_plane:4*N, normal:3*N]
     // Float32 values and is zeroed before accumulation. All buffers must belong
     // to this Context's VkDevice.
-    void backward_blend_device(
-        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_gradients,
-        const SplatBufferView& dL_median_depth = {},
-        const SplatBufferView& dL_normal = {});
-    [[nodiscard]] std::uint64_t blend_gradient_float_count() const noexcept;
+    void backward_blend_device(const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+                               const SplatBufferView& packed_gradients,
+                               const SplatBufferView& dL_median_depth = {},
+                               const SplatBufferView& dL_normal = {});
+    [[nodiscard]]
+    std::uint64_t blend_gradient_float_count() const noexcept;
     // Fully device-resident color/alpha backward. The output layout is
     // [means, SH-or-colors, opacities, scales, rotations,
     //  log_scales, raw_rotations, opacity_logits, refine_weight] for the normal
@@ -478,91 +487,85 @@ public:
     // the unfused layout, so this output needs N or 2*N floats instead.
     // In-place structure updates invalidate projection reuse and this frame's
     // backward snapshots; render a fresh frame before another backward.
-    void backward_device(
-        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_model_gradients,
-        const SplatBufferView& dL_median_depth = {},
-        const SplatBufferView& dL_normal = {},
-        const SplatSHAdamUpdate* sh_adam = nullptr,
-        const SplatStructureAdamUpdate* structure_adam = nullptr);
-    [[nodiscard]] std::uint64_t model_gradient_float_count() const noexcept;
+    void backward_device(const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+                         const SplatBufferView& packed_model_gradients,
+                         const SplatBufferView& dL_median_depth = {},
+                         const SplatBufferView& dL_normal = {},
+                         const SplatSHAdamUpdate* sh_adam = nullptr,
+                         const SplatStructureAdamUpdate* structure_adam = nullptr);
+    [[nodiscard]]
+    std::uint64_t model_gradient_float_count() const noexcept;
     // GGGS multi-view median-depth query and its complete backward pass.
     // sample_depth_backward consumes the most recent sample_depth call.
-    [[nodiscard]] SplatDepthSamples sample_depth(
-        std::span<const float> world_points, const SplatCamera& camera,
-        const SplatSettings& settings = {});
-    [[nodiscard]] SplatDepthSampleGradients sample_depth_backward(
-        std::span<const float> dL_camera_points);
+    [[nodiscard]]
+    SplatDepthSamples sample_depth(std::span<const float> world_points, const SplatCamera& camera,
+                                   const SplatSettings& settings = {});
+    [[nodiscard]]
+    SplatDepthSampleGradients sample_depth_backward(std::span<const float> dL_camera_points);
     // These calls retain their own latest query state, but render a neighbour
     // frame internally. Use a separate rasterizer from the reference frame.
-    void sample_depth_device(
-        const SplatBufferView& world_points, std::uint32_t point_count,
-        const SplatCamera& camera, const SplatSettings& settings,
-        const SplatBufferView& camera_points, const SplatBufferView& inside);
+    void sample_depth_device(const SplatBufferView& world_points, std::uint32_t point_count,
+                             const SplatCamera& camera, const SplatSettings& settings,
+                             const SplatBufferView& camera_points, const SplatBufferView& inside);
     // Forward-only integrated occupancy; inside denotes frustum visibility,
     // including rays whose occupancy is zero.
     // reuse_prepared_view queries the preceding occupancy call's projection.
     // Model, camera and settings must match, with no intervening bind or frame.
-    void occupancy_device(
-        const SplatBufferView& world_points, std::uint32_t point_count,
-        const SplatCamera& camera, const SplatSettings& settings,
-        const SplatBufferView& occupancy, const SplatBufferView& inside,
-        bool reuse_prepared_view = false);
-    void sample_depth_backward_device(
-        const SplatBufferView& dL_camera_points,
-        const SplatBufferView& packed_model_gradients,
-        const SplatBufferView& point_gradients,
-        bool omit_appearance_gradients = false);
+    void occupancy_device(const SplatBufferView& world_points, std::uint32_t point_count,
+                          const SplatCamera& camera, const SplatSettings& settings,
+                          const SplatBufferView& occupancy, const SplatBufferView& inside,
+                          bool reuse_prepared_view = false);
+    void sample_depth_backward_device(const SplatBufferView& dL_camera_points,
+                                      const SplatBufferView& packed_model_gradients,
+                                      const SplatBufferView& point_gradients,
+                                      bool omit_appearance_gradients = false);
     // Depth queries have zero appearance derivatives. The optional layout
     // removes the SH/color section and otherwise preserves the model layout.
-    [[nodiscard]] std::uint64_t sample_gradient_float_count(
-        bool omit_appearance_gradients = false) const noexcept;
-    void multi_view_loss_device(
-        const SplatDeviceMultiViewInput& input,
-        const SplatDeviceMultiViewOutput& output);
+    [[nodiscard]]
+    std::uint64_t
+    sample_gradient_float_count(bool omit_appearance_gradients = false) const noexcept;
+    void multi_view_loss_device(const SplatDeviceMultiViewInput& input,
+                                const SplatDeviceMultiViewOutput& output);
     // CUDA-equivalent multi-view loss stage. Feed sampled_point_gradient to
     // sample_depth_backward(); add that result's point gradient through the
     // reference unprojection, and feed the reference gradients to backward().
-    [[nodiscard]] SplatMultiViewOutput multi_view_loss(
-        const SplatMultiViewInput& input);
+    [[nodiscard]]
+    SplatMultiViewOutput multi_view_loss(const SplatMultiViewInput& input);
     // Host parity/debug adapter. It uploads both images and downloads the
     // gradient, so training code must use photara/splat/photometric_loss and
     // fused_l1_ssim_device() instead. Statistics use the CUDA-compatible
     // zero-padded 11x11 Gaussian window and valid 5-pixel reduction crop.
-    [[nodiscard]] SplatPhotometricOutput photometric_loss(
-        std::span<const float> prediction, std::span<const float> target,
-        std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
-        float photometric_weight = 1.0F,
-        std::span<const float> mask = {});
+    [[nodiscard]]
+    SplatPhotometricOutput
+    photometric_loss(std::span<const float> prediction, std::span<const float> target,
+                     std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
+                     float photometric_weight = 1.0F, std::span<const float> mask = {});
     // Low-level device primitive used by photara/splat/photometric_loss. All
     // views must belong to this Context's VkDevice. No image or gradient is
     // copied to the host.
-    [[nodiscard]] SplatDevicePhotometricOutput fused_l1_ssim_device(
-        const SplatBufferView& prediction, const SplatBufferView& target,
-        std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
-        float photometric_weight = 1.0F,
-        const SplatBufferView& mask = {},
-        const SplatBufferView& gradient_destination = {});
+    [[nodiscard]]
+    SplatDevicePhotometricOutput
+    fused_l1_ssim_device(const SplatBufferView& prediction, const SplatBufferView& target,
+                         std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
+                         float photometric_weight = 1.0F, const SplatBufferView& mask = {},
+                         const SplatBufferView& gradient_destination = {});
     // Dispatch Photara's training-only PPISP/bilateral-grid compute kernel.
     // All buffers remain on the adopted Vulkan device.
-    void color_correction_device(
-        const std::array<SplatBufferView, 6>& buffers,
-        const std::array<std::uint32_t, 20>& push_words,
-        std::uint32_t groups_x);
-    void color_correction_batch_device(
-        std::span<const SplatColorCorrectionCommand> commands);
+    void color_correction_device(const std::array<SplatBufferView, 6>& buffers,
+                                 const std::array<std::uint32_t, 20>& push_words,
+                                 std::uint32_t groups_x);
+    void color_correction_batch_device(std::span<const SplatColorCorrectionCommand> commands);
     // Reads exactly one float from the most recent device loss result.
-    [[nodiscard]] float read_photometric_loss(
-        const SplatDevicePhotometricOutput& output);
+    [[nodiscard]]
+    float read_photometric_loss(const SplatDevicePhotometricOutput& output);
     // Same frame as render() with need_depth off, but the color stays on the
     // device as RGBA8: no float readback and no host-side quantization.
-    [[nodiscard]] SplatRgbaImage render_rgba_device(
-        const SplatCamera& camera, const SplatSettings& settings);
-    void render_rgba(
-        const SplatCamera& camera, const SplatSettings& settings,
-        std::vector<std::uint8_t>& rgba);
+    [[nodiscard]]
+    SplatRgbaImage render_rgba_device(const SplatCamera& camera, const SplatSettings& settings);
+    void render_rgba(const SplatCamera& camera, const SplatSettings& settings,
+                     std::vector<std::uint8_t>& rgba);
 
-private:
+  private:
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
@@ -599,22 +602,21 @@ struct ExternalPreviewOptions {
 // preview image. The source buffer has to stay alive through submit(); the
 // call waits until the copy has finished.
 class ExternalImagePreview {
-public:
-    ExternalImagePreview(
-        const PreviewDevice& device, const ExternalPreviewOptions& options);
+  public:
+    ExternalImagePreview(const PreviewDevice& device, const ExternalPreviewOptions& options);
     ~ExternalImagePreview();
     ExternalImagePreview(const ExternalImagePreview&) = delete;
     ExternalImagePreview& operator=(const ExternalImagePreview&) = delete;
 
-    void submit(
-        const SplatBufferView& color, std::uint32_t source_width,
-        std::uint32_t source_height);
-    [[nodiscard]] std::uint64_t frame_count() const noexcept;
+    void submit(const SplatBufferView& color, std::uint32_t source_width,
+                std::uint32_t source_height);
+    [[nodiscard]]
+    std::uint64_t frame_count() const noexcept;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace vulkan
-}  // namespace splat_drender
+} // namespace vulkan
+} // namespace splat_drender

@@ -7,7 +7,7 @@
 namespace splat_drender::cfg {
 
 // Tile size. One CTA renders one tile; one thread renders one pixel.
-constexpr int kTileWidth  = 16;
+constexpr int kTileWidth = 16;
 constexpr int kTileHeight = 16;
 constexpr int kTileThreads = kTileWidth * kTileHeight;
 
@@ -50,4 +50,4 @@ constexpr int kGaussianBlock = 256;
 constexpr int kShRowStride = 48;
 constexpr int kShRowWords = kShRowStride / 4;
 
-}  // namespace splat_drender::cfg
+} // namespace splat_drender::cfg

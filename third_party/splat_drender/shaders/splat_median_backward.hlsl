@@ -30,7 +30,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID) {
 
     uint px = group_id.x * 16u + group_thread.x;
     uint py = group_id.y * 16u + group_thread.y;
-    if (px >= width || py >= height) return;
+    if (px >= width || py >= height)
+        return;
     uint pixel = py * width + px;
     float ray_z = pixel_ray_z(float(px), float(py), mode, fx, fy, cx, cy, k1, k2, k3, k4);
     float median = out_f[7u * pixel_count + pixel] / max(ray_z, 1.0e-8f);
@@ -38,7 +39,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID) {
     median_state[pixel] = float2(median, 0.0f);
 
     uint last = out_u[gaussian_count + pixel];
-    if (median == 0.0f || last == 0u || upstream == 0.0f) return;
+    if (median == 0.0f || last == 0u || upstream == 0.0f)
+        return;
     uint tile = group_id.y * tiles_x + group_id.x;
     uint begin = ranges[2u * tile];
     uint finish = min(ranges[2u * tile + 1u], begin + last);
@@ -47,12 +49,13 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID) {
         uint gaussian = instances[at];
         float2 mean = gauss_f[7u * gaussian].xy;
         float4 conic = gauss_f[7u * gaussian + 1u];
-        float2 delta = float2(
-            wrap_dx(mean.x - float(px), wrap_width, mode), mean.y - float(py));
+        float2 delta = float2(wrap_dx(mean.x - float(px), wrap_width, mode), mean.y - float(py));
         float power = gaussian_power(conic, delta.x, delta.y);
-        if (power > 0.0f) continue;
+        if (power > 0.0f)
+            continue;
         float alpha = min(kAlphaClip, conic.w * exp(power));
-        if (alpha < kAlphaFloor) continue;
+        if (alpha < kAlphaFloor)
+            continue;
         float4 plane = gauss_f[7u * gaussian + 3u];
         float peak = plane.x * delta.x + plane.y * delta.y + plane.z;
         float td = (median - peak) * plane.w;

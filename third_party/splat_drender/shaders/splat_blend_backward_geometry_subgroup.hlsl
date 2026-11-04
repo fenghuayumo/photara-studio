@@ -42,23 +42,25 @@ groupshared float4 gs_plane[256];
 groupshared float3 gs_normal[256];
 
 void atomic_add_f32(uint index, float value) {
-    if (value == 0.0f || isnan(value) || isinf(value)) return;
+    if (value == 0.0f || isnan(value) || isinf(value))
+        return;
 #ifdef SPLAT_GEOMETRY_NATIVE_ATOMIC
     op_atomic_f_add(grad_values[index], kDeviceScope, kRelaxed, value);
 #else
     uint expected = grad_values[index];
     [loop] for (;;) {
         uint observed;
-        InterlockedCompareExchange(grad_values[index],expected,asuint(asfloat(expected)+value),observed);
-        if(observed==expected) return;
-        expected=observed;
+        InterlockedCompareExchange(grad_values[index], expected, asuint(asfloat(expected) + value),
+                                   observed);
+        if (observed == expected)
+            return;
+        expected = observed;
     }
 #endif
 }
 
-void commit_gradient(uint gaussian, uint count, float3 acc_mean,
-                     float4 acc_conic, float3 acc_color, float4 acc_plane,
-                     float3 acc_normal, float acc_refine) {
+void commit_gradient(uint gaussian, uint count, float3 acc_mean, float4 acc_conic, float3 acc_color,
+                     float4 acc_plane, float3 acc_normal, float acc_refine) {
     uint mean_base = gaussian * 3u;
     uint conic_base = count * 3u + gaussian * 4u;
     uint color_base = count * 7u + gaussian * 3u;
@@ -131,7 +133,8 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         gs_normal[group_thread] = gauss_f[gaussian * 7u + 4u].xyz;
     }
     GroupMemoryBarrierWithGroupSync();
-    if (!bucket_active) return;
+    if (!bucket_active)
+        return;
 
     const bool entry_valid = pos < tile_n;
     const uint slot = group_thread;
@@ -174,27 +177,31 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             stage_last = out_u[count + staged_pixel];
             const float4 stage_snap = snap[bucket_idx * 256u + staged_local];
             const float3 stage_final = float3(out_f[8u * pixel_count + staged_pixel],
-                out_f[9u * pixel_count + staged_pixel],
-                out_f[10u * pixel_count + staged_pixel]);
+                                              out_f[9u * pixel_count + staged_pixel],
+                                              out_f[10u * pixel_count + staged_pixel]);
             stage_alpha = out_f[3u * pixel_count + staged_pixel];
-            const float3 stage_grad = float3(loss_color[staged_pixel],
-                                             loss_color[pixel_count + staged_pixel],
-                                             loss_color[2u * pixel_count + staged_pixel]);
-            const float stage_loss_alpha =
-                pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
-            stage_after0_t = float4(stage_final - stage_snap.xyz,
-                                    stage_snap.w);
-            stage_grad_dfin =
-                float4(stage_grad, dot(background, stage_grad) - stage_loss_alpha);
+            const float3 stage_grad =
+                float3(loss_color[staged_pixel], loss_color[pixel_count + staged_pixel],
+                       loss_color[2u * pixel_count + staged_pixel]);
+            const float stage_loss_alpha = pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
+            stage_after0_t = float4(stage_final - stage_snap.xyz, stage_snap.w);
+            stage_grad_dfin = float4(stage_grad, dot(background, stage_grad) - stage_loss_alpha);
             if (geometry) {
-                float3 normal_out = float3(out_f[4u*pixel_count+staged_pixel],
-                    out_f[5u*pixel_count+staged_pixel],out_f[6u*pixel_count+staged_pixel]);
-                float3 normal_grad = stage_alpha > 0.0f ? float3(loss_normal[staged_pixel],
-                    loss_normal[pixel_count+staged_pixel],loss_normal[2u*pixel_count+staged_pixel])/stage_alpha : 0.0f;
-                stage_normal_grad_dfin=float4(normal_grad,dot(normal_grad,normal_out));
-                stage_normal_after_dot=dot(normal_out*stage_alpha-
-                    snap[bucket_limit*256u+bucket_idx*256u+staged_local].xyz,normal_grad);
-                stage_median=median_state[staged_pixel];
+                float3 normal_out = float3(out_f[4u * pixel_count + staged_pixel],
+                                           out_f[5u * pixel_count + staged_pixel],
+                                           out_f[6u * pixel_count + staged_pixel]);
+                float3 normal_grad =
+                    stage_alpha > 0.0f
+                        ? float3(loss_normal[staged_pixel], loss_normal[pixel_count + staged_pixel],
+                                 loss_normal[2u * pixel_count + staged_pixel]) /
+                              stage_alpha
+                        : 0.0f;
+                stage_normal_grad_dfin = float4(normal_grad, dot(normal_grad, normal_out));
+                stage_normal_after_dot =
+                    dot(normal_out * stage_alpha -
+                            snap[bucket_limit * 256u + bucket_idx * 256u + staged_local].xyz,
+                        normal_grad);
+                stage_median = median_state[staged_pixel];
             }
         }
 
@@ -207,27 +214,23 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const float alpha_final = WaveReadLaneAt(stage_alpha, j);
             const float4 grad_dfin = WaveReadLaneAt(stage_grad_dfin, j);
             const float3 pixel_grad = grad_dfin.xyz;
-            const float4 normal_grad_dfin = WaveReadLaneAt(stage_normal_grad_dfin,j);
-            const float normal_after0_dot = WaveReadLaneAt(stage_normal_after_dot,j);
-            const float2 ms = WaveReadLaneAt(stage_median,j);
+            const float4 normal_grad_dfin = WaveReadLaneAt(stage_normal_grad_dfin, j);
+            const float normal_after0_dot = WaveReadLaneAt(stage_normal_after_dot, j);
+            const float2 ms = WaveReadLaneAt(stage_median, j);
             const float3 normal_grad = normal_grad_dfin.xyz;
 
-            const bool pixel_active = entry_valid && px < width && py < height &&
-                pos < last &&
-                (wrap_width != 0 ||
-                 (px >= bounds.x && px < bounds.y && py >= bounds.z && py < bounds.w));
-            float2 qdelta = float2(
-                wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
-                gs_mean[slot].y - float(py));
+            const bool pixel_active = entry_valid && px < width && py < height && pos < last &&
+                                      (wrap_width != 0 || (px >= bounds.x && px < bounds.y &&
+                                                           py >= bounds.z && py < bounds.w));
+            float2 qdelta = float2(wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
+                                   gs_mean[slot].y - float(py));
             float power = gaussian_power(gs_conic[slot], qdelta.x, qdelta.y);
             float qG = power <= 0.0f ? exp(power) : 0.0f;
-            float qalpha = pixel_active && qG > 0.0f
-                ? min(kAlphaClip, gs_conic[slot].w * qG)
-                : 0.0f;
+            float qalpha =
+                pixel_active && qG > 0.0f ? min(kAlphaClip, gs_conic[slot].w * qG) : 0.0f;
             qalpha = qalpha >= kAlphaFloor ? qalpha : 0.0f;
 
-            const float transmittance =
-                after0_t.w * WavePrefixProduct(1.0f - qalpha);
+            const float transmittance = after0_t.w * WavePrefixProduct(1.0f - qalpha);
             const float blend_weight = qalpha * transmittance;
             // The prefix color only ever reaches the gradient projected onto the
             // pixel gradient, so the channel-wise prefix sum folds into one scalar
@@ -235,37 +238,38 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const float color_after_dot =
                 dot(after0_t.xyz - blend_weight * color, pixel_grad) -
                 WavePrefixSum(blend_weight * dot(gs_color[slot], pixel_grad));
-            const float normal_after_dot = normal_after0_dot -
-                blend_weight*dot(gs_normal[slot],normal_grad) -
-                WavePrefixSum(blend_weight*dot(gs_normal[slot],normal_grad));
-            if (!pixel_active || qalpha == 0.0f) continue;
+            const float normal_after_dot =
+                normal_after0_dot - blend_weight * dot(gs_normal[slot], normal_grad) -
+                WavePrefixSum(blend_weight * dot(gs_normal[slot], normal_grad));
+            if (!pixel_active || qalpha == 0.0f)
+                continue;
 
             const float final_t = 1.0f - alpha_final;
-            const float d_final_t_render =
-                grad_dfin.w;
+            const float d_final_t_render = grad_dfin.w;
             const float inv_1ma = 1.0f / (1.0f - qalpha);
             float d_opacity_render =
                 transmittance * dot(color, pixel_grad) - color_after_dot * inv_1ma;
             float d_opacity = d_opacity_render;
             float d_peak = 0.0f;
             if (geometry) {
-                d_opacity += transmittance*dot(gs_normal[slot],normal_grad) - normal_after_dot*inv_1ma;
-                acc_normal += blend_weight*normal_grad;
+                d_opacity +=
+                    transmittance * dot(gs_normal[slot], normal_grad) - normal_after_dot * inv_1ma;
+                acc_normal += blend_weight * normal_grad;
                 const float4 plane = gs_plane[slot];
-                const float peak = plane.x*qdelta.x+plane.y*qdelta.y+plane.z;
-                const float td = (ms.x-peak)*plane.w;
-                const float ge = exp(-0.5f*td*td), gt = qalpha*ge;
-                float d_gt = ms.y*0.25f/(1.0f-gt);
-                d_gt = ms.x>peak ? d_gt : -d_gt;
-                d_gt = plane.w>0.0f ? d_gt : 0.0f;
-                d_opacity += d_gt*ge-ms.y*(td>0.0f ? 0.5f*inv_1ma : 0.0f);
-                const float d_delta = -d_gt*gt*td;
-                acc_plane.w += d_delta*(ms.x-peak);
-                d_peak = -d_delta*plane.w;
-                acc_plane.xyz += float3(d_peak*qdelta.x,d_peak*qdelta.y,d_peak);
+                const float peak = plane.x * qdelta.x + plane.y * qdelta.y + plane.z;
+                const float td = (ms.x - peak) * plane.w;
+                const float ge = exp(-0.5f * td * td), gt = qalpha * ge;
+                float d_gt = ms.y * 0.25f / (1.0f - gt);
+                d_gt = ms.x > peak ? d_gt : -d_gt;
+                d_gt = plane.w > 0.0f ? d_gt : 0.0f;
+                d_opacity += d_gt * ge - ms.y * (td > 0.0f ? 0.5f * inv_1ma : 0.0f);
+                const float d_delta = -d_gt * gt * td;
+                acc_plane.w += d_delta * (ms.x - peak);
+                d_peak = -d_delta * plane.w;
+                acc_plane.xyz += float3(d_peak * qdelta.x, d_peak * qdelta.y, d_peak);
             }
             d_opacity_render -= final_t * inv_1ma * d_final_t_render;
-            d_opacity -= final_t * inv_1ma * (d_final_t_render+normal_grad_dfin.w);
+            d_opacity -= final_t * inv_1ma * (d_final_t_render + normal_grad_dfin.w);
             if (mode == kModeFisheye && conic.w * qG >= kAlphaClip) {
                 d_opacity = 0.0f;
                 d_opacity_render = 0.0f;
@@ -275,22 +279,18 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const float dG = conic.w * d_opacity;
             const float dG_render = conic.w * d_opacity_render;
             const float gdx = qG * qdelta.x, gdy = qG * qdelta.y;
-            const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak*gs_plane[slot].x;
-            const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak*gs_plane[slot].y;
+            const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * gs_plane[slot].x;
+            const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * gs_plane[slot].y;
             acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
-            const float refine_x =
-                dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
-            const float refine_y =
-                dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
-            acc_refine += length(float2(refine_x, refine_y)) /
-                          max(alpha_final, 1.0e-5f);
-            acc_conic += float4(-0.5f * gdx * qdelta.x * dG,
-                                -0.5f * gdx * qdelta.y * dG,
+            const float refine_x = dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
+            const float refine_y = dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
+            acc_refine += length(float2(refine_x, refine_y)) / max(alpha_final, 1.0e-5f);
+            acc_conic += float4(-0.5f * gdx * qdelta.x * dG, -0.5f * gdx * qdelta.y * dG,
                                 -0.5f * gdy * qdelta.y * dG, qG * d_opacity);
         }
     }
 
     if (entry_valid)
-        commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color,
-                        acc_plane, acc_normal, acc_refine);
+        commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color, acc_plane, acc_normal,
+                        acc_refine);
 }

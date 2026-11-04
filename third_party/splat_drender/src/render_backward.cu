@@ -37,29 +37,22 @@ SD_D2 inline bool overlaps(ushort4 b, const WarpBounds& w) {
     return b.x < w.x1 && b.y > w.x0 && b.z < w.y1 && b.w > w.y0;
 }
 
-}  // namespace
+} // namespace
 
 // ---------------------------------------------------------------------------
 // dT/dtm accumulation for the median-depth gradient (thread-per-pixel walk,
 // same contributor numbering as the forward pass).
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(cfg::kTileThreads)
-median_scale_walk(const uint2* __restrict__ tile_range,
-                  const unsigned* __restrict__ instance_value, int width,
-                  int height, CameraIntrinsics K, int wrap_width,
-                  const float2* __restrict__ mean2d,
-                  const float4* __restrict__ conic_opacity,
-                  const float4* __restrict__ ray_plane,
-                  const ushort4* __restrict__ screen_bounds,
-                  const unsigned* __restrict__ n_contrib,
-                  const unsigned* __restrict__ max_contributor,
-                  const float* __restrict__ median_depth_out,
-                  const float* __restrict__ dL_dmedian_in,
-                  float* __restrict__ dL_dmt_out) {
+__global__ void __launch_bounds__(cfg::kTileThreads) median_scale_walk(
+    const uint2* __restrict__ tile_range, const unsigned* __restrict__ instance_value, int width,
+    int height, CameraIntrinsics K, int wrap_width, const float2* __restrict__ mean2d,
+    const float4* __restrict__ conic_opacity, const float4* __restrict__ ray_plane,
+    const ushort4* __restrict__ screen_bounds, const unsigned* __restrict__ n_contrib,
+    const unsigned* __restrict__ max_contributor, const float* __restrict__ median_depth_out,
+    const float* __restrict__ dL_dmedian_in, float* __restrict__ dL_dmt_out) {
     auto block = cg::this_thread_block();
     const unsigned tiles_x = (width + cfg::kTileWidth - 1) / cfg::kTileWidth;
-    const unsigned tile_id =
-        block.group_index().y * tiles_x + block.group_index().x;
+    const unsigned tile_id = block.group_index().y * tiles_x + block.group_index().x;
     const int pix_min_x = block.group_index().x * cfg::kTileWidth;
     const int pix_min_y = block.group_index().y * cfg::kTileHeight;
     const int pix_x = pix_min_x + block.thread_index().x;
@@ -82,11 +75,11 @@ median_scale_walk(const uint2* __restrict__ tile_range,
         last_contributor = n_contrib[pix_id];
         // A zero upstream gradient keeps dL_dmt at zero whatever the walk
         // accumulates, so the walk itself can stop immediately.
-        done = (mDepth == 0.f) || (last_contributor == 0) ||
-               (dL_dpixel_mt == 0.f);
+        done = (mDepth == 0.f) || (last_contributor == 0) || (dL_dpixel_mt == 0.f);
     }
     if (max_contrib == 0) {
-        if (inside) dL_dmt_out[pix_id] = 0.f;
+        if (inside)
+            dL_dmt_out[pix_id] = 0.f;
         return;
     }
 
@@ -110,13 +103,12 @@ median_scale_walk(const uint2* __restrict__ tile_range,
     __shared__ ushort4 sbounds[cfg::kTileThreads];
 
     float dT_dtm = 0.f;
-    const int rounds =
-        (int(max_contrib) + cfg::kTileThreads - 1) / cfg::kTileThreads;
+    const int rounds = (int(max_contrib) + cfg::kTileThreads - 1) / cfg::kTileThreads;
     int todo = int(max_contrib);
     unsigned contributor = 0;
-    for (int round = 0; round < rounds;
-         ++round, todo -= cfg::kTileThreads) {
-        if (__syncthreads_and(done)) break;
+    for (int round = 0; round < rounds; ++round, todo -= cfg::kTileThreads) {
+        if (__syncthreads_and(done))
+            break;
         const int progress = round * cfg::kTileThreads + block.thread_rank();
         if (progress < int(max_contrib)) {
             const unsigned g = instance_value[range.x + progress];
@@ -130,17 +122,18 @@ median_scale_walk(const uint2* __restrict__ tile_range,
         for (int j = 0; !done && j < batch; ++j) {
             contributor++;
             done = contributor >= last_contributor;
-            if (!overlaps(sbounds[j], wb)) continue;
+            if (!overlaps(sbounds[j], wb))
+                continue;
 
             const float2 d =
-                make_float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode),
-                            sxy[j].y - pixf.y);
+                make_float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode), sxy[j].y - pixf.y);
             const float4 co = sconic[j];
-            const float power =
-                geo::gaussian_power(co, d.x, d.y);
-            if (power > 0.f) continue;
+            const float power = geo::gaussian_power(co, d.x, d.y);
+            if (power > 0.f)
+                continue;
             const float alpha = fminf(K.alpha_clip, co.w * expf(power));
-            if (alpha < cfg::kAlphaFloor) continue;
+            if (alpha < cfg::kAlphaFloor)
+                continue;
 
             const float4 rp = splane[j];
             const float t_peak = rp.x * d.x + rp.y * d.y + rp.z;
@@ -160,37 +153,26 @@ median_scale_walk(const uint2* __restrict__ tile_range,
 // Bucket-parallel blending backward (FasterGS transposition).
 // ---------------------------------------------------------------------------
 template <bool GEOMETRY>
-__global__ void __launch_bounds__(256)
-blend_bucket_backward(const uint2* __restrict__ tile_range,
-                      const unsigned* __restrict__ instance_value, int width,
-                      int height, CameraIntrinsics K, int wrap_width,
-                      float3 background, const float2* __restrict__ mean2d,
-                      const float4* __restrict__ conic_opacity,
-                      const float3* __restrict__ rgb,
-                      const float* __restrict__ colors,
-                      const float4* __restrict__ ray_plane,
-                      const float3* __restrict__ normal,
-                      const ushort4* __restrict__ screen_bounds,
-                      const float* __restrict__ alphas,
-                      const float* __restrict__ normal_map,
-                      const float* __restrict__ median_depth_out,
-                      const unsigned* __restrict__ n_contrib,
-                      const unsigned* __restrict__ max_contributor,
-                      const unsigned* __restrict__ bucket_offset,
-                      const unsigned* __restrict__ bucket_tile,
-                      const ws::PixelState pst, const float* __restrict__ dL_dpixel_in,
-                      const float* __restrict__ dL_dmedian_in,
-                      const float* __restrict__ dL_dalpha_in,
-                      const float* __restrict__ dL_dnormal_in,
-                      ws::GradState gs, float* __restrict__ dL_dcolors,
-                      float* __restrict__ refine_weight,
-                      const float* __restrict__ densify_map,
-                      float* __restrict__ densify_weight,
-                      float* __restrict__ densify_weight_den, int buckets) {
+__global__ void __launch_bounds__(256) blend_bucket_backward(
+    const uint2* __restrict__ tile_range, const unsigned* __restrict__ instance_value, int width,
+    int height, CameraIntrinsics K, int wrap_width, float3 background,
+    const float2* __restrict__ mean2d, const float4* __restrict__ conic_opacity,
+    const float3* __restrict__ rgb, const float* __restrict__ colors,
+    const float4* __restrict__ ray_plane, const float3* __restrict__ normal,
+    const ushort4* __restrict__ screen_bounds, const float* __restrict__ alphas,
+    const float* __restrict__ normal_map, const float* __restrict__ median_depth_out,
+    const unsigned* __restrict__ n_contrib, const unsigned* __restrict__ max_contributor,
+    const unsigned* __restrict__ bucket_offset, const unsigned* __restrict__ bucket_tile,
+    const ws::PixelState pst, const float* __restrict__ dL_dpixel_in,
+    const float* __restrict__ dL_dmedian_in, const float* __restrict__ dL_dalpha_in,
+    const float* __restrict__ dL_dnormal_in, ws::GradState gs, float* __restrict__ dL_dcolors,
+    float* __restrict__ refine_weight, const float* __restrict__ densify_map,
+    float* __restrict__ densify_weight, float* __restrict__ densify_weight_den, int buckets) {
     const int warp_id = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int bucket_idx = blockIdx.x * 8 + warp_id;
-    if (bucket_idx >= buckets) return;
+    if (bucket_idx >= buckets)
+        return;
 
     const unsigned tile_id = bucket_tile[bucket_idx];
     const uint2 range = tile_range[tile_id];
@@ -198,7 +180,8 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     const int tile_bucket = bucket_idx - int(tile_first);
     const unsigned tile_max = max_contributor[tile_id];
     // Upper-bound tail buckets park at tile 0 far beyond its bucket count.
-    if (unsigned(tile_bucket) * 32u >= tile_max) return;
+    if (unsigned(tile_bucket) * 32u >= tile_max)
+        return;
 
     const int tile_n = range.y - range.x;
     const int pos = tile_bucket * 32 + lane;
@@ -228,8 +211,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     const int pix_min_x = int(tile_id % tiles_x) * cfg::kTileWidth;
     const int pix_min_y = int(tile_id / tiles_x) * cfg::kTileHeight;
     const std::size_t pixels = std::size_t(width) * height;
-    const float4* __restrict__ snap_ct =
-        pst.snap_ct + (std::size_t(bucket_idx) << 8);
+    const float4* __restrict__ snap_ct = pst.snap_ct + (std::size_t(bucket_idx) << 8);
     const float4* __restrict__ snap_normal =
         GEOMETRY ? pst.snap_normal + (std::size_t(bucket_idx) << 8) : nullptr;
 
@@ -274,8 +256,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
                 const int py = pix_min_y + (local >> 4);
                 const bool pin = px < width && py < height;
                 const unsigned pid = unsigned(width) * py + px;
-                const float4 sct = pin ? snap_ct[local]
-                                       : make_float4(0.f, 0.f, 0.f, 1.f);
+                const float4 sct = pin ? snap_ct[local] : make_float4(0.f, 0.f, 0.f, 1.f);
                 float3 ctot = make_float3(0.f, 0.f, 0.f);
                 float3 grad = make_float3(0.f, 0.f, 0.f);
                 float w_final = 0.f;
@@ -288,55 +269,42 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
                 unsigned last = 0;
                 if (pin) {
                     w_final = alphas[pid];
-                    ctot = make_float3(pst.total_color[pid],
-                                       pst.total_color[pixels + pid],
+                    ctot = make_float3(pst.total_color[pid], pst.total_color[pixels + pid],
                                        pst.total_color[2 * pixels + pid]);
-                    grad = make_float3(dL_dpixel_in[pid],
-                                       dL_dpixel_in[pixels + pid],
+                    grad = make_float3(dL_dpixel_in[pid], dL_dpixel_in[pixels + pid],
                                        dL_dpixel_in[2 * pixels + pid]);
                     // The reference snapshots the render branch BEFORE the
                     // geometry additions: it keeps the -dL_dalpha term.
-                    dL_dfinalT_render = background.x * grad.x +
-                                        background.y * grad.y +
-                                        background.z * grad.z -
-                                        dL_dalpha_in[pid];
+                    dL_dfinalT_render = background.x * grad.x + background.y * grad.y +
+                                        background.z * grad.z - dL_dalpha_in[pid];
                     dL_dfinalT = dL_dfinalT_render;
                     last = n_contrib[pid];
                     if constexpr (GEOMETRY) {
                         // Reference builds unnormalized accumulated normals
                         // (out_normal = Normal / (1 - T)).
                         const float inv_w = w_final > 0.f ? 1.f / w_final : 0.f;
-                        const float nm[3] = {
-                            normal_map[pid], normal_map[pixels + pid],
-                            normal_map[2 * pixels + pid]};
-                        gnorm = make_float3(
-                            dL_dnormal_in[pid] * inv_w,
-                            dL_dnormal_in[pixels + pid] * inv_w,
-                            dL_dnormal_in[2 * pixels + pid] * inv_w);
-                        dL_dfinalT += gnorm.x * nm[0] + gnorm.y * nm[1] +
-                                      gnorm.z * nm[2];
-                        ntot = make_float3(nm[0] * w_final, nm[1] * w_final,
-                                           nm[2] * w_final);
+                        const float nm[3] = {normal_map[pid], normal_map[pixels + pid],
+                                             normal_map[2 * pixels + pid]};
+                        gnorm = make_float3(dL_dnormal_in[pid] * inv_w,
+                                            dL_dnormal_in[pixels + pid] * inv_w,
+                                            dL_dnormal_in[2 * pixels + pid] * inv_w);
+                        dL_dfinalT += gnorm.x * nm[0] + gnorm.y * nm[1] + gnorm.z * nm[2];
+                        ntot = make_float3(nm[0] * w_final, nm[1] * w_final, nm[2] * w_final);
                         const float rln = pixel_ray_z(float(px), float(py), K);
                         mDepth = median_depth_out[pid] / fmaxf(rln, 1.0e-8f);
                         dL_dmt = pst.dL_dmt[pid];
                     }
                 }
-                s_state[warp_id][lane] = make_float4(ctot.x - sct.x,
-                                                     ctot.y - sct.y,
-                                                     ctot.z - sct.z, sct.w);
-                s_c0[warp_id][lane] =
-                    make_float4(grad.x, grad.y, grad.z, dL_dfinalT);
-                s_c1[warp_id][lane] = make_float4(1.f - w_final, mDepth,
-                                                  dL_dmt, dL_dfinalT_render);
+                s_state[warp_id][lane] =
+                    make_float4(ctot.x - sct.x, ctot.y - sct.y, ctot.z - sct.z, sct.w);
+                s_c0[warp_id][lane] = make_float4(grad.x, grad.y, grad.z, dL_dfinalT);
+                s_c1[warp_id][lane] = make_float4(1.f - w_final, mDepth, dL_dmt, dL_dfinalT_render);
                 s_last[warp_id][lane] = last;
                 if constexpr (GEOMETRY) {
                     const float4 sn = snap_normal[local];
                     s_nstate[warp_id][lane] =
-                        make_float4(ntot.x - sn.x, ntot.y - sn.y,
-                                    ntot.z - sn.z, 0.f);
-                    s_gnorm[warp_id][lane] =
-                        make_float4(gnorm.x, gnorm.y, gnorm.z, 0.f);
+                        make_float4(ntot.x - sn.x, ntot.y - sn.y, ntot.z - sn.z, 0.f);
+                    s_gnorm[warp_id][lane] = make_float4(gnorm.x, gnorm.y, gnorm.z, 0.f);
                 }
             }
             __syncwarp();
@@ -398,26 +366,28 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
                 gnz = gg.z;
             }
         }
-        if (idx < 0 || idx >= cfg::kTileThreads) continue;
+        if (idx < 0 || idx >= cfg::kTileThreads)
+            continue;
 
         const int px = pix_min_x + (idx & 15);
         const int py = pix_min_y + (idx >> 4);
         const bool pin = px < width && py < height;
-        if (!valid_instance || !pin || unsigned(pos) >= last_contrib) continue;
+        if (!valid_instance || !pin || unsigned(pos) >= last_contrib)
+            continue;
         // The screen bounds are the exact axis-aligned box of the
         // alpha >= floor ellipse, so pixels outside were never blended.
-        if (wrap_width == 0 && (px < bounds.x || px >= bounds.y ||
-                                py < bounds.z || py >= bounds.w))
+        if (wrap_width == 0 && (px < bounds.x || px >= bounds.y || py < bounds.z || py >= bounds.w))
             continue;
 
         const float dx = wrap_dx(xy.x - float(px), wrap_width, K.mode);
         const float dy = xy.y - float(py);
-        const float power =
-            geo::gaussian_power(co, dx, dy);
-        if (power > 0.f) continue;
+        const float power = geo::gaussian_power(co, dx, dy);
+        if (power > 0.f)
+            continue;
         const float G = expf(power);
         const float alpha = fminf(K.alpha_clip, co.w * G);
-        if (alpha < cfg::kAlphaFloor) continue;
+        if (alpha < cfg::kAlphaFloor)
+            continue;
 
         const float blend_weight = alpha * T;
         const float inv_1ma = 1.f / (1.f - alpha);
@@ -435,18 +405,15 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
         // Reference chains equal (state-after / T_next) dots; folding T
         // into both terms (FasterGS form) avoids the trailing *= T.
         const float c_dot = col.x * gpx + col.y * gpy + col.z * gpz;
-        const float accum_color_dot =
-            (cax * gpx + cay * gpy + caz * gpz) * inv_1ma;
+        const float accum_color_dot = (cax * gpx + cay * gpy + caz * gpz) * inv_1ma;
         float dL_dopa_render = T * c_dot - accum_color_dot;
         float dL_dopa = dL_dopa_render;
         float dL_dopa_sigma = 0.f;
         float dL_dt = 0.f;
 
         if constexpr (GEOMETRY) {
-            const float n_dot =
-                nrm.x * gnx + nrm.y * gny + nrm.z * gnz;
-            const float accum_normal_dot =
-                (nax * gnx + nay * gny + naz * gnz) * inv_1ma;
+            const float n_dot = nrm.x * gnx + nrm.y * gny + nrm.z * gnz;
+            const float accum_normal_dot = (nax * gnx + nay * gny + naz * gnz) * inv_1ma;
             dL_dopa += T * n_dot - accum_normal_dot;
             acc_normal.x += blend_weight * gnx;
             acc_normal.y += blend_weight * gny;
@@ -462,9 +429,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
             float dL_dGt = dL_dmt * 0.25f / (1.f - Gt);
             dL_dGt = mDepth > t_peak ? dL_dGt : -dL_dGt;
             dL_dGt = rsigma > 0.f ? dL_dGt : 0.f;
-            dL_dopa_sigma =
-                dL_dGt * G_exp -
-                dL_dmt * (t_delta > 0.f ? 0.5f * inv_1ma : 0.f);
+            dL_dopa_sigma = dL_dGt * G_exp - dL_dmt * (t_delta > 0.f ? 0.5f * inv_1ma : 0.f);
             const float dL_ddelta = -dL_dGt * Gt * t_delta;
             acc_ray_plane.w += dL_ddelta * (mDepth - t_peak);
             dL_dt = -dL_ddelta * rsigma;
@@ -473,7 +438,8 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
             acc_ray_plane.z += dL_dt;
         }
 
-        if constexpr (GEOMETRY) dL_dopa += dL_dopa_sigma;
+        if constexpr (GEOMETRY)
+            dL_dopa += dL_dopa_sigma;
         dL_dopa_render += -T_final * inv_1ma * dL_fin_r;
         dL_dopa += -T_final * inv_1ma * dL_fin;
 
@@ -533,8 +499,10 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
         atomicAdd(&gs.d_conic[g].y, acc_conic.y);
         atomicAdd(&gs.d_conic[g].z, acc_conic.z);
         atomicAdd(&gs.d_conic[g].w, acc_conic.w);
-        if (refine_weight != nullptr) atomicAdd(&refine_weight[g], acc_refine);
-        if (densify_weight != nullptr) atomicAdd(&densify_weight[g], acc_densify);
+        if (refine_weight != nullptr)
+            atomicAdd(&refine_weight[g], acc_refine);
+        if (densify_weight != nullptr)
+            atomicAdd(&densify_weight[g], acc_densify);
         if (densify_weight_den != nullptr)
             atomicAdd(&densify_weight_den[g], acc_densify_den);
         if constexpr (GEOMETRY) {
@@ -553,17 +521,16 @@ __device__ inline float structure_sigmoid(float x) {
     return 1.f / (1.f + expf(-x));
 }
 
-__device__ inline void adam_scalar(
-    float* parameter, int index, float grad, float* first, float* second,
-    float lr, float beta1, float beta2, float correction1, float correction2,
-    float epsilon, float clamp_min, float clamp_max) {
+__device__ inline void adam_scalar(float* parameter, int index, float grad, float* first,
+                                   float* second, float lr, float beta1, float beta2,
+                                   float correction1, float correction2, float epsilon,
+                                   float clamp_min, float clamp_max) {
     const float previous = parameter[index];
     if (!isfinite(previous) || !isfinite(grad)) {
         first[index] = 0.f;
         second[index] = 0.f;
-        parameter[index] = isfinite(previous)
-            ? fminf(fmaxf(previous, clamp_min), clamp_max)
-            : fminf(fmaxf(0.f, clamp_min), clamp_max);
+        parameter[index] = isfinite(previous) ? fminf(fmaxf(previous, clamp_min), clamp_max)
+                                              : fminf(fmaxf(0.f, clamp_min), clamp_max);
         return;
     }
     const float m = beta1 * first[index] + (1.f - beta1) * grad;
@@ -576,21 +543,19 @@ __device__ inline void adam_scalar(
     }
     first[index] = m;
     second[index] = v;
-    const float candidate =
-        previous - lr * (m / correction1) / (sqrtf(v / correction2) + epsilon);
+    const float candidate = previous - lr * (m / correction1) / (sqrtf(v / correction2) + epsilon);
     const float updated = isfinite(candidate) ? candidate : previous;
     parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
 }
 
-__device__ inline void add_shape_regularizer_grads(
-    const float* log_scales, const float* quaternions, int i,
-    float* grad_log, float* grad_quat, const StructureAdam& a) {
+__device__ inline void add_shape_regularizer_grads(const float* log_scales,
+                                                   const float* quaternions, int i, float* grad_log,
+                                                   float* grad_quat, const StructureAdam& a) {
     if (a.shape_quat_norm_reg > 0.f) {
-        const float ns =
-            quaternions[4 * i] * quaternions[4 * i] +
-            quaternions[4 * i + 1] * quaternions[4 * i + 1] +
-            quaternions[4 * i + 2] * quaternions[4 * i + 2] +
-            quaternions[4 * i + 3] * quaternions[4 * i + 3];
+        const float ns = quaternions[4 * i] * quaternions[4 * i] +
+                         quaternions[4 * i + 1] * quaternions[4 * i + 1] +
+                         quaternions[4 * i + 2] * quaternions[4 * i + 2] +
+                         quaternions[4 * i + 3] * quaternions[4 * i + 3];
         if (ns > 1e-20f) {
             const float n = sqrtf(ns);
             const float factor = a.shape_quat_norm_reg * (n - 1.f) / ns;
@@ -602,45 +567,50 @@ __device__ inline void add_shape_regularizer_grads(
     if (a.shape_axis_ratio_reg > 0.F) {
         int longest = 0, shortest = 0;
         for (int axis = 1; axis < 3; ++axis) {
-            if (log_scales[3 * i + axis] > log_scales[3 * i + longest]) longest = axis;
-            if (log_scales[3 * i + axis] < log_scales[3 * i + shortest]) shortest = axis;
+            if (log_scales[3 * i + axis] > log_scales[3 * i + longest])
+                longest = axis;
+            if (log_scales[3 * i + axis] < log_scales[3 * i + shortest])
+                shortest = axis;
         }
-        const float excess = log_scales[3 * i + longest] -
-            log_scales[3 * i + shortest] - logf(a.shape_max_axis_ratio);
+        const float excess = log_scales[3 * i + longest] - log_scales[3 * i + shortest] -
+                             logf(a.shape_max_axis_ratio);
         if (excess > 0.F && isfinite(excess)) {
             grad_log[longest] += a.shape_axis_ratio_reg * excess;
             grad_log[shortest] -= a.shape_axis_ratio_reg * excess;
         }
     }
 
-    if (a.shape_erank_reg <= 0.f && a.shape_erank_s3_reg <= 0.f) return;
+    if (a.shape_erank_reg <= 0.f && a.shape_erank_s3_reg <= 0.f)
+        return;
     float log_scale[3]{};
     int largest = 0;
     for (int axis = 0; axis < 3; ++axis) {
         log_scale[axis] = log_scales[3 * i + axis];
-        if (!(log_scale[axis] > -1e4f)) log_scale[axis] = -1e4f;
-        if (axis > 0 && log_scale[axis] > log_scale[largest]) largest = axis;
+        if (!(log_scale[axis] > -1e4f))
+            log_scale[axis] = -1e4f;
+        if (axis > 0 && log_scale[axis] > log_scale[largest])
+            largest = axis;
     }
     float x[3]{};
     for (int axis = 0; axis < 3; ++axis)
         x[axis] = expf(2.f * (log_scale[axis] - log_scale[largest]));
     const float sum = x[0] + x[1] + x[2];
-    if (!(sum > 0.f)) return;
+    if (!(sum > 0.f))
+        return;
     int smallest = 0;
     for (int axis = 1; axis < 3; ++axis)
-        if (x[axis] < x[smallest]) smallest = axis;
+        if (x[axis] < x[smallest])
+            smallest = axis;
     const float share_largest = x[largest] / sum;
     const float raw_share_smallest = x[smallest] / sum;
     const bool smallest_clamped = !(raw_share_smallest > 1e-30f);
-    const float share_smallest =
-        smallest_clamped ? 1e-30f : raw_share_smallest;
+    const float share_smallest = smallest_clamped ? 1e-30f : raw_share_smallest;
     const float middle_complement = 1.f - share_largest - share_smallest;
     const bool middle_clamped = !(middle_complement > 1e-30f);
     const float share_middle = middle_clamped ? 1e-30f : middle_complement;
-    const float entropy = -(
-        share_largest * logf(share_largest) +
-        share_middle * logf(share_middle) +
-        share_smallest * logf(share_smallest));
+    const float entropy =
+        -(share_largest * logf(share_largest) + share_middle * logf(share_middle) +
+          share_smallest * logf(share_smallest));
     const float rank = expf(entropy);
     float dreg_dshare[3]{};
     if (a.shape_erank_reg > 0.f && rank - 0.99999f < 1.f) {
@@ -651,8 +621,7 @@ __device__ inline void add_shape_regularizer_grads(
     const float dloss_dshare_smallest = dreg_dshare[2] + a.shape_erank_s3_reg;
     float dloss_dx[3]{};
     for (int axis = 0; axis < 3; ++axis) {
-        float d_largest = axis == largest ? (1.f - share_largest) / sum
-                                          : -share_largest / sum;
+        float d_largest = axis == largest ? (1.f - share_largest) / sum : -share_largest / sum;
         float d_smallest = 0.f;
         if (axis == smallest) {
             if (!smallest_clamped)
@@ -660,17 +629,16 @@ __device__ inline void add_shape_regularizer_grads(
         } else {
             d_smallest = -share_smallest / sum;
         }
-        const float d_middle =
-            middle_clamped ? 0.f : -(d_largest + d_smallest);
-        dloss_dx[axis] = dreg_dshare[0] * d_largest +
-                         dreg_dshare[1] * d_middle +
+        const float d_middle = middle_clamped ? 0.f : -(d_largest + d_smallest);
+        dloss_dx[axis] = dreg_dshare[0] * d_largest + dreg_dshare[1] * d_middle +
                          dloss_dshare_smallest * d_smallest;
     }
     for (int axis = 0; axis < 3; ++axis) {
         if (axis == largest) {
             float pull = 0.f;
             for (int other = 0; other < 3; ++other)
-                if (other != largest) pull += dloss_dx[other] * x[other];
+                if (other != largest)
+                    pull += dloss_dx[other] * x[other];
             grad_log[axis] += (-2.f * pull);
         } else {
             grad_log[axis] += dloss_dx[axis] * 2.f * x[axis];
@@ -678,33 +646,29 @@ __device__ inline void add_shape_regularizer_grads(
     }
 }
 
-__device__ inline void update_structure_adam_row(
-    int i, float3 d_mean, float3 d_scale, float4 d_rot, float d_opacity,
-    const float* __restrict__ activated_scales,
-    const float* __restrict__ activated_opacities, const StructureAdam& a) {
-    const float filter_squared =
-        a.filter_3d != nullptr ? a.filter_3d[i] * a.filter_3d[i] : 0.f;
+__device__ inline void update_structure_adam_row(int i, float3 d_mean, float3 d_scale, float4 d_rot,
+                                                 float d_opacity,
+                                                 const float* __restrict__ activated_scales,
+                                                 const float* __restrict__ activated_opacities,
+                                                 const StructureAdam& a) {
+    const float filter_squared = a.filter_3d != nullptr ? a.filter_3d[i] * a.filter_3d[i] : 0.f;
     const float activated_opacity = activated_opacities[i];
     float grad_log[3];
     for (int axis = 0; axis < 3; ++axis) {
         const int offset = 3 * i + axis;
         const float raw_scale = expf(a.log_scales[offset]);
         const float filtered_scale = activated_scales[offset];
-        const float scale_grad =
-            axis == 0 ? d_scale.x : axis == 1 ? d_scale.y : d_scale.z;
+        const float scale_grad = axis == 0 ? d_scale.x : axis == 1 ? d_scale.y : d_scale.z;
         grad_log[axis] =
             scale_grad * raw_scale * raw_scale / filtered_scale +
-            d_opacity * activated_opacity * filter_squared /
-                (filtered_scale * filtered_scale);
+            d_opacity * activated_opacity * filter_squared / (filtered_scale * filtered_scale);
     }
     const float rw = a.quaternions[4 * i];
     const float rx = a.quaternions[4 * i + 1];
     const float ry = a.quaternions[4 * i + 2];
     const float rz = a.quaternions[4 * i + 3];
-    const float inverse_norm =
-        rsqrtf(fmaxf(rw * rw + rx * rx + ry * ry + rz * rz, 1e-20f));
-    const float q[4] = {rw * inverse_norm, rx * inverse_norm, ry * inverse_norm,
-                        rz * inverse_norm};
+    const float inverse_norm = rsqrtf(fmaxf(rw * rw + rx * rx + ry * ry + rz * rz, 1e-20f));
+    const float q[4] = {rw * inverse_norm, rx * inverse_norm, ry * inverse_norm, rz * inverse_norm};
     const float rot[4] = {d_rot.x, d_rot.y, d_rot.z, d_rot.w};
     const float qdot = q[0] * rot[0] + q[1] * rot[1] + q[2] * rot[2] + q[3] * rot[3];
     float grad_quat[4];
@@ -720,62 +684,53 @@ __device__ inline void update_structure_adam_row(
             if (isfinite(log_scale) && log_scale > -40.f)
                 grad_log[axis] += a.scale_reg * expf(log_scale);
         }
-    add_shape_regularizer_grads(
-        a.log_scales, a.quaternions, i, grad_log, grad_quat, a);
-    if (a.opacity_gradient) a.opacity_gradient[i] = grad_logit;
+    add_shape_regularizer_grads(a.log_scales, a.quaternions, i, grad_log, grad_quat, a);
+    if (a.opacity_gradient)
+        a.opacity_gradient[i] = grad_logit;
     const float inf = 1.e30f;
     for (int c = 0; c < 3; ++c) {
         const int mi = 3 * i + c;
         const float mg = c == 0 ? d_mean.x : c == 1 ? d_mean.y : d_mean.z;
-        adam_scalar(a.means, mi, mg, a.means_first, a.means_second, a.means_lr,
-                    a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon,
-                    -inf, inf);
-        adam_scalar(a.log_scales, mi, grad_log[c], a.scales_first, a.scales_second,
-                    a.scales_lr, a.beta1, a.beta2, a.correction1, a.correction2,
-                    a.epsilon, a.minimum_log_scale, a.maximum_log_scale);
+        adam_scalar(a.means, mi, mg, a.means_first, a.means_second, a.means_lr, a.beta1, a.beta2,
+                    a.correction1, a.correction2, a.epsilon, -inf, inf);
+        adam_scalar(a.log_scales, mi, grad_log[c], a.scales_first, a.scales_second, a.scales_lr,
+                    a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon, a.minimum_log_scale,
+                    a.maximum_log_scale);
     }
     for (int c = 0; c < 4; ++c)
-        adam_scalar(a.quaternions, 4 * i + c, grad_quat[c], a.rotations_first,
-                    a.rotations_second, a.quaternions_lr, a.beta1, a.beta2,
-                    a.correction1, a.correction2, a.epsilon, -inf, inf);
-    adam_scalar(a.opacity_logits, i, grad_logit, a.opacity_first, a.opacity_second,
-                a.opacities_lr, a.beta1, a.beta2, a.correction1, a.correction2,
-                a.epsilon, -12.f, 12.f);
+        adam_scalar(a.quaternions, 4 * i + c, grad_quat[c], a.rotations_first, a.rotations_second,
+                    a.quaternions_lr, a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon,
+                    -inf, inf);
+    adam_scalar(a.opacity_logits, i, grad_logit, a.opacity_first, a.opacity_second, a.opacities_lr,
+                a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon, -12.f, 12.f);
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false,
-          bool Gut = false>
+template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false, bool Gut = false>
 __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
-gaussian_backward(
-    const int count, const int sh_degree, const int sh_bases,
-    const float* __restrict__ means,
-    const float* __restrict__ sh, const float* __restrict__ opacities,
-    const float* __restrict__ scales, const float* __restrict__ rotations,
-    const float* __restrict__ cov6, const float* __restrict__ view,
-    const float* __restrict__ camera_center, CameraIntrinsics K, int width,
-    int height, float kernel_size, float scale_modifier,
-    const int* __restrict__ radius, const bool* __restrict__ clamped,
-    ws::GaussianState st, ws::GradState gs, float* __restrict__ grad_mean,
-    float* __restrict__ grad_sh, float* __restrict__ grad_colors,
-    float* __restrict__ grad_opacity, float* __restrict__ grad_scale,
-    float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam,
-    StructureAdam structure_adam) {
+    gaussian_backward(const int count, const int sh_degree, const int sh_bases,
+                      const float* __restrict__ means, const float* __restrict__ sh,
+                      const float* __restrict__ opacities, const float* __restrict__ scales,
+                      const float* __restrict__ rotations, const float* __restrict__ cov6,
+                      const float* __restrict__ view, const float* __restrict__ camera_center,
+                      CameraIntrinsics K, int width, int height, float kernel_size,
+                      float scale_modifier, const int* __restrict__ radius,
+                      const bool* __restrict__ clamped, ws::GaussianState st, ws::GradState gs,
+                      float* __restrict__ grad_mean, float* __restrict__ grad_sh,
+                      float* __restrict__ grad_colors, float* __restrict__ grad_opacity,
+                      float* __restrict__ grad_scale, float* __restrict__ grad_rotation,
+                      float* __restrict__ grad_cov, SHAdam sh_adam, StructureAdam structure_adam) {
     // Fused SH keeps the coefficients of this thread's Gaussian in a shared
     // tile instead of a 48-register row: the warp then updates all 32 rows it
     // owns with one lane per column, which is the coalesced pattern the
     // standalone optimizer used.
-    __shared__ float4 sh_tile[FusedSH
-        ? cfg::kGaussianBlock * cfg::kShRowWords
-        : 1];
+    __shared__ float4 sh_tile[FusedSH ? cfg::kGaussianBlock * cfg::kShRowWords : 1];
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     float* shared_row = nullptr;
     if constexpr (FusedSH) {
-        shared_row = reinterpret_cast<float*>(
-            &sh_tile[threadIdx.x * cfg::kShRowWords]);
+        shared_row = reinterpret_cast<float*>(&sh_tile[threadIdx.x * cfg::kShRowWords]);
 #pragma unroll
         for (int k = 0; k < cfg::kShRowWords; ++k)
-            sh_tile[threadIdx.x * cfg::kShRowWords + k] =
-                make_float4(0.f, 0.f, 0.f, 0.f);
+            sh_tile[threadIdx.x * cfg::kShRowWords + k] = make_float4(0.f, 0.f, 0.f, 0.f);
     }
     float3 d_mean = make_float3(0.f, 0.f, 0.f);
     float3 d_scale = make_float3(0.f, 0.f, 0.f);
@@ -791,43 +746,41 @@ gaussian_backward(
             d_opacity = gs.d_conic[i].w;
             d_rot = gs.d_ray_plane[i];
         } else {
-        geo::SplatBackward io;
-        io.d_conic = gs.d_conic[i];
-        // Color-only pools leave the geometry scratch unallocated; zero inputs
-        // make splat_backward() take its unused-branch early-out, exactly like a
-        // memset-to-zero scratch buffer did.
-        if constexpr (!PinholeRGB) {
-            io.d_ray_plane = gs.d_ray_plane
-                ? gs.d_ray_plane[i] : make_float4(0.f, 0.f, 0.f, 0.f);
-            io.d_normal = gs.d_normal
-                ? gs.d_normal[i] : make_float3(0.f, 0.f, 0.f);
-        }
-        io.d_mean2d = make_float2(gs.d_mean2d[i].x, gs.d_mean2d[i].y);
-        io.mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
-        io.view = view;
-        io.K = K;
-        io.width = width;
-        io.height = height;
-        io.kernel_size = kernel_size;
-        io.scale_modifier = scale_modifier;
-        io.scale = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
-        io.rotation =
-            rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
-        io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
-        io.opacity = opacities[i];
-        geo::splat_backward<PinholeRGB>(io);
-        d_mean = io.grad_mean;
-        d_opacity = io.grad_opacity;
-        if (HasCov) {
-            if (grad_cov) {
-#pragma unroll
-                for (int k = 0; k < 6; ++k) grad_cov[6 * i + k] += io.grad_cov6[k];
+            geo::SplatBackward io;
+            io.d_conic = gs.d_conic[i];
+            // Color-only pools leave the geometry scratch unallocated; zero inputs
+            // make splat_backward() take its unused-branch early-out, exactly like a
+            // memset-to-zero scratch buffer did.
+            if constexpr (!PinholeRGB) {
+                io.d_ray_plane =
+                    gs.d_ray_plane ? gs.d_ray_plane[i] : make_float4(0.f, 0.f, 0.f, 0.f);
+                io.d_normal = gs.d_normal ? gs.d_normal[i] : make_float3(0.f, 0.f, 0.f);
             }
-        } else {
-            d_scale = io.grad_scale;
-            d_rot = io.grad_rotation;
-        }
-
+            io.d_mean2d = make_float2(gs.d_mean2d[i].x, gs.d_mean2d[i].y);
+            io.mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+            io.view = view;
+            io.K = K;
+            io.width = width;
+            io.height = height;
+            io.kernel_size = kernel_size;
+            io.scale_modifier = scale_modifier;
+            io.scale = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
+            io.rotation = rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
+            io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
+            io.opacity = opacities[i];
+            geo::splat_backward<PinholeRGB>(io);
+            d_mean = io.grad_mean;
+            d_opacity = io.grad_opacity;
+            if (HasCov) {
+                if (grad_cov) {
+#pragma unroll
+                    for (int k = 0; k < 6; ++k)
+                        grad_cov[6 * i + k] += io.grad_cov6[k];
+                }
+            } else {
+                d_scale = io.grad_scale;
+                d_rot = io.grad_rotation;
+            }
         }
         if (HasSH) {
             sh::BackwardIO bwd;
@@ -835,11 +788,9 @@ gaussian_backward(
             bwd.grad_sh = reinterpret_cast<float3*>(grad_sh);
             if constexpr (FusedSH)
                 bwd.grad_sh_row = reinterpret_cast<float3*>(shared_row);
-            sh::backward(i, sh_degree, sh_bases,
-                         reinterpret_cast<const float3*>(means),
-                         make_float3(camera_center[0], camera_center[1],
-                                     camera_center[2]),
-                         sh, st.clamped, gs.d_color, bwd);
+            sh::backward(i, sh_degree, sh_bases, reinterpret_cast<const float3*>(means),
+                         make_float3(camera_center[0], camera_center[1], camera_center[2]), sh,
+                         st.clamped, gs.d_color, bwd);
             d_mean.x += bwd.grad_mean.x;
             d_mean.y += bwd.grad_mean.y;
             d_mean.z += bwd.grad_mean.z;
@@ -854,7 +805,8 @@ gaussian_backward(
                 grad_mean[3 * i + 1] += d_mean.y;
                 grad_mean[3 * i + 2] += d_mean.z;
             }
-            if (grad_opacity) grad_opacity[i] += d_opacity;
+            if (grad_opacity)
+                grad_opacity[i] += d_opacity;
             if constexpr (!HasCov) {
                 if (grad_scale) {
                     grad_scale[3 * i + 0] += d_scale.x;
@@ -874,110 +826,87 @@ gaussian_backward(
         __syncthreads();
         const int warp_thread0 = (int(threadIdx.x) >> 5) * 32;
         const int warp_row0 = int(blockIdx.x) * int(blockDim.x) + warp_thread0;
-        float* warp_tile = reinterpret_cast<float*>(sh_tile) +
-            std::size_t(warp_thread0) * cfg::kShRowStride;
+        float* warp_tile =
+            reinterpret_cast<float*>(sh_tile) + std::size_t(warp_thread0) * cfg::kShRowStride;
         const int active = (sh_degree + 1) * (sh_degree + 1) * 3;
         for (int r = 0; r < 32; ++r) {
             const int row = warp_row0 + r;
-            if (row >= count) break;
-            float* parameter = sh_adam.parameter +
-                std::size_t(row) * sh_adam.stride;
-            __half* first = reinterpret_cast<__half*>(sh_adam.first) +
-                std::size_t(row) * sh_adam.stride;
+            if (row >= count)
+                break;
+            float* parameter = sh_adam.parameter + std::size_t(row) * sh_adam.stride;
+            __half* first =
+                reinterpret_cast<__half*>(sh_adam.first) + std::size_t(row) * sh_adam.stride;
             sh_adam_quant_warp_row(
-                sh_adam.stride, active, parameter,
-                warp_tile + r * cfg::kShRowStride, first,
+                sh_adam.stride, active, parameter, warp_tile + r * cfg::kShRowStride, first,
                 sh_adam.packed + std::size_t(row) * sh_adam.stride,
-                sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr,
-                sh_adam.rest_lr, sh_adam.beta1, sh_adam.beta2,
-                sh_adam.correction1, sh_adam.correction2,
-                sh_adam.epsilon, sh_adam.regularization_factor);
+                sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr, sh_adam.rest_lr, sh_adam.beta1,
+                sh_adam.beta2, sh_adam.correction1, sh_adam.correction2, sh_adam.epsilon,
+                sh_adam.regularization_factor);
         }
     }
     if constexpr (!HasCov) {
         if (structure_adam.means && i < count)
-            update_structure_adam_row(
-                i, d_mean, d_scale, d_rot, d_opacity, scales, opacities,
-                structure_adam);
+            update_structure_adam_row(i, d_mean, d_scale, d_rot, d_opacity, scales, opacities,
+                                      structure_adam);
     }
 }
 
-}  // namespace splat_drender::kernels
+} // namespace splat_drender::kernels
 
 namespace splat_drender::launch {
 
-void median_scale_backward(const uint2* tile_range,
-                           const unsigned* instance_value, int width,
-                           int height, CameraIntrinsics K, int wrap_width,
-                           const float2* mean2d, const float4* conic_opacity,
-                           const float4* ray_plane,
-                           const ushort4* screen_bounds,
-                           const unsigned* n_contrib,
-                           const unsigned* max_contributor,
-                           const float* median_depth,
-                          const float* dL_dmedian, float* dL_dmt,
-                          dim3 grid) {
+void median_scale_backward(const uint2* tile_range, const unsigned* instance_value, int width,
+                           int height, CameraIntrinsics K, int wrap_width, const float2* mean2d,
+                           const float4* conic_opacity, const float4* ray_plane,
+                           const ushort4* screen_bounds, const unsigned* n_contrib,
+                           const unsigned* max_contributor, const float* median_depth,
+                           const float* dL_dmedian, float* dL_dmt, dim3 grid) {
     const dim3 block(cfg::kTileWidth, cfg::kTileHeight);
     kernels::median_scale_walk<<<grid, block>>>(
-        tile_range, instance_value, width, height, K, wrap_width, mean2d,
-        conic_opacity, ray_plane, screen_bounds, n_contrib, max_contributor,
-        median_depth, dL_dmedian, dL_dmt);
+        tile_range, instance_value, width, height, K, wrap_width, mean2d, conic_opacity, ray_plane,
+        screen_bounds, n_contrib, max_contributor, median_depth, dL_dmedian, dL_dmt);
 }
 
-void blend_bucket_backward(bool need_depth, const uint2* tile_range,
-                           const unsigned* instance_value, int width,
-                           int height, CameraIntrinsics K, int wrap_width,
-                           float3 background, const float2* mean2d,
-                           const float4* conic_opacity, const float3* rgb,
-                           const float* colors, const float4* ray_plane,
-                           const float3* normal,
-                           const ushort4* screen_bounds, const float* alphas,
+void blend_bucket_backward(bool need_depth, const uint2* tile_range, const unsigned* instance_value,
+                           int width, int height, CameraIntrinsics K, int wrap_width,
+                           float3 background, const float2* mean2d, const float4* conic_opacity,
+                           const float3* rgb, const float* colors, const float4* ray_plane,
+                           const float3* normal, const ushort4* screen_bounds, const float* alphas,
                            const float* normal_map, const float* median_depth,
-                           const unsigned* n_contrib,
-                           const unsigned* max_contributor,
-                           const unsigned* bucket_offset,
-                           const unsigned* bucket_tile,
-                           const ws::PixelState pst, const float* dL_color,
-                           const float* dL_median, const float* dL_alpha,
-                           const float* dL_normal, ws::GradState gs,
-                           float* dL_colors, float* refine_weight,
-                           const float* densify_map, float* densify_weight,
-                           float* densify_weight_den, int buckets) {
-    if (buckets <= 0) return;
+                           const unsigned* n_contrib, const unsigned* max_contributor,
+                           const unsigned* bucket_offset, const unsigned* bucket_tile,
+                           const ws::PixelState pst, const float* dL_color, const float* dL_median,
+                           const float* dL_alpha, const float* dL_normal, ws::GradState gs,
+                           float* dL_colors, float* refine_weight, const float* densify_map,
+                           float* densify_weight, float* densify_weight_den, int buckets) {
+    if (buckets <= 0)
+        return;
     const dim3 grid((buckets + 7) / 8, 1, 1);
     if (need_depth) {
         kernels::blend_bucket_backward<true><<<grid, 256>>>(
-            tile_range, instance_value, width, height, K, wrap_width,
-            background, mean2d, conic_opacity, rgb, colors, ray_plane, normal,
-            screen_bounds, alphas, normal_map, median_depth,
-            n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
-            dL_color, dL_median, dL_alpha, dL_normal, gs, dL_colors,
-            refine_weight, densify_map, densify_weight, densify_weight_den,
-            buckets);
+            tile_range, instance_value, width, height, K, wrap_width, background, mean2d,
+            conic_opacity, rgb, colors, ray_plane, normal, screen_bounds, alphas, normal_map,
+            median_depth, n_contrib, max_contributor, bucket_offset, bucket_tile, pst, dL_color,
+            dL_median, dL_alpha, dL_normal, gs, dL_colors, refine_weight, densify_map,
+            densify_weight, densify_weight_den, buckets);
     } else {
         kernels::blend_bucket_backward<false><<<grid, 256>>>(
-            tile_range, instance_value, width, height, K, wrap_width,
-            background, mean2d, conic_opacity, rgb, colors, ray_plane, normal,
-            screen_bounds, alphas, normal_map, median_depth,
-            n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
-            dL_color, dL_median, dL_alpha, dL_normal, gs, dL_colors,
-            refine_weight, densify_map, densify_weight, densify_weight_den,
-            buckets);
+            tile_range, instance_value, width, height, K, wrap_width, background, mean2d,
+            conic_opacity, rgb, colors, ray_plane, normal, screen_bounds, alphas, normal_map,
+            median_depth, n_contrib, max_contributor, bucket_offset, bucket_tile, pst, dL_color,
+            dL_median, dL_alpha, dL_normal, gs, dL_colors, refine_weight, densify_map,
+            densify_weight, densify_weight_den, buckets);
     }
 }
 
-void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
-                       int sh_bases, const float* means, const float* sh,
-                       const float* opacities, const float* scales,
-                       const float* rotations, const float* cov6,
-                       const float* view, const float* camera_center,
-                       CameraIntrinsics K, int width, int height,
-                       float kernel_size, float scale_modifier,
-                       const int* radius, const bool* clamped,
-                       ws::GaussianState st, ws::GradState gs, float* grad_mean,
-                       float* grad_sh, float* grad_colors, float* grad_opacity,
-                       float* grad_scale, float* grad_rotation,
-                       float* grad_cov, SHAdam sh_adam,
+void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree, int sh_bases,
+                       const float* means, const float* sh, const float* opacities,
+                       const float* scales, const float* rotations, const float* cov6,
+                       const float* view, const float* camera_center, CameraIntrinsics K, int width,
+                       int height, float kernel_size, float scale_modifier, const int* radius,
+                       const bool* clamped, ws::GaussianState st, ws::GradState gs,
+                       float* grad_mean, float* grad_sh, float* grad_colors, float* grad_opacity,
+                       float* grad_scale, float* grad_rotation, float* grad_cov, SHAdam sh_adam,
                        StructureAdam structure_adam, bool gut) {
     auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
         constexpr bool kSH = decltype(sh_c)::value;
@@ -987,13 +916,11 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
             constexpr bool kPinholeRGB = decltype(rgb_c)::value;
             constexpr bool kGut = decltype(gut_c)::value;
             kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB, kGut>
-                <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-                    cfg::kGaussianBlock>>>(
-                    count, sh_degree, sh_bases, means, sh, opacities, scales,
-                    rotations, cov6, view, camera_center, K, width, height,
-                    kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
-                    grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                    grad_cov, sh_adam, structure_adam);
+                <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock, cfg::kGaussianBlock>>>(
+                    count, sh_degree, sh_bases, means, sh, opacities, scales, rotations, cov6, view,
+                    camera_center, K, width, height, kernel_size, scale_modifier, radius, clamped,
+                    st, gs, grad_mean, grad_sh, grad_colors, grad_opacity, grad_scale,
+                    grad_rotation, grad_cov, sh_adam, structure_adam);
         };
         // GUT already differentiated the 3D response in gut::backward. Keep
         // EWA projection backward out of its SH/Adam kernel's compiled state.
@@ -1017,16 +944,22 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
     const auto on = std::true_type{};
     if (has_sh) {
         if (sh_adam.parameter) {
-            if (has_cov) dispatch(on, on, on);
-            else dispatch(on, off, on);
+            if (has_cov)
+                dispatch(on, on, on);
+            else
+                dispatch(on, off, on);
         } else {
-            if (has_cov) dispatch(on, on, off);
-            else dispatch(on, off, off);
+            if (has_cov)
+                dispatch(on, on, off);
+            else
+                dispatch(on, off, off);
         }
     } else {
-        if (has_cov) dispatch(off, on, off);
-        else dispatch(off, off, off);
+        if (has_cov)
+            dispatch(off, on, off);
+        else
+            dispatch(off, off, off);
     }
 }
 
-}  // namespace splat_drender::launch
+} // namespace splat_drender::launch

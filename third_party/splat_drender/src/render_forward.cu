@@ -18,68 +18,67 @@ using namespace splat_drender;
 namespace splat_drender::kernels {
 
 // Ordered 32-bit key for positive floats: monotonic map depth -> uint.
-SD_D2 inline unsigned depth_bits(float d) { return __float_as_uint(d); }
+SD_D2 inline unsigned depth_bits(float d) {
+    return __float_as_uint(d);
+}
 
 // Fuses EWA projection, conic, SH color, tile counting, depth key, screen
 // bounds and the visibility scan flag into one launch.
 // GEOMETRY = false skips the ray-plane / footprint-normal stores; the caller
 // then leaves those two arrays unallocated (color-only photometric steps).
 template <bool GEOMETRY>
-__global__ void preprocess_gaussians(
-    const int count, const int sh_degree, const int sh_bases,
-    const float* __restrict__ means, const float* __restrict__ sh,
-    const float* __restrict__ colors, const float* __restrict__ opacities,
-    const float* __restrict__ scales, const float* __restrict__ rotations,
-    const float* __restrict__ cov6, const float* __restrict__ view,
-    const float* __restrict__ camera_center, CameraIntrinsics K, int width,
-    int height, float kernel_size, float scale_modifier, int grid_x,
-    int grid_y, int wrap_width, ws::GaussianState st,
-    int* __restrict__ radii) {
+__global__ void
+preprocess_gaussians(const int count, const int sh_degree, const int sh_bases,
+                     const float* __restrict__ means, const float* __restrict__ sh,
+                     const float* __restrict__ colors, const float* __restrict__ opacities,
+                     const float* __restrict__ scales, const float* __restrict__ rotations,
+                     const float* __restrict__ cov6, const float* __restrict__ view,
+                     const float* __restrict__ camera_center, CameraIntrinsics K, int width,
+                     int height, float kernel_size, float scale_modifier, int grid_x, int grid_y,
+                     int wrap_width, ws::GaussianState st, int* __restrict__ radii) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    if (i >= count)
+        return;
 
     st.tiles_touched[i] = 0;
     st.visible_flag[i] = 0;
     st.radius[i] = 0;
     radii[i] = 0;
 
-    const float3 mean =
-        make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+    const float3 mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
     const float3 t = mat::xform_point(mean, view);
-    if (!camera_visible(t, K.mode, K.near_plane)) return;
+    if (!camera_visible(t, K.mode, K.near_plane))
+        return;
 
     geo::Splat splat;
-    const float3* scale_ptr =
-        scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
-    const float4* rot_ptr =
-        rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
+    const float3* scale_ptr = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
+    const float4* rot_ptr = rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
     const float* cov_ptr = cov6 ? cov6 + 6 * i : nullptr;
-    if (!geo::project_splat(mean, view, K, width, height, kernel_size,
-                            scale_modifier, scale_ptr, rot_ptr, cov_ptr,
-                            splat))
+    if (!geo::project_splat(mean, view, K, width, height, kernel_size, scale_modifier, scale_ptr,
+                            rot_ptr, cov_ptr, splat))
         return;
 
     footprint::apply(splat.cov2d[0], splat.cov2d[1], splat.cov2d[2], width, height);
     const Projection p = project(t, K, width, height);
-    if (!p.valid) return;
+    if (!p.valid)
+        return;
 
-    const float det =
-        splat.cov2d[0] * splat.cov2d[2] - splat.cov2d[1] * splat.cov2d[1];
-    if (det == 0.f) return;
+    const float det = splat.cov2d[0] * splat.cov2d[2] - splat.cov2d[1] * splat.cov2d[1];
+    if (det == 0.f)
+        return;
     const float det_inv = 1.f / det;
-    const float4 conic_opacity =
-        make_float4(splat.cov2d[2] * det_inv, -splat.cov2d[1] * det_inv,
-                    splat.cov2d[0] * det_inv, opacities[i] * splat.coef);
+    const float4 conic_opacity = make_float4(splat.cov2d[2] * det_inv, -splat.cov2d[1] * det_inv,
+                                             splat.cov2d[0] * det_inv, opacities[i] * splat.coef);
 
     const float mid = 0.5f * (splat.cov2d[0] + splat.cov2d[2]);
     const float root = sqrtf(fmaxf(0.1f, mid * mid - det));
     const float radius = ceilf(3.f * sqrtf(fmaxf(mid + root, mid - root)));
 
     const unsigned touched =
-        tiles::enumerate(make_float2(p.pixel_x, p.pixel_y), conic_opacity,
-                         grid_x, grid_y, unsigned(i), 0, nullptr, nullptr,
-                         wrap_width);
-    if (touched == 0) return;
+        tiles::enumerate(make_float2(p.pixel_x, p.pixel_y), conic_opacity, grid_x, grid_y,
+                         unsigned(i), 0, nullptr, nullptr, wrap_width);
+    if (touched == 0)
+        return;
 
     // Point-query preprocessing passes neither sh nor colors; blended color
     // is never read on that path, so skip the per-view SH evaluation exactly
@@ -87,8 +86,7 @@ __global__ void preprocess_gaussians(
     if (sh != nullptr) {
         const float3 rgb = sh::evaluate(
             i, sh_degree, sh_bases, reinterpret_cast<const float3*>(means),
-            make_float3(camera_center[0], camera_center[1], camera_center[2]),
-            sh, st.clamped);
+            make_float3(camera_center[0], camera_center[1], camera_center[2]), sh, st.clamped);
         st.rgb[i] = rgb;
     }
 
@@ -135,74 +133,82 @@ __global__ void preprocess_gaussians(
 // Emits (depth key, gaussian id) pairs in gaussian-index order; the stable
 // radix sort then yields the exact depth order of the reference 64-bit key
 // sort (ties keep index order).
-__global__ void emit_depth_entries(
-    const int count, const unsigned* __restrict__ visible_offset,
-    const unsigned* __restrict__ visible_flag,
-    const unsigned* __restrict__ depth_key, unsigned* __restrict__ key_out,
-    unsigned* __restrict__ value_out) {
+__global__ void emit_depth_entries(const int count, const unsigned* __restrict__ visible_offset,
+                                   const unsigned* __restrict__ visible_flag,
+                                   const unsigned* __restrict__ depth_key,
+                                   unsigned* __restrict__ key_out,
+                                   unsigned* __restrict__ value_out) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count || visible_flag[i] == 0) return;
+    if (i >= count || visible_flag[i] == 0)
+        return;
     const unsigned pos = visible_offset[i] - 1u;
     key_out[pos] = depth_key[i];
     value_out[pos] = unsigned(i);
 }
 
-__global__ void gather_touched(
-    const int visible_count, const unsigned* __restrict__ sorted_ids,
-    const unsigned* __restrict__ tiles_touched,
-    unsigned* __restrict__ compact_n) {
+__global__ void gather_touched(const int visible_count, const unsigned* __restrict__ sorted_ids,
+                               const unsigned* __restrict__ tiles_touched,
+                               unsigned* __restrict__ compact_n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= visible_count) return;
+    if (i >= visible_count)
+        return;
     compact_n[i] = tiles_touched[sorted_ids[i]];
 }
 
 // Emits (tile id, gaussian id) instances in depth order.
-__global__ void emit_instances(
-    const int visible_count, const unsigned* __restrict__ depth_sorted_ids,
-    const float2* __restrict__ mean2d,
-    const float4* __restrict__ conic_opacity,
-    const unsigned* __restrict__ compact_offset, int grid_x, int grid_y,
-    int wrap_width, unsigned* __restrict__ tile_key,
-    unsigned* __restrict__ instance_value, const ushort4* clip) {
+__global__ void emit_instances(const int visible_count,
+                               const unsigned* __restrict__ depth_sorted_ids,
+                               const float2* __restrict__ mean2d,
+                               const float4* __restrict__ conic_opacity,
+                               const unsigned* __restrict__ compact_offset, int grid_x, int grid_y,
+                               int wrap_width, unsigned* __restrict__ tile_key,
+                               unsigned* __restrict__ instance_value, const ushort4* clip) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= visible_count) return;
+    if (i >= visible_count)
+        return;
     const unsigned g = depth_sorted_ids[i];
     const unsigned off = (i == 0) ? 0u : compact_offset[i - 1];
-    tiles::enumerate(mean2d[g], conic_opacity[g], grid_x, grid_y, g, off,
-                     tile_key, instance_value, wrap_width, nullptr, 0,
-                     clip ? clip + g : nullptr);
+    tiles::enumerate(mean2d[g], conic_opacity[g], grid_x, grid_y, g, off, tile_key, instance_value,
+                     wrap_width, nullptr, 0, clip ? clip + g : nullptr);
 }
 
 // Small-list path: emit in Gaussian index order to preserve depth ties.
-__global__ void emit_packed_instances(int count, ws::GaussianState st,
-    int grid_x, int grid_y, int wrap_width, unsigned long long* keys, unsigned* values,
-    bool clip) {
+__global__ void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y,
+                                      int wrap_width, unsigned long long* keys, unsigned* values,
+                                      bool clip) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count || st.tiles_touched[i] == 0) return;
+    if (i >= count || st.tiles_touched[i] == 0)
+        return;
     const unsigned offset = i == 0 ? 0 : st.visible_offset[i - 1];
-    tiles::enumerate(st.mean2d[i], st.conic_opacity[i], grid_x, grid_y,
-        unsigned(i), offset, nullptr, values, wrap_width, keys, st.depth_key[i],
-        clip ? st.screen_bounds + i : nullptr);
+    tiles::enumerate(st.mean2d[i], st.conic_opacity[i], grid_x, grid_y, unsigned(i), offset,
+                     nullptr, values, wrap_width, keys, st.depth_key[i],
+                     clip ? st.screen_bounds + i : nullptr);
 }
 
 __global__ void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    if (i >= count)
+        return;
     const unsigned tile = unsigned(keys[i] >> 32);
-    if (i == 0) range[tile].x = 0;
+    if (i == 0)
+        range[tile].x = 0;
     else {
         const unsigned previous = unsigned(keys[i - 1] >> 32);
-        if (tile != previous) { range[previous].y = unsigned(i); range[tile].x = unsigned(i); }
+        if (tile != previous) {
+            range[previous].y = unsigned(i);
+            range[tile].x = unsigned(i);
+        }
     }
-    if (i == count - 1) range[tile].y = unsigned(count);
+    if (i == count - 1)
+        range[tile].y = unsigned(count);
 }
 
 // Extracts per-tile instance ranges from the tile-sorted keys.
-__global__ void extract_tile_ranges(
-    const int instance_count, const unsigned* __restrict__ tile_key,
-    uint2* __restrict__ range) {
+__global__ void extract_tile_ranges(const int instance_count, const unsigned* __restrict__ tile_key,
+                                    uint2* __restrict__ range) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= instance_count) return;
+    if (i >= instance_count)
+        return;
     const unsigned tile = tile_key[i];
     if (i == 0) {
         range[tile].x = 0;
@@ -213,14 +219,14 @@ __global__ void extract_tile_ranges(
             range[tile].x = unsigned(i);
         }
     }
-    if (i == instance_count - 1) range[tile].y = unsigned(instance_count);
+    if (i == instance_count - 1)
+        range[tile].y = unsigned(instance_count);
 }
 
 // Single block: per-tile bucket counts, their inclusive scan, and the
 // bucket->tile mapping. Entries beyond the exact bucket count map to tile 0
 // so the upper-bound backward grid safely early-returns on them.
-__global__ void bucket_offsets_kernel(int tiles, int buckets,
-                                      const uint2* __restrict__ range,
+__global__ void bucket_offsets_kernel(int tiles, int buckets, const uint2* __restrict__ range,
                                       unsigned* __restrict__ bucket_count,
                                       unsigned* __restrict__ bucket_offset,
                                       unsigned* __restrict__ bucket_tile,
@@ -234,15 +240,17 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
         const int t = base + tid;
         unsigned v = 0;
         if (t < tiles) {
-            v = ((max_contributor ? max_contributor[t] :
-                  range[t].y - range[t].x) + bucket_size - 1) / bucket_size;
+            v = ((max_contributor ? max_contributor[t] : range[t].y - range[t].x) + bucket_size -
+                 1) /
+                bucket_size;
             bucket_count[t] = v;
         }
         // CUB preserves the inclusive integer offsets without the eight
         // read/barrier/write/barrier stages of a Hillis-Steele scan.
         unsigned prefix, aggregate;
         Scan(scan).InclusiveSum(v, prefix, aggregate);
-        if (t < tiles) bucket_offset[t] = carry + prefix;
+        if (t < tiles)
+            bucket_offset[t] = carry + prefix;
         carry += aggregate;
         // All threads must finish using TempStorage before the next chunk.
         __syncthreads();
@@ -257,28 +265,20 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
 // median-depth bisection refine, with numbering-preserving warp culling.
 template <bool GEOMETRY>
 __global__ void __launch_bounds__(cfg::kTileThreads)
-blend_tile(const uint2* __restrict__ tile_range,
-           const unsigned* __restrict__ instance_value, int width, int height,
-           CameraIntrinsics K, int wrap_width,
-           const float2* __restrict__ mean2d,
-           const float4* __restrict__ conic_opacity,
-           const float3* __restrict__ rgb, const float* __restrict__ colors,
-           const float4* __restrict__ ray_plane,
-           const float3* __restrict__ normal,
-           const ushort4* __restrict__ screen_bounds,
-           unsigned* __restrict__ n_contrib,
-           unsigned* __restrict__ max_contributor,
-           const unsigned* __restrict__ bucket_offset,
-           unsigned* __restrict__ bucket_tile, ws::PixelState pst,
-           float3 background,
-           float* __restrict__ out_color,
-           float* __restrict__ out_alpha, float* __restrict__ out_normal,
-           float* __restrict__ out_median_depth,
-           float* __restrict__ visibility) {
+    blend_tile(const uint2* __restrict__ tile_range, const unsigned* __restrict__ instance_value,
+               int width, int height, CameraIntrinsics K, int wrap_width,
+               const float2* __restrict__ mean2d, const float4* __restrict__ conic_opacity,
+               const float3* __restrict__ rgb, const float* __restrict__ colors,
+               const float4* __restrict__ ray_plane, const float3* __restrict__ normal,
+               const ushort4* __restrict__ screen_bounds, unsigned* __restrict__ n_contrib,
+               unsigned* __restrict__ max_contributor, const unsigned* __restrict__ bucket_offset,
+               unsigned* __restrict__ bucket_tile, ws::PixelState pst, float3 background,
+               float* __restrict__ out_color, float* __restrict__ out_alpha,
+               float* __restrict__ out_normal, float* __restrict__ out_median_depth,
+               float* __restrict__ visibility) {
     auto block = cg::this_thread_block();
     const unsigned tiles_x = (width + cfg::kTileWidth - 1) / cfg::kTileWidth;
-    const unsigned tile_id =
-        block.group_index().y * tiles_x + block.group_index().x;
+    const unsigned tile_id = block.group_index().y * tiles_x + block.group_index().x;
     const int pix_min_x = block.group_index().x * cfg::kTileWidth;
     const int pix_min_y = block.group_index().y * cfg::kTileHeight;
     const int pix_x = pix_min_x + block.thread_index().x;
@@ -289,19 +289,16 @@ blend_tile(const uint2* __restrict__ tile_range,
 
     const uint2 range = tile_range[tile_id];
     const unsigned bucket_end = pst.snap_ct ? bucket_offset[tile_id] : 0u;
-    const unsigned bucket_begin =
-        pst.snap_ct && tile_id > 0 ? bucket_offset[tile_id - 1] : 0u;
-    const int todo = pst.snap_ct
-        ? min(int(range.y - range.x), int(bucket_end - bucket_begin) * 32)
-        : int(range.y - range.x);
+    const unsigned bucket_begin = pst.snap_ct && tile_id > 0 ? bucket_offset[tile_id - 1] : 0u;
+    const int todo = pst.snap_ct ? min(int(range.y - range.x), int(bucket_end - bucket_begin) * 32)
+                                 : int(range.y - range.x);
     const int rounds = (todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
     const bool color_needed = out_color || pst.snap_ct;
     // Global index of this tile's first bucket; every 32 instances of the
     // sorted list form one bucket whose 256-pixel state snapshot the
     // backward pass restarts from.
     const unsigned bucket_base = bucket_begin;
-    for (int b = block.thread_rank(); pst.snap_ct && b < (todo + 31) / 32;
-         b += cfg::kTileThreads)
+    for (int b = block.thread_rank(); pst.snap_ct && b < (todo + 31) / 32; b += cfg::kTileThreads)
         bucket_tile[bucket_base + b] = tile_id;
 
     __shared__ unsigned sid[cfg::kTileThreads];
@@ -322,7 +319,8 @@ blend_tile(const uint2* __restrict__ tile_range,
     // ---- pass 1: color / alpha / normal / depth seed ----
     int remaining = todo;
     for (int round = 0; round < rounds; ++round, remaining -= cfg::kTileThreads) {
-        if (__syncthreads_and(done)) break;
+        if (__syncthreads_and(done))
+            break;
         const int progress = round * cfg::kTileThreads + block.thread_rank();
         if (range.x + progress < int(range.y)) {
             const unsigned g = instance_value[range.x + progress];
@@ -345,29 +343,28 @@ blend_tile(const uint2* __restrict__ tile_range,
             // pixels terminated earlier never read their snapshot back.
             if (!done && pst.snap_ct) {
                 const std::size_t slot =
-                    (std::size_t(bucket_base + round * 8 + sub) << 8) +
-                    block.thread_rank();
-                pst.snap_ct[slot] =
-                    make_float4(color[0], color[1], color[2], transmittance);
+                    (std::size_t(bucket_base + round * 8 + sub) << 8) + block.thread_rank();
+                pst.snap_ct[slot] = make_float4(color[0], color[1], color[2], transmittance);
                 if constexpr (GEOMETRY)
-                    pst.snap_normal[slot] = make_float4(
-                        normal_acc[0], normal_acc[1], normal_acc[2], 0.f);
+                    pst.snap_normal[slot] =
+                        make_float4(normal_acc[0], normal_acc[1], normal_acc[2], 0.f);
             }
             const int j_end = min(batch, (sub + 1) << 5);
             for (int j = sub << 5; !done && j < j_end; ++j) {
                 contributor++;
                 const bool active = !done;
-                if (!active) continue;
+                if (!active)
+                    continue;
 
                 const float2 d =
-                    make_float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode),
-                                sxy[j].y - pixf.y);
+                    make_float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode), sxy[j].y - pixf.y);
                 const float4 co = sconic[j];
-                const float power =
-                    geo::gaussian_power(co, d.x, d.y);
-                if (power > 0.f) continue;
+                const float power = geo::gaussian_power(co, d.x, d.y);
+                if (power > 0.f)
+                    continue;
                 const float alpha = fminf(K.alpha_clip, co.w * expf(power));
-                if (alpha < cfg::kAlphaFloor) continue;
+                if (alpha < cfg::kAlphaFloor)
+                    continue;
                 const float test_t = transmittance * (1.f - alpha);
                 if (test_t < cfg::kTransmittanceFloor) {
                     done = true;
@@ -375,7 +372,8 @@ blend_tile(const uint2* __restrict__ tile_range,
                 }
 
                 const float a_t = alpha * transmittance;
-                if (visibility) visibility[sid[j]] = 1.f;
+                if (visibility)
+                    visibility[sid[j]] = 1.f;
                 if (color_needed) {
                     color[0] += srgb[j].x * a_t;
                     color[1] += srgb[j].y * a_t;
@@ -397,8 +395,7 @@ blend_tile(const uint2* __restrict__ tile_range,
     }
 
     __shared__ unsigned warp_scratch[cfg::kTileThreads / 32];
-    const unsigned block_max =
-        mat::block_max(last_contributor, warp_scratch);
+    const unsigned block_max = mat::block_max(last_contributor, warp_scratch);
 
     // ---- pass 2: median-depth bisection ----
     float median_depth = 0.f;
@@ -414,17 +411,17 @@ blend_tile(const uint2* __restrict__ tile_range,
             constexpr int start = first ? 0 : 1;
             constexpr int end = first ? S + 1 : S;
 #pragma unroll
-            for (int s = start; s < end; ++s) T_p[s] = 1.f;
+            for (int s = start; s < end; ++s)
+                T_p[s] = 1.f;
             const float interval = (depth_max - depth_min) * (1.f / float(S));
             bool local_done = !in_range;
             int todo2 = int(block_max);
             unsigned contributor2 = 0;
             const int depth_rounds = (int(block_max) + cfg::kTileThreads - 1) / cfg::kTileThreads;
-            for (int round = 0; round < depth_rounds;
-                 ++round, todo2 -= cfg::kTileThreads) {
-                if (__syncthreads_and(local_done)) break;
-                const int progress =
-                    round * cfg::kTileThreads + block.thread_rank();
+            for (int round = 0; round < depth_rounds; ++round, todo2 -= cfg::kTileThreads) {
+                if (__syncthreads_and(local_done))
+                    break;
+                const int progress = round * cfg::kTileThreads + block.thread_rank();
                 if (progress < int(block_max)) {
                     const unsigned g = instance_value[range.x + progress];
                     sxy[block.thread_rank()] = mean2d[g];
@@ -436,18 +433,19 @@ blend_tile(const uint2* __restrict__ tile_range,
                 for (int j = 0; !local_done && j < batch; ++j) {
                     contributor2++;
                     const bool active = !local_done;
-                    if (!active) continue;
+                    if (!active)
+                        continue;
                     local_done = contributor2 >= last_contributor;
 
-                    const float2 d = make_float2(
-                        wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode),
-                        sxy[j].y - pixf.y);
+                    const float2 d = make_float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, K.mode),
+                                                 sxy[j].y - pixf.y);
                     const float4 co = sconic[j];
-                    const float power =
-                        geo::gaussian_power(co, d.x, d.y);
-                    if (power > 0.f) continue;
+                    const float power = geo::gaussian_power(co, d.x, d.y);
+                    if (power > 0.f)
+                        continue;
                     const float alpha = fminf(K.alpha_clip, co.w * expf(power));
-                    if (alpha < cfg::kAlphaFloor) continue;
+                    if (alpha < cfg::kAlphaFloor)
+                        continue;
 
                     const float4 rp = splane[j];
                     const float t_peak = rp.x * d.x + rp.y * d.y + rp.z;
@@ -469,7 +467,8 @@ blend_tile(const uint2* __restrict__ tile_range,
             }
             int start_id = 0;
 #pragma unroll
-            for (int p = 1; p < S; ++p) start_id = T_p[p] >= 0.5f ? p : start_id;
+            for (int p = 1; p < S; ++p)
+                start_id = T_p[p] >= 0.5f ? p : start_id;
             depth_max = depth_min + (start_id + 1) * interval;
             depth_min = depth_min + (start_id + 0) * interval;
             T_p[0] = T_p[start_id];
@@ -477,7 +476,8 @@ blend_tile(const uint2* __restrict__ tile_range,
         };
 
         refine(std::true_type{});
-        for (int it = 0; it < cfg::kDepthRefinements - 1; ++it) refine(std::false_type{});
+        for (int it = 0; it < cfg::kDepthRefinements - 1; ++it)
+            refine(std::false_type{});
 
         const float w_max = __saturatef((T_p[0] - 0.5f) / (T_p[0] - T_p[S]));
         const float w_min = 1.f - w_max;
@@ -485,19 +485,23 @@ blend_tile(const uint2* __restrict__ tile_range,
     }
 
     if (inside) {
-        if (n_contrib) n_contrib[pix_id] = last_contributor;
-        // Keep the no-background accumulated color so the bucket backward
-        // can rebuild its "color after" state without the rendered image.
+        if (n_contrib)
+            n_contrib[pix_id] = last_contributor;
+            // Keep the no-background accumulated color so the bucket backward
+            // can rebuild its "color after" state without the rendered image.
 #pragma unroll
         for (int ch = 0; ch < 3; ++ch)
             if (pst.total_color)
                 pst.total_color[ch * width * height + pix_id] = color[ch];
 #pragma unroll
         for (int ch = 0; ch < 3; ++ch)
-            if (out_color) out_color[ch * width * height + pix_id] =
-                color[ch] + transmittance *
-                    (ch == 0 ? background.x : ch == 1 ? background.y : background.z);
-        if (out_alpha) out_alpha[pix_id] = 1.f - transmittance;
+            if (out_color)
+                out_color[ch * width * height + pix_id] =
+                    color[ch] + transmittance * (ch == 0   ? background.x
+                                                 : ch == 1 ? background.y
+                                                           : background.z);
+        if (out_alpha)
+            out_alpha[pix_id] = 1.f - transmittance;
         if constexpr (GEOMETRY) {
             const float rln = pixel_ray_z(pixf.x, pixf.y, K);
             out_median_depth[pix_id] = median_depth * rln;
@@ -508,119 +512,105 @@ blend_tile(const uint2* __restrict__ tile_range,
                     last_contributor ? normal_acc[ch] / len_normal : 0.f;
         }
     }
-    if (block.thread_rank() == 0) max_contributor[tile_id] = block_max;
+    if (block.thread_rank() == 0)
+        max_contributor[tile_id] = block_max;
 }
 
-}  // namespace splat_drender::kernels
+} // namespace splat_drender::kernels
 
 namespace splat_drender::launch {
 
-void preprocess_gaussians(
-    int count, int sh_degree, int sh_bases, const float* means, const float* sh,
-    const float* colors, const float* opacities, const float* scales,
-    const float* rotations, const float* cov6, const float* view,
-    const float* camera_center, CameraIntrinsics K, int width, int height,
-    float kernel_size, float scale_modifier, int grid_x, int grid_y,
-    int wrap_width, bool geometry, ws::GaussianState st, int* radii) {
-    const unsigned blocks =
-        (count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock;
+void preprocess_gaussians(int count, int sh_degree, int sh_bases, const float* means,
+                          const float* sh, const float* colors, const float* opacities,
+                          const float* scales, const float* rotations, const float* cov6,
+                          const float* view, const float* camera_center, CameraIntrinsics K,
+                          int width, int height, float kernel_size, float scale_modifier,
+                          int grid_x, int grid_y, int wrap_width, bool geometry,
+                          ws::GaussianState st, int* radii) {
+    const unsigned blocks = (count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock;
     if (geometry) {
         kernels::preprocess_gaussians<true><<<blocks, cfg::kGaussianBlock>>>(
-            count, sh_degree, sh_bases, means, sh, colors, opacities, scales,
-            rotations, cov6, view, camera_center, K, width, height, kernel_size,
-            scale_modifier, grid_x, grid_y, wrap_width, st, radii);
+            count, sh_degree, sh_bases, means, sh, colors, opacities, scales, rotations, cov6, view,
+            camera_center, K, width, height, kernel_size, scale_modifier, grid_x, grid_y,
+            wrap_width, st, radii);
     } else {
         kernels::preprocess_gaussians<false><<<blocks, cfg::kGaussianBlock>>>(
-            count, sh_degree, sh_bases, means, sh, colors, opacities, scales,
-            rotations, cov6, view, camera_center, K, width, height, kernel_size,
-            scale_modifier, grid_x, grid_y, wrap_width, st, radii);
+            count, sh_degree, sh_bases, means, sh, colors, opacities, scales, rotations, cov6, view,
+            camera_center, K, width, height, kernel_size, scale_modifier, grid_x, grid_y,
+            wrap_width, st, radii);
     }
 }
 
-void emit_depth_entries(int count, const unsigned* visible_offset,
-                        const unsigned* visible_flag,
-                        const unsigned* depth_key, unsigned* key_out,
-                        unsigned* value_out) {
-    kernels::emit_depth_entries<<<(count + cfg::kGaussianBlock - 1) /
-                                      cfg::kGaussianBlock,
-                                  cfg::kGaussianBlock>>>(
-        count, visible_offset, visible_flag, depth_key, key_out, value_out);
+void emit_depth_entries(int count, const unsigned* visible_offset, const unsigned* visible_flag,
+                        const unsigned* depth_key, unsigned* key_out, unsigned* value_out) {
+    kernels::emit_depth_entries<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                                  cfg::kGaussianBlock>>>(count, visible_offset, visible_flag,
+                                                         depth_key, key_out, value_out);
 }
 
-void gather_touched(int visible_count, const unsigned* sorted_ids,
-                    const unsigned* tiles_touched, unsigned* compact_n) {
-    kernels::gather_touched<<<(visible_count + cfg::kGaussianBlock - 1) /
-                                  cfg::kGaussianBlock,
-                              cfg::kGaussianBlock>>>(
-        visible_count, sorted_ids, tiles_touched, compact_n);
+void gather_touched(int visible_count, const unsigned* sorted_ids, const unsigned* tiles_touched,
+                    unsigned* compact_n) {
+    kernels::gather_touched<<<(visible_count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                              cfg::kGaussianBlock>>>(visible_count, sorted_ids, tiles_touched,
+                                                     compact_n);
 }
 
-void emit_instances(int visible_count, const unsigned* depth_sorted_ids,
-                    const float2* mean2d, const float4* conic_opacity,
-                    const unsigned* compact_offset, int grid_x, int grid_y,
-                    int wrap_width, unsigned* tile_key,
-                    unsigned* instance_value, const ushort4* clip) {
-    kernels::emit_instances<<<(visible_count + cfg::kGaussianBlock - 1) /
-                                  cfg::kGaussianBlock,
-                              cfg::kGaussianBlock>>>(
-        visible_count, depth_sorted_ids, mean2d, conic_opacity, compact_offset,
-        grid_x, grid_y, wrap_width, tile_key, instance_value, clip);
+void emit_instances(int visible_count, const unsigned* depth_sorted_ids, const float2* mean2d,
+                    const float4* conic_opacity, const unsigned* compact_offset, int grid_x,
+                    int grid_y, int wrap_width, unsigned* tile_key, unsigned* instance_value,
+                    const ushort4* clip) {
+    kernels::emit_instances<<<(visible_count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                              cfg::kGaussianBlock>>>(visible_count, depth_sorted_ids, mean2d,
+                                                     conic_opacity, compact_offset, grid_x, grid_y,
+                                                     wrap_width, tile_key, instance_value, clip);
 }
 
-void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y,
-                           int wrap_width, unsigned long long* keys, unsigned* values,
-                           bool clip) {
+void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y, int wrap_width,
+                           unsigned long long* keys, unsigned* values, bool clip) {
     kernels::emit_packed_instances<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-        cfg::kGaussianBlock>>>(count, st, grid_x, grid_y, wrap_width, keys, values, clip);
+                                     cfg::kGaussianBlock>>>(count, st, grid_x, grid_y, wrap_width,
+                                                            keys, values, clip);
 }
 void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range) {
     kernels::extract_packed_ranges<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-        cfg::kGaussianBlock>>>(count, keys, range);
+                                     cfg::kGaussianBlock>>>(count, keys, range);
 }
 
-void extract_ranges(int instance_count, const unsigned* tile_key,
-                    uint2* range) {
-    kernels::extract_tile_ranges<<<(instance_count + cfg::kGaussianBlock - 1) /
-                                       cfg::kGaussianBlock,
-                                   cfg::kGaussianBlock>>>(instance_count,
-                                                          tile_key, range);
+void extract_ranges(int instance_count, const unsigned* tile_key, uint2* range) {
+    kernels::extract_tile_ranges<<<(instance_count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                                   cfg::kGaussianBlock>>>(instance_count, tile_key, range);
 }
 
-void bucket_offsets(int tiles, int buckets, const uint2* range,
-                    unsigned* bucket_count, unsigned* bucket_offset,
-                    unsigned* bucket_tile, const unsigned* max_contributor,
+void bucket_offsets(int tiles, int buckets, const uint2* range, unsigned* bucket_count,
+                    unsigned* bucket_offset, unsigned* bucket_tile, const unsigned* max_contributor,
                     unsigned bucket_size) {
-    kernels::bucket_offsets_kernel<<<1, cfg::kTileThreads>>>(
-        tiles, buckets, range, bucket_count, bucket_offset, bucket_tile,
-        max_contributor, bucket_size);
+    kernels::bucket_offsets_kernel<<<1, cfg::kTileThreads>>>(tiles, buckets, range, bucket_count,
+                                                             bucket_offset, bucket_tile,
+                                                             max_contributor, bucket_size);
 }
 
-void blend(bool need_depth, const uint2* tile_range,
-           const unsigned* instance_value, int width, int height,
-           CameraIntrinsics K, int wrap_width, const float2* mean2d,
+void blend(bool need_depth, const uint2* tile_range, const unsigned* instance_value, int width,
+           int height, CameraIntrinsics K, int wrap_width, const float2* mean2d,
            const float4* conic_opacity, const float3* rgb, const float* colors,
-           const float4* ray_plane, const float3* normal,
-           const ushort4* screen_bounds, unsigned* n_contrib,
-           unsigned* max_contributor, const unsigned* bucket_offset,
-           unsigned* bucket_tile, ws::PixelState pst, float3 background,
-           float* out_color, float* out_alpha, float* out_normal,
-           float* out_median_depth, float* visibility, dim3 grid) {
+           const float4* ray_plane, const float3* normal, const ushort4* screen_bounds,
+           unsigned* n_contrib, unsigned* max_contributor, const unsigned* bucket_offset,
+           unsigned* bucket_tile, ws::PixelState pst, float3 background, float* out_color,
+           float* out_alpha, float* out_normal, float* out_median_depth, float* visibility,
+           dim3 grid) {
     dim3 block(cfg::kTileWidth, cfg::kTileHeight);
     if (need_depth) {
         kernels::blend_tile<true><<<grid, block>>>(
-            tile_range, instance_value, width, height, K, wrap_width, mean2d,
-            conic_opacity, rgb, colors, ray_plane, normal, screen_bounds,
-            n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
-            background, out_color, out_alpha, out_normal, out_median_depth,
+            tile_range, instance_value, width, height, K, wrap_width, mean2d, conic_opacity, rgb,
+            colors, ray_plane, normal, screen_bounds, n_contrib, max_contributor, bucket_offset,
+            bucket_tile, pst, background, out_color, out_alpha, out_normal, out_median_depth,
             visibility);
     } else {
         kernels::blend_tile<false><<<grid, block>>>(
-            tile_range, instance_value, width, height, K, wrap_width, mean2d,
-            conic_opacity, rgb, colors, ray_plane, normal, screen_bounds,
-            n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
-            background, out_color, out_alpha, out_normal, out_median_depth,
+            tile_range, instance_value, width, height, K, wrap_width, mean2d, conic_opacity, rgb,
+            colors, ray_plane, normal, screen_bounds, n_contrib, max_contributor, bucket_offset,
+            bucket_tile, pst, background, out_color, out_alpha, out_normal, out_median_depth,
             visibility);
     }
 }
 
-}  // namespace splat_drender::launch
+} // namespace splat_drender::launch

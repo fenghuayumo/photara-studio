@@ -33,27 +33,24 @@ namespace {
 
 void check(const VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
-        throw std::runtime_error(
-            std::string("Vulkan preview ") + operation + " failed (" +
-            std::to_string(static_cast<int>(result)) + ")");
+        throw std::runtime_error(std::string("Vulkan preview ") + operation + " failed (" +
+                                 std::to_string(static_cast<int>(result)) + ")");
     }
 }
 
-std::uint32_t memory_type(
-    const VkPhysicalDevice physical, const std::uint32_t bits) {
+std::uint32_t memory_type(const VkPhysicalDevice physical, const std::uint32_t bits) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical, &properties);
     for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
-        if ((bits & (1U << index)) != 0 &&
-            (properties.memoryTypes[index].propertyFlags &
-             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        if ((bits & (1U << index)) != 0 && (properties.memoryTypes[index].propertyFlags &
+                                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
             return index;
         }
     }
     throw std::runtime_error("Vulkan preview image has no device-local memory type");
 }
 
-}  // namespace
+} // namespace
 
 struct ExternalImagePreview::Impl {
     PreviewDevice device;
@@ -74,7 +71,8 @@ struct ExternalImagePreview::Impl {
     std::uint64_t frames = 0;
 
     ~Impl() {
-        if (device.device == VK_NULL_HANDLE) return;
+        if (device.device == VK_NULL_HANDLE)
+            return;
         std::unique_ptr<photara::vk::QueueLock> queue_lock;
         if (device.queue != VK_NULL_HANDLE)
             queue_lock = std::make_unique<photara::vk::QueueLock>(device.queue);
@@ -89,32 +87,33 @@ struct ExternalImagePreview::Impl {
             vkDestroyPipelineLayout(device.device, pipeline_layout, nullptr);
         if (set_layout != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device.device, set_layout, nullptr);
-        if (packed != VK_NULL_HANDLE) vkDestroyBuffer(device.device, packed, nullptr);
+        if (packed != VK_NULL_HANDLE)
+            vkDestroyBuffer(device.device, packed, nullptr);
         if (packed_memory != VK_NULL_HANDLE)
             vkFreeMemory(device.device, packed_memory, nullptr);
-        if (image != VK_NULL_HANDLE) vkDestroyImage(device.device, image, nullptr);
-        if (memory != VK_NULL_HANDLE) vkFreeMemory(device.device, memory, nullptr);
+        if (image != VK_NULL_HANDLE)
+            vkDestroyImage(device.device, image, nullptr);
+        if (memory != VK_NULL_HANDLE)
+            vkFreeMemory(device.device, memory, nullptr);
         if (timeline != VK_NULL_HANDLE)
             vkDestroySemaphore(device.device, timeline, nullptr);
     }
 };
 
-ExternalImagePreview::ExternalImagePreview(
-    const PreviewDevice& device, const ExternalPreviewOptions& options)
+ExternalImagePreview::ExternalImagePreview(const PreviewDevice& device,
+                                           const ExternalPreviewOptions& options)
     : impl_(std::make_unique<Impl>()) {
     if (device.device == VK_NULL_HANDLE || device.queue == VK_NULL_HANDLE ||
-        !options.memory_handle || !options.semaphore_handle ||
-        !options.allocation_size || !options.width || !options.height) {
+        !options.memory_handle || !options.semaphore_handle || !options.allocation_size ||
+        !options.width || !options.height) {
         throw std::invalid_argument("Incomplete Vulkan preview options");
     }
     impl_->device = device;
     impl_->width = options.width;
     impl_->height = options.height;
 
-    VkPhysicalDeviceIDProperties identity{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-    VkPhysicalDeviceProperties2 properties{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    VkPhysicalDeviceIDProperties identity{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     properties.pNext = &identity;
     vkGetPhysicalDeviceProperties2(device.physical_device, &properties);
     if (options.device_luid != 0) {
@@ -127,18 +126,17 @@ ExternalImagePreview::ExternalImagePreview(
                 "The Vulkan training device does not match the editor preview image");
         }
     } else if (options.has_device_uuid &&
-               std::memcmp(
-                   identity.deviceUUID, options.device_uuid.data(),
-                   options.device_uuid.size()) != 0) {
+               std::memcmp(identity.deviceUUID, options.device_uuid.data(),
+                           options.device_uuid.size()) != 0) {
         throw std::runtime_error(
             "The Vulkan training device does not match the editor preview image");
     }
 
 #if defined(_WIN32)
-    HANDLE memory_handle = reinterpret_cast<HANDLE>(
-        static_cast<std::uintptr_t>(options.memory_handle));
-    HANDLE semaphore_handle = reinterpret_cast<HANDLE>(
-        static_cast<std::uintptr_t>(options.semaphore_handle));
+    HANDLE memory_handle =
+        reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(options.memory_handle));
+    HANDLE semaphore_handle =
+        reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(options.semaphore_handle));
     const auto close_imports = [&] {
         if (memory_handle != nullptr)
             CloseHandle(std::exchange(memory_handle, nullptr));
@@ -160,12 +158,10 @@ ExternalImagePreview::ExternalImagePreview(
 
 #if defined(_WIN32)
     constexpr auto k_memory_handle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-    constexpr auto k_semaphore_handle =
-        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    constexpr auto k_semaphore_handle = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 #else
     constexpr auto k_memory_handle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-    constexpr auto k_semaphore_handle =
-        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    constexpr auto k_semaphore_handle = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 #endif
     VkExternalMemoryImageCreateInfo external_image{
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
@@ -179,26 +175,22 @@ ExternalImagePreview::ExternalImagePreview(
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                        VK_IMAGE_USAGE_SAMPLED_BIT;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     try {
-        check(vkCreateImage(device.device, &image_info, nullptr, &impl_->image),
-              "create image");
+        check(vkCreateImage(device.device, &image_info, nullptr, &impl_->image), "create image");
 #if defined(_WIN32)
         VkImportMemoryWin32HandleInfoKHR import_memory{
             VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR};
         import_memory.handleType = k_memory_handle;
         import_memory.handle = memory_handle;
 #else
-        VkImportMemoryFdInfoKHR import_memory{
-            VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+        VkImportMemoryFdInfoKHR import_memory{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
         import_memory.handleType = k_memory_handle;
         import_memory.fd = memory_fd;
 #endif
-        VkMemoryDedicatedAllocateInfo dedicated{
-            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
         dedicated.pNext = &import_memory;
         dedicated.image = impl_->image;
         VkMemoryRequirements requirements{};
@@ -216,15 +208,12 @@ ExternalImagePreview::ExternalImagePreview(
         check(vkBindImageMemory(device.device, impl_->image, impl_->memory, 0),
               "bind preview image");
 
-        VkSemaphoreTypeCreateInfo timeline_type{
-            VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        VkSemaphoreTypeCreateInfo timeline_type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
         timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
         timeline_type.initialValue = 0;
-        VkSemaphoreCreateInfo semaphore_info{
-            VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         semaphore_info.pNext = &timeline_type;
-        check(vkCreateSemaphore(
-                  device.device, &semaphore_info, nullptr, &impl_->timeline),
+        check(vkCreateSemaphore(device.device, &semaphore_info, nullptr, &impl_->timeline),
               "create preview semaphore");
 #if defined(_WIN32)
         VkImportSemaphoreWin32HandleInfoKHR import_semaphore{
@@ -232,27 +221,21 @@ ExternalImagePreview::ExternalImagePreview(
         import_semaphore.handleType = k_semaphore_handle;
         import_semaphore.handle = semaphore_handle;
         import_semaphore.semaphore = impl_->timeline;
-        const auto import_semaphore_handle =
-            reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
-                vkGetDeviceProcAddr(
-                    device.device, "vkImportSemaphoreWin32HandleKHR"));
+        const auto import_semaphore_handle = reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
+            vkGetDeviceProcAddr(device.device, "vkImportSemaphoreWin32HandleKHR"));
         if (!import_semaphore_handle)
-            throw std::runtime_error(
-                "Vulkan Win32 semaphore import function is unavailable");
+            throw std::runtime_error("Vulkan Win32 semaphore import function is unavailable");
         check(import_semaphore_handle(device.device, &import_semaphore),
               "import preview semaphore");
 #else
-        VkImportSemaphoreFdInfoKHR import_semaphore{
-            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+        VkImportSemaphoreFdInfoKHR import_semaphore{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
         import_semaphore.semaphore = impl_->timeline;
         import_semaphore.handleType = k_semaphore_handle;
         import_semaphore.fd = semaphore_fd;
-        const auto import_semaphore_handle =
-            reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
-                vkGetDeviceProcAddr(device.device, "vkImportSemaphoreFdKHR"));
+        const auto import_semaphore_handle = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+            vkGetDeviceProcAddr(device.device, "vkImportSemaphoreFdKHR"));
         if (!import_semaphore_handle)
-            throw std::runtime_error(
-                "Vulkan fd semaphore import function is unavailable");
+            throw std::runtime_error("Vulkan fd semaphore import function is unavailable");
         check(import_semaphore_handle(device.device, &import_semaphore),
               "import preview semaphore");
         semaphore_consumed = true;
@@ -267,8 +250,7 @@ ExternalImagePreview::ExternalImagePreview(
         static_cast<VkDeviceSize>(options.width) * options.height * 4U;
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = packed_bytes;
-    buffer_info.usage =
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     check(vkCreateBuffer(device.device, &buffer_info, nullptr, &impl_->packed),
           "create packed preview buffer");
     VkMemoryRequirements buffer_requirements{};
@@ -277,11 +259,9 @@ ExternalImagePreview::ExternalImagePreview(
     buffer_allocation.allocationSize = buffer_requirements.size;
     buffer_allocation.memoryTypeIndex =
         memory_type(device.physical_device, buffer_requirements.memoryTypeBits);
-    check(vkAllocateMemory(
-              device.device, &buffer_allocation, nullptr, &impl_->packed_memory),
+    check(vkAllocateMemory(device.device, &buffer_allocation, nullptr, &impl_->packed_memory),
           "allocate packed preview buffer");
-    check(vkBindBufferMemory(
-              device.device, impl_->packed, impl_->packed_memory, 0),
+    check(vkBindBufferMemory(device.device, impl_->packed, impl_->packed_memory, 0),
           "bind packed preview buffer");
 
     std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
@@ -291,24 +271,20 @@ ExternalImagePreview::ExternalImagePreview(
         bindings[index].descriptorCount = 1;
         bindings[index].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo set_info{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     set_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
     set_info.pBindings = bindings.data();
-    check(vkCreateDescriptorSetLayout(
-              device.device, &set_info, nullptr, &impl_->set_layout),
+    check(vkCreateDescriptorSetLayout(device.device, &set_info, nullptr, &impl_->set_layout),
           "create preview descriptor layout");
     VkPushConstantRange push{};
     push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     push.size = sizeof(std::uint32_t) * 4;
-    VkPipelineLayoutCreateInfo layout_info{
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &impl_->set_layout;
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &push;
-    check(vkCreatePipelineLayout(
-              device.device, &layout_info, nullptr, &impl_->pipeline_layout),
+    check(vkCreatePipelineLayout(device.device, &layout_info, nullptr, &impl_->pipeline_layout),
           "create preview pipeline layout");
 
     const std::span<const unsigned char> spir_v{splat_preview_pack_hlsl_spv};
@@ -318,13 +294,11 @@ ExternalImagePreview::ExternalImagePreview(
     VkShaderModule shader = VK_NULL_HANDLE;
     check(vkCreateShaderModule(device.device, &shader_info, nullptr, &shader),
           "create preview shader");
-    VkPipelineShaderStageCreateInfo stage{
-        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = shader;
     stage.pName = "main";
-    VkComputePipelineCreateInfo pipeline_info{
-        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     pipeline_info.stage = stage;
     pipeline_info.layout = impl_->pipeline_layout;
     const VkResult pipeline_result = vkCreateComputePipelines(
@@ -333,47 +307,37 @@ ExternalImagePreview::ExternalImagePreview(
     check(pipeline_result, "create preview pipeline");
 
     VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
-    VkDescriptorPoolCreateInfo pool_info{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = 1;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
-    check(vkCreateDescriptorPool(
-              device.device, &pool_info, nullptr, &impl_->descriptor_pool),
+    check(vkCreateDescriptorPool(device.device, &pool_info, nullptr, &impl_->descriptor_pool),
           "create preview descriptor pool");
-    VkDescriptorSetAllocateInfo allocate_set{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    VkDescriptorSetAllocateInfo allocate_set{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate_set.descriptorPool = impl_->descriptor_pool;
     allocate_set.descriptorSetCount = 1;
     allocate_set.pSetLayouts = &impl_->set_layout;
-    check(vkAllocateDescriptorSets(
-              device.device, &allocate_set, &impl_->descriptor),
+    check(vkAllocateDescriptorSets(device.device, &allocate_set, &impl_->descriptor),
           "allocate preview descriptor");
 
-    VkCommandPoolCreateInfo command_pool{
-        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkCommandPoolCreateInfo command_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     command_pool.queueFamilyIndex = device.queue_family;
-    check(vkCreateCommandPool(
-              device.device, &command_pool, nullptr, &impl_->command_pool),
+    check(vkCreateCommandPool(device.device, &command_pool, nullptr, &impl_->command_pool),
           "create preview command pool");
-    VkCommandBufferAllocateInfo allocate_command{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferAllocateInfo allocate_command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     allocate_command.commandPool = impl_->command_pool;
     allocate_command.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocate_command.commandBufferCount = 1;
-    check(vkAllocateCommandBuffers(
-              device.device, &allocate_command, &impl_->command),
+    check(vkAllocateCommandBuffers(device.device, &allocate_command, &impl_->command),
           "allocate preview command");
 }
 
 ExternalImagePreview::~ExternalImagePreview() = default;
 
-void ExternalImagePreview::submit(
-    const SplatBufferView& color, const std::uint32_t source_width,
-    const std::uint32_t source_height) {
-    if (!impl_ || color.buffer == VK_NULL_HANDLE || source_width == 0 ||
-        source_height == 0) {
+void ExternalImagePreview::submit(const SplatBufferView& color, const std::uint32_t source_width,
+                                  const std::uint32_t source_height) {
+    if (!impl_ || color.buffer == VK_NULL_HANDLE || source_width == 0 || source_height == 0) {
         throw std::invalid_argument("Vulkan preview requires a device RGB buffer");
     }
     // The rasterizer submitted the color write without waiting. Hold the queue
@@ -400,27 +364,21 @@ void ExternalImagePreview::submit(
     writes[1] = writes[0];
     writes[1].dstBinding = 1;
     writes[1].pBufferInfo = &destination;
-    vkUpdateDescriptorSets(
-        impl_->device.device, static_cast<std::uint32_t>(writes.size()),
-        writes.data(), 0, nullptr);
+    vkUpdateDescriptorSets(impl_->device.device, static_cast<std::uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
 
     check(vkResetCommandBuffer(impl_->command, 0), "reset preview command");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(impl_->command, &begin), "begin preview command");
 
-    vkCmdBindPipeline(
-        impl_->command, VK_PIPELINE_BIND_POINT_COMPUTE, impl_->pipeline);
-    vkCmdBindDescriptorSets(
-        impl_->command, VK_PIPELINE_BIND_POINT_COMPUTE, impl_->pipeline_layout,
-        0, 1, &impl_->descriptor, 0, nullptr);
-    const std::uint32_t push_values[4] = {
-        source_width, source_height, impl_->width, impl_->height};
-    vkCmdPushConstants(
-        impl_->command, impl_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-        sizeof(push_values), push_values);
-    vkCmdDispatch(
-        impl_->command, (impl_->width + 15U) / 16U, (impl_->height + 15U) / 16U, 1);
+    vkCmdBindPipeline(impl_->command, VK_PIPELINE_BIND_POINT_COMPUTE, impl_->pipeline);
+    vkCmdBindDescriptorSets(impl_->command, VK_PIPELINE_BIND_POINT_COMPUTE, impl_->pipeline_layout,
+                            0, 1, &impl_->descriptor, 0, nullptr);
+    const std::uint32_t push_values[4] = {source_width, source_height, impl_->width, impl_->height};
+    vkCmdPushConstants(impl_->command, impl_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(push_values), push_values);
+    vkCmdDispatch(impl_->command, (impl_->width + 15U) / 16U, (impl_->height + 15U) / 16U, 1);
 
     VkBufferMemoryBarrier buffer_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     buffer_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -438,17 +396,15 @@ void ExternalImagePreview::submit(
     acquire.dstQueueFamilyIndex = impl_->device.queue_family;
     acquire.image = impl_->image;
     acquire.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(
-        impl_->command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &buffer_barrier, 1,
-        &acquire);
+    vkCmdPipelineBarrier(impl_->command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &buffer_barrier, 1,
+                         &acquire);
 
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {impl_->width, impl_->height, 1};
-    vkCmdCopyBufferToImage(
-        impl_->command, impl_->packed, impl_->image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vkCmdCopyBufferToImage(impl_->command, impl_->packed, impl_->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
     VkImageMemoryBarrier release = acquire;
     release.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -457,17 +413,15 @@ void ExternalImagePreview::submit(
     release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     release.srcQueueFamilyIndex = impl_->device.queue_family;
     release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-    vkCmdPipelineBarrier(
-        impl_->command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
-        &release);
+    vkCmdPipelineBarrier(impl_->command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &release);
     check(vkEndCommandBuffer(impl_->command), "end preview command");
 
     const std::uint64_t frame = ++impl_->frames;
     const std::uint64_t wait_value = 2 * (frame - 1);
     const std::uint64_t signal_value = 2 * frame - 1;
-    VkTimelineSemaphoreSubmitInfo timeline{
-        VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkTimelineSemaphoreSubmitInfo timeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     // Gate the whole command buffer. A transfer-only wait would let the pack
     // dispatch start before the editor has finished sampling the image.
@@ -488,8 +442,7 @@ void ExternalImagePreview::submit(
     submit.pCommandBuffers = &impl_->command;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &impl_->timeline;
-    check(vkQueueSubmit(impl_->device.queue, 1, &submit, VK_NULL_HANDLE),
-          "submit preview");
+    check(vkQueueSubmit(impl_->device.queue, 1, &submit, VK_NULL_HANDLE), "submit preview");
     check(vkQueueWaitIdle(impl_->device.queue), "finish preview");
 }
 
@@ -497,4 +450,4 @@ std::uint64_t ExternalImagePreview::frame_count() const noexcept {
     return impl_ ? impl_->frames : 0;
 }
 
-}  // namespace splat_drender::vulkan
+} // namespace splat_drender::vulkan

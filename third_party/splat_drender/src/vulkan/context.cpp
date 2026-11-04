@@ -66,14 +66,13 @@ namespace {
 
 void check_vk(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
-        throw std::runtime_error(std::string(operation) + " failed with VkResult " + std::to_string(result));
+        throw std::runtime_error(std::string(operation) + " failed with VkResult " +
+                                 std::to_string(result));
     }
 }
 
-std::uint32_t find_memory_type(
-    VkPhysicalDevice physical_device,
-    std::uint32_t type_bits,
-    VkMemoryPropertyFlags required_flags) {
+std::uint32_t find_memory_type(VkPhysicalDevice physical_device, std::uint32_t type_bits,
+                               VkMemoryPropertyFlags required_flags) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
     for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
@@ -85,10 +84,9 @@ std::uint32_t find_memory_type(
     throw std::runtime_error("No compatible Vulkan memory type was found");
 }
 
-std::optional<std::uint32_t> try_find_memory_type(
-    VkPhysicalDevice physical_device,
-    std::uint32_t type_bits,
-    VkMemoryPropertyFlags required_flags) {
+std::optional<std::uint32_t> try_find_memory_type(VkPhysicalDevice physical_device,
+                                                  std::uint32_t type_bits,
+                                                  VkMemoryPropertyFlags required_flags) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
     for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
@@ -102,15 +100,13 @@ std::optional<std::uint32_t> try_find_memory_type(
 
 // VRAM that the host cannot map. Host memory carries DEVICE_LOCAL on a
 // resizable-BAR system, and the GPU reaches that over PCIe.
-std::optional<std::uint32_t> try_find_pure_device_local(
-    VkPhysicalDevice physical_device,
-    const std::uint32_t type_bits) {
+std::optional<std::uint32_t> try_find_pure_device_local(VkPhysicalDevice physical_device,
+                                                        const std::uint32_t type_bits) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
     for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
         const auto flags = properties.memoryTypes[i].propertyFlags;
-        if ((type_bits & (1U << i)) != 0 &&
-            (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
+        if ((type_bits & (1U << i)) != 0 && (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
             (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
             return i;
         }
@@ -139,7 +135,8 @@ std::optional<std::filesystem::path> shader_directory_override() {
 #ifdef _WIN32
     char* raw_value = nullptr;
     std::size_t value_size = 0;
-    if (_dupenv_s(&raw_value, &value_size, "SPLAT_DRENDER_SHADER_DIR") != 0 || raw_value == nullptr) {
+    if (_dupenv_s(&raw_value, &value_size, "SPLAT_DRENDER_SHADER_DIR") != 0 ||
+        raw_value == nullptr) {
         return std::nullopt;
     }
     std::filesystem::path value(raw_value);
@@ -238,12 +235,10 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
         return std::as_bytes(std::span{splat_blend_backward_no_geometry_hlsl_spv});
     }
     if (shader_name == "splat_blend_backward_no_geometry_subgroup.hlsl.spv") {
-        return std::as_bytes(
-            std::span{splat_blend_backward_no_geometry_subgroup_hlsl_spv});
+        return std::as_bytes(std::span{splat_blend_backward_no_geometry_subgroup_hlsl_spv});
     }
     if (shader_name == "splat_blend_backward_no_geometry_atomic.hlsl.spv") {
-        return std::as_bytes(
-            std::span{splat_blend_backward_no_geometry_atomic_hlsl_spv});
+        return std::as_bytes(std::span{splat_blend_backward_no_geometry_atomic_hlsl_spv});
     }
     if (shader_name == "splat_median_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_median_backward_hlsl_spv});
@@ -299,11 +294,9 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     throw std::invalid_argument("Unknown embedded shader: " + shader_name);
 }
 
-VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageTypeFlagsEXT,
-    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
-    void*) {
+VKAPI_ATTR VkBool32 VKAPI_CALL
+debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT,
+               const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void*) {
     if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && callback_data != nullptr) {
         // A callback must not throw. The application can attach a debugger here.
     }
@@ -338,10 +331,12 @@ std::uint32_t find_compute_queue_family(VkPhysicalDevice physical_device) {
 // is undefined for a family the device was not created with, so the handle
 // alone cannot tell us the index and the caller has to state it.
 bool queue_family_has_compute(VkPhysicalDevice physical_device, const std::uint32_t family) {
-    if (physical_device == VK_NULL_HANDLE || family == VK_QUEUE_FAMILY_IGNORED) return false;
+    if (physical_device == VK_NULL_HANDLE || family == VK_QUEUE_FAMILY_IGNORED)
+        return false;
     std::uint32_t count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, nullptr);
-    if (family >= count) return false;
+    if (family >= count)
+        return false;
     std::vector<VkQueueFamilyProperties> properties(count);
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, properties.data());
     return (properties[family].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
@@ -361,9 +356,11 @@ bool has_instance_extension(const char* extension_name) {
 
 bool has_instance_layer(const char* layer_name) {
     std::uint32_t count = 0;
-    check_vk(vkEnumerateInstanceLayerProperties(&count, nullptr), "vkEnumerateInstanceLayerProperties");
+    check_vk(vkEnumerateInstanceLayerProperties(&count, nullptr),
+             "vkEnumerateInstanceLayerProperties");
     std::vector<VkLayerProperties> properties(count);
-    check_vk(vkEnumerateInstanceLayerProperties(&count, properties.data()), "vkEnumerateInstanceLayerProperties");
+    check_vk(vkEnumerateInstanceLayerProperties(&count, properties.data()),
+             "vkEnumerateInstanceLayerProperties");
     return std::ranges::any_of(properties, [layer_name](const VkLayerProperties& property) {
         return std::strcmp(property.layerName, layer_name) == 0;
     });
@@ -374,21 +371,18 @@ bool has_device_extension(VkPhysicalDevice physical_device, const char* extensio
     check_vk(vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &count, nullptr),
              "vkEnumerateDeviceExtensionProperties");
     std::vector<VkExtensionProperties> properties(count);
-    check_vk(vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &count, properties.data()),
-             "vkEnumerateDeviceExtensionProperties");
+    check_vk(
+        vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &count, properties.data()),
+        "vkEnumerateDeviceExtensionProperties");
     return std::ranges::any_of(properties, [extension_name](const VkExtensionProperties& property) {
         return std::strcmp(property.extensionName, extension_name) == 0;
     });
 }
 
-}  // namespace
+} // namespace
 
-Buffer::Buffer(
-    VkPhysicalDevice physical_device,
-    VkDevice logical_device,
-    VkDeviceSize byte_size,
-    VkBufferUsageFlags usage,
-    const BufferMemory memory_kind)
+Buffer::Buffer(VkPhysicalDevice physical_device, VkDevice logical_device, VkDeviceSize byte_size,
+               VkBufferUsageFlags usage, const BufferMemory memory_kind)
     : device(logical_device), size(std::max<VkDeviceSize>(byte_size, 4)) {
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = size;
@@ -400,23 +394,23 @@ Buffer::Buffer(
     vkGetBufferMemoryRequirements(device, handle, &requirements);
     VkMemoryAllocateInfo allocation_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocation_info.allocationSize = requirements.size;
-    constexpr auto host_visible_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    constexpr auto host_visible_flags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     switch (memory_kind) {
     case BufferMemory::host_visible_device_local:
-        allocation_info.memoryTypeIndex = try_find_memory_type(
-                                              physical_device, requirements.memoryTypeBits,
-                                              host_visible_flags | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-                                              .value_or(find_memory_type(
-                                                  physical_device, requirements.memoryTypeBits, host_visible_flags));
+        allocation_info.memoryTypeIndex =
+            try_find_memory_type(physical_device, requirements.memoryTypeBits,
+                                 host_visible_flags | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                .value_or(find_memory_type(physical_device, requirements.memoryTypeBits,
+                                           host_visible_flags));
         break;
     case BufferMemory::device_local:
         // Prefer VRAM without the host bit: a resizable-BAR heap is host
         // visible but the GPU still crosses PCIe to reach it.
-        allocation_info.memoryTypeIndex = try_find_pure_device_local(
-                                              physical_device, requirements.memoryTypeBits)
-                                              .value_or(find_memory_type(
-                                                  physical_device, requirements.memoryTypeBits,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+        allocation_info.memoryTypeIndex =
+            try_find_pure_device_local(physical_device, requirements.memoryTypeBits)
+                .value_or(find_memory_type(physical_device, requirements.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
         break;
     case BufferMemory::host_visible:
     default:
@@ -424,11 +418,12 @@ Buffer::Buffer(
         // render target is memory-bound, and write-combined memory is ~20x
         // slower to read than cached memory.
         allocation_info.memoryTypeIndex =
-            try_find_memory_type(
-                physical_device, requirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                .value_or(find_memory_type(physical_device, requirements.memoryTypeBits, host_visible_flags));
+            try_find_memory_type(physical_device, requirements.memoryTypeBits,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                .value_or(find_memory_type(physical_device, requirements.memoryTypeBits,
+                                           host_visible_flags));
         break;
     }
     check_vk(vkAllocateMemory(device, &allocation_info, nullptr, &memory), "vkAllocateMemory");
@@ -476,16 +471,19 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 
 // Flush/invalidate the atom-aligned range that covers the transfer: mapped
 // memory that is not coherent only guarantees visibility at those boundaries.
-void flush_range(VkDevice device, VkDeviceMemory memory, VkDeviceSize atom, const std::size_t offset,
-                 const std::size_t bytes, const std::size_t size, const bool invalidate) {
-    if (bytes == 0) return;
+void flush_range(VkDevice device, VkDeviceMemory memory, VkDeviceSize atom,
+                 const std::size_t offset, const std::size_t bytes, const std::size_t size,
+                 const bool invalidate) {
+    if (bytes == 0)
+        return;
     VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     range.memory = memory;
     range.offset = (static_cast<VkDeviceSize>(offset) / atom) * atom;
     const VkDeviceSize end = static_cast<VkDeviceSize>(offset) + bytes;
     range.size = std::min<VkDeviceSize>(((end + atom - 1) / atom) * atom, size) - range.offset;
     if (invalidate) {
-        check_vk(vkInvalidateMappedMemoryRanges(device, 1, &range), "vkInvalidateMappedMemoryRanges");
+        check_vk(vkInvalidateMappedMemoryRanges(device, 1, &range),
+                 "vkInvalidateMappedMemoryRanges");
     } else {
         check_vk(vkFlushMappedMemoryRanges(device, 1, &range), "vkFlushMappedMemoryRanges");
     }
@@ -548,13 +546,13 @@ Context::Impl::Impl(const ContextOptions& options) {
 // goes to the caller's device and queue.
 void Context::Impl::adopt_external_device(const ExternalDevice& external) {
     if (external.queue == VK_NULL_HANDLE || external.physical_device == VK_NULL_HANDLE) {
-        throw std::invalid_argument(
-            "Adopting a Vulkan device requires external_device.physical_device and external_device.queue");
+        throw std::invalid_argument("Adopting a Vulkan device requires "
+                                    "external_device.physical_device and external_device.queue");
     }
     if (!queue_family_has_compute(external.physical_device, external.queue_family)) {
-        throw std::invalid_argument(
-            "ContextOptions::external_device.queue_family " + std::to_string(external.queue_family) +
-            " is out of range or has no compute queue");
+        throw std::invalid_argument("ContextOptions::external_device.queue_family " +
+                                    std::to_string(external.queue_family) +
+                                    " is out of range or has no compute queue");
     }
     instance = external.instance;
     physical_device = external.physical_device;
@@ -572,7 +570,8 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
     std::vector<const char*> extensions;
     if (validation_enabled) {
         if (!has_instance_layer("VK_LAYER_KHRONOS_validation")) {
-            throw std::runtime_error("Vulkan validation was requested but VK_LAYER_KHRONOS_validation is unavailable");
+            throw std::runtime_error(
+                "Vulkan validation was requested but VK_LAYER_KHRONOS_validation is unavailable");
         }
         layers.push_back("VK_LAYER_KHRONOS_validation");
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -608,24 +607,28 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
         const auto create_debug_messenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
         if (create_debug_messenger != nullptr) {
-            VkDebugUtilsMessengerCreateInfoEXT debug_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+            VkDebugUtilsMessengerCreateInfoEXT debug_info{
+                VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
             debug_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                          VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
             debug_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
                                      VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                                      VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
             debug_info.pfnUserCallback = debug_callback;
-            check_vk(create_debug_messenger(instance, &debug_info, nullptr, &debug_messenger), "debug messenger creation");
+            check_vk(create_debug_messenger(instance, &debug_info, nullptr, &debug_messenger),
+                     "debug messenger creation");
         }
     }
 
     std::uint32_t device_count = 0;
-    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, nullptr), "vkEnumeratePhysicalDevices");
+    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, nullptr),
+             "vkEnumeratePhysicalDevices");
     if (device_count == 0) {
         throw std::runtime_error("No Vulkan devices were found");
     }
     std::vector<VkPhysicalDevice> devices(device_count);
-    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, devices.data()), "vkEnumeratePhysicalDevices");
+    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, devices.data()),
+             "vkEnumeratePhysicalDevices");
     if (options.device_index >= device_count) {
         throw std::out_of_range("Vulkan device_index is out of range");
     }
@@ -672,7 +675,8 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
 #endif
     device_create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());
     device_create_info.ppEnabledExtensionNames = device_extensions.data();
-    check_vk(vkCreateDevice(physical_device, &device_create_info, nullptr, &device), "vkCreateDevice");
+    check_vk(vkCreateDevice(physical_device, &device_create_info, nullptr, &device),
+             "vkCreateDevice");
     vkGetDeviceQueue(device, queue_family_index, 0, &queue);
     owns_instance = true;
     owns_device = true;
@@ -682,7 +686,8 @@ void Context::Impl::create_pools() {
     VkCommandPoolCreateInfo command_pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     command_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     command_pool_info.queueFamilyIndex = queue_family_index;
-    check_vk(vkCreateCommandPool(device, &command_pool_info, nullptr, &command_pool), "vkCreateCommandPool");
+    check_vk(vkCreateCommandPool(device, &command_pool_info, nullptr, &command_pool),
+             "vkCreateCommandPool");
 
     const std::vector<VkDescriptorPoolSize> pool_sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
@@ -692,7 +697,8 @@ void Context::Impl::create_pools() {
     pool_info.maxSets = 512;
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
-    check_vk(vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool), "vkCreateDescriptorPool");
+    check_vk(vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool),
+             "vkCreateDescriptorPool");
 
     photara::vk::ExternalDevice external;
     external.instance = instance;
@@ -739,25 +745,26 @@ Context::Impl::~Impl() {
     }
 }
 
-Buffer Context::Impl::create_buffer(
-    VkDeviceSize size,
-    VkBufferUsageFlags usage,
-    const BufferMemory memory) const {
+Buffer Context::Impl::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                                    const BufferMemory memory) const {
     return Buffer(physical_device, device, size, usage, memory);
 }
 
 void Context::Impl::ensure_staging(const VkDeviceSize bytes) {
-    if (staging_.size >= bytes) return;
-    staging_ = create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                             BufferMemory::host_visible);
+    if (staging_.size >= bytes)
+        return;
+    staging_ =
+        create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      BufferMemory::host_visible);
 }
 
 // One-shot copy on the compute queue. Callers hold dispatch_mutex. The queue
 // lock is the same gate photara_vk uses, taken only around the submit.
-void Context::Impl::copy_between(
-    const Buffer& source, const std::size_t source_offset, const Buffer& destination,
-    const std::size_t destination_offset, const std::size_t byte_size) {
-    if (byte_size == 0) return;
+void Context::Impl::copy_between(const Buffer& source, const std::size_t source_offset,
+                                 const Buffer& destination, const std::size_t destination_offset,
+                                 const std::size_t byte_size) {
+    if (byte_size == 0)
+        return;
     VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     allocate.commandPool = command_pool;
     allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -784,37 +791,36 @@ void Context::Impl::copy_between(
     vkFreeCommandBuffers(device, command_pool, 1, &command);
 }
 
-void Context::Impl::write_buffer(
-    const Buffer& destination, const void* source, const std::size_t byte_size,
-    const std::size_t offset) {
+void Context::Impl::write_buffer(const Buffer& destination, const void* source,
+                                 const std::size_t byte_size, const std::size_t offset) {
     if (destination.host_visible()) {
         destination.upload(source, byte_size, offset);
         return;
     }
     ensure_staging(byte_size);
     staging_.upload(source, byte_size);
-    copy_between(staging_, 0, destination,
-                 offset + static_cast<std::size_t>(destination.offset), byte_size);
+    copy_between(staging_, 0, destination, offset + static_cast<std::size_t>(destination.offset),
+                 byte_size);
 }
 
-void Context::Impl::read_buffer(
-    const Buffer& source, void* destination, const std::size_t byte_size,
-    const std::size_t offset) {
+void Context::Impl::read_buffer(const Buffer& source, void* destination,
+                                const std::size_t byte_size, const std::size_t offset) {
     if (source.host_visible()) {
         source.download(destination, byte_size, offset);
         return;
     }
     ensure_staging(byte_size);
-    copy_between(source, offset + static_cast<std::size_t>(source.offset),
-                 staging_, 0, byte_size);
+    copy_between(source, offset + static_cast<std::size_t>(source.offset), staging_, 0, byte_size);
     staging_.download(destination, byte_size);
 }
 
-void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t value, const std::size_t byte_size) {
-    if (byte_size == 0) return;
+void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t value,
+                                const std::size_t byte_size) {
+    if (byte_size == 0)
+        return;
     if (destination.host_visible()) {
-        std::memset(static_cast<std::byte*>(destination.mapped) + destination.offset,
-                    value & 0xFFU, byte_size);
+        std::memset(static_cast<std::byte*>(destination.mapped) + destination.offset, value & 0xFFU,
+                    byte_size);
         return;
     }
     VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -831,9 +837,9 @@ void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t v
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(
-        command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
-        0, nullptr, 0, nullptr);
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                         nullptr);
     check_vk(vkEndCommandBuffer(command), "vkEndCommandBuffer");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
@@ -846,19 +852,19 @@ void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t v
     vkFreeCommandBuffers(device, command_pool, 1, &command);
 }
 
-ComputePipeline Context::Impl::create_pipeline(
-    const std::string& shader_name,
-    std::uint32_t storage_buffer_count,
-    std::uint32_t push_constant_size) const {
+ComputePipeline Context::Impl::create_pipeline(const std::string& shader_name,
+                                               std::uint32_t storage_buffer_count,
+                                               std::uint32_t push_constant_size) const {
     if (const auto override_directory = shader_directory_override()) {
         const auto bytes = read_spir_v(*override_directory / shader_name);
         return runtime.create_compute(bytes, storage_buffer_count, push_constant_size);
     }
-    return runtime.create_compute(
-        embedded_shader(shader_name), storage_buffer_count, push_constant_size);
+    return runtime.create_compute(embedded_shader(shader_name), storage_buffer_count,
+                                  push_constant_size);
 }
 
-Context::Context(const ContextOptions& options) : impl_(std::make_unique<Impl>(options)) {}
+Context::Context(const ContextOptions& options) : impl_(std::make_unique<Impl>(options)) {
+}
 Context::~Context() = default;
 Context::Context(Context&&) noexcept = default;
 Context& Context::operator=(Context&&) noexcept = default;
@@ -907,9 +913,11 @@ std::vector<DeviceInfo> Context::enumerate_devices() {
     VkInstance temporary_instance = VK_NULL_HANDLE;
     check_vk(vkCreateInstance(&create_info, nullptr, &temporary_instance), "vkCreateInstance");
     std::uint32_t count = 0;
-    check_vk(vkEnumeratePhysicalDevices(temporary_instance, &count, nullptr), "vkEnumeratePhysicalDevices");
+    check_vk(vkEnumeratePhysicalDevices(temporary_instance, &count, nullptr),
+             "vkEnumeratePhysicalDevices");
     std::vector<VkPhysicalDevice> physical_devices(count);
-    check_vk(vkEnumeratePhysicalDevices(temporary_instance, &count, physical_devices.data()), "vkEnumeratePhysicalDevices");
+    check_vk(vkEnumeratePhysicalDevices(temporary_instance, &count, physical_devices.data()),
+             "vkEnumeratePhysicalDevices");
     std::vector<DeviceInfo> result;
     result.reserve(count);
     for (const auto physical_device : physical_devices) {
@@ -919,4 +927,4 @@ std::vector<DeviceInfo> Context::enumerate_devices() {
     return result;
 }
 
-}  // namespace splat_drender::vulkan
+} // namespace splat_drender::vulkan

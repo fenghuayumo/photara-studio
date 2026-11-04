@@ -75,7 +75,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     if (snapshots) {
         uint bucket_count = (todo + 31u) >> 5;
         for (uint bucket = rank; bucket < bucket_count; bucket += 256u) {
-            out_u[gaussian_count + pixel_count + (height + 15u) / 16u * tiles_x + bucket_base + bucket] = tile_id;
+            out_u[gaussian_count + pixel_count + (height + 15u) / 16u * tiles_x + bucket_base +
+                  bucket] = tile_id;
         }
     }
 
@@ -92,11 +93,14 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     bool done = !inside;
 
     [loop] for (uint round = 0; round < rounds; ++round) {
-        if (rank == 0) alive_count = 0;
+        if (rank == 0)
+            alive_count = 0;
         GroupMemoryBarrierWithGroupSync();
-        if (!done) InterlockedAdd(alive_count, 1u);
+        if (!done)
+            InterlockedAdd(alive_count, 1u);
         GroupMemoryBarrierWithGroupSync();
-        if (alive_count == 0) break;
+        if (alive_count == 0)
+            break;
 
         uint progress = round * 256u + rank;
         if (range_begin + progress < range_end) {
@@ -122,32 +126,38 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
             if (snapshots && !done) {
                 uint slot = ((bucket_base + round * 8u + sub) << 8) + rank;
                 snap[slot] = float4(color0, color1, color2, transmittance);
-                if (geometry) snap[bucket_limit * 256u + slot] = float4(normal0, normal1, normal2, 0.0f);
+                if (geometry)
+                    snap[bucket_limit * 256u + slot] = float4(normal0, normal1, normal2, 0.0f);
             }
             uint j_end = min(batch, (sub + 1u) << 5);
             [loop] for (uint j = sub << 5; !done && j < j_end; ++j) {
                 ++contributor;
-                float2 delta = float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, mode), sxy[j].y - pixf.y);
+                float2 delta =
+                    float2(wrap_dx(sxy[j].x - pixf.x, wrap_width, mode), sxy[j].y - pixf.y);
                 float4 conic = sconic[j];
                 float power = gaussian_power(conic, delta.x, delta.y);
-                if (power > 0.0f) continue;
+                if (power > 0.0f)
+                    continue;
 #ifdef SPLAT_BLEND_RINGS
                 float sigma = max(0.5f, asfloat(pc.u19));
                 float radius = -2.0f * power / (sigma * sigma);
-                if (radius > 1.0f) continue;
+                if (radius > 1.0f)
+                    continue;
                 float norm = (exp(-4.0f * radius) - exp(-4.0f)) / (1.0f - exp(-4.0f));
                 float alpha = radius >= 0.96f ? 0.6f : max(0.05f, norm * sopacity[j]);
 #else
                 float alpha = min(kAlphaClip, conic.w * exp(power));
 #endif
-                if (alpha < kAlphaFloor) continue;
+                if (alpha < kAlphaFloor)
+                    continue;
                 float test_t = transmittance * (1.0f - alpha);
                 if (test_t < kTransmittanceFloor) {
                     done = true;
                     continue;
                 }
                 float weight = alpha * transmittance;
-                if (stats) InterlockedOr(out_u[sid[j]], 1u);
+                if (stats)
+                    InterlockedOr(out_u[sid[j]], 1u);
                 color0 += srgb[j].x * weight;
                 color1 += srgb[j].y * weight;
                 color2 += srgb[j].z * weight;
@@ -159,7 +169,8 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                     depth_seed = transmittance > 0.5f ? depth : depth_seed;
                 }
                 transmittance = test_t;
-                if (geometry || stats) last_contributor = contributor;
+                if (geometry || stats)
+                    last_contributor = contributor;
             }
         }
     }
@@ -169,11 +180,13 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
         red[rank] = last_contributor;
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint stride = 128u; stride > 0u; stride >>= 1) {
-            if (rank < stride) red[rank] = max(red[rank], red[rank + stride]);
+            if (rank < stride)
+                red[rank] = max(red[rank], red[rank + stride]);
             GroupMemoryBarrierWithGroupSync();
         }
         block_max = red[0];
-        if (stats && rank == 0) out_u[gaussian_count + pixel_count + tile_id] = block_max;
+        if (stats && rank == 0)
+            out_u[gaussian_count + pixel_count + tile_id] = block_max;
     }
 
     float median = 0.0f;
@@ -188,19 +201,23 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
             bool first = refine == 0;
             uint probe_begin = first ? 0u : 1u;
             uint probe_end = first ? 9u : 8u;
-            [unroll] for (uint probe_fill = 0u; probe_fill < 9u; ++probe_fill)
-                if (probe_fill >= probe_begin && probe_fill < probe_end) probe[probe_fill] = 1.0f;
+            [unroll] for (uint probe_fill = 0u; probe_fill < 9u;
+                          ++probe_fill) if (probe_fill >= probe_begin && probe_fill < probe_end)
+                probe[probe_fill] = 1.0f;
             float interval = (depth_max - depth_min) * (1.0f / float(kDepthSplit));
             bool local_done = !in_range;
             uint todo_depth = block_max;
             uint contributor_depth = 0;
             uint depth_rounds = (block_max + 255u) >> 8;
             [loop] for (uint depth_round = 0; depth_round < depth_rounds; ++depth_round) {
-                if (rank == 0) alive_count = 0;
+                if (rank == 0)
+                    alive_count = 0;
                 GroupMemoryBarrierWithGroupSync();
-                if (!local_done) InterlockedAdd(alive_count, 1u);
+                if (!local_done)
+                    InterlockedAdd(alive_count, 1u);
                 GroupMemoryBarrierWithGroupSync();
-                if (alive_count == 0) break;
+                if (alive_count == 0)
+                    break;
 
                 uint depth_progress = depth_round * 256u + rank;
                 if (depth_progress < block_max) {
@@ -215,17 +232,21 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                 [loop] for (uint dj = 0; !local_done && dj < depth_batch; ++dj) {
                     ++contributor_depth;
                     local_done = contributor_depth >= last_contributor;
-                    float2 delta_d = float2(wrap_dx(sxy[dj].x - pixf.x, wrap_width, mode), sxy[dj].y - pixf.y);
+                    float2 delta_d =
+                        float2(wrap_dx(sxy[dj].x - pixf.x, wrap_width, mode), sxy[dj].y - pixf.y);
                     float4 conic_d = sconic[dj];
                     float power_d = gaussian_power(conic_d, delta_d.x, delta_d.y);
-                    if (power_d > 0.0f) continue;
+                    if (power_d > 0.0f)
+                        continue;
                     float alpha_d = min(kAlphaClip, conic_d.w * exp(power_d));
-                    if (alpha_d < kAlphaFloor) continue;
+                    if (alpha_d < kAlphaFloor)
+                        continue;
                     float peak = splane[dj].x * delta_d.x + splane[dj].y * delta_d.y + splane[dj].z;
                     float rsigma = splane[dj].w;
                     bool ball = rsigma > 0.0f;
                     [unroll] for (uint sample = 0u; sample < 9u; ++sample) {
-                        if (sample < probe_begin || sample >= probe_end) continue;
+                        if (sample < probe_begin || sample >= probe_end)
+                            continue;
                         float ts = depth_min + interval * float(sample);
                         float delta_t = (ts - peak) * rsigma;
                         float response = ball ? exp(-0.5f * delta_t * delta_t) : 0.0f;
@@ -235,10 +256,12 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                     }
                 }
             }
-            if (first) in_range = probe[0] >= 0.5f && probe[kDepthSplit] <= 0.5f && in_range;
+            if (first)
+                in_range = probe[0] >= 0.5f && probe[kDepthSplit] <= 0.5f && in_range;
             uint start_id = 0;
             [unroll] for (uint bracket = 1; bracket < uint(kDepthSplit); ++bracket) {
-                if (probe[bracket] >= 0.5f) start_id = bracket;
+                if (probe[bracket] >= 0.5f)
+                    start_id = bracket;
             }
             float next_max = depth_min + float(start_id + 1u) * interval;
             float next_min = depth_min + float(start_id) * interval;

@@ -9,9 +9,11 @@
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint count = control[0];
     uint index = dispatch_id.x;
-    if (control[2] != 0u || index >= count) return;
+    if (control[2] != 0u || index >= count)
+        return;
     uint tile = key_lo[index];
-    if (index == 0u) ranges[tile * 2u] = 0u;
+    if (index == 0u)
+        ranges[tile * 2u] = 0u;
     else {
         uint previous = key_lo[index - 1u];
         if (tile != previous) {
@@ -19,5 +21,6 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             ranges[tile * 2u] = index;
         }
     }
-    if (index == count - 1u) ranges[tile * 2u + 1u] = count;
+    if (index == count - 1u)
+        ranges[tile * 2u + 1u] = count;
 }

@@ -14,9 +14,11 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
 
     if (mode == 1) {
         uint index = group_id.x * 256 + group_thread;
-        if (index >= n) return;
+        if (index >= n)
+            return;
         uint block = index >> 8;
-        if (block == 0) return;
+        if (block == 0)
+            return;
         data[out_offset + index] += data[sums_offset + block - 1];
         return;
     }
@@ -28,9 +30,12 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     [unroll] for (uint offset = 1; offset < 256; offset <<= 1) {
         uint addend = group_thread >= offset ? scratch[group_thread - offset] : 0;
         GroupMemoryBarrierWithGroupSync();
-        if (group_thread >= offset) scratch[group_thread] += addend;
+        if (group_thread >= offset)
+            scratch[group_thread] += addend;
         GroupMemoryBarrierWithGroupSync();
     }
-    if (index < n) data[out_offset + index] = scratch[group_thread];
-    if (group_thread == 255) data[sums_offset + group_id.x] = scratch[255];
+    if (index < n)
+        data[out_offset + index] = scratch[group_thread];
+    if (group_thread == 255)
+        data[sums_offset + group_id.x] = scratch[255];
 }

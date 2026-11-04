@@ -8,7 +8,7 @@
 
 #if defined(__CUDACC__)
 #define SD_HD __host__ __device__
-#define SD_D  __device__
+#define SD_D __device__
 #else
 #define SD_HD
 #define SD_D
@@ -35,15 +35,24 @@ struct CameraIntrinsics {
     bool compensate_2d = true;
 };
 
-SD_HD inline bool is_equirect(CameraMode m) { return m == CameraMode::equirectangular; }
-SD_HD inline bool is_fisheye(CameraMode m) { return m == CameraMode::opencv_fisheye; }
-SD_HD inline bool is_orthographic(CameraMode m) { return m == CameraMode::orthographic; }
-SD_HD inline bool is_pinhole(CameraMode m) { return m == CameraMode::pinhole; }
+SD_HD inline bool is_equirect(CameraMode m) {
+    return m == CameraMode::equirectangular;
+}
+SD_HD inline bool is_fisheye(CameraMode m) {
+    return m == CameraMode::opencv_fisheye;
+}
+SD_HD inline bool is_orthographic(CameraMode m) {
+    return m == CameraMode::orthographic;
+}
+SD_HD inline bool is_pinhole(CameraMode m) {
+    return m == CameraMode::pinhole;
+}
 
 // Horizontal wrap-around used by equirectangular images: map dx into
 // [-w/2, w/2) so instances on either seam edge hit the correct pixels.
 SD_HD inline float wrap_dx(float dx, int width, CameraMode m) {
-    if (!is_equirect(m) || width <= 0) return dx;
+    if (!is_equirect(m) || width <= 0)
+        return dx;
     const float w = static_cast<float>(width);
     return dx - w * floorf((dx + 0.5f * w) / w);
 }
@@ -68,28 +77,40 @@ struct Projection {
 SD_HD inline ProjectionJacobian projection_tangent_basis(const ProjectionJacobian& J) {
     ProjectionJacobian B{};
     float scale = 0.f;
-    for (int k=0;k<3;++k) scale=fmaxf(scale,fmaxf(fabsf(J.du[k]),fabsf(J.dv[k])));
-    if (!(scale>0.f) || !isfinite(scale)) return B;
-    float u[3],v[3],n[3];
-    for(int k=0;k<3;++k) {u[k]=J.du[k]/scale;v[k]=J.dv[k]/scale;}
-    for(int k=0;k<3;++k) n[k]=u[(k+1)%3]*v[(k+2)%3]-u[(k+2)%3]*v[(k+1)%3];
-    const float det=n[0]*n[0]+n[1]*n[1]+n[2]*n[2];
-    if (!(det>0.f) || !isfinite(det)) return B;
-    for(int k=0;k<3;++k) {
-        B.du[k]=(v[(k+1)%3]*n[(k+2)%3]-v[(k+2)%3]*n[(k+1)%3])/det/scale;
-        B.dv[k]=(n[(k+1)%3]*u[(k+2)%3]-n[(k+2)%3]*u[(k+1)%3])/det/scale;
+    for (int k = 0; k < 3; ++k)
+        scale = fmaxf(scale, fmaxf(fabsf(J.du[k]), fabsf(J.dv[k])));
+    if (!(scale > 0.f) || !isfinite(scale))
+        return B;
+    float u[3], v[3], n[3];
+    for (int k = 0; k < 3; ++k) {
+        u[k] = J.du[k] / scale;
+        v[k] = J.dv[k] / scale;
+    }
+    for (int k = 0; k < 3; ++k)
+        n[k] = u[(k + 1) % 3] * v[(k + 2) % 3] - u[(k + 2) % 3] * v[(k + 1) % 3];
+    const float det = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    if (!(det > 0.f) || !isfinite(det))
+        return B;
+    for (int k = 0; k < 3; ++k) {
+        B.du[k] = (v[(k + 1) % 3] * n[(k + 2) % 3] - v[(k + 2) % 3] * n[(k + 1) % 3]) / det / scale;
+        B.dv[k] = (n[(k + 1) % 3] * u[(k + 2) % 3] - n[(k + 2) % 3] * u[(k + 1) % 3]) / det / scale;
     }
     return B;
 }
 
 SD_HD inline Projection project_pinhole(float3 t, const CameraIntrinsics& K) {
     Projection p;
-    if (!(t.z > K.near_plane)) return p;
+    if (!(t.z > K.near_plane))
+        return p;
     const float iz = 1.f / t.z;
     p.pixel_x = t.x * iz * K.fx + K.cx;
     p.pixel_y = t.y * iz * K.fy + K.cy;
-    p.J.du[0] = K.fx * iz;  p.J.du[1] = 0.f;  p.J.du[2] = -(K.fx * t.x) * iz * iz;
-    p.J.dv[0] = 0.f;        p.J.dv[1] = K.fy * iz;  p.J.dv[2] = -(K.fy * t.y) * iz * iz;
+    p.J.du[0] = K.fx * iz;
+    p.J.du[1] = 0.f;
+    p.J.du[2] = -(K.fx * t.x) * iz * iz;
+    p.J.dv[0] = 0.f;
+    p.J.dv[1] = K.fy * iz;
+    p.J.dv[2] = -(K.fy * t.y) * iz * iz;
     p.valid = true;
     return p;
 }
@@ -98,17 +119,22 @@ SD_HD inline Projection project_fisheye(float3 t, const CameraIntrinsics& K) {
     // OpenCV fisheye: theta_d(theta) = theta (1 + k1 th^2 + ... + k4 th^8),
     // pixel = focal * theta_d * (x, y) / r.
     Projection p;
-    if (!(t.z > 1.0e-6f)) return p;
+    if (!(t.z > 1.0e-6f))
+        return p;
     const float r = hypotf(t.x, t.y);
     const float theta = atan2f(r, t.z);
     constexpr float kHalfPi = 1.57079632679f;
-    if (!(theta < kHalfPi)) return p;
+    if (!(theta < kHalfPi))
+        return p;
     const float th2 = theta * theta;
     const float poly = 1.f + th2 * (K.k1 + th2 * (K.k2 + th2 * (K.k3 + th2 * K.k4)));
     const float theta_d = theta * poly;
-    if (!(theta_d >= 0.f)) return p;
-    const float dtheta_d = 1.f + th2 * (3.f * K.k1 + th2 * (5.f * K.k2 + th2 * (7.f * K.k3 + th2 * 9.f * K.k4)));
-    if (!(dtheta_d > 1.0e-6f)) return p;
+    if (!(theta_d >= 0.f))
+        return p;
+    const float dtheta_d =
+        1.f + th2 * (3.f * K.k1 + th2 * (5.f * K.k2 + th2 * (7.f * K.k3 + th2 * 9.f * K.k4)));
+    if (!(dtheta_d > 1.0e-6f))
+        return p;
 
     const float r2 = t.x * t.x + t.y * t.y;
     const float l2 = r2 + t.z * t.z;
@@ -125,8 +151,12 @@ SD_HD inline Projection project_fisheye(float3 t, const CameraIntrinsics& K) {
         const float dz = -iz * iz * (1.f + 3.f * a * q + 5.f * b * q * q);
         p.pixel_x = K.cx + K.fx * t.x * s;
         p.pixel_y = K.cy + K.fy * t.y * s;
-        du_dx = K.fx * (s + t.x * t.x * ds); du_dy = K.fx * t.x * t.y * ds; du_dz = K.fx * t.x * dz;
-        dv_dx = K.fy * t.x * t.y * ds;       dv_dy = K.fy * (s + t.y * t.y * ds); dv_dz = K.fy * t.y * dz;
+        du_dx = K.fx * (s + t.x * t.x * ds);
+        du_dy = K.fx * t.x * t.y * ds;
+        du_dz = K.fx * t.x * dz;
+        dv_dx = K.fy * t.x * t.y * ds;
+        dv_dy = K.fy * (s + t.y * t.y * ds);
+        dv_dz = K.fy * t.y * dz;
     } else {
         const float rho = theta_d / r;
         p.pixel_x = K.fx * rho * t.x + K.cx;
@@ -141,11 +171,19 @@ SD_HD inline Projection project_fisheye(float3 t, const CameraIntrinsics& K) {
         const float drho_dx = dtd_dx / r - theta_d * t.x * ir3;
         const float drho_dy = dtd_dy / r - theta_d * t.y * ir3;
         const float drho_dz = dtd_dz / r;
-        du_dx = K.fx * (rho + t.x * drho_dx); du_dy = K.fx * t.x * drho_dy; du_dz = K.fx * t.x * drho_dz;
-        dv_dx = K.fy * t.y * drho_dx;         dv_dy = K.fy * (rho + t.y * drho_dy); dv_dz = K.fy * t.y * drho_dz;
+        du_dx = K.fx * (rho + t.x * drho_dx);
+        du_dy = K.fx * t.x * drho_dy;
+        du_dz = K.fx * t.x * drho_dz;
+        dv_dx = K.fy * t.y * drho_dx;
+        dv_dy = K.fy * (rho + t.y * drho_dy);
+        dv_dz = K.fy * t.y * drho_dz;
     }
-    p.J.du[0] = du_dx; p.J.du[1] = du_dy; p.J.du[2] = du_dz;
-    p.J.dv[0] = dv_dx; p.J.dv[1] = dv_dy; p.J.dv[2] = dv_dz;
+    p.J.du[0] = du_dx;
+    p.J.du[1] = du_dy;
+    p.J.du[2] = du_dz;
+    p.J.dv[0] = dv_dx;
+    p.J.dv[1] = dv_dy;
+    p.J.dv[2] = dv_dz;
     p.valid = isfinite(p.pixel_x) && isfinite(p.pixel_y);
     return p;
 }
@@ -153,9 +191,11 @@ SD_HD inline Projection project_fisheye(float3 t, const CameraIntrinsics& K) {
 SD_HD inline Projection project_equirect(float3 t, int width, int height) {
     Projection p;
     const float l = sqrtf(t.x * t.x + t.y * t.y + t.z * t.z);
-    if (!(l > 1.0e-6f) || width <= 0 || height <= 0) return p;
+    if (!(l > 1.0e-6f) || width <= 0 || height <= 0)
+        return p;
     const float horiz = hypotf(t.x, t.z);
-    if (horiz < 1.0e-5f) return p;
+    if (horiz < 1.0e-5f)
+        return p;
     constexpr float kPi = 3.14159265358979323846f;
     const float az = atan2f(t.x, t.z);
     const float el = atan2f(t.y, horiz);
@@ -169,8 +209,12 @@ SD_HD inline Projection project_equirect(float3 t, int width, int height) {
     const float del_dz = -t.y * t.z / (horiz * l2);
     const float su = static_cast<float>(width) / (2.f * kPi);
     const float sv = static_cast<float>(height) / kPi;
-    p.J.du[0] = su * daz_dx; p.J.du[1] = su * daz_dy; p.J.du[2] = su * daz_dz;
-    p.J.dv[0] = sv * del_dx; p.J.dv[1] = sv * del_dy; p.J.dv[2] = sv * del_dz;
+    p.J.du[0] = su * daz_dx;
+    p.J.du[1] = su * daz_dy;
+    p.J.du[2] = su * daz_dz;
+    p.J.dv[0] = sv * del_dx;
+    p.J.dv[1] = sv * del_dy;
+    p.J.dv[2] = sv * del_dz;
     p.valid = isfinite(p.pixel_x) && isfinite(p.pixel_y);
     return p;
 }
@@ -178,7 +222,8 @@ SD_HD inline Projection project_equirect(float3 t, int width, int height) {
 SD_HD inline Projection project(float3 t, const CameraIntrinsics& K, int width, int height) {
     if (is_orthographic(K.mode)) {
         Projection p;
-        if (!(t.z > K.near_plane)) return p;
+        if (!(t.z > K.near_plane))
+            return p;
         p.pixel_x = K.fx * t.x + K.cx;
         p.pixel_y = K.fy * t.y + K.cy;
         p.J.du[0] = K.fx;
@@ -186,8 +231,10 @@ SD_HD inline Projection project(float3 t, const CameraIntrinsics& K, int width, 
         p.valid = isfinite(p.pixel_x) && isfinite(p.pixel_y);
         return p;
     }
-    if (is_fisheye(K.mode)) return project_fisheye(t, K);
-    if (is_equirect(K.mode)) return project_equirect(t, width, height);
+    if (is_fisheye(K.mode))
+        return project_fisheye(t, K);
+    if (is_equirect(K.mode))
+        return project_equirect(t, width, height);
     return project_pinhole(t, K);
 }
 
@@ -202,7 +249,8 @@ SD_HD inline bool camera_visible(float3 t, CameraMode m, float near_plane = 0.2f
 // Unit ray through a pixel; .z converts a ray-length depth to camera Z.
 // Device-only (uses rnorm3df and the inverse fisheye solve).
 SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K) {
-    if (is_orthographic(K.mode)) return make_float3(0.f, 0.f, 1.f);
+    if (is_orthographic(K.mode))
+        return make_float3(0.f, 0.f, 1.f);
     const float x = (px - K.cx) / K.fx;
     const float y = (py - K.cy) / K.fy;
     if (is_equirect(K.mode)) {
@@ -210,8 +258,7 @@ SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K)
         // makes those offsets the azimuth and elevation in radians, so the ray
         // is the spherical direction rather than a perspective (x, y, 1).
         const float cos_elevation = cosf(y);
-        return make_float3(cos_elevation * sinf(x), sinf(y),
-                           cos_elevation * cosf(x));
+        return make_float3(cos_elevation * sinf(x), sinf(y), cos_elevation * cosf(x));
     }
     if (!is_fisheye(K.mode)) {
         const float inv = rnorm3df(x, y, 1.f);
@@ -228,12 +275,17 @@ SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K)
     for (int i = 0; i < 28; ++i) {
         const float t = 0.5f * (lo + hi), q = t * t;
         const float td = t * (1.f + q * (K.k1 + q * (K.k2 + q * (K.k3 + q * K.k4))));
-        if (td < r) lo = t; else hi = t;
+        if (td < r)
+            lo = t;
+        else
+            hi = t;
     }
     const float theta = 0.5f * (lo + hi);
     const float t2 = theta * theta;
-    const float derivative = 1.f + t2 * (3.f * K.k1 + t2 * (5.f * K.k2 + t2 * (7.f * K.k3 + 9.f * t2 * K.k4)));
-    if (!(derivative > 1.e-6f)) return make_float3(0.f, 0.f, 0.f);
+    const float derivative =
+        1.f + t2 * (3.f * K.k1 + t2 * (5.f * K.k2 + t2 * (7.f * K.k3 + 9.f * t2 * K.k4)));
+    if (!(derivative > 1.e-6f))
+        return make_float3(0.f, 0.f, 0.f);
     const float scale = r > 1.0e-8f ? sinf(theta) / r : 1.f;
     return make_float3(x * scale, y * scale, fmaxf(0.f, cosf(theta)));
 }
@@ -242,12 +294,13 @@ SD_D inline float pixel_ray_z(float px, float py, const CameraIntrinsics& K) {
     // The rasterizer accumulates |t|, the distance along the ray. Pinhole and
     // fisheye convert that to camera-space Z, but a panorama has no global Z
     // axis: the distance along the ray is already its depth.
-    if (is_equirect(K.mode)) return 1.f;
+    if (is_equirect(K.mode))
+        return 1.f;
     return pixel_unit_ray(px, py, K).z;
 }
-#endif  // __CUDACC__
+#endif // __CUDACC__
 
-}  // namespace splat_drender
+} // namespace splat_drender
 
 #undef SD_HD
 #undef SD_D

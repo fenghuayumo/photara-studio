@@ -26,16 +26,18 @@ groupshared float reduction[256];
 #endif
 
 void add_score(uint gaussian, float value) {
-    if (value == 0.0f) return;
+    if (value == 0.0f)
+        return;
 #if defined(SPLAT_PRUNING_ATOMIC)
     op_atomic_f_add(scores[gaussian], 1u, 0u, value);
 #else
     uint expected = scores[gaussian];
     [loop] for (;;) {
         uint observed;
-        InterlockedCompareExchange(scores[gaussian], expected,
-            asuint(asfloat(expected) + value), observed);
-        if (observed == expected) return;
+        InterlockedCompareExchange(scores[gaussian], expected, asuint(asfloat(expected) + value),
+                                   observed);
+        if (observed == expected)
+            return;
         expected = observed;
     }
 #endif
@@ -56,7 +58,8 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
     uint limit = min(end - begin, out_u[count + pixels + tile]);
     // The rendered image includes the final background. Removing the prefix
     // leaves the weighted colour behind the current accepted contributor.
-    float residual = inside ? out_f[pixel] + out_f[pixels + pixel] + out_f[2u * pixels + pixel] : 0.0f;
+    float residual =
+        inside ? out_f[pixel] + out_f[pixels + pixel] + out_f[2u * pixels + pixel] : 0.0f;
     float transmittance = 1.0f;
     [loop] for (uint base = 0u; base < limit; base += 256u) {
         // Stage each primitive once per tile, coalescing the draw-list reads.
@@ -74,7 +77,8 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
             float value = 0.0f;
             if (base + j < last) {
                 float2 mean = smean[j];
-                float2 delta = float2(wrap_dx(mean.x - float(x), wrap_width, mode), mean.y - float(y));
+                float2 delta =
+                    float2(wrap_dx(mean.x - float(x), wrap_width, mode), mean.y - float(y));
                 float4 conic = sconic[j];
                 float power = gaussian_power(conic, delta.x, delta.y);
                 if (power <= 0.0f) {
@@ -82,7 +86,8 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
                     if (alpha >= kAlphaFloor) {
                         float colour = scolour[j];
                         residual -= transmittance * alpha * colour;
-                        float derivative = conic.w * (transmittance * colour - residual / (1.0f - alpha));
+                        float derivative =
+                            conic.w * (transmittance * colour - residual / (1.0f - alpha));
                         value = derivative * derivative;
                         transmittance *= 1.0f - alpha;
                     }
@@ -92,15 +97,18 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
             // Identical per-pixel recurrence to CUDA, but only one global
             // atomic per subgroup/Gaussian instead of one per pixel.
             float total = WaveActiveSum(value);
-            if (WaveIsFirstLane()) add_score(sid[j], total);
+            if (WaveIsFirstLane())
+                add_score(sid[j], total);
 #else
             reduction[rank] = value;
             GroupMemoryBarrierWithGroupSync();
             [unroll] for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-                if (rank < stride) reduction[rank] += reduction[rank + stride];
+                if (rank < stride)
+                    reduction[rank] += reduction[rank + stride];
                 GroupMemoryBarrierWithGroupSync();
             }
-            if (rank == 0u) add_score(sid[j], reduction[0]);
+            if (rank == 0u)
+                add_score(sid[j], reduction[0]);
             GroupMemoryBarrierWithGroupSync();
 #endif
         }

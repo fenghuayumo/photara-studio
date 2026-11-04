@@ -12,9 +12,15 @@ using namespace splat_drender;
 
 int main() {
     CameraIntrinsics K;
-    K.fx = 29.f; K.fy = 31.f; K.cx = 39.2f; K.cy = 31.1f;
+    K.fx = 29.f;
+    K.fy = 31.f;
+    K.cx = 39.2f;
+    K.cy = 31.1f;
     K.mode = CameraMode::opencv_fisheye;
-    K.k1 = 0.06f; K.k2 = -0.012f; K.k3 = 0.003f; K.k4 = -0.0004f;
+    K.k1 = 0.06f;
+    K.k2 = -0.012f;
+    K.k3 = 0.003f;
+    K.k4 = -0.0004f;
 
     const float angle = 0.23f, c = cosf(angle), s = sinf(angle);
     float view[16] = {c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1};
@@ -27,15 +33,14 @@ int main() {
     const float sc[3] = {0.16f, 0.10f, 0.22f};
     mat::Mat3 S2 = mat::Mat3::diag(sc[0] * sc[0], sc[1] * sc[1], sc[2] * sc[2]);
     mat::Mat3 Sig = mat::transpose(R) * S2 * R;
-    float sig[6] = {Sig.m[0][0], Sig.m[0][1], Sig.m[0][2],
-                    Sig.m[1][1], Sig.m[1][2], Sig.m[2][2]};
+    float sig[6] = {Sig.m[0][0], Sig.m[0][1], Sig.m[0][2], Sig.m[1][1], Sig.m[1][2], Sig.m[2][2]};
 
     // Dual evaluation: d conic / d Sigma.
-    fisheye::Dual td[3] = {fisheye::Dual::variable(t[0], 0),
-                           fisheye::Dual::variable(t[1], 1),
+    fisheye::Dual td[3] = {fisheye::Dual::variable(t[0], 0), fisheye::Dual::variable(t[1], 1),
                            fisheye::Dual::variable(t[2], 2)};
     fisheye::Dual sd[6];
-    for (int i = 0; i < 6; ++i) sd[i] = fisheye::Dual::variable(sig[i], 3 + i);
+    for (int i = 0; i < 6; ++i)
+        sd[i] = fisheye::Dual::variable(sig[i], 3 + i);
     const auto dual = fisheye::evaluate(td, sd, W, K, 0.f);
 
     // Chain: d conic / d scale_y = sum_i d conic / d Sigma_i * dSigma_i/ds_y.
@@ -44,18 +49,27 @@ int main() {
         const float k = 2.f * sc[1];
         static const int row = 1;
         const int i = (entry == 0 || entry == 1 || entry == 2) ? 0
-                     : (entry == 3 || entry == 4) ? 1 : 2;
-        const int j = (entry == 0) ? 0
-                     : (entry == 1 || entry == 3) ? 1
-                     : (entry == 2 || entry == 4) ? 2 : 2;
+                      : (entry == 3 || entry == 4)             ? 1
+                                                               : 2;
+        const int j = (entry == 0)                 ? 0
+                      : (entry == 1 || entry == 3) ? 1
+                      : (entry == 2 || entry == 4) ? 2
+                                                   : 2;
         // entry index maps: 0:(0,0) 1:(0,1) 2:(0,2) 3:(1,1) 4:(1,2) 5:(2,2)
-        const int ii = entry == 0 ? 0 : entry == 1 ? 0 : entry == 2 ? 0
-                                                          : entry == 3 ? 1
-                                                          : entry == 4 ? 1 : 2;
-        const int jj = entry == 0 ? 0 : entry == 1 ? 1 : entry == 2 ? 2
-                                                          : entry == 3 ? 1
-                                                          : entry == 4 ? 2 : 2;
-        (void)i; (void)j;
+        const int ii = entry == 0   ? 0
+                       : entry == 1 ? 0
+                       : entry == 2 ? 0
+                       : entry == 3 ? 1
+                       : entry == 4 ? 1
+                                    : 2;
+        const int jj = entry == 0   ? 0
+                       : entry == 1 ? 1
+                       : entry == 2 ? 2
+                       : entry == 3 ? 1
+                       : entry == 4 ? 2
+                                    : 2;
+        (void)i;
+        (void)j;
         return k * R.m[row][ii] * R.m[row][jj];
     };
 
@@ -79,8 +93,7 @@ int main() {
     const float h = 1e-4f;
     const float fd = (eval_conic_loss(sc[1] + h) - eval_conic_loss(sc[1] - h)) / (2 * h);
 
-    printf("dual dL/ds_y = %.6f   fd = %.6f   ratio = %.4f\n", dual_total, fd,
-           fd / dual_total);
+    printf("dual dL/ds_y = %.6f   fd = %.6f   ratio = %.4f\n", dual_total, fd, fd / dual_total);
     printf("conic = (%.6f, %.6f, %.6f) coef=%.6f plane=(%.6f,%.6f,%.6f,%.6f)\n",
            fisheye::scalar(dual.conic[0]), fisheye::scalar(dual.conic[1]),
            fisheye::scalar(dual.conic[2]), fisheye::scalar(dual.coefficient),

@@ -49,34 +49,39 @@ struct PushConstants {
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc;
 
-struct FootprintCap { float q, lambda; float3 derivative; };
+struct FootprintCap {
+    float q, lambda;
+    float3 derivative;
+};
 
 FootprintCap footprint_policy(float3 cov, int width, int height) {
-    float half_diff = .5f * (cov.x-cov.z);
-    float radius = length(float2(half_diff,cov.y));
-    float lambda = .5f*cov.x + .5f*cov.z + radius;
-    float limit = min(1024.0f,float(min(width,height)));
-    float variance = .125f*limit*limit;
+    float half_diff = .5f * (cov.x - cov.z);
+    float radius = length(float2(half_diff, cov.y));
+    float lambda = .5f * cov.x + .5f * cov.z + radius;
+    float limit = min(1024.0f, float(min(width, height)));
+    float variance = .125f * limit * limit;
     FootprintCap cap;
-    cap.q = 1.0f; cap.lambda = lambda; cap.derivative = 0.0f;
+    cap.q = 1.0f;
+    cap.lambda = lambda;
+    cap.derivative = 0.0f;
     if (lambda > variance && isfinite(lambda)) {
-        cap.q = variance/lambda;
-        float h = radius > 0.0f ? half_diff/radius : 0.0f;
-        cap.derivative = float3(.5f+.5f*h, radius > 0.0f ? cov.y/radius : 0.0f, .5f-.5f*h);
+        cap.q = variance / lambda;
+        float h = radius > 0.0f ? half_diff / radius : 0.0f;
+        cap.derivative =
+            float3(.5f + .5f * h, radius > 0.0f ? cov.y / radius : 0.0f, .5f - .5f * h);
     }
     return cap;
 }
 
 float3 footprint_conic_backward(float3 cov, FootprintCap cap, float4 g) {
-    float3 c = cov*cap.q;
-    float det = c.x*c.z-c.y*c.y;
-    float u=c.z/det, v=-c.y/det, w=c.x/det;
-    float3 grad = float3(
-        -(u*u*g.x+2.0f*u*v*g.y+v*v*g.z),
-        -2.0f*(u*v*g.x+(u*w+v*v)*g.y+v*w*g.z),
-        -(v*v*g.x+2.0f*v*w*g.y+w*w*g.z));
-    float pull = dot(grad,cov)/cap.lambda;
-    return cap.q*(grad-pull*cap.derivative);
+    float3 c = cov * cap.q;
+    float det = c.x * c.z - c.y * c.y;
+    float u = c.z / det, v = -c.y / det, w = c.x / det;
+    float3 grad = float3(-(u * u * g.x + 2.0f * u * v * g.y + v * v * g.z),
+                         -2.0f * (u * v * g.x + (u * w + v * v) * g.y + v * w * g.z),
+                         -(v * v * g.x + 2.0f * v * w * g.y + w * w * g.z));
+    float pull = dot(grad, cov) / cap.lambda;
+    return cap.q * (grad - pull * cap.derivative);
 }
 
 struct Mat3 {
@@ -89,8 +94,7 @@ float mat_at(Mat3 a, int col, int row) {
 
 Mat3 mat_zero() {
     Mat3 o;
-    [unroll] for (int i = 0; i < 3; ++i)
-        [unroll] for (int j = 0; j < 3; ++j) o.m[i][j] = 0.0f;
+    [unroll] for (int i = 0; i < 3; ++i)[unroll] for (int j = 0; j < 3; ++j) o.m[i][j] = 0.0f;
     return o;
 }
 
@@ -104,23 +108,20 @@ Mat3 mat_diag(float x, float y, float z) {
 
 Mat3 mat_mul(Mat3 a, Mat3 b) {
     Mat3 o = mat_zero();
-    [unroll] for (int i = 0; i < 3; ++i)
-        [unroll] for (int j = 0; j < 3; ++j)
-            o.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j];
+    [unroll] for (int i = 0; i < 3; ++i)[unroll] for (int j = 0; j < 3; ++j) o.m[i][j] =
+        a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j];
     return o;
 }
 
 float3 mat_mul_vec(Mat3 a, float3 v) {
-    return float3(
-        a.m[0][0] * v.x + a.m[0][1] * v.y + a.m[0][2] * v.z,
-        a.m[1][0] * v.x + a.m[1][1] * v.y + a.m[1][2] * v.z,
-        a.m[2][0] * v.x + a.m[2][1] * v.y + a.m[2][2] * v.z);
+    return float3(a.m[0][0] * v.x + a.m[0][1] * v.y + a.m[0][2] * v.z,
+                  a.m[1][0] * v.x + a.m[1][1] * v.y + a.m[1][2] * v.z,
+                  a.m[2][0] * v.x + a.m[2][1] * v.y + a.m[2][2] * v.z);
 }
 
 Mat3 mat_transpose(Mat3 a) {
     Mat3 o = mat_zero();
-    [unroll] for (int i = 0; i < 3; ++i)
-        [unroll] for (int j = 0; j < 3; ++j) o.m[i][j] = a.m[j][i];
+    [unroll] for (int i = 0; i < 3; ++i)[unroll] for (int j = 0; j < 3; ++j) o.m[i][j] = a.m[j][i];
     return o;
 }
 
@@ -138,16 +139,14 @@ Mat3 mat_outer(float3 u, float3 v) {
     return o;
 }
 
-float3 xform_point(float3 p, float v0, float v1, float v2, float v4, float v5, float v6,
-                   float v8, float v9, float v10, float v12, float v13, float v14) {
-    return float3(
-        v0 * p.x + v4 * p.y + v8 * p.z + v12,
-        v1 * p.x + v5 * p.y + v9 * p.z + v13,
-        v2 * p.x + v6 * p.y + v10 * p.z + v14);
+float3 xform_point(float3 p, float v0, float v1, float v2, float v4, float v5, float v6, float v8,
+                   float v9, float v10, float v12, float v13, float v14) {
+    return float3(v0 * p.x + v4 * p.y + v8 * p.z + v12, v1 * p.x + v5 * p.y + v9 * p.z + v13,
+                  v2 * p.x + v6 * p.y + v10 * p.z + v14);
 }
 
-Mat3 world_rotation_transposed(float v0, float v1, float v2, float v4, float v5, float v6,
-                               float v8, float v9, float v10) {
+Mat3 world_rotation_transposed(float v0, float v1, float v2, float v4, float v5, float v6, float v8,
+                               float v9, float v10) {
     Mat3 w = mat_zero();
     w.m[0][0] = v0;
     w.m[0][1] = v1;
@@ -213,7 +212,8 @@ Projection project_ortho(float3 t, float fx, float fy, float cx, float cy) {
     p.dv1 = 0.0f;
     p.dv2 = 0.0f;
     p.valid = false;
-    if (!(t.z > asfloat(pc.u21))) return p;
+    if (!(t.z > asfloat(pc.u21)))
+        return p;
     p.pixel_x = t.x * fx + cx;
     p.pixel_y = t.y * fy + cy;
     p.du0 = fx;
@@ -233,7 +233,8 @@ Projection project_pinhole(float3 t, float fx, float fy, float cx, float cy) {
     p.dv1 = 0.0f;
     p.dv2 = 0.0f;
     p.valid = false;
-    if (!(t.z > asfloat(pc.u21))) return p;
+    if (!(t.z > asfloat(pc.u21)))
+        return p;
     float iz = 1.0f / t.z;
     p.pixel_x = t.x * iz * fx + cx;
     p.pixel_y = t.y * iz * fy + cy;
@@ -247,8 +248,8 @@ Projection project_pinhole(float3 t, float fx, float fy, float cx, float cy) {
     return p;
 }
 
-Projection project_fisheye(float3 t, float fx, float fy, float cx, float cy,
-                           float k1, float k2, float k3, float k4) {
+Projection project_fisheye(float3 t, float fx, float fy, float cx, float cy, float k1, float k2,
+                           float k3, float k4) {
     Projection p;
     p.pixel_x = 0.0f;
     p.pixel_y = 0.0f;
@@ -259,16 +260,21 @@ Projection project_fisheye(float3 t, float fx, float fy, float cx, float cy,
     p.dv1 = 0.0f;
     p.dv2 = 0.0f;
     p.valid = false;
-    if (!(t.z > 1.0e-6f)) return p;
+    if (!(t.z > 1.0e-6f))
+        return p;
     float r = sqrt(t.x * t.x + t.y * t.y);
     float theta = atan2(r, t.z);
-    if (!(theta < 1.57079632679f)) return p;
+    if (!(theta < 1.57079632679f))
+        return p;
     float th2 = theta * theta;
     float poly = 1.0f + th2 * (k1 + th2 * (k2 + th2 * (k3 + th2 * k4)));
     float theta_d = theta * poly;
-    if (!(theta_d >= 0.0f)) return p;
-    float dtheta_d = 1.0f + th2 * (3.0f * k1 + th2 * (5.0f * k2 + th2 * (7.0f * k3 + th2 * 9.0f * k4)));
-    if (!(dtheta_d > 1.0e-6f)) return p;
+    if (!(theta_d >= 0.0f))
+        return p;
+    float dtheta_d =
+        1.0f + th2 * (3.0f * k1 + th2 * (5.0f * k2 + th2 * (7.0f * k3 + th2 * 9.0f * k4)));
+    if (!(dtheta_d > 1.0e-6f))
+        return p;
 
     float r2 = t.x * t.x + t.y * t.y;
     float l2 = r2 + t.z * t.z;
@@ -332,9 +338,11 @@ Projection project_equirect(float3 t, int width, int height) {
     p.dv2 = 0.0f;
     p.valid = false;
     float l = sqrt(dot(t, t));
-    if (!(l > 1.0e-6f) || width <= 0 || height <= 0) return p;
+    if (!(l > 1.0e-6f) || width <= 0 || height <= 0)
+        return p;
     float horiz = sqrt(t.x * t.x + t.z * t.z);
-    if (horiz < 1.0e-5f) return p;
+    if (horiz < 1.0e-5f)
+        return p;
     float az = atan2(t.x, t.z);
     float el = atan2(t.y, horiz);
     p.pixel_x = (az / (2.0f * kPi) + 0.5f) * float(width);
@@ -358,10 +366,12 @@ Projection project_equirect(float3 t, int width, int height) {
     return p;
 }
 
-Projection project_camera(float3 t, uint mode, int width, int height, float fx, float fy, float cx, float cy,
-                          float k1, float k2, float k3, float k4) {
-    if (mode == kModeFisheye) return project_fisheye(t, fx, fy, cx, cy, k1, k2, k3, k4);
-    if (mode == kModeEquirect) return project_equirect(t, width, height);
+Projection project_camera(float3 t, uint mode, int width, int height, float fx, float fy, float cx,
+                          float cy, float k1, float k2, float k3, float k4) {
+    if (mode == kModeFisheye)
+        return project_fisheye(t, fx, fy, cx, cy, k1, k2, k3, k4);
+    if (mode == kModeEquirect)
+        return project_equirect(t, width, height);
     return project_pinhole(t, fx, fy, cx, cy);
 }
 
@@ -382,30 +392,37 @@ float3 pixel_unit_ray(float px, float py, uint mode, float fx, float fy, float c
     float hi = 1.57079632679f;
     float h2 = hi * hi;
     float limit = hi * (1.0f + h2 * (k1 + h2 * (k2 + h2 * (k3 + h2 * k4))));
-    if (!(fx > 0.0f && fy > 0.0f && r < limit) || !finite1(r)) return 0.0f;
+    if (!(fx > 0.0f && fy > 0.0f && r < limit) || !finite1(r))
+        return 0.0f;
     [loop] for (int i = 0; i < 28; ++i) {
         float mid = 0.5f * (lo + hi);
         float q = mid * mid;
         float td = mid * (1.0f + q * (k1 + q * (k2 + q * (k3 + q * k4))));
-        if (td < r) lo = mid;
-        else hi = mid;
+        if (td < r)
+            lo = mid;
+        else
+            hi = mid;
     }
     float theta = 0.5f * (lo + hi);
     float t2 = theta * theta;
-    float derivative = 1.0f + t2 * (3.0f*k1 + t2 * (5.0f*k2 + t2 * (7.0f*k3 + 9.0f*t2*k4)));
-    if (!(derivative > 1.0e-6f)) return 0.0f;
+    float derivative =
+        1.0f + t2 * (3.0f * k1 + t2 * (5.0f * k2 + t2 * (7.0f * k3 + 9.0f * t2 * k4)));
+    if (!(derivative > 1.0e-6f))
+        return 0.0f;
     float scale = r > 1.0e-8f ? sin(theta) / r : 1.0f;
     return float3(x * scale, y * scale, max(0.0f, cos(theta)));
 }
 
-float pixel_ray_z(float px, float py, uint mode, float fx, float fy, float cx, float cy,
-                  float k1, float k2, float k3, float k4) {
-    if (mode == kModeEquirect) return 1.0f;
+float pixel_ray_z(float px, float py, uint mode, float fx, float fy, float cx, float cy, float k1,
+                  float k2, float k3, float k4) {
+    if (mode == kModeEquirect)
+        return 1.0f;
     return pixel_unit_ray(px, py, mode, fx, fy, cx, cy, k1, k2, k3, k4).z;
 }
 
 float wrap_dx(float dx, int wrap_width, uint mode) {
-    if (mode != kModeEquirect || wrap_width <= 0) return dx;
+    if (mode != kModeEquirect || wrap_width <= 0)
+        return dx;
     float w = float(wrap_width);
     return dx - w * floor((dx + 0.5f * w) / w);
 }
@@ -423,12 +440,15 @@ void sym_eig3(inout Mat3 a, out float eig0, out float eig1, out float eig2, out 
     vecs = mat_diag(1.0f, 1.0f, 1.0f);
     [loop] for (int sweep = 0; sweep < 16; ++sweep) {
         float off = abs(a.m[0][1]) + abs(a.m[0][2]) + abs(a.m[1][2]);
-        if (off < 1.0e-12f) break;
+        if (off < 1.0e-12f)
+            break;
         [unroll] for (int p = 0; p < 2; ++p) {
             [unroll] for (int q = p + 1; q < 3; ++q) {
-                if (abs(a.m[p][q]) < 1.0e-15f) continue;
+                if (abs(a.m[p][q]) < 1.0e-15f)
+                    continue;
                 float theta = 0.5f * (a.m[q][q] - a.m[p][p]) / a.m[p][q];
-                float t = (theta >= 0.0f ? 1.0f : -1.0f) / (abs(theta) + sqrt(theta * theta + 1.0f));
+                float t =
+                    (theta >= 0.0f ? 1.0f : -1.0f) / (abs(theta) + sqrt(theta * theta + 1.0f));
                 float c = 1.0f / sqrt(t * t + 1.0f);
                 float s = t * c;
                 [unroll] for (int k = 0; k < 3; ++k) {
@@ -460,8 +480,12 @@ void sym_eig3(inout Mat3 a, out float eig0, out float eig1, out float eig2, out 
 int min_index3(float a, float b, float c) {
     int i = 0;
     float v = a;
-    if (b < v) { i = 1; v = b; }
-    if (c < v) i = 2;
+    if (b < v) {
+        i = 1;
+        v = b;
+    }
+    if (c < v)
+        i = 2;
     return i;
 }
 
@@ -474,8 +498,8 @@ struct FishResult {
 };
 
 FishResult fisheye_evaluate(float3 t, float c0, float c1, float c2, float c3, float c4, float c5,
-                            Mat3 W, float fx, float fy, float k1, float k2, float k3, float k4, float kernel,
-                            bool need_geometry) {
+                            Mat3 W, float fx, float fy, float k1, float k2, float k3, float k4,
+                            float kernel, bool need_geometry) {
     FishResult built;
     built.cov0 = 0.0f;
     built.cov1 = 0.0f;
@@ -605,11 +629,11 @@ struct SplatGeom {
 };
 
 SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, float v5, float v6,
-                        float v8, float v9, float v10, float v12, float v13, float v14,
-                        uint mode, int width, int height, float fx, float fy, float cx, float cy,
-                        float k1, float k2, float k3, float k4, float kernel, float scale_modifier,
-                        bool has_scales, float3 scale, float4 rotation, float c0, float c1, float c2,
-                        float c3, float c4, float c5, bool need_geometry) {
+                        float v8, float v9, float v10, float v12, float v13, float v14, uint mode,
+                        int width, int height, float fx, float fy, float cx, float cy, float k1,
+                        float k2, float k3, float k4, float kernel, float scale_modifier,
+                        bool has_scales, float3 scale, float4 rotation, float c0, float c1,
+                        float c2, float c3, float c4, float c5, bool need_geometry) {
     SplatGeom built;
     built.cov0 = 0.0f;
     built.cov1 = 0.0f;
@@ -622,8 +646,8 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     float3 t = xform_point(mean, v0, v1, v2, v4, v5, v6, v8, v9, v10, v12, v13, v14);
     float tc = sqrt(dot(t, t));
     if (mode == kModeFisheye) {
-        if (!project_camera(t, mode, width, height, fx, fy, cx, cy,
-                            k1, k2, k3, k4).valid) return built;
+        if (!project_camera(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4).valid)
+            return built;
         Mat3 W = world_rotation_transposed(v0, v1, v2, v4, v5, v6, v8, v9, v10);
         Mat3 Vrk = mat_zero();
         if (has_scales) {
@@ -631,20 +655,26 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
             Mat3 SR = mat_mul(mat_diag(sl.x, sl.y, sl.z), quat_rotation(rotation));
             Vrk = mat_mul(mat_transpose(SR), SR);
         } else {
-            Vrk.m[0][0] = c0; Vrk.m[0][1] = c1; Vrk.m[0][2] = c2;
-            Vrk.m[1][0] = c1; Vrk.m[1][1] = c3; Vrk.m[1][2] = c4;
-            Vrk.m[2][0] = c2; Vrk.m[2][1] = c4; Vrk.m[2][2] = c5;
+            Vrk.m[0][0] = c0;
+            Vrk.m[0][1] = c1;
+            Vrk.m[0][2] = c2;
+            Vrk.m[1][0] = c1;
+            Vrk.m[1][1] = c3;
+            Vrk.m[1][2] = c4;
+            Vrk.m[2][0] = c2;
+            Vrk.m[2][1] = c4;
+            Vrk.m[2][2] = c5;
         }
-        FishResult native = fisheye_evaluate(
-            t, Vrk.m[0][0], Vrk.m[0][1], Vrk.m[0][2],
-            Vrk.m[1][1], Vrk.m[1][2], Vrk.m[2][2],
-            W, fx, fy, k1, k2, k3, k4, kernel, need_geometry);
-        if (!native.ok || !finite1(native.cov0) || !finite1(native.cov1) ||
-            !finite1(native.cov2) || !finite1(native.coef) ||
-            !(native.cov0 * native.cov2 > native.cov1 * native.cov1)) return built;
-        if (need_geometry && (!finite3(native.normal) ||
-            !finite1(native.plane.x) || !finite1(native.plane.y) ||
-            !finite1(native.plane.z) || !finite1(native.plane.w))) return built;
+        FishResult native =
+            fisheye_evaluate(t, Vrk.m[0][0], Vrk.m[0][1], Vrk.m[0][2], Vrk.m[1][1], Vrk.m[1][2],
+                             Vrk.m[2][2], W, fx, fy, k1, k2, k3, k4, kernel, need_geometry);
+        if (!native.ok || !finite1(native.cov0) || !finite1(native.cov1) || !finite1(native.cov2) ||
+            !finite1(native.coef) || !(native.cov0 * native.cov2 > native.cov1 * native.cov1))
+            return built;
+        if (need_geometry &&
+            (!finite3(native.normal) || !finite1(native.plane.x) || !finite1(native.plane.y) ||
+             !finite1(native.plane.z) || !finite1(native.plane.w)))
+            return built;
         built.cov0 = native.cov0;
         built.cov1 = native.cov1;
         built.cov2 = native.cov2;
@@ -658,7 +688,8 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     float v = 0.0f;
     Mat3 J = mat_zero();
     if (mode == kModeOrtho) {
-        if (!(t.z > asfloat(pc.u21))) return built;
+        if (!(t.z > asfloat(pc.u21)))
+            return built;
         J.m[0][0] = fx;
         J.m[1][1] = fy;
     } else if (mode == kModePinhole) {
@@ -678,7 +709,8 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
         J.m[2][1] = -(fy * t.y) / (t.z * t.z);
     } else {
         Projection proj = project_camera(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4);
-        if (!proj.valid) return built;
+        if (!proj.valid)
+            return built;
         J.m[0][0] = proj.du0;
         J.m[0][1] = proj.dv0;
         J.m[1][0] = proj.du1;
@@ -765,7 +797,8 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     float factor_normal = l / ray_len2;
     float3 plane = mat_mul_vec(nJ_inv, uvh_m / vb);
     float rsigmat = well ? sqrt(vb / ray_len2) : 0.0f;
-    built.ray_plane = float4(plane.x * factor_normal / fx, plane.y * factor_normal / fy, tc, rsigmat);
+    built.ray_plane =
+        float4(plane.x * factor_normal / fx, plane.y * factor_normal / fy, tc, rsigmat);
     float3 ray_normal = float3(-plane.x * factor_normal, -plane.y * factor_normal, -1.0f);
     Mat3 nJ = mat_zero();
     float iz = 1.0f / t.z;
@@ -783,23 +816,31 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
     return built;
 }
 
-float3 evaluate_sh_unclamped(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs, uint coeff_offset,
-                   out float clamped0, out float clamped1, out float clamped2) {
+float3 evaluate_sh_unclamped(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs,
+                             uint coeff_offset, out float clamped0, out float clamped1,
+                             out float clamped2) {
     float3 dir = pos - campos;
     float inv = rsqrt(dot(dir, dir));
     dir *= inv;
     float3 c0 = float3(coeffs[coeff_offset], coeffs[coeff_offset + 1], coeffs[coeff_offset + 2]);
-    float3 result = float3(0.28209479177387814f * c0.x, 0.28209479177387814f * c0.y, 0.28209479177387814f * c0.z);
+    float3 result = float3(0.28209479177387814f * c0.x, 0.28209479177387814f * c0.y,
+                           0.28209479177387814f * c0.z);
     float x = dir.x;
     float y = dir.y;
     float z = dir.z;
     if (degree > 0) {
-        float3 c1 = float3(coeffs[coeff_offset + 3], coeffs[coeff_offset + 4], coeffs[coeff_offset + 5]);
-        float3 c2 = float3(coeffs[coeff_offset + 6], coeffs[coeff_offset + 7], coeffs[coeff_offset + 8]);
-        float3 c3 = float3(coeffs[coeff_offset + 9], coeffs[coeff_offset + 10], coeffs[coeff_offset + 11]);
-        result += float3(-0.4886025119029199f * y * c1.x + 0.4886025119029199f * z * c2.x - 0.4886025119029199f * x * c3.x,
-                         -0.4886025119029199f * y * c1.y + 0.4886025119029199f * z * c2.y - 0.4886025119029199f * x * c3.y,
-                         -0.4886025119029199f * y * c1.z + 0.4886025119029199f * z * c2.z - 0.4886025119029199f * x * c3.z);
+        float3 c1 =
+            float3(coeffs[coeff_offset + 3], coeffs[coeff_offset + 4], coeffs[coeff_offset + 5]);
+        float3 c2 =
+            float3(coeffs[coeff_offset + 6], coeffs[coeff_offset + 7], coeffs[coeff_offset + 8]);
+        float3 c3 =
+            float3(coeffs[coeff_offset + 9], coeffs[coeff_offset + 10], coeffs[coeff_offset + 11]);
+        result += float3(-0.4886025119029199f * y * c1.x + 0.4886025119029199f * z * c2.x -
+                             0.4886025119029199f * x * c3.x,
+                         -0.4886025119029199f * y * c1.y + 0.4886025119029199f * z * c2.y -
+                             0.4886025119029199f * x * c3.y,
+                         -0.4886025119029199f * y * c1.z + 0.4886025119029199f * z * c2.z -
+                             0.4886025119029199f * x * c3.z);
         if (degree > 1) {
             float xx = x * x;
             float yy = y * y;
@@ -815,15 +856,17 @@ float3 evaluate_sh_unclamped(uint degree, float3 pos, float3 campos, StructuredB
                 result += kC2[s] * q2[s] * float3(coeffs[base], coeffs[base + 1], coeffs[base + 2]);
             }
             if (degree > 2) {
-                float q3[7] = {y * (3.0f * xx - yy), xy * z, y * (4.0f * zz - xx - yy),
-                               z * (2.0f * zz - 3.0f * xx - 3.0f * yy), x * (4.0f * zz - xx - yy),
-                               z * (xx - yy), x * (xx - 3.0f * yy)};
-                float kC3[7] = {-0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f,
-                                0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f,
+                float q3[7] = {y * (3.0f * xx - yy),      xy * z,
+                               y * (4.0f * zz - xx - yy), z * (2.0f * zz - 3.0f * xx - 3.0f * yy),
+                               x * (4.0f * zz - xx - yy), z * (xx - yy),
+                               x * (xx - 3.0f * yy)};
+                float kC3[7] = {-0.5900435899266435f, 2.890611442640554f,   -0.4570457994644658f,
+                                0.3731763325901154f,  -0.4570457994644658f, 1.445305721320277f,
                                 -0.5900435899266435f};
                 [unroll] for (int s3 = 0; s3 < 7; ++s3) {
                     uint base3 = coeff_offset + uint(9 + s3) * 3;
-                    result += kC3[s3] * q3[s3] * float3(coeffs[base3], coeffs[base3 + 1], coeffs[base3 + 2]);
+                    result += kC3[s3] * q3[s3] *
+                              float3(coeffs[base3], coeffs[base3 + 1], coeffs[base3 + 2]);
                 }
             }
         }
@@ -835,9 +878,11 @@ float3 evaluate_sh_unclamped(uint degree, float3 pos, float3 campos, StructuredB
     return result;
 }
 
-float3 evaluate_sh(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs, uint coeff_offset,
-                   out float clamped0, out float clamped1, out float clamped2) {
-    return max(evaluate_sh_unclamped(degree,pos,campos,coeffs,coeff_offset,clamped0,clamped1,clamped2),0.f);
+float3 evaluate_sh(uint degree, float3 pos, float3 campos, StructuredBuffer<float> coeffs,
+                   uint coeff_offset, out float clamped0, out float clamped1, out float clamped2) {
+    return max(evaluate_sh_unclamped(degree, pos, campos, coeffs, coeff_offset, clamped0, clamped1,
+                                     clamped2),
+               0.f);
 }
 
 #endif

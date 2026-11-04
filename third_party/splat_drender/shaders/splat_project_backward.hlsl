@@ -68,20 +68,58 @@ struct D3 {
     float3 d;
 };
 
-D3 dc(float v) { D3 r; r.v = v; r.d = 0.0f; return r; }
-D3 dv(float v, uint axis) {
-    D3 r = dc(v);
-    if (axis == 0u) r.d.x = 1.0f;
-    else if (axis == 1u) r.d.y = 1.0f;
-    else r.d.z = 1.0f;
+D3 dc(float v) {
+    D3 r;
+    r.v = v;
+    r.d = 0.0f;
     return r;
 }
-D3 da(D3 a, D3 b) { D3 r; r.v = a.v + b.v; r.d = a.d + b.d; return r; }
-D3 ds(D3 a, D3 b) { D3 r; r.v = a.v - b.v; r.d = a.d - b.d; return r; }
-D3 dn(D3 a) { D3 r; r.v = -a.v; r.d = -a.d; return r; }
-D3 dm(D3 a, D3 b) { D3 r; r.v = a.v * b.v; r.d = a.d * b.v + a.v * b.d; return r; }
-D3 dd(D3 a, D3 b) { D3 r; r.v = a.v / b.v; r.d = (a.d - r.v * b.d) / b.v; return r; }
-D3 dq(D3 a) { D3 r; r.v = sqrt(a.v); r.d = a.d * (0.5f / r.v); return r; }
+D3 dv(float v, uint axis) {
+    D3 r = dc(v);
+    if (axis == 0u)
+        r.d.x = 1.0f;
+    else if (axis == 1u)
+        r.d.y = 1.0f;
+    else
+        r.d.z = 1.0f;
+    return r;
+}
+D3 da(D3 a, D3 b) {
+    D3 r;
+    r.v = a.v + b.v;
+    r.d = a.d + b.d;
+    return r;
+}
+D3 ds(D3 a, D3 b) {
+    D3 r;
+    r.v = a.v - b.v;
+    r.d = a.d - b.d;
+    return r;
+}
+D3 dn(D3 a) {
+    D3 r;
+    r.v = -a.v;
+    r.d = -a.d;
+    return r;
+}
+D3 dm(D3 a, D3 b) {
+    D3 r;
+    r.v = a.v * b.v;
+    r.d = a.d * b.v + a.v * b.d;
+    return r;
+}
+D3 dd(D3 a, D3 b) {
+    D3 r;
+    r.v = a.v / b.v;
+    r.d = (a.d - r.v * b.d) / b.v;
+    return r;
+}
+D3 dq(D3 a) {
+    D3 r;
+    r.v = sqrt(a.v);
+    r.d = a.d * (0.5f / r.v);
+    return r;
+}
 D3 datan2(D3 y, D3 x) {
     D3 r;
     r.v = atan2(y.v, x.v);
@@ -89,8 +127,10 @@ D3 datan2(D3 y, D3 x) {
     return r;
 }
 D3 dclamp(D3 a, float lo, float hi) {
-    if (a.v < lo) return dc(lo);
-    if (a.v > hi) return dc(hi);
+    if (a.v < lo)
+        return dc(lo);
+    if (a.v > hi)
+        return dc(hi);
     return a;
 }
 
@@ -100,9 +140,8 @@ struct DualProjection {
     bool valid;
 };
 
-DualProjection projection_jacobian_dual(
-    float3 t, uint mode, int width, int height, float fx, float fy,
-    float k1, float k2, float k3, float k4) {
+DualProjection projection_jacobian_dual(float3 t, uint mode, int width, int height, float fx,
+                                        float fy, float k1, float k2, float k3, float k4) {
     DualProjection p;
     p.j00 = p.j01 = p.j02 = p.j10 = p.j11 = p.j12 = dc(0.0f);
     p.valid = true;
@@ -150,7 +189,8 @@ DualProjection projection_jacobian_dual(
         float bb = k2 - k1 + 1.0f / 5.0f;
         D3 s = dm(iz, da(dc(1.0f), da(dm(dc(aa), q), dm(dc(bb), dm(q, q)))));
         D3 deriv = dm(dc(2.0f), dm(dm(dm(iz, iz), iz), da(dc(aa), dm(dc(2.0f * bb), q))));
-        D3 dz = dn(dm(dm(iz, iz), da(dc(1.0f), da(dm(dc(3.0f * aa), q), dm(dc(5.0f * bb), dm(q, q))))));
+        D3 dz =
+            dn(dm(dm(iz, iz), da(dc(1.0f), da(dm(dc(3.0f * aa), q), dm(dc(5.0f * bb), dm(q, q))))));
         p.j00 = dm(dc(fx), da(s, dm(dm(x, x), deriv)));
         p.j01 = dm(dc(fx), dm(dm(x, y), deriv));
         p.j02 = dm(dc(fx), dm(x, dz));
@@ -161,11 +201,13 @@ DualProjection projection_jacobian_dual(
         D3 r = dq(r2);
         D3 theta = datan2(r, z);
         D3 q = dm(theta, theta);
-        D3 td = dm(theta, da(dc(1.0f), dm(q, da(
-            dc(k1), dm(q, da(dc(k2), dm(q, da(dc(k3), dm(q, dc(k4))))))))));
-        D3 dt = da(dc(1.0f), dm(q, da(
-            dc(3.0f * k1), dm(q, da(dc(5.0f * k2), dm(q, da(
-                dc(7.0f * k3), dm(q, dc(9.0f * k4)))))))));
+        D3 td =
+            dm(theta, da(dc(1.0f),
+                         dm(q, da(dc(k1), dm(q, da(dc(k2), dm(q, da(dc(k3), dm(q, dc(k4))))))))));
+        D3 dt =
+            da(dc(1.0f),
+               dm(q, da(dc(3.0f * k1),
+                        dm(q, da(dc(5.0f * k2), dm(q, da(dc(7.0f * k3), dm(q, dc(9.0f * k4)))))))));
         D3 s = dd(td, r);
         D3 deriv = dd(ds(dd(dm(dt, z), l2), s), r2);
         p.j00 = dm(dc(fx), da(s, dm(dm(x, x), deriv)));
@@ -180,27 +222,30 @@ DualProjection projection_jacobian_dual(
 
 Mat3 mat_add(Mat3 a, Mat3 b) {
     Mat3 r;
-    [unroll] for (int i = 0; i < 3; ++i)
-        [unroll] for (int j = 0; j < 3; ++j) r.m[i][j] = a.m[i][j] + b.m[i][j];
+    [unroll] for (int i = 0; i < 3; ++i)[unroll] for (int j = 0; j < 3; ++j) r.m[i][j] =
+        a.m[i][j] + b.m[i][j];
     return r;
 }
 
-void cov3d_backward(
-    float3 scale_local, float4 rot, Mat3 R, float g0, float g1, float g2,
-    float g3, float g4, float g5, out float3 grad_scale, out float4 grad_rotation) {
+void cov3d_backward(float3 scale_local, float4 rot, Mat3 R, float g0, float g1, float g2, float g3,
+                    float g4, float g5, out float3 grad_scale, out float4 grad_rotation) {
     Mat3 M = mat_mul(mat_diag(scale_local.x, scale_local.y, scale_local.z), R);
     Mat3 G = mat_zero();
-    G.m[0][0] = g0; G.m[0][1] = 0.5f * g1; G.m[0][2] = 0.5f * g2;
-    G.m[1][0] = 0.5f * g1; G.m[1][1] = g3; G.m[1][2] = 0.5f * g4;
-    G.m[2][0] = 0.5f * g2; G.m[2][1] = 0.5f * g4; G.m[2][2] = g5;
+    G.m[0][0] = g0;
+    G.m[0][1] = 0.5f * g1;
+    G.m[0][2] = 0.5f * g2;
+    G.m[1][0] = 0.5f * g1;
+    G.m[1][1] = g3;
+    G.m[1][2] = 0.5f * g4;
+    G.m[2][0] = 0.5f * g2;
+    G.m[2][1] = 0.5f * g4;
+    G.m[2][2] = g5;
     Mat3 dM = mat_mul(M, G);
-    [unroll] for (int i = 0; i < 3; ++i)
-        [unroll] for (int j = 0; j < 3; ++j) dM.m[i][j] *= 2.0f;
+    [unroll] for (int i = 0; i < 3; ++i)[unroll] for (int j = 0; j < 3; ++j) dM.m[i][j] *= 2.0f;
     Mat3 A = mat_transpose(dM);
-    grad_scale = float3(
-        R.m[0][0] * A.m[0][0] + R.m[0][1] * A.m[1][0] + R.m[0][2] * A.m[2][0],
-        R.m[1][0] * A.m[0][1] + R.m[1][1] * A.m[1][1] + R.m[1][2] * A.m[2][1],
-        R.m[2][0] * A.m[0][2] + R.m[2][1] * A.m[1][2] + R.m[2][2] * A.m[2][2]);
+    grad_scale = float3(R.m[0][0] * A.m[0][0] + R.m[0][1] * A.m[1][0] + R.m[0][2] * A.m[2][0],
+                        R.m[1][0] * A.m[0][1] + R.m[1][1] * A.m[1][1] + R.m[1][2] * A.m[2][1],
+                        R.m[2][0] * A.m[0][2] + R.m[2][1] * A.m[1][2] + R.m[2][2] * A.m[2][2]);
     [unroll] for (int row = 0; row < 3; ++row) {
         A.m[row][0] *= scale_local.x;
         A.m[row][1] *= scale_local.y;
@@ -211,41 +256,49 @@ void cov3d_backward(
     float a02 = mat_at(A, 0, 2), a20 = mat_at(A, 2, 0);
     float a12 = mat_at(A, 1, 2), a21 = mat_at(A, 2, 1);
     float a00 = mat_at(A, 0, 0), a11 = mat_at(A, 1, 1), a22 = mat_at(A, 2, 2);
-    grad_rotation = float4(
-        2.0f * z * (a01 - a10) + 2.0f * y * (a20 - a02) + 2.0f * x * (a12 - a21),
-        2.0f * y * (a10 + a01) + 2.0f * z * (a20 + a02) + 2.0f * w * (a12 - a21) - 4.0f * x * (a22 + a11),
-        2.0f * x * (a10 + a01) + 2.0f * w * (a20 - a02) + 2.0f * z * (a12 + a21) - 4.0f * y * (a22 + a00),
-        2.0f * w * (a01 - a10) + 2.0f * x * (a20 + a02) + 2.0f * y * (a12 + a21) - 4.0f * z * (a11 + a00));
+    grad_rotation = float4(2.0f * z * (a01 - a10) + 2.0f * y * (a20 - a02) + 2.0f * x * (a12 - a21),
+                           2.0f * y * (a10 + a01) + 2.0f * z * (a20 + a02) +
+                               2.0f * w * (a12 - a21) - 4.0f * x * (a22 + a11),
+                           2.0f * x * (a10 + a01) + 2.0f * w * (a20 - a02) +
+                               2.0f * z * (a12 + a21) - 4.0f * y * (a22 + a00),
+                           2.0f * w * (a01 - a10) + 2.0f * x * (a20 + a02) +
+                               2.0f * y * (a12 + a21) - 4.0f * z * (a11 + a00));
 }
 
 static const float C0 = 0.28209479177387814f;
 static const float C1 = 0.4886025119029199f;
-static const float C2[5] = {
-    1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f,
-    -1.0925484305920792f, 0.5462742152960396f};
-static const float C3[7] = {
-    -0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f,
-    0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f,
-    -0.5900435899266435f};
+static const float C2[5] = {1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f,
+                            -1.0925484305920792f, 0.5462742152960396f};
+static const float C3[7] = {-0.5900435899266435f, 2.890611442640554f,   -0.4570457994644658f,
+                            0.3731763325901154f,  -0.4570457994644658f, 1.445305721320277f,
+                            -0.5900435899266435f};
 
 float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 center,
                    float3 color_grad, float3 clamped, uint feature_base) {
-    if(pc.u23!=0u) {
-        float3 original=mean-center,dir=gut_unit_direction(original);
-        GutShBasis basis=gut_sh_basis(int(degree),dir.x,dir.y,dir.z);
-        float3 dl=color_grad*float3(clamped.x==0.0f,clamped.y==0.0f,clamped.z==0.0f);
-        float3 dx=0.0f,dy=0.0f,dz=0.0f;
-        uint source=index*bases*3u,active=(degree+1u)*(degree+1u);
-        [unroll] for(uint k=0u;k<16u;++k) if(k<active) {
-            write_sh_gradient(source+3u*k,gut_mul(basis.value[k],dl.x));
-            write_sh_gradient(source+3u*k+1u,gut_mul(basis.value[k],dl.y));
-            write_sh_gradient(source+3u*k+2u,gut_mul(basis.value[k],dl.z));
-            float3 coefficient=float3(color_src[source+3u*k],color_src[source+3u*k+1u],color_src[source+3u*k+2u]);
-            dx=float3(gut_fma(basis.dx[k],coefficient.x,dx.x),gut_fma(basis.dx[k],coefficient.y,dx.y),gut_fma(basis.dx[k],coefficient.z,dx.z));
-            dy=float3(gut_fma(basis.dy[k],coefficient.x,dy.x),gut_fma(basis.dy[k],coefficient.y,dy.y),gut_fma(basis.dy[k],coefficient.z,dy.z));
-            dz=float3(gut_fma(basis.dz[k],coefficient.x,dz.x),gut_fma(basis.dz[k],coefficient.y,dz.y),gut_fma(basis.dz[k],coefficient.z,dz.z));
+    if (pc.u23 != 0u) {
+        float3 original = mean - center, dir = gut_unit_direction(original);
+        GutShBasis basis = gut_sh_basis(int(degree), dir.x, dir.y, dir.z);
+        float3 dl = color_grad * float3(clamped.x == 0.0f, clamped.y == 0.0f, clamped.z == 0.0f);
+        float3 dx = 0.0f, dy = 0.0f, dz = 0.0f;
+        uint source = index * bases * 3u, active = (degree + 1u) * (degree + 1u);
+        [unroll] for (uint k = 0u; k < 16u; ++k) if (k < active) {
+            write_sh_gradient(source + 3u * k, gut_mul(basis.value[k], dl.x));
+            write_sh_gradient(source + 3u * k + 1u, gut_mul(basis.value[k], dl.y));
+            write_sh_gradient(source + 3u * k + 2u, gut_mul(basis.value[k], dl.z));
+            float3 coefficient = float3(color_src[source + 3u * k], color_src[source + 3u * k + 1u],
+                                        color_src[source + 3u * k + 2u]);
+            dx = float3(gut_fma(basis.dx[k], coefficient.x, dx.x),
+                        gut_fma(basis.dx[k], coefficient.y, dx.y),
+                        gut_fma(basis.dx[k], coefficient.z, dx.z));
+            dy = float3(gut_fma(basis.dy[k], coefficient.x, dy.x),
+                        gut_fma(basis.dy[k], coefficient.y, dy.y),
+                        gut_fma(basis.dy[k], coefficient.z, dy.z));
+            dz = float3(gut_fma(basis.dz[k], coefficient.x, dz.x),
+                        gut_fma(basis.dz[k], coefficient.y, dz.y),
+                        gut_fma(basis.dz[k], coefficient.z, dz.z));
         }
-        return gut_unit_direction_vjp(original,float3(gut_dot(dx,dl),gut_dot(dy,dl),gut_dot(dz,dl)));
+        return gut_unit_direction_vjp(original,
+                                      float3(gut_dot(dx, dl), gut_dot(dy, dl), gut_dot(dz, dl)));
     }
     float3 original = mean - center;
     float inv = rsqrt(dot(original, original));
@@ -267,7 +320,8 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
         }
         float3 c1 = float3(color_src[source + 3u], color_src[source + 4u], color_src[source + 5u]);
         float3 c2v = float3(color_src[source + 6u], color_src[source + 7u], color_src[source + 8u]);
-        float3 c3v = float3(color_src[source + 9u], color_src[source + 10u], color_src[source + 11u]);
+        float3 c3v =
+            float3(color_src[source + 9u], color_src[source + 10u], color_src[source + 11u]);
         dx = -C1 * c3v;
         dy = -C1 * c1;
         dz = C1 * c2v;
@@ -291,24 +345,26 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
                 dz += C2[j] * qz[j] * c;
             }
             if (degree > 2u) {
-                float q3[7] = {
-                    y * (3.0f * xx - yy), x * y * z, y * (4.0f * zz - xx - yy),
-                    z * (2.0f * zz - 3.0f * xx - 3.0f * yy), x * (4.0f * zz - xx - yy),
-                    z * (xx - yy), x * (xx - 3.0f * yy)};
-                float qx3[7] = {
-                    6.0f * x * y, y * z, -2.0f * x * y, -6.0f * x * z,
-                    -3.0f * xx + 4.0f * zz - yy, 2.0f * x * z, 3.0f * (xx - yy)};
-                float qy3[7] = {
-                    3.0f * (xx - yy), x * z, -3.0f * yy + 4.0f * zz - xx, -6.0f * y * z,
-                    -2.0f * x * y, -2.0f * y * z, -6.0f * x * y};
-                float qz3[7] = {
-                    0.0f, x * y, 8.0f * y * z, 3.0f * (2.0f * zz - xx - yy),
-                    8.0f * x * z, xx - yy, 0.0f};
+                float q3[7] = {y * (3.0f * xx - yy),      x * y * z,
+                               y * (4.0f * zz - xx - yy), z * (2.0f * zz - 3.0f * xx - 3.0f * yy),
+                               x * (4.0f * zz - xx - yy), z * (xx - yy),
+                               x * (xx - 3.0f * yy)};
+                float qx3[7] = {6.0f * x * y,
+                                y * z,
+                                -2.0f * x * y,
+                                -6.0f * x * z,
+                                -3.0f * xx + 4.0f * zz - yy,
+                                2.0f * x * z,
+                                3.0f * (xx - yy)};
+                float qy3[7] = {3.0f * (xx - yy), x * z,         -3.0f * yy + 4.0f * zz - xx,
+                                -6.0f * y * z,    -2.0f * x * y, -2.0f * y * z,
+                                -6.0f * x * y};
+                float qz3[7] = {0.0f,         x * y,   8.0f * y * z, 3.0f * (2.0f * zz - xx - yy),
+                                8.0f * x * z, xx - yy, 0.0f};
                 [unroll] for (uint j3 = 0u; j3 < 7u; ++j3) {
                     uint so3 = source + (9u + j3) * 3u;
                     uint go3 = feature_base + so3;
-                    float3 cc = float3(
-                        color_src[so3], color_src[so3 + 1u], color_src[so3 + 2u]);
+                    float3 cc = float3(color_src[so3], color_src[so3 + 1u], color_src[so3 + 2u]);
                     write_sh_gradient(go3 - feature_base, C3[j3] * q3[j3] * dl.x);
                     write_sh_gradient(go3 + 1u - feature_base, C3[j3] * q3[j3] * dl.y);
                     write_sh_gradient(go3 + 2u - feature_base, C3[j3] * q3[j3] * dl.z);
@@ -323,28 +379,25 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
     return (direction_grad - dir * dot(dir, direction_grad)) * inv;
 }
 
-SplatGeom geometry_eval(
-    float3 mean, bool has_scales, float3 scale, float4 rotation,
-    float c0, float c1, float c2, float c3, float c4, float c5,
-    uint mode, int width, int height, float fx, float fy, float cx, float cy,
-    float k1, float k2, float k3, float k4, float kernel,
-    float scale_modifier) {
-    return project_splat(
-        mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
-        camera[8], camera[9], camera[10], camera[12], camera[13], camera[14],
-        mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel,
-        scale_modifier, has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, true);
+SplatGeom geometry_eval(float3 mean, bool has_scales, float3 scale, float4 rotation, float c0,
+                        float c1, float c2, float c3, float c4, float c5, uint mode, int width,
+                        int height, float fx, float fy, float cx, float cy, float k1, float k2,
+                        float k3, float k4, float kernel, float scale_modifier) {
+    return project_splat(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
+                         camera[8], camera[9], camera[10], camera[12], camera[13], camera[14], mode,
+                         width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel, scale_modifier,
+                         has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, true);
 }
 
 float geometry_loss(SplatGeom value, float4 d_plane, float3 d_normal) {
-    if (!value.ok) return 0.0f;
+    if (!value.ok)
+        return 0.0f;
     return dot(value.ray_plane, d_plane) + dot(value.normal, d_normal);
 }
 
-void generic_geometry_backward(
-    float3 t, Mat3 W, Mat3 V, bool has_scales, float3 scale_local,
-    float4 d_plane_raw, float3 d_normal, float fx, float fy,
-    out Mat3 dV, out float3 dt) {
+void generic_geometry_backward(float3 t, Mat3 W, Mat3 V, bool has_scales, float3 scale_local,
+                               float4 d_plane_raw, float3 d_normal, float fx, float fy, out Mat3 dV,
+                               out float3 dt) {
     dV = mat_zero();
     dt = 0.0f;
     float4 d_plane = d_plane_raw;
@@ -370,9 +423,8 @@ void generic_geometry_backward(
         sym_eig3(eig_in, e0, e1, e2, vecs);
         well = min(e0, min(e1, e2)) > 1.0e-8f;
         if (well) {
-            V_inv = mat_mul(
-                mat_mul(vecs, mat_diag(1.0f / e0, 1.0f / e1, 1.0f / e2)),
-                mat_transpose(vecs));
+            V_inv = mat_mul(mat_mul(vecs, mat_diag(1.0f / e0, 1.0f / e1, 1.0f / e2)),
+                            mat_transpose(vecs));
         }
     }
     // The scale path supplies V as positive definite. Its inverse can be
@@ -429,8 +481,7 @@ void generic_geometry_backward(
     float3 d_ray_normal = mat_mul_vec(mat_transpose(nJ), d_cam_normal);
     Mat3 d_nJ = mat_outer(d_cam_normal, ray_normal);
     float d_factor =
-        plane.x * (-d_ray_normal.x + d_plane.x) +
-        plane.y * (-d_ray_normal.y + d_plane.y);
+        plane.x * (-d_ray_normal.x + d_plane.x) + plane.y * (-d_ray_normal.y + d_plane.y);
     float d_plane_x = (-d_ray_normal.x + d_plane.x) * factor;
     float d_plane_y = (-d_ray_normal.y + d_plane.y) * factor;
     float3 d_plane3 = float3(d_plane_x, d_plane_y, 0.0f);
@@ -443,24 +494,18 @@ void generic_geometry_backward(
     float d_len2_x2 = -d_plane.w * rsigma / ray_len2;
     float d_u_sigma = d_len2_x2 * u + d_plane.w * rsigma * uvh_m_vb.x;
     float d_v_sigma = d_len2_x2 * v + d_plane.w * rsigma * uvh_m_vb.y;
-    float aux_nJ =
-        (-mat_at(d_nJ, 2, 0) * u - mat_at(d_nJ, 2, 1) * v - mat_at(d_nJ, 2, 2)) /
-        ray_len2 * ray_len_inv;
-    float d_u_nJ =
-        -mat_at(d_nJ, 0, 2) / t.z + mat_at(d_nJ, 2, 0) * ray_len_inv + aux_nJ * u;
-    float d_v_nJ =
-        -mat_at(d_nJ, 1, 2) / t.z + mat_at(d_nJ, 2, 1) * ray_len_inv + aux_nJ * v;
-    float d_z_nJ =
-        (mat_at(d_nJ, 0, 0) + mat_at(d_nJ, 1, 1) -
-         mat_at(d_nJ, 0, 2) * u - mat_at(d_nJ, 1, 2) * v) /
-        (-t.z * t.z);
+    float aux_nJ = (-mat_at(d_nJ, 2, 0) * u - mat_at(d_nJ, 2, 1) * v - mat_at(d_nJ, 2, 2)) /
+                   ray_len2 * ray_len_inv;
+    float d_u_nJ = -mat_at(d_nJ, 0, 2) / t.z + mat_at(d_nJ, 2, 0) * ray_len_inv + aux_nJ * u;
+    float d_v_nJ = -mat_at(d_nJ, 1, 2) / t.z + mat_at(d_nJ, 2, 1) * ray_len_inv + aux_nJ * v;
+    float d_z_nJ = (mat_at(d_nJ, 0, 0) + mat_at(d_nJ, 1, 1) - mat_at(d_nJ, 0, 2) * u -
+                    mat_at(d_nJ, 1, 2) * v) /
+                   (-t.z * t.z);
     Mat3 d_nJinv = mat_outer(d_plane3, uvh_m_vb);
-    float d_u_plane =
-        d_uvh_plane.x + (mat_at(d_nJinv, 0, 1) + mat_at(d_nJinv, 1, 0)) * (-v) +
-        2.0f * mat_at(d_nJinv, 1, 1) * u - mat_at(d_nJinv, 2, 0);
-    float d_v_plane =
-        d_uvh_plane.y + (mat_at(d_nJinv, 0, 1) + mat_at(d_nJinv, 1, 0)) * (-u) +
-        2.0f * mat_at(d_nJinv, 0, 0) * v - mat_at(d_nJinv, 2, 1);
+    float d_u_plane = d_uvh_plane.x + (mat_at(d_nJinv, 0, 1) + mat_at(d_nJinv, 1, 0)) * (-v) +
+                      2.0f * mat_at(d_nJinv, 1, 1) * u - mat_at(d_nJinv, 2, 0);
+    float d_v_plane = d_uvh_plane.y + (mat_at(d_nJinv, 0, 1) + mat_at(d_nJinv, 1, 0)) * (-u) +
+                      2.0f * mat_at(d_nJinv, 0, 0) * v - mat_at(d_nJinv, 2, 1);
     float aux_factor = d_factor * (-t.z / ray_len2 * ray_len_inv);
     float d_u = d_u_nJ + d_u_plane + aux_factor * u + d_u_sigma;
     float d_v = d_v_nJ + d_v_plane + aux_factor * v + d_v_sigma;
@@ -471,8 +516,8 @@ void generic_geometry_backward(
         float3 lhs = mat_mul_vec(V_inv, W_uvh);
         float3 vr = mat_mul_vec(V_inv, rhs);
         dV = mat_outer(lhs, -vr);
-        [unroll] for (int rr = 0; rr < 3; ++rr)
-            [unroll] for (int cc = 0; cc < 3; ++cc) dV.m[rr][cc] /= vb;
+        [unroll] for (int rr = 0; rr < 3; ++rr)[unroll] for (int cc = 0; cc < 3; ++cc)
+            dV.m[rr][cc] /= vb;
     }
     float rz = 1.0f / t.z;
     dt = float3(d_u * rz, d_v * rz, -(d_u * t.x + d_v * t.y) * rz * rz + d_z) + dt_center;
@@ -481,7 +526,8 @@ void generic_geometry_backward(
 void project_backward(uint3 dispatch_id) {
     uint count = pc.u0;
     uint index = dispatch_id.x;
-    if (index >= count) return;
+    if (index >= count)
+        return;
     uint flags = pc.u1;
 #ifdef SPLAT_PINHOLE_RGB
     const uint mode = kModePinhole;
@@ -532,8 +578,8 @@ void project_backward(uint3 dispatch_id) {
     uint scale_base = opacity_base + gradient_count;
     uint rotation_base = scale_base + 3u * gradient_count;
     uint covariance_base = rotation_base + 4u * gradient_count;
-    uint log_scale_base = covariance_base +
-        ((compact_raw_gradients && has_scales) ? 0u : 6u * gradient_count);
+    uint log_scale_base =
+        covariance_base + ((compact_raw_gradients && has_scales) ? 0u : 6u * gradient_count);
     uint raw_rotation_base = log_scale_base + 3u * gradient_count;
     uint logit_base = raw_rotation_base + 4u * gradient_count;
     uint refine_base = logit_base + gradient_count;
@@ -553,27 +599,24 @@ void project_backward(uint3 dispatch_id) {
         model_grad[raw_rotation_base + 4u * gradient_index + rotation_component] = 0.0f;
     }
     if (!(compact_raw_gradients && has_scales)) {
-        [unroll] for (uint covariance_component = 0u; covariance_component < 6u; ++covariance_component)
+        [unroll] for (uint covariance_component = 0u; covariance_component < 6u;
+                      ++covariance_component)
             model_grad[covariance_base + 6u * gradient_index + covariance_component] = 0.0f;
     }
     model_grad[logit_base + gradient_index] = 0.0f;
     model_grad[refine_base + gradient_index] = blend_grad[17u * count + index];
-    if (gauss_u[3u * count + index] == 0u) return;
+    if (gauss_u[3u * count + index] == 0u)
+        return;
 
     float3 mean = float3(means[3u * index], means[3u * index + 1u], means[3u * index + 2u]);
-    float3 t = xform_point(
-        mean,
-        camera[0], camera[1], camera[2],
-        camera[4], camera[5], camera[6],
-        camera[8], camera[9], camera[10],
-        camera[12], camera[13], camera[14]);
-    Mat3 W = world_rotation_transposed(
-        camera[0], camera[1], camera[2],
-        camera[4], camera[5], camera[6],
-        camera[8], camera[9], camera[10]);
-    DualProjection dual = projection_jacobian_dual(
-        t, mode, int(width), int(height), fx, fy, k1, k2, k3, k4);
-    if (!dual.valid && pc.u23 == 0u) return;
+    float3 t = xform_point(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
+                           camera[8], camera[9], camera[10], camera[12], camera[13], camera[14]);
+    Mat3 W = world_rotation_transposed(camera[0], camera[1], camera[2], camera[4], camera[5],
+                                       camera[6], camera[8], camera[9], camera[10]);
+    DualProjection dual =
+        projection_jacobian_dual(t, mode, int(width), int(height), fx, fy, k1, k2, k3, k4);
+    if (!dual.valid && pc.u23 == 0u)
+        return;
     Mat3 J = mat_zero();
     J.m[0][0] = dual.j00.v;
     J.m[0][1] = dual.j10.v;
@@ -594,22 +637,27 @@ void project_backward(uint3 dispatch_id) {
             float f2 = filter_3d[index] * filter_3d[index];
             float determinant_ratio = 1.0f;
             [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
-                float raw_scale = pc.u23!=0u ? gut_exp(raw_log_scales[3u * index + axis]) : exp(raw_log_scales[3u * index + axis]);
-                scale[axis] = pc.u23!=0u ? gut_sqrt(gut_fma(raw_scale,raw_scale,f2)) : sqrt(raw_scale * raw_scale + f2);
-                determinant_ratio *= pc.u23!=0u ? gut_div(raw_scale,scale[axis]) : raw_scale / scale[axis];
+                float raw_scale = pc.u23 != 0u ? gut_exp(raw_log_scales[3u * index + axis])
+                                               : exp(raw_log_scales[3u * index + axis]);
+                scale[axis] = pc.u23 != 0u ? gut_sqrt(gut_fma(raw_scale, raw_scale, f2))
+                                           : sqrt(raw_scale * raw_scale + f2);
+                determinant_ratio *=
+                    pc.u23 != 0u ? gut_div(raw_scale, scale[axis]) : raw_scale / scale[axis];
             }
-            rotation = float4(
-                raw_rotations[4u * index], raw_rotations[4u * index + 1u],
-                raw_rotations[4u * index + 2u], raw_rotations[4u * index + 3u]);
-            if(pc.u23!=0u) rotation=gut_unit_quaternion(rotation);
-            else rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
-            activated_opacity = (pc.u23!=0u ? gut_rcp(gut_add(1.0f,gut_exp(-opacity_logits[index]))) :
-                1.0f / (1.0f + exp(-opacity_logits[index]))) * determinant_ratio;
+            rotation = float4(raw_rotations[4u * index], raw_rotations[4u * index + 1u],
+                              raw_rotations[4u * index + 2u], raw_rotations[4u * index + 3u]);
+            if (pc.u23 != 0u)
+                rotation = gut_unit_quaternion(rotation);
+            else
+                rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
+            activated_opacity =
+                (pc.u23 != 0u ? gut_rcp(gut_add(1.0f, gut_exp(-opacity_logits[index])))
+                              : 1.0f / (1.0f + exp(-opacity_logits[index]))) *
+                determinant_ratio;
         } else {
             scale = float3(scales[3u * index], scales[3u * index + 1u], scales[3u * index + 2u]);
-            rotation = float4(
-                rotations[4u * index], rotations[4u * index + 1u],
-                rotations[4u * index + 2u], rotations[4u * index + 3u]);
+            rotation = float4(rotations[4u * index], rotations[4u * index + 1u],
+                              rotations[4u * index + 2u], rotations[4u * index + 3u]);
         }
         scale_local = scale_modifier * scale;
         R = quat_rotation(rotation);
@@ -637,260 +685,253 @@ void project_backward(uint3 dispatch_id) {
         // The blend pass differentiates world-space ray transforms B
         // and local origins B*(eye-mean). Convert once per Gaussian into the
         // activated geometry, then use the shared SH and activation chain.
-        float3 go = float3(blend_grad[3u*index],blend_grad[3u*index+1u],blend_grad[3u*index+2u]);
+        float3 go = float3(blend_grad[3u * index], blend_grad[3u * index + 1u],
+                           blend_grad[3u * index + 2u]);
         Mat3 dA = mat_zero();
-        [unroll] for (uint axis=0u;axis<3u;++axis) {
-            dA.m[0][axis]=blend_grad[3u*count+4u*index+axis];
-            dA.m[1][axis]=blend_grad[10u*count+4u*index+axis];
-            dA.m[2][axis]=blend_grad[14u*count+3u*index+axis];
-        }
-        Mat3 B=mat_zero();
-        [unroll] for(uint row=0u;row<3u;++row)
-            [unroll] for(uint col=0u;col<3u;++col)
-                B.m[row][col]=gauss_f[index*pc.u23+3u+row][col];
-        float3 eye=float3(camera[16],camera[17],camera[18]);
-        GutGeometryGradient geometry=gut_geometry_vjp(
-            float3(B.m[0][0],B.m[0][1],B.m[0][2]),float3(B.m[1][0],B.m[1][1],B.m[1][2]),float3(B.m[2][0],B.m[2][1],B.m[2][2]),go,
-            float3(dA.m[0][0],dA.m[0][1],dA.m[0][2]),float3(dA.m[1][0],dA.m[1][1],dA.m[1][2]),float3(dA.m[2][0],dA.m[2][1],dA.m[2][2]),
-            eye-mean,scale,scale_modifier,rotation);
-        float3 gs=geometry.scale;
-        float4 gr=geometry.rotation;
-        float3 gm=geometry.mean;
-        float3 gcolor=float3(blend_grad[7u*count+3u*index],blend_grad[7u*count+3u*index+1u],blend_grad[7u*count+3u*index+2u]);
-        if (has_sh) {
-            float c0,c1,c2;
-            evaluate_gut_sh_unclamped(degree,mean,eye,color_src,index*bases*3u,c0,c1,c2);
-            gm+=sh_backward(index,degree,bases,mean,eye,gcolor,float3(c0,c1,c2),feature_base);
-        } else {
-            [unroll] for(uint channel=0u;channel<3u;++channel)
-                model_grad[feature_base+3u*index+channel]=gcolor[channel];
-        }
-        [unroll] for(uint axis=0u;axis<3u;++axis) {
-            model_grad[3u*gradient_index+axis]=gm[axis];
-            model_grad[scale_base+3u*gradient_index+axis]=gs[axis];
-        }
-        [unroll] for(uint qi=0u;qi<4u;++qi) model_grad[rotation_base+4u*gradient_index+qi]=gr[qi];
-        model_grad[opacity_base+gradient_index]=blend_grad[3u*count+4u*index+3u];
-    } else {
-    Mat3 cov = mat_mul(mat_transpose(T), mat_mul(V, T));
-    uint conic_base = 3u * count + 4u * index;
-    float4 gc = float4(
-        blend_grad[conic_base], blend_grad[conic_base + 1u],
-        blend_grad[conic_base + 2u], blend_grad[conic_base + 3u]);
-#ifdef SPLAT_PINHOLE_RGB
-    const float4 gplane = 0.0f;
-    const float3 gnormal = 0.0f;
-#else
-    uint plane_grad_base = 10u * count + 4u * index;
-    uint normal_grad_base = 14u * count + 3u * index;
-    float4 gplane = float4(
-        blend_grad[plane_grad_base], blend_grad[plane_grad_base + 1u],
-        blend_grad[plane_grad_base + 2u], blend_grad[plane_grad_base + 3u]);
-    float3 gnormal = float3(
-        blend_grad[normal_grad_base],
-        blend_grad[normal_grad_base + 1u],
-        blend_grad[normal_grad_base + 2u]);
-#endif
-    float a0 = cov.m[0][0];
-    float b = cov.m[0][1];
-    float c0v = cov.m[1][1];
-    float a = a0 + kernel;
-    float c = c0v + kernel;
-    float denom = a * c - b * b;
-    float denom2inv = 1.0f / (denom * denom + 1.0e-7f);
-    float ga = denom2inv * (-c * c * gc.x + 2.0f * b * c * gc.y + (denom - a * c) * gc.z);
-    float gcc = denom2inv * (-a * a * gc.z + 2.0f * a * b * gc.y + (denom - a * c) * gc.x);
-    float gb = denom2inv * 2.0f * (b * c * gc.x - (denom + 2.0f * b * b) * gc.y + a * b * gc.z);
-    float3 screen_cov = float3(a,b,c);
-    FootprintCap cap = footprint_policy(screen_cov,int(width),int(height));
-    if (cap.q < 1.0f) {
-        float3 gradient = footprint_conic_backward(screen_cov,cap,gc);
-        ga=gradient.x; gb=gradient.y; gcc=gradient.z;
-    }
-    float det0 = max(1.0e-6f, a0 * c0v - b * b);
-    float det1 = max(1.0e-6f, denom);
-    float coef = pc.u22 != 0u ? sqrt(det0 / det1) : 1.0f;
-    if (mode == kModeFisheye && pc.u22 != 0u) {
-        float lc = activated_opacity * gc.w;
-        if (a0 * c0v - b * b > 1.0e-6f) {
-            float q = lc * 0.5f * coef / det0;
-            ga += q * c0v;
-            gcc += q * a0;
-            gb -= q * 2.0f * b;
-        }
-        if (denom > 1.0e-6f) {
-            float q = -lc * 0.5f * coef / det1;
-            ga += q * c;
-            gcc += q * a;
-            gb -= q * 2.0f * b;
-        }
-    }
-    model_grad[opacity_base + gradient_index] = gc.w * coef;
-    Mat3 G = mat_zero();
-    G.m[0][0] = ga;
-    G.m[0][1] = 0.5f * gb;
-    G.m[1][0] = 0.5f * gb;
-    G.m[1][1] = gcc;
-    Mat3 dV = mat_mul(mat_mul(T, G), mat_transpose(T));
-    float3 geometry_dt = 0.0f;
-    if (mode != kModeFisheye && (any(gplane != 0.0f) || any(gnormal != 0.0f))) {
-        Mat3 geometry_dV;
-        generic_geometry_backward(
-            t, W, V, has_scales, scale_local, gplane, gnormal, fx, fy,
-            geometry_dV, geometry_dt);
-        dV = mat_add(dV, geometry_dV);
-    }
-    float gv0 = dV.m[0][0];
-    float gv1 = dV.m[0][1] + dV.m[1][0];
-    float gv2 = dV.m[0][2] + dV.m[2][0];
-    float gv3 = dV.m[1][1];
-    float gv4 = dV.m[1][2] + dV.m[2][1];
-    float gv5 = dV.m[2][2];
-    if (has_scales) {
-        float3 gs;
-        float4 gr;
-        cov3d_backward(scale_local, rotation, R, gv0, gv1, gv2, gv3, gv4, gv5, gs, gr);
-        gs *= scale_modifier;
-        model_grad[scale_base + 3u * gradient_index] = gs.x;
-        model_grad[scale_base + 3u * gradient_index + 1u] = gs.y;
-        model_grad[scale_base + 3u * gradient_index + 2u] = gs.z;
-        [unroll] for (uint q = 0u; q < 4u; ++q)
-            model_grad[rotation_base + 4u * gradient_index + q] = gr[q];
-    } else {
-        uint o = covariance_base + 6u * index;
-        model_grad[o] = gv0;
-        model_grad[o + 1u] = gv1;
-        model_grad[o + 2u] = gv2;
-        model_grad[o + 3u] = gv3;
-        model_grad[o + 4u] = gv4;
-        model_grad[o + 5u] = gv5;
-    }
-    Mat3 dT = mat_mul(mat_mul(V, T), G);
-    [unroll] for (int rr = 0; rr < 3; ++rr)
-        [unroll] for (int cc = 0; cc < 3; ++cc) dT.m[rr][cc] *= 2.0f;
-    Mat3 dJ = mat_mul(mat_transpose(W), dT);
-    float3 gt =
-        dJ.m[0][0] * dual.j00.d + dJ.m[1][0] * dual.j01.d + dJ.m[2][0] * dual.j02.d +
-        dJ.m[0][1] * dual.j10.d + dJ.m[1][1] * dual.j11.d + dJ.m[2][1] * dual.j12.d +
-        geometry_dt;
-    uint mean2base = 3u * index;
-    float2 gm2 = float2(blend_grad[mean2base], blend_grad[mean2base + 1u]);
-    Projection projected;
-    if (mode == kModeOrtho) projected = project_ortho(t, fx, fy, cx, cy);
-    else projected = project_camera(t, mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4);
-    if (mode == kModePinhole) {
-        float rz = 1.0f / (t.z + 1.0e-7f);
-        float sx = t.x * rz;
-        float sy = t.y * rz;
-        gt += float3(
-            fx * rz * gm2.x, fy * rz * gm2.y, -(fx * sx * gm2.x + fy * sy * gm2.y) * rz);
-    } else if (projected.valid) {
-        gt += float3(
-            projected.du0 * gm2.x + projected.dv0 * gm2.y,
-            projected.du1 * gm2.x + projected.dv1 * gm2.y,
-            projected.du2 * gm2.x + projected.dv2 * gm2.y);
-    }
-    float3 gm = float3(
-        camera[0] * gt.x + camera[1] * gt.y + camera[2] * gt.z,
-        camera[4] * gt.x + camera[5] * gt.y + camera[6] * gt.z,
-        camera[8] * gt.x + camera[9] * gt.y + camera[10] * gt.z);
-    uint color_grad_base = 7u * count + 3u * index;
-    float3 gcolor = float3(
-        blend_grad[color_grad_base],
-        blend_grad[color_grad_base + 1u],
-        blend_grad[color_grad_base + 2u]);
-    if (!omit_appearance && has_sh) {
-        gm += sh_backward(
-            index, degree, bases, mean,
-            float3(camera[16], camera[17], camera[18]),
-            gcolor, gauss_f[(geometry ? 7u : 5u) * index + (geometry ? 6u : 4u)].xyz, feature_base);
-    } else if (!omit_appearance) {
-        uint fo = feature_base + 3u * index;
-        model_grad[fo] = gcolor.x;
-        model_grad[fo + 1u] = gcolor.y;
-        model_grad[fo + 2u] = gcolor.z;
-    }
-    model_grad[3u * gradient_index] = gm.x;
-    model_grad[3u * gradient_index + 1u] = gm.y;
-    model_grad[3u * gradient_index + 2u] = gm.z;
-    if (mode == kModeFisheye && (any(gplane != 0.0f) || any(gnormal != 0.0f))) {
         [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
-            float eps = 1.0e-3f * max(1.0f, abs(mean[axis]));
-            float3 mp = mean;
-            float3 mm = mean;
-            mp[axis] += eps;
-            mm[axis] -= eps;
-            SplatGeom gp = geometry_eval(
-                mp, has_scales, scale, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
-                mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                kernel, scale_modifier);
-            SplatGeom gn = geometry_eval(
-                mm, has_scales, scale, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
-                mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                kernel, scale_modifier);
-            model_grad[3u * gradient_index + axis] +=
-                (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
-                (2.0f * eps);
+            dA.m[0][axis] = blend_grad[3u * count + 4u * index + axis];
+            dA.m[1][axis] = blend_grad[10u * count + 4u * index + axis];
+            dA.m[2][axis] = blend_grad[14u * count + 3u * index + axis];
         }
-        if (has_scales) {
-            [unroll] for (uint axis2 = 0u; axis2 < 3u; ++axis2) {
-                float eps = 1.0e-3f * max(0.1f, abs(scale[axis2]));
-                float3 sp = scale;
-                float3 sm = scale;
-                sp[axis2] += eps;
-                sm[axis2] -= eps;
-                SplatGeom gp = geometry_eval(
-                    mean, true, sp, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                SplatGeom gn = geometry_eval(
-                    mean, true, sm, rotation, cv0, cv1, cv2, cv3, cv4, cv5,
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                model_grad[scale_base + 3u * gradient_index + axis2] +=
-                    (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
-                    (2.0f * eps);
-            }
-            [unroll] for (uint qi = 0u; qi < 4u; ++qi) {
-                float eps = 1.0e-3f;
-                float4 qp = rotation;
-                float4 qm = rotation;
-                qp[qi] += eps;
-                qm[qi] -= eps;
-                SplatGeom gp = geometry_eval(
-                    mean, true, scale, qp, cv0, cv1, cv2, cv3, cv4, cv5,
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                SplatGeom gn = geometry_eval(
-                    mean, true, scale, qm, cv0, cv1, cv2, cv3, cv4, cv5,
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                model_grad[rotation_base + 4u * gradient_index + qi] +=
-                    (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
-                    (2.0f * eps);
-            }
+        Mat3 B = mat_zero();
+        [unroll] for (uint row = 0u; row < 3u; ++row)[unroll] for (uint col = 0u; col < 3u; ++col)
+            B.m[row][col] = gauss_f[index * pc.u23 + 3u + row][col];
+        float3 eye = float3(camera[16], camera[17], camera[18]);
+        GutGeometryGradient geometry = gut_geometry_vjp(
+            float3(B.m[0][0], B.m[0][1], B.m[0][2]), float3(B.m[1][0], B.m[1][1], B.m[1][2]),
+            float3(B.m[2][0], B.m[2][1], B.m[2][2]), go, float3(dA.m[0][0], dA.m[0][1], dA.m[0][2]),
+            float3(dA.m[1][0], dA.m[1][1], dA.m[1][2]), float3(dA.m[2][0], dA.m[2][1], dA.m[2][2]),
+            eye - mean, scale, scale_modifier, rotation);
+        float3 gs = geometry.scale;
+        float4 gr = geometry.rotation;
+        float3 gm = geometry.mean;
+        float3 gcolor =
+            float3(blend_grad[7u * count + 3u * index], blend_grad[7u * count + 3u * index + 1u],
+                   blend_grad[7u * count + 3u * index + 2u]);
+        if (has_sh) {
+            float c0, c1, c2;
+            evaluate_gut_sh_unclamped(degree, mean, eye, color_src, index * bases * 3u, c0, c1, c2);
+            gm += sh_backward(index, degree, bases, mean, eye, gcolor, float3(c0, c1, c2),
+                              feature_base);
         } else {
-            float cv[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
-            [unroll] for (uint ci = 0u; ci < 6u; ++ci) {
-                float eps = 1.0e-3f * max(0.01f, abs(cv[ci]));
-                float cp[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
-                float cm[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
-                cp[ci] += eps;
-                cm[ci] -= eps;
-                SplatGeom gp = geometry_eval(
-                    mean, false, scale, rotation, cp[0], cp[1], cp[2], cp[3], cp[4], cp[5],
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                SplatGeom gn = geometry_eval(
-                    mean, false, scale, rotation, cm[0], cm[1], cm[2], cm[3], cm[4], cm[5],
-                    mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4,
-                    kernel, scale_modifier);
-                model_grad[covariance_base + 6u * gradient_index + ci] +=
+            [unroll] for (uint channel = 0u; channel < 3u; ++channel)
+                model_grad[feature_base + 3u * index + channel] = gcolor[channel];
+        }
+        [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
+            model_grad[3u * gradient_index + axis] = gm[axis];
+            model_grad[scale_base + 3u * gradient_index + axis] = gs[axis];
+        }
+        [unroll] for (uint qi = 0u; qi < 4u; ++qi)
+            model_grad[rotation_base + 4u * gradient_index + qi] = gr[qi];
+        model_grad[opacity_base + gradient_index] = blend_grad[3u * count + 4u * index + 3u];
+    } else {
+        Mat3 cov = mat_mul(mat_transpose(T), mat_mul(V, T));
+        uint conic_base = 3u * count + 4u * index;
+        float4 gc = float4(blend_grad[conic_base], blend_grad[conic_base + 1u],
+                           blend_grad[conic_base + 2u], blend_grad[conic_base + 3u]);
+#ifdef SPLAT_PINHOLE_RGB
+        const float4 gplane = 0.0f;
+        const float3 gnormal = 0.0f;
+#else
+        uint plane_grad_base = 10u * count + 4u * index;
+        uint normal_grad_base = 14u * count + 3u * index;
+        float4 gplane = float4(blend_grad[plane_grad_base], blend_grad[plane_grad_base + 1u],
+                               blend_grad[plane_grad_base + 2u], blend_grad[plane_grad_base + 3u]);
+        float3 gnormal = float3(blend_grad[normal_grad_base], blend_grad[normal_grad_base + 1u],
+                                blend_grad[normal_grad_base + 2u]);
+#endif
+        float a0 = cov.m[0][0];
+        float b = cov.m[0][1];
+        float c0v = cov.m[1][1];
+        float a = a0 + kernel;
+        float c = c0v + kernel;
+        float denom = a * c - b * b;
+        float denom2inv = 1.0f / (denom * denom + 1.0e-7f);
+        float ga = denom2inv * (-c * c * gc.x + 2.0f * b * c * gc.y + (denom - a * c) * gc.z);
+        float gcc = denom2inv * (-a * a * gc.z + 2.0f * a * b * gc.y + (denom - a * c) * gc.x);
+        float gb = denom2inv * 2.0f * (b * c * gc.x - (denom + 2.0f * b * b) * gc.y + a * b * gc.z);
+        float3 screen_cov = float3(a, b, c);
+        FootprintCap cap = footprint_policy(screen_cov, int(width), int(height));
+        if (cap.q < 1.0f) {
+            float3 gradient = footprint_conic_backward(screen_cov, cap, gc);
+            ga = gradient.x;
+            gb = gradient.y;
+            gcc = gradient.z;
+        }
+        float det0 = max(1.0e-6f, a0 * c0v - b * b);
+        float det1 = max(1.0e-6f, denom);
+        float coef = pc.u22 != 0u ? sqrt(det0 / det1) : 1.0f;
+        if (mode == kModeFisheye && pc.u22 != 0u) {
+            float lc = activated_opacity * gc.w;
+            if (a0 * c0v - b * b > 1.0e-6f) {
+                float q = lc * 0.5f * coef / det0;
+                ga += q * c0v;
+                gcc += q * a0;
+                gb -= q * 2.0f * b;
+            }
+            if (denom > 1.0e-6f) {
+                float q = -lc * 0.5f * coef / det1;
+                ga += q * c;
+                gcc += q * a;
+                gb -= q * 2.0f * b;
+            }
+        }
+        model_grad[opacity_base + gradient_index] = gc.w * coef;
+        Mat3 G = mat_zero();
+        G.m[0][0] = ga;
+        G.m[0][1] = 0.5f * gb;
+        G.m[1][0] = 0.5f * gb;
+        G.m[1][1] = gcc;
+        Mat3 dV = mat_mul(mat_mul(T, G), mat_transpose(T));
+        float3 geometry_dt = 0.0f;
+        if (mode != kModeFisheye && (any(gplane != 0.0f) || any(gnormal != 0.0f))) {
+            Mat3 geometry_dV;
+            generic_geometry_backward(t, W, V, has_scales, scale_local, gplane, gnormal, fx, fy,
+                                      geometry_dV, geometry_dt);
+            dV = mat_add(dV, geometry_dV);
+        }
+        float gv0 = dV.m[0][0];
+        float gv1 = dV.m[0][1] + dV.m[1][0];
+        float gv2 = dV.m[0][2] + dV.m[2][0];
+        float gv3 = dV.m[1][1];
+        float gv4 = dV.m[1][2] + dV.m[2][1];
+        float gv5 = dV.m[2][2];
+        if (has_scales) {
+            float3 gs;
+            float4 gr;
+            cov3d_backward(scale_local, rotation, R, gv0, gv1, gv2, gv3, gv4, gv5, gs, gr);
+            gs *= scale_modifier;
+            model_grad[scale_base + 3u * gradient_index] = gs.x;
+            model_grad[scale_base + 3u * gradient_index + 1u] = gs.y;
+            model_grad[scale_base + 3u * gradient_index + 2u] = gs.z;
+            [unroll] for (uint q = 0u; q < 4u; ++q)
+                model_grad[rotation_base + 4u * gradient_index + q] = gr[q];
+        } else {
+            uint o = covariance_base + 6u * index;
+            model_grad[o] = gv0;
+            model_grad[o + 1u] = gv1;
+            model_grad[o + 2u] = gv2;
+            model_grad[o + 3u] = gv3;
+            model_grad[o + 4u] = gv4;
+            model_grad[o + 5u] = gv5;
+        }
+        Mat3 dT = mat_mul(mat_mul(V, T), G);
+        [unroll] for (int rr = 0; rr < 3; ++rr)[unroll] for (int cc = 0; cc < 3; ++cc)
+            dT.m[rr][cc] *= 2.0f;
+        Mat3 dJ = mat_mul(mat_transpose(W), dT);
+        float3 gt = dJ.m[0][0] * dual.j00.d + dJ.m[1][0] * dual.j01.d + dJ.m[2][0] * dual.j02.d +
+                    dJ.m[0][1] * dual.j10.d + dJ.m[1][1] * dual.j11.d + dJ.m[2][1] * dual.j12.d +
+                    geometry_dt;
+        uint mean2base = 3u * index;
+        float2 gm2 = float2(blend_grad[mean2base], blend_grad[mean2base + 1u]);
+        Projection projected;
+        if (mode == kModeOrtho)
+            projected = project_ortho(t, fx, fy, cx, cy);
+        else
+            projected =
+                project_camera(t, mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4);
+        if (mode == kModePinhole) {
+            float rz = 1.0f / (t.z + 1.0e-7f);
+            float sx = t.x * rz;
+            float sy = t.y * rz;
+            gt +=
+                float3(fx * rz * gm2.x, fy * rz * gm2.y, -(fx * sx * gm2.x + fy * sy * gm2.y) * rz);
+        } else if (projected.valid) {
+            gt += float3(projected.du0 * gm2.x + projected.dv0 * gm2.y,
+                         projected.du1 * gm2.x + projected.dv1 * gm2.y,
+                         projected.du2 * gm2.x + projected.dv2 * gm2.y);
+        }
+        float3 gm = float3(camera[0] * gt.x + camera[1] * gt.y + camera[2] * gt.z,
+                           camera[4] * gt.x + camera[5] * gt.y + camera[6] * gt.z,
+                           camera[8] * gt.x + camera[9] * gt.y + camera[10] * gt.z);
+        uint color_grad_base = 7u * count + 3u * index;
+        float3 gcolor = float3(blend_grad[color_grad_base], blend_grad[color_grad_base + 1u],
+                               blend_grad[color_grad_base + 2u]);
+        if (!omit_appearance && has_sh) {
+            gm += sh_backward(
+                index, degree, bases, mean, float3(camera[16], camera[17], camera[18]), gcolor,
+                gauss_f[(geometry ? 7u : 5u) * index + (geometry ? 6u : 4u)].xyz, feature_base);
+        } else if (!omit_appearance) {
+            uint fo = feature_base + 3u * index;
+            model_grad[fo] = gcolor.x;
+            model_grad[fo + 1u] = gcolor.y;
+            model_grad[fo + 2u] = gcolor.z;
+        }
+        model_grad[3u * gradient_index] = gm.x;
+        model_grad[3u * gradient_index + 1u] = gm.y;
+        model_grad[3u * gradient_index + 2u] = gm.z;
+        if (mode == kModeFisheye && (any(gplane != 0.0f) || any(gnormal != 0.0f))) {
+            [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
+                float eps = 1.0e-3f * max(1.0f, abs(mean[axis]));
+                float3 mp = mean;
+                float3 mm = mean;
+                mp[axis] += eps;
+                mm[axis] -= eps;
+                SplatGeom gp = geometry_eval(mp, has_scales, scale, rotation, cv0, cv1, cv2, cv3,
+                                             cv4, cv5, mode, int(width), int(height), fx, fy, cx,
+                                             cy, k1, k2, k3, k4, kernel, scale_modifier);
+                SplatGeom gn = geometry_eval(mm, has_scales, scale, rotation, cv0, cv1, cv2, cv3,
+                                             cv4, cv5, mode, int(width), int(height), fx, fy, cx,
+                                             cy, k1, k2, k3, k4, kernel, scale_modifier);
+                model_grad[3u * gradient_index + axis] +=
                     (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
                     (2.0f * eps);
             }
+            if (has_scales) {
+                [unroll] for (uint axis2 = 0u; axis2 < 3u; ++axis2) {
+                    float eps = 1.0e-3f * max(0.1f, abs(scale[axis2]));
+                    float3 sp = scale;
+                    float3 sm = scale;
+                    sp[axis2] += eps;
+                    sm[axis2] -= eps;
+                    SplatGeom gp = geometry_eval(mean, true, sp, rotation, cv0, cv1, cv2, cv3, cv4,
+                                                 cv5, mode, int(width), int(height), fx, fy, cx, cy,
+                                                 k1, k2, k3, k4, kernel, scale_modifier);
+                    SplatGeom gn = geometry_eval(mean, true, sm, rotation, cv0, cv1, cv2, cv3, cv4,
+                                                 cv5, mode, int(width), int(height), fx, fy, cx, cy,
+                                                 k1, k2, k3, k4, kernel, scale_modifier);
+                    model_grad[scale_base + 3u * gradient_index + axis2] +=
+                        (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
+                        (2.0f * eps);
+                }
+                [unroll] for (uint qi = 0u; qi < 4u; ++qi) {
+                    float eps = 1.0e-3f;
+                    float4 qp = rotation;
+                    float4 qm = rotation;
+                    qp[qi] += eps;
+                    qm[qi] -= eps;
+                    SplatGeom gp = geometry_eval(mean, true, scale, qp, cv0, cv1, cv2, cv3, cv4,
+                                                 cv5, mode, int(width), int(height), fx, fy, cx, cy,
+                                                 k1, k2, k3, k4, kernel, scale_modifier);
+                    SplatGeom gn = geometry_eval(mean, true, scale, qm, cv0, cv1, cv2, cv3, cv4,
+                                                 cv5, mode, int(width), int(height), fx, fy, cx, cy,
+                                                 k1, k2, k3, k4, kernel, scale_modifier);
+                    model_grad[rotation_base + 4u * gradient_index + qi] +=
+                        (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
+                        (2.0f * eps);
+                }
+            } else {
+                float cv[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
+                [unroll] for (uint ci = 0u; ci < 6u; ++ci) {
+                    float eps = 1.0e-3f * max(0.01f, abs(cv[ci]));
+                    float cp[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
+                    float cm[6] = {cv0, cv1, cv2, cv3, cv4, cv5};
+                    cp[ci] += eps;
+                    cm[ci] -= eps;
+                    SplatGeom gp =
+                        geometry_eval(mean, false, scale, rotation, cp[0], cp[1], cp[2], cp[3],
+                                      cp[4], cp[5], mode, int(width), int(height), fx, fy, cx, cy,
+                                      k1, k2, k3, k4, kernel, scale_modifier);
+                    SplatGeom gn =
+                        geometry_eval(mean, false, scale, rotation, cm[0], cm[1], cm[2], cm[3],
+                                      cm[4], cm[5], mode, int(width), int(height), fx, fy, cx, cy,
+                                      k1, k2, k3, k4, kernel, scale_modifier);
+                    model_grad[covariance_base + 6u * gradient_index + ci] +=
+                        (geometry_loss(gp, gplane, gnormal) - geometry_loss(gn, gplane, gnormal)) /
+                        (2.0f * eps);
+                }
+            }
         }
-    }
     }
     if (raw_chain && has_scales) {
         float f = filter_3d[index];
@@ -900,33 +941,30 @@ void project_backward(uint3 dispatch_id) {
             uint o = 3u * gradient_index + ax;
             float raw = exp(raw_log_scales[3u * index + ax]);
             float fs = scale[ax];
-            model_grad[log_scale_base + o] =
-                model_grad[scale_base + o] * raw * raw / fs +
-                gop * activated_opacity * f2 / (fs * fs);
+            model_grad[log_scale_base + o] = model_grad[scale_base + o] * raw * raw / fs +
+                                             gop * activated_opacity * f2 / (fs * fs);
         }
-        float4 rawq = float4(
-            raw_rotations[4u * index], raw_rotations[4u * index + 1u],
-            raw_rotations[4u * index + 2u], raw_rotations[4u * index + 3u]);
+        float4 rawq = float4(raw_rotations[4u * index], raw_rotations[4u * index + 1u],
+                             raw_rotations[4u * index + 2u], raw_rotations[4u * index + 3u]);
         float rinv = rsqrt(max(dot(rawq, rawq), 1.0e-20f));
         float4 qn = rawq * rinv;
-        float4 gq = float4(
-            model_grad[rotation_base + 4u * gradient_index],
-            model_grad[rotation_base + 4u * gradient_index + 1u],
-            model_grad[rotation_base + 4u * gradient_index + 2u],
-            model_grad[rotation_base + 4u * gradient_index + 3u]);
+        float4 gq = float4(model_grad[rotation_base + 4u * gradient_index],
+                           model_grad[rotation_base + 4u * gradient_index + 1u],
+                           model_grad[rotation_base + 4u * gradient_index + 2u],
+                           model_grad[rotation_base + 4u * gradient_index + 3u]);
         float qdot = dot(qn, gq);
-        float4 grq = pc.u23!=0u ? gut_quaternion_vjp(rawq,gq) : rinv * (gq - qn * qdot);
+        float4 grq = pc.u23 != 0u ? gut_quaternion_vjp(rawq, gq) : rinv * (gq - qn * qdot);
         [unroll] for (uint qi = 0u; qi < 4u; ++qi)
             model_grad[raw_rotation_base + 4u * gradient_index + qi] = grq[qi];
         float opa = 1.0f / (1.0f + exp(-opacity_logits[index]));
-        model_grad[logit_base + gradient_index] =
-            gop * activated_opacity * (1.0f - opa);
+        model_grad[logit_base + gradient_index] = gop * activated_opacity * (1.0f - opa);
     }
 }
 
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
-    if (dispatch_id.x >= pc.u0) return;
+    if (dispatch_id.x >= pc.u0)
+        return;
 #ifdef SPLAT_PINHOLE_RGB
     sh_row_base = dispatch_id.x * pc.u6 * 3u;
 #endif

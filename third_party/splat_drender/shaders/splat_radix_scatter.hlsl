@@ -56,14 +56,16 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             uint exclusive = hist_scan[pc.u4 + hist_index] - hist[hist_index];
             uint dest = exclusive + chunk_base[digit] + rank;
             out_lo[dest] = lo;
-            if (key_is_64 != 0) out_hi[dest] = hi;
+            if (key_is_64 != 0)
+                out_hi[dest] = hi;
             out_val[dest] = value;
         }
         GroupMemoryBarrierWithGroupSync();
         chunk_count[tid] = 0;
         GroupMemoryBarrierWithGroupSync();
         // One atomic per key instead of a serial 256-iteration loop in lane 0.
-        if (valid) InterlockedAdd(chunk_count[digit], 1u);
+        if (valid)
+            InterlockedAdd(chunk_count[digit], 1u);
         GroupMemoryBarrierWithGroupSync();
         chunk_base[tid] += chunk_count[tid];
         GroupMemoryBarrierWithGroupSync();

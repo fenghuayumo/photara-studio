@@ -45,19 +45,18 @@ struct Buffer {
     bool owning = true;
 
     Buffer() = default;
-    Buffer(
-        VkPhysicalDevice physical_device,
-        VkDevice logical_device,
-        VkDeviceSize byte_size,
-        VkBufferUsageFlags usage,
-        BufferMemory memory_kind = BufferMemory::host_visible);
+    Buffer(VkPhysicalDevice physical_device, VkDevice logical_device, VkDeviceSize byte_size,
+           VkBufferUsageFlags usage, BufferMemory memory_kind = BufferMemory::host_visible);
     ~Buffer();
     Buffer(Buffer&& other) noexcept;
     Buffer& operator=(Buffer&& other) noexcept;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 
-    [[nodiscard]] bool host_visible() const noexcept { return mapped != nullptr; }
+    [[nodiscard]]
+    bool host_visible() const noexcept {
+        return mapped != nullptr;
+    }
     // Destroy an owning allocation before this member is rebound as a view.
     // The caller must first guarantee no queued work still references it.
     void destroy_owned() noexcept {
@@ -97,30 +96,27 @@ struct Buffer {
 using ComputePipeline = photara::vk::ComputePipeline;
 
 class Context::Impl {
-public:
+  public:
     explicit Impl(const ContextOptions& options);
     ~Impl();
 
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 
-    [[nodiscard]] Buffer create_buffer(
-        VkDeviceSize size,
-        VkBufferUsageFlags usage,
-        BufferMemory memory = BufferMemory::host_visible) const;
-    [[nodiscard]] ComputePipeline create_pipeline(
-        const std::string& shader_name,
-        std::uint32_t storage_buffer_count,
-        std::uint32_t push_constant_size) const;
+    [[nodiscard]]
+    Buffer create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                         BufferMemory memory = BufferMemory::host_visible) const;
+    [[nodiscard]]
+    ComputePipeline create_pipeline(const std::string& shader_name,
+                                    std::uint32_t storage_buffer_count,
+                                    std::uint32_t push_constant_size) const;
 
     // Host transfers for buffers that are not mapped. Both go through one
     // staging buffer and one submit; callers must hold dispatch_mutex.
-    void write_buffer(
-        const Buffer& destination, const void* source, std::size_t byte_size,
-        std::size_t offset = 0);
-    void read_buffer(
-        const Buffer& source, void* destination, std::size_t byte_size,
-        std::size_t offset = 0);
+    void write_buffer(const Buffer& destination, const void* source, std::size_t byte_size,
+                      std::size_t offset = 0);
+    void read_buffer(const Buffer& source, void* destination, std::size_t byte_size,
+                     std::size_t offset = 0);
     // Device-side memset, for the zero fills the host used to do on a mapping.
     void fill_buffer(const Buffer& destination, std::uint32_t value, std::size_t byte_size);
     // Device-to-device copy, so a reordering stays on the GPU.
@@ -150,16 +146,15 @@ public:
     mutable std::mutex dispatch_mutex;
     photara::vk::Device runtime;
 
-private:
+  private:
     void create_instance_and_device(const ContextOptions& options);
     void adopt_external_device(const ExternalDevice& external);
     void create_pools();
-    void copy_between(
-        const Buffer& source, std::size_t source_offset, const Buffer& destination,
-        std::size_t destination_offset, std::size_t byte_size);
+    void copy_between(const Buffer& source, std::size_t source_offset, const Buffer& destination,
+                      std::size_t destination_offset, std::size_t byte_size);
     void ensure_staging(VkDeviceSize bytes);
 
     Buffer staging_;
 };
 
-}  // namespace splat_drender::vulkan
+} // namespace splat_drender::vulkan

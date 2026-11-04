@@ -12,7 +12,8 @@
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint point_count = pc.u0;
     uint i = dispatch_id.x;
-    if (i >= point_count) return;
+    if (i >= point_count)
+        return;
     uint width = pc.u1;
     uint height = pc.u2;
     uint tiles_x = pc.u3;
@@ -35,21 +36,18 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     sample_u[i] = 0u;
     sample_u[point_count + i] = 0u;
     float3 world = float3(points[3u * i], points[3u * i + 1u], points[3u * i + 2u]);
-    float3 t = xform_point(
-        world,
-        camera[0], camera[1], camera[2],
-        camera[4], camera[5], camera[6],
-        camera[8], camera[9], camera[10],
-        camera[12], camera[13], camera[14]);
+    float3 t = xform_point(world, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
+                           camera[8], camera[9], camera[10], camera[12], camera[13], camera[14]);
     if (mode == kModeEquirect) {
-        if (!(dot(t, t) > 1.0e-12f)) return;
+        if (!(dot(t, t) > 1.0e-12f))
+            return;
     } else if (!(t.z > (mode == kModeFisheye ? 1.0e-6f : asfloat(pc.u21)))) {
         return;
     }
-    Projection pr = project_camera(
-        t, mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4);
-    if (!pr.valid || pr.pixel_x < 0.0f || pr.pixel_x > float(width - 1u) ||
-        pr.pixel_y < 0.0f || pr.pixel_y > float(height - 1u)) {
+    Projection pr =
+        project_camera(t, mode, int(width), int(height), fx, fy, cx, cy, k1, k2, k3, k4);
+    if (!pr.valid || pr.pixel_x < 0.0f || pr.pixel_x > float(width - 1u) || pr.pixel_y < 0.0f ||
+        pr.pixel_y > float(height - 1u)) {
         return;
     }
     uint tx = min(tiles_x - 1u, uint(max(0.0f, floor((pr.pixel_x + 0.5f) / 16.0f))));
@@ -67,14 +65,18 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
         float4 co = gauss_f[7u * g + 1u];
         float power = gaussian_power(co, d.x, d.y);
-        if (power > 0.0f) continue;
+        if (power > 0.0f)
+            continue;
         float alpha = min(kAlphaClip, co.w * exp(power));
-        if (alpha < kAlphaFloor) continue;
+        if (alpha < kAlphaFloor)
+            continue;
         float test_t = T * (1.0f - alpha);
-        if (test_t < kTransmittanceFloor) break;
+        if (test_t < kTransmittanceFloor)
+            break;
         float4 rp = gauss_f[7u * g + 3u];
         float peak = rp.x * d.x + rp.y * d.y + rp.z;
-        if (T > 0.5f) seed = peak;
+        if (T > 0.5f)
+            seed = peak;
         T = test_t;
         last = contributor;
     }
@@ -82,7 +84,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // Invalid queries are already zeroed, and backward ignores them. Avoid
     // performing eight depth searches for a ray without enough opacity.
     sample_u[i] = last;
-    if (!in_range) return;
+    if (!in_range)
+        return;
     float window = bracket > 0.0f ? bracket : 200.0f;
     float lo = max(seed - window, 0.0f);
     float hi = max(seed + window, 0.0f);
@@ -92,8 +95,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         bool first = refine == 0u;
         uint sb = first ? 0u : 1u;
         uint se = first ? 9u : 8u;
-        [unroll] for (uint sr = 0u; sr < 9u; ++sr)
-            if (sr >= sb && sr < se) probes[sr] = 1.0f;
+        [unroll] for (uint sr = 0u; sr < 9u; ++sr) if (sr >= sb && sr < se) probes[sr] = 1.0f;
         float interval = (hi - lo) / 8.0f;
         uint used = 0u;
         [loop] for (uint at2 = begin; at2 < end && used < last; ++at2) {
@@ -102,9 +104,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
             float4 co = gauss_f[7u * g + 1u];
             float power = gaussian_power(co, d.x, d.y);
-            if (power > 0.0f) continue;
+            if (power > 0.0f)
+                continue;
             float alpha = min(kAlphaClip, co.w * exp(power));
-            if (alpha < kAlphaFloor) continue;
+            if (alpha < kAlphaFloor)
+                continue;
             float4 rp = gauss_f[7u * g + 3u];
             float peak = rp.x * d.x + rp.y * d.y + rp.z;
             // Match CUDA's cfg::kDepthBandSigmas (8): outside this band the
@@ -115,12 +119,16 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
                 const float half_band = 8.0f / rp.w;
                 const float probe_min = lo + interval * float(sb);
                 const float probe_max = lo + interval * float(se - 1u);
-                if (peak - half_band > probe_max) band = 1;
-                else if (peak + half_band < probe_min) band = -1;
+                if (peak - half_band > probe_max)
+                    band = 1;
+                else if (peak + half_band < probe_min)
+                    band = -1;
             }
-            if (band == 1) continue;
+            if (band == 1)
+                continue;
             [unroll] for (uint s2 = 0u; s2 < 9u; ++s2) {
-                if (s2 < sb || s2 >= se) continue;
+                if (s2 < sb || s2 >= se)
+                    continue;
                 if (band == -1) {
                     probes[s2] *= 1.0f - alpha;
                     continue;
@@ -132,10 +140,12 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
                 probes[s2] *= (ts > peak ? (1.0f - alpha) : om) * rsqrt(om);
             }
         }
-        if (first && !(probes[0] >= 0.5f && probes[8] <= 0.5f)) return;
+        if (first && !(probes[0] >= 0.5f && probes[8] <= 0.5f))
+            return;
         uint sid = 0u;
         [unroll] for (uint s3 = 1u; s3 < 8u; ++s3) {
-            if (probes[s3] >= 0.5f) sid = s3;
+            if (probes[s3] >= 0.5f)
+                sid = s3;
         }
         float nlo = lo + float(sid) * interval;
         float nhi = lo + float(sid + 1u) * interval;
@@ -143,12 +153,12 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         probes[8] = probes[sid + 1u];
         lo = nlo;
         hi = nhi;
-        if (tolerance > 0.0f && hi - lo <= tolerance) break;
+        if (tolerance > 0.0f && hi - lo <= tolerance)
+            break;
     }
     float weight = saturate((probes[0] - 0.5f) / (probes[0] - probes[8]));
     float depth = in_range ? weight * hi + (1.0f - weight) * lo : 0.0f;
-    float3 ray = pixel_unit_ray(
-        pr.pixel_x, pr.pixel_y, mode, fx, fy, cx, cy, k1, k2, k3, k4);
+    float3 ray = pixel_unit_ray(pr.pixel_x, pr.pixel_y, mode, fx, fy, cx, cy, k1, k2, k3, k4);
     float3 camera_point = ray * depth;
     sample_f[3u * i] = camera_point.x;
     sample_f[3u * i + 1u] = camera_point.y;

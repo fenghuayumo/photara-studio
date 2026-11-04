@@ -22,7 +22,7 @@ groupshared uint alive;
 [numthreads(16, 16, 1)]
 void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank : SV_GroupIndex) {
     uint width = pc.u0, height = pc.u1, pixels = pc.u18;
-    uint2 xy = group.xy*16u + thread.xy;
+    uint2 xy = group.xy * 16u + thread.xy;
     bool inside = xy.x < width && xy.y < height;
     bool geometry = (pc.u3 & 4u) != 0u;
     bool stats = (pc.u3 & 16u) != 0u;
@@ -30,102 +30,126 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint rank :
     bool snapshots = (pc.u3 & 8u) != 0u;
     uint mode = pc.u4;
     float fx = asfloat(pc.u6), fy = asfloat(pc.u7), cx = asfloat(pc.u8), cy = asfloat(pc.u9);
-    float3 camera_direction = mode == kModeOrtho ? float3(0.0f, 0.0f, 1.0f)
-        : pixel_unit_ray(float(xy.x), float(xy.y), mode, fx, fy, cx, cy,
-                         asfloat(pc.u10), asfloat(pc.u11), asfloat(pc.u12), asfloat(pc.u13));
+    float3 camera_direction =
+        mode == kModeOrtho
+            ? float3(0.0f, 0.0f, 1.0f)
+            : pixel_unit_ray(float(xy.x), float(xy.y), mode, fx, fy, cx, cy, asfloat(pc.u10),
+                             asfloat(pc.u11), asfloat(pc.u12), asfloat(pc.u13));
     float3 direction = gut_world_direction(camera_direction);
-    float3 offset = mode == kModeOrtho ? gut_world_direction(float3((float(xy.x)-cx)/fx, (float(xy.y)-cy)/fy, 0.0f)) : 0.0f;
-    uint tile = group.y*pc.u2 + group.x;
-    uint begin = ranges[2u*tile], end = ranges[2u*tile+1u];
-    uint bucket_base = snapshots && tile > 0u ? bucket_offset[tile-1u] : 0u;
+    float3 offset =
+        mode == kModeOrtho
+            ? gut_world_direction(float3((float(xy.x) - cx) / fx, (float(xy.y) - cy) / fy, 0.0f))
+            : 0.0f;
+    uint tile = group.y * pc.u2 + group.x;
+    uint begin = ranges[2u * tile], end = ranges[2u * tile + 1u];
+    uint bucket_base = snapshots && tile > 0u ? bucket_offset[tile - 1u] : 0u;
     if (snapshots) {
-        for (uint bucket = rank; bucket < (end-begin+31u)/32u; bucket += 256u)
-            out_u[pc.u17+pixels+pc.u2*((height+15u)/16u)+bucket_base+bucket] = tile;
+        for (uint bucket = rank; bucket < (end - begin + 31u) / 32u; bucket += 256u)
+            out_u[pc.u17 + pixels + pc.u2 * ((height + 15u) / 16u) + bucket_base + bucket] = tile;
     }
     float T = 1.0f, depth = 0.0f;
     float3 rgb = 0.0f, normal = 0.0f;
     uint last = 0u;
-    bool done = !inside || !(gut_dot(direction,direction) > 0.0f);
+    bool done = !inside || !(gut_dot(direction, direction) > 0.0f);
     [loop] for (uint base = begin; base < end; base += 256u) {
-        if (rank == 0u) alive = 0u;
+        if (rank == 0u)
+            alive = 0u;
         GroupMemoryBarrierWithGroupSync();
-        if (!done) InterlockedAdd(alive, 1u);
+        if (!done)
+            InterlockedAdd(alive, 1u);
         GroupMemoryBarrierWithGroupSync();
-        if (alive == 0u) break;
-        uint batch = min(256u, end-base);
+        if (alive == 0u)
+            break;
+        uint batch = min(256u, end - base);
         if (rank < batch) {
-            uint id = instances[base+rank];
+            uint id = instances[base + rank];
             ids[rank] = id;
-            uint g = id*((pc.u3 & 512u)!=0u ? 11u : 7u);
-            colors[rank] = gauss_f[g+2u];
-            rows0[rank] = gauss_f[g+3u]; rows1[rank] = gauss_f[g+4u]; rows2[rank] = gauss_f[g+5u];
-            normals[rank] = gauss_f[g+6u].xyz;
+            uint g = id * ((pc.u3 & 512u) != 0u ? 11u : 7u);
+            colors[rank] = gauss_f[g + 2u];
+            rows0[rank] = gauss_f[g + 3u];
+            rows1[rank] = gauss_f[g + 4u];
+            rows2[rank] = gauss_f[g + 5u];
+            normals[rank] = gauss_f[g + 6u].xyz;
         }
         GroupMemoryBarrierWithGroupSync();
         [loop] for (uint j = 0u; j < batch; ++j) {
             if (snapshots && inside && (j & 31u) == 0u)
-                snap[(bucket_base+(base+j-begin)/32u)*256u+rank] = float4(rgb,T);
-            if (done) continue;
+                snap[(bucket_base + (base + j - begin) / 32u) * 256u + rank] = float4(rgb, T);
+            if (done)
+                continue;
             float4 a = rows0[j], b = rows1[j], c = rows2[j];
-            float3 o = float3(a.w, b.w, c.w) + float3(gut_dot(a.xyz, offset), gut_dot(b.xyz, offset), gut_dot(c.xyz, offset));
-            float3 d = float3(gut_dot(a.xyz, direction), gut_dot(b.xyz, direction), gut_dot(c.xyz, direction));
+            float3 o =
+                float3(a.w, b.w, c.w) +
+                float3(gut_dot(a.xyz, offset), gut_dot(b.xyz, offset), gut_dot(c.xyz, offset));
+            float3 d = float3(gut_dot(a.xyz, direction), gut_dot(b.xyz, direction),
+                              gut_dot(c.xyz, direction));
             float dd = gut_dot(d, d);
-            float peak = gut_div(-gut_dot(o,d),dd);
-            if (!(dd > 0.0f) || !(peak > 0.0f)) continue;
-            float3 closest = float3(gut_fma(peak,d.x,o.x),gut_fma(peak,d.y,o.y),gut_fma(peak,d.z,o.z));
+            float peak = gut_div(-gut_dot(o, d), dd);
+            if (!(dd > 0.0f) || !(peak > 0.0f))
+                continue;
+            float3 closest =
+                float3(gut_fma(peak, d.x, o.x), gut_fma(peak, d.y, o.y), gut_fma(peak, d.z, o.z));
             float distance = gut_dot(closest, closest);
             // Use the same response arithmetic as backward replay and CUDA.
-            float alpha = min(kAlphaClip, colors[j].w*gut_gaussian(closest));
+            float alpha = min(kAlphaClip, colors[j].w * gut_gaussian(closest));
             if (rings) {
                 float sigma = max(0.5f, asfloat(pc.u19));
-                float radius = distance/(sigma*sigma);
-                if (radius > 1.0f) continue;
-                float norm = (exp(-4.0f*radius)-exp(-4.0f))/(1.0f-exp(-4.0f));
-                alpha = radius >= 0.96f ? 0.6f : max(0.05f, norm*colors[j].w);
+                float radius = distance / (sigma * sigma);
+                if (radius > 1.0f)
+                    continue;
+                float norm = (exp(-4.0f * radius) - exp(-4.0f)) / (1.0f - exp(-4.0f));
+                alpha = radius >= 0.96f ? 0.6f : max(0.05f, norm * colors[j].w);
             }
-            if (alpha < kAlphaFloor) continue;
-            float next = T*(1.0f-alpha);
-            if (next < kTransmittanceFloor) { done = true; continue; }
-            float weight = alpha*T;
-            rgb += weight*colors[j].xyz;
+            if (alpha < kAlphaFloor)
+                continue;
+            float next = T * (1.0f - alpha);
+            if (next < kTransmittanceFloor) {
+                done = true;
+                continue;
+            }
+            float weight = alpha * T;
+            rgb += weight * colors[j].xyz;
             if (geometry) {
                 float3 n = normals[j];
                 n = gut_dot(n, camera_direction) > 0.0f ? -n : n;
-                normal += weight*n;
-                if (T >= 0.5f && next < 0.5f) depth = peak*(mode == kModeEquirect ? 1.0f : camera_direction.z);
+                normal += weight * n;
+                if (T >= 0.5f && next < 0.5f)
+                    depth = peak * (mode == kModeEquirect ? 1.0f : camera_direction.z);
             }
-            if (stats) InterlockedOr(out_u[ids[j]], 1u);
+            if (stats)
+                InterlockedOr(out_u[ids[j]], 1u);
             T = next;
-            last = base+j-begin+1u;
+            last = base + j - begin + 1u;
         }
         // Do not overwrite shared Gaussian rows until all pixels finish.
         GroupMemoryBarrierWithGroupSync();
     }
     if (inside) {
-        uint pix = xy.y*width+xy.x;
-        out_f[pix] = rgb.x+T*asfloat(pc.u14);
-        out_f[pixels+pix] = rgb.y+T*asfloat(pc.u15);
-        out_f[2u*pixels+pix] = rgb.z+T*asfloat(pc.u16);
-        out_f[3u*pixels+pix] = 1.0f-T;
+        uint pix = xy.y * width + xy.x;
+        out_f[pix] = rgb.x + T * asfloat(pc.u14);
+        out_f[pixels + pix] = rgb.y + T * asfloat(pc.u15);
+        out_f[2u * pixels + pix] = rgb.z + T * asfloat(pc.u16);
+        out_f[3u * pixels + pix] = 1.0f - T;
         if (snapshots) {
-            out_f[7u*pixels+pix] = direction.x;
-            out_f[8u*pixels+pix] = direction.y;
-            out_f[9u*pixels+pix] = direction.z;
+            out_f[7u * pixels + pix] = direction.x;
+            out_f[8u * pixels + pix] = direction.y;
+            out_f[9u * pixels + pix] = direction.z;
         }
         if (geometry) {
-            normal /= max(1.0f-T, 1.0e-8f);
-            out_f[4u*pixels+pix] = normal.x;
-            out_f[5u*pixels+pix] = normal.y;
-            out_f[6u*pixels+pix] = normal.z;
-            out_f[7u*pixels+pix] = depth;
+            normal /= max(1.0f - T, 1.0e-8f);
+            out_f[4u * pixels + pix] = normal.x;
+            out_f[5u * pixels + pix] = normal.y;
+            out_f[6u * pixels + pix] = normal.z;
+            out_f[7u * pixels + pix] = depth;
         }
         if (stats) {
-            out_u[pc.u17+pix] = last;
-            if (snapshots) InterlockedMax(out_u[pc.u17+pixels+tile], last);
-            uint output_base = (geometry ? 8u : 4u)*pixels;
-            out_f[output_base+pix] = rgb.x;
-            out_f[output_base+pixels+pix] = rgb.y;
-            out_f[output_base+2u*pixels+pix] = rgb.z;
+            out_u[pc.u17 + pix] = last;
+            if (snapshots)
+                InterlockedMax(out_u[pc.u17 + pixels + tile], last);
+            uint output_base = (geometry ? 8u : 4u) * pixels;
+            out_f[output_base + pix] = rgb.x;
+            out_f[output_base + pixels + pix] = rgb.y;
+            out_f[output_base + 2u * pixels + pix] = rgb.z;
         }
     }
 }

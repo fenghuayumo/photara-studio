@@ -8,7 +8,8 @@
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint count = pc.u0;
     uint index = dispatch_id.x;
-    if (index >= count) return;
+    if (index >= count)
+        return;
     uint packed = pc.u1;
     uint tile = packed != 0 ? key_hi[index] : key_lo[index];
     if (index == 0) {
@@ -20,5 +21,6 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             ranges[tile * 2] = index;
         }
     }
-    if (index == count - 1) ranges[tile * 2 + 1] = count;
+    if (index == count - 1)
+        ranges[tile * 2 + 1] = count;
 }

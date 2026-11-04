@@ -25,13 +25,14 @@ float3 preview_rotate(float4 q, float3 v) {
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint count = pc.u0;
     uint index = dispatch_id.x;
-    if (index >= count) return;
+    if (index >= count)
+        return;
 
     // Auxiliary normal-field render keeps all projected geometry intact.
     if ((pc.u3 & 128u) != 0u) {
         uint base = index * ((pc.u3 & 4u) != 0u ? 7u : 5u);
-        gauss_f[base + 2u] = float4(color_src[3u * index],
-            color_src[3u * index + 1u], color_src[3u * index + 2u], 0.0f);
+        gauss_f[base + 2u] = float4(color_src[3u * index], color_src[3u * index + 1u],
+                                    color_src[3u * index + 2u], 0.0f);
         gauss_f[base + ((pc.u3 & 4u) != 0u ? 6u : 4u)] = 0.0f;
         return;
     }
@@ -72,20 +73,27 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         uint lo = 0u, hi = transform_count;
         while (lo < hi) {
             uint mid = (lo + hi) / 2u;
-            if (index < asuint(camera[23u + 9u * mid])) hi = mid;
-            else lo = mid + 1u;
+            if (index < asuint(camera[23u + 9u * mid]))
+                hi = mid;
+            else
+                lo = mid + 1u;
         }
         uint base = 23u + 9u * lo;
         float3 translation = float3(camera[base + 1u], camera[base + 2u], camera[base + 3u]);
         placement_scale = camera[base + 4u];
-        placement_rotation = float4(camera[base + 5u], camera[base + 6u], camera[base + 7u], camera[base + 8u]);
+        placement_rotation =
+            float4(camera[base + 5u], camera[base + 6u], camera[base + 7u], camera[base + 8u]);
         mean = preview_rotate(placement_rotation, mean * placement_scale) + translation;
-        sh_eye = preview_rotate(float4(placement_rotation.x, -placement_rotation.yzw), sh_eye - translation) / placement_scale;
+        sh_eye = preview_rotate(float4(placement_rotation.x, -placement_rotation.yzw),
+                                sh_eye - translation) /
+                 placement_scale;
     }
     float3 t = xform_point(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
                            camera[8], camera[9], camera[10], camera[12], camera[13], camera[14]);
-    if ((flags & 256u)!=0u) t=gut_camera_point(mean);
-    if (!camera_visible(t, mode)) return;
+    if ((flags & 256u) != 0u)
+        t = gut_camera_point(mean);
+    if (!camera_visible(t, mode))
+        return;
 
     float3 scale = 0.0f;
     float4 rotation = float4(1.0f, 0.0f, 0.0f, 0.0f);
@@ -97,25 +105,30 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             float determinant_ratio = 1.0f;
             [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
                 uint offset = 3u * index + axis;
-                bool gut=(flags & 256u)!=0u;
+                bool gut = (flags & 256u) != 0u;
                 float raw_scale = gut ? gut_exp(scales[offset]) : exp(scales[offset]);
-                float filtered_scale = gut ? gut_sqrt(gut_fma(raw_scale,raw_scale,filter_squared))
-                                          : sqrt(raw_scale * raw_scale + filter_squared);
+                float filtered_scale = gut ? gut_sqrt(gut_fma(raw_scale, raw_scale, filter_squared))
+                                           : sqrt(raw_scale * raw_scale + filter_squared);
                 scale[axis] = filtered_scale;
-                determinant_ratio *= gut ? gut_div(raw_scale,filtered_scale) : raw_scale / filtered_scale;
+                determinant_ratio *=
+                    gut ? gut_div(raw_scale, filtered_scale) : raw_scale / filtered_scale;
             }
-            rotation = float4(
-                rotations[4u * index], rotations[4u * index + 1u],
-                rotations[4u * index + 2u], rotations[4u * index + 3u]);
-            if ((flags & 256u)!=0u) {
-                float inv=gut_rsqrt(max(gut_dot4(rotation.x,rotation.y,rotation.z,rotation.w),1.0e-20f));
-                rotation=float4(gut_mul(rotation.x,inv),gut_mul(rotation.y,inv),gut_mul(rotation.z,inv),gut_mul(rotation.w,inv));
-            } else rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
-            opacity = ((flags & 256u)!=0u ? gut_rcp(gut_add(1.0f,gut_exp(-opacity)))
-                                         : 1.0f / (1.0f + exp(-opacity))) * determinant_ratio;
+            rotation = float4(rotations[4u * index], rotations[4u * index + 1u],
+                              rotations[4u * index + 2u], rotations[4u * index + 3u]);
+            if ((flags & 256u) != 0u) {
+                float inv = gut_rsqrt(
+                    max(gut_dot4(rotation.x, rotation.y, rotation.z, rotation.w), 1.0e-20f));
+                rotation = float4(gut_mul(rotation.x, inv), gut_mul(rotation.y, inv),
+                                  gut_mul(rotation.z, inv), gut_mul(rotation.w, inv));
+            } else
+                rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
+            opacity = ((flags & 256u) != 0u ? gut_rcp(gut_add(1.0f, gut_exp(-opacity)))
+                                            : 1.0f / (1.0f + exp(-opacity))) *
+                      determinant_ratio;
         } else {
             scale = float3(scales[3 * index], scales[3 * index + 1], scales[3 * index + 2]);
-            rotation = float4(rotations[4 * index], rotations[4 * index + 1], rotations[4 * index + 2], rotations[4 * index + 3]);
+            rotation = float4(rotations[4 * index], rotations[4 * index + 1],
+                              rotations[4 * index + 2], rotations[4 * index + 3]);
         }
     } else {
         uint base = 6 * index;
@@ -127,7 +140,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         c5 = covariances[base + 5];
     }
 
-    reconstruction_geometry(index,scale,opacity);
+    reconstruction_geometry(index, scale, opacity);
     if (transform_count != 0u) {
         scale *= placement_scale;
         float4 q = placement_rotation;
@@ -140,46 +153,55 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         return;
     }
 
-    SplatGeom geom = project_splat(
-        mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
-        camera[8], camera[9], camera[10], camera[12], camera[13], camera[14],
-        mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel, scale_modifier,
-        has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, geometry);
-    if (!geom.ok) return;
+    SplatGeom geom =
+        project_splat(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
+                      camera[8], camera[9], camera[10], camera[12], camera[13], camera[14], mode,
+                      width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel, scale_modifier,
+                      has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, geometry);
+    if (!geom.ok)
+        return;
 
-    float3 screen_cov = float3(geom.cov0,geom.cov1,geom.cov2);
-    FootprintCap cap = footprint_policy(screen_cov,int(width),int(height));
+    float3 screen_cov = float3(geom.cov0, geom.cov1, geom.cov2);
+    FootprintCap cap = footprint_policy(screen_cov, int(width), int(height));
     if (cap.q < 1.0f) {
         screen_cov *= cap.q;
-        geom.cov0=screen_cov.x; geom.cov1=screen_cov.y; geom.cov2=screen_cov.z;
+        geom.cov0 = screen_cov.x;
+        geom.cov1 = screen_cov.y;
+        geom.cov2 = screen_cov.z;
     }
 
     Projection projected;
-    if (mode == kModeOrtho) projected = project_ortho(t, fx, fy, cx, cy);
-    else projected = project_camera(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4);
-    if (!projected.valid) return;
+    if (mode == kModeOrtho)
+        projected = project_ortho(t, fx, fy, cx, cy);
+    else
+        projected = project_camera(t, mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4);
+    if (!projected.valid)
+        return;
 
     float det = geom.cov0 * geom.cov2 - geom.cov1 * geom.cov1;
-    if (det == 0.0f) return;
+    if (det == 0.0f)
+        return;
     float det_inv = 1.0f / det;
-    float4 conic = float4(geom.cov2 * det_inv, -geom.cov1 * det_inv, geom.cov0 * det_inv,
-                          opacity * geom.coef);
+    float4 conic =
+        float4(geom.cov2 * det_inv, -geom.cov1 * det_inv, geom.cov0 * det_inv, opacity * geom.coef);
     float preview_opacity = conic.w;
     // Preview flags reserve bits 16..27 for sigma in units of 1/256.
     // Tile enumeration and instance emission use conic.w to derive the
     // footprint cutoff, so set a proxy opacity that gives exactly sigma^2.
     // Keep the real opacity in rgb.w for the preview shader only.
     if ((flags & 64u) != 0) {
-        if (preview_opacity <= kAlphaFloor) return;
+        if (preview_opacity <= kAlphaFloor)
+            return;
         float sigma = float((flags >> 16u) & 4095u) / 256.0f;
         conic.w = kAlphaFloor * exp(0.5f * sigma * sigma);
     }
     float mid = 0.5f * (geom.cov0 + geom.cov2);
     float root = sqrt(max(0.1f, mid * mid - det));
     float radius = ceil(3.0f * sqrt(max(mid + root, mid - root)));
-    uint touched = enumerate_tiles(float2(projected.pixel_x, projected.pixel_y), conic, grid_x, grid_y,
-                                   index, 0, wrap_width, 0, 0);
-    if (touched == 0) return;
+    uint touched = enumerate_tiles(float2(projected.pixel_x, projected.pixel_y), conic, grid_x,
+                                   grid_y, index, 0, wrap_width, 0, 0);
+    if (touched == 0)
+        return;
 
     float clamped0 = 0.0f;
     float clamped1 = 0.0f;
@@ -187,14 +209,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 rgb;
     if (has_sh) {
         uint bases = pc.u2;
-        rgb = evaluate_sh_unclamped(pc.u1, sh_mean, sh_eye, color_src, index * bases * 3,
-                          clamped0, clamped1, clamped2);
-        if (!reconstruction_enabled()) rgb = max(rgb,0.f);
+        rgb = evaluate_sh_unclamped(pc.u1, sh_mean, sh_eye, color_src, index * bases * 3, clamped0,
+                                    clamped1, clamped2);
+        if (!reconstruction_enabled())
+            rgb = max(rgb, 0.f);
     } else {
         rgb = float3(color_src[3 * index], color_src[3 * index + 1], color_src[3 * index + 2]);
     }
 
-    rgb = reconstruction_color(index,rgb);
+    rgb = reconstruction_color(index, rgb);
     float selection_depth = mode == kModeEquirect ? length(t) : t.z;
     if (camera[19] > .5f && (selection_depth < camera[20] || selection_depth > camera[21]))
         rgb *= .18f;
@@ -203,7 +226,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint depth_key = asuint(depth);
     uint gaussian_slots = geometry ? 7u : 5u;
     uint gaussian_base = index * gaussian_slots;
-    gauss_f[gaussian_base] = float4(projected.pixel_x, projected.pixel_y, asfloat(depth_key), asfloat(uint(radius)));
+    gauss_f[gaussian_base] =
+        float4(projected.pixel_x, projected.pixel_y, asfloat(depth_key), asfloat(uint(radius)));
     gauss_f[gaussian_base + 1u] = conic;
     gauss_f[gaussian_base + 2u] = float4(rgb, (flags & 64u) != 0 ? preview_opacity : 0.0f);
     if (geometry) {
@@ -218,7 +242,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint y0 = uint(max(0.0f, min(65535.0f, floor(projected.pixel_y - ey))));
     uint y1 = uint(max(0.0f, min(65535.0f, floor(projected.pixel_y + ey) + 1.0f)));
     uint bounds_slot = geometry ? 5u : 3u;
-    gauss_f[gaussian_base + bounds_slot] = float4(asfloat(x0), asfloat(x1), asfloat(y0), asfloat(y1));
+    gauss_f[gaussian_base + bounds_slot] =
+        float4(asfloat(x0), asfloat(x1), asfloat(y0), asfloat(y1));
     gauss_f[gaussian_base + bounds_slot + 1u] = float4(clamped0, clamped1, clamped2, 0.0f);
 
     gauss_u[index] = touched;

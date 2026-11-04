@@ -62,7 +62,8 @@ std::uint32_t scan_scratch_uints(std::uint32_t count) {
 }
 
 void require(bool condition, const char* message) {
-    if (!condition) throw std::invalid_argument(message);
+    if (!condition)
+        throw std::invalid_argument(message);
 }
 
 VkDescriptorBufferInfo descriptor(const Buffer& buffer) {
@@ -77,22 +78,23 @@ photara::vk::BufferBinding to_binding(const VkDescriptorBufferInfo& info) {
     return photara::vk::binding(info);
 }
 
-VkDescriptorBufferInfo descriptor(
-    const SplatBufferView& view, const std::uint64_t required_bytes) {
+VkDescriptorBufferInfo descriptor(const SplatBufferView& view, const std::uint64_t required_bytes) {
     return {view.buffer, view.offset, required_bytes};
 }
 
 void clear_buffer(Buffer& buffer) {
-    if (!buffer.host_visible()) return;
+    if (!buffer.host_visible())
+        return;
     std::memset(static_cast<std::byte*>(buffer.mapped) + buffer.offset, 0,
                 static_cast<std::size_t>(buffer.size));
 }
 
 template <typename T>
-std::vector<T> download_vector(
-    Context::Impl& context, const Buffer& buffer, std::size_t count, std::size_t offset_bytes = 0) {
+std::vector<T> download_vector(Context::Impl& context, const Buffer& buffer, std::size_t count,
+                               std::size_t offset_bytes = 0) {
     std::vector<T> values(count);
-    if (count != 0) context.read_buffer(buffer, values.data(), count * sizeof(T), offset_bytes);
+    if (count != 0)
+        context.read_buffer(buffer, values.data(), count * sizeof(T), offset_bytes);
     return values;
 }
 
@@ -111,8 +113,7 @@ bool environment_flag(const char* name) {
 #endif
 }
 
-std::uint32_t environment_interval(
-    const char* name, const std::uint32_t default_value) {
+std::uint32_t environment_interval(const char* name, const std::uint32_t default_value) {
 #ifdef _WIN32
     char* raw_value = nullptr;
     std::size_t value_size = 0;
@@ -130,79 +131,94 @@ std::uint32_t environment_interval(
 } // namespace
 
 class SplatRasterizer::Impl {
-public:
+  public:
     static constexpr std::uint32_t k_batch_slots = 4;
     static constexpr std::uint32_t k_count_mirror_words = 4;
 
     explicit Impl(Context::Impl& context)
-        : context_(context),
-          dummy_(context.create_buffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)),
+        : context_(context), dummy_(context.create_buffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)),
           preprocess_(context.create_pipeline("splat_preprocess.hlsl.spv", 12, sizeof(Push))),
           scan_(context.create_pipeline("splat_scan.hlsl.spv", 1, sizeof(Push))),
           emit_(context.create_pipeline("splat_emit.hlsl.spv", 7, sizeof(Push))),
-          indirect_control_(context.create_pipeline("splat_indirect_control.hlsl.spv", 3, sizeof(Push))),
+          indirect_control_(
+              context.create_pipeline("splat_indirect_control.hlsl.spv", 3, sizeof(Push))),
           emit_indirect_(context.create_pipeline("splat_emit_indirect.hlsl.spv", 8, sizeof(Push))),
           hist_(context.create_pipeline("splat_radix_hist.hlsl.spv", 3, sizeof(Push))),
-          hist_indirect_(context.create_pipeline("splat_radix_hist_indirect.hlsl.spv", 4, sizeof(Push))),
+          hist_indirect_(
+              context.create_pipeline("splat_radix_hist_indirect.hlsl.spv", 4, sizeof(Push))),
           scatter_(context.create_pipeline("splat_radix_scatter.hlsl.spv", 8, sizeof(Push))),
-          scatter_indirect_(context.create_pipeline("splat_radix_scatter_indirect.hlsl.spv", 9, sizeof(Push))),
+          scatter_indirect_(
+              context.create_pipeline("splat_radix_scatter_indirect.hlsl.spv", 9, sizeof(Push))),
           ranges_(context.create_pipeline("splat_ranges.hlsl.spv", 3, sizeof(Push))),
-          ranges_indirect_(context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
+          ranges_indirect_(
+              context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
-          blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
+          blend_no_geometry_(
+              context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
           blend_gut_(context.create_pipeline("splat_blend_gut.hlsl.spv", 8, sizeof(Push))),
           blend_rings_(context.create_pipeline("splat_blend_rings.hlsl.spv", 7, sizeof(Push))),
-          blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
-          pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
-          median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
-          blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
-          blend_gut_backward_(context.create_pipeline("splat_blend_gut_backward.hlsl.spv", 12, sizeof(Push))),
-          blend_backward_no_geometry_(
-              context.create_pipeline(
-                  "splat_blend_backward_no_geometry.hlsl.spv", 12, sizeof(Push))),
-          blend_backward_no_geometry_subgroup_(
-              context.create_pipeline(
-                  "splat_blend_backward_no_geometry_subgroup.hlsl.spv",
-                  12, sizeof(Push))),
+          blend_training_(
+              context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
+          pruning_scores_(
+              context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
+          median_backward_(
+              context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
+          blend_backward_(
+              context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
+          blend_gut_backward_(
+              context.create_pipeline("splat_blend_gut_backward.hlsl.spv", 12, sizeof(Push))),
+          blend_backward_no_geometry_(context.create_pipeline(
+              "splat_blend_backward_no_geometry.hlsl.spv", 12, sizeof(Push))),
+          blend_backward_no_geometry_subgroup_(context.create_pipeline(
+              "splat_blend_backward_no_geometry_subgroup.hlsl.spv", 12, sizeof(Push))),
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
           occupancy_(context.create_pipeline("splat_occupancy.hlsl.spv", 7, sizeof(Push))),
-          sample_depth_group_(context.create_pipeline("splat_sample_depth_group.hlsl.spv", 9, sizeof(Push))),
-          sample_depth_tiled_(context.create_pipeline("splat_sample_depth_tiled.hlsl.spv", 8, sizeof(Push))),
-          sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
+          sample_depth_group_(
+              context.create_pipeline("splat_sample_depth_group.hlsl.spv", 9, sizeof(Push))),
+          sample_depth_tiled_(
+              context.create_pipeline("splat_sample_depth_tiled.hlsl.spv", 8, sizeof(Push))),
+          sample_depth_backward_(
+              context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
           ssim_(context.create_pipeline("splat_ssim.hlsl.spv", 12, sizeof(Push))),
           loss_reduce_(context.create_pipeline("splat_loss_reduce.hlsl.spv", 2, sizeof(Push))),
-          color_correction_(context.create_pipeline(
-              "splat_color_correction.hlsl.spv", 6, sizeof(Push))),
-          project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
-          project_structure_adam_(context.create_pipeline("splat_project_backward_structure_adam.hlsl.spv", 28, sizeof(Push) + 8 * sizeof(float))),
-          project_pinhole_rgb_adam_(context.create_pipeline("splat_project_backward_pinhole_rgb_adam.hlsl.spv", 28, sizeof(Push) + 8 * sizeof(float))),
-          project_sh_adam_(context.create_pipeline("splat_project_backward_sh_adam.hlsl.spv", 19, sizeof(Push) + 8 * sizeof(float))),
+          color_correction_(
+              context.create_pipeline("splat_color_correction.hlsl.spv", 6, sizeof(Push))),
+          project_backward_(
+              context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
+          project_structure_adam_(
+              context.create_pipeline("splat_project_backward_structure_adam.hlsl.spv", 28,
+                                      sizeof(Push) + 8 * sizeof(float))),
+          project_pinhole_rgb_adam_(
+              context.create_pipeline("splat_project_backward_pinhole_rgb_adam.hlsl.spv", 28,
+                                      sizeof(Push) + 8 * sizeof(float))),
+          project_sh_adam_(context.create_pipeline("splat_project_backward_sh_adam.hlsl.spv", 19,
+                                                   sizeof(Push) + 8 * sizeof(float))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))),
-          encoder_ring_(
-              context.runtime, k_batch_slots,
-              photara::vk::BarrierPolicy::after_compute_indirect) {
+          encoder_ring_(context.runtime, k_batch_slots,
+                        photara::vk::BarrierPolicy::after_compute_indirect) {
         clear_buffer(dummy_);
         query_subgroup_properties();
         if (subgroup_backward_supported_ && subgroup_shuffle_supported_ && subgroup_size_ == 32u)
             blend_gut_backward_subgroup_ = context.create_pipeline(
-                "splat_blend_gut_backward_subgroup.hlsl.spv",12,sizeof(Push));
+                "splat_blend_gut_backward_subgroup.hlsl.spv", 12, sizeof(Push));
         if (subgroup_vote_supported_ && subgroup_backward_supported_)
-            blend_gut_rgba_ = context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 8, sizeof(Push));
+            blend_gut_rgba_ =
+                context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 8, sizeof(Push));
         if (subgroup_backward_supported_ && subgroup_size_ == 32u)
             blend_backward_geometry_subgroup_ = context.create_pipeline(
                 "splat_blend_backward_geometry_subgroup.hlsl.spv", 12, sizeof(Push));
         if (context_.buffer_float32_atomic_add &&
             !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
-            color_correction_atomic_ = context.create_pipeline(
-                "splat_color_correction_atomic.hlsl.spv", 6, sizeof(Push));
-            if (subgroup_backward_supported_ && subgroup_shuffle_supported_ && subgroup_size_ == 32u)
+            color_correction_atomic_ =
+                context.create_pipeline("splat_color_correction_atomic.hlsl.spv", 6, sizeof(Push));
+            if (subgroup_backward_supported_ && subgroup_shuffle_supported_ &&
+                subgroup_size_ == 32u)
                 blend_gut_backward_atomic_ = context.create_pipeline(
-                    "splat_blend_gut_backward_atomic.hlsl.spv",12,sizeof(Push));
+                    "splat_blend_gut_backward_atomic.hlsl.spv", 12, sizeof(Push));
             blend_backward_no_geometry_atomic_ = context.create_pipeline(
-                "splat_blend_backward_no_geometry_atomic.hlsl.spv",
-                12, sizeof(Push));
+                "splat_blend_backward_no_geometry_atomic.hlsl.spv", 12, sizeof(Push));
             sample_depth_backward_atomic_ = context.create_pipeline(
                 "splat_sample_depth_backward_atomic.hlsl.spv", 10, sizeof(Push));
             if (subgroup_backward_supported_ && subgroup_size_ == 32u)
@@ -219,8 +235,8 @@ public:
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
         if (subgroup_backward_supported_) {
-            pruning_scores_subgroup_ = context.create_pipeline(
-                "splat_pruning_scores_subgroup.hlsl.spv", 6, sizeof(Push));
+            pruning_scores_subgroup_ =
+                context.create_pipeline("splat_pruning_scores_subgroup.hlsl.spv", 6, sizeof(Push));
             if (context_.buffer_float32_atomic_add &&
                 !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD"))
                 pruning_scores_atomic_ = context.create_pipeline(
@@ -228,8 +244,8 @@ public:
         }
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        phase_alignment_ = std::max<VkDeviceSize>(
-            256, properties.limits.minStorageBufferOffsetAlignment);
+        phase_alignment_ =
+            std::max<VkDeviceSize>(256, properties.limits.minStorageBufferOffsetAlignment);
     }
 
     ~Impl() {
@@ -257,7 +273,8 @@ public:
     void upload_model(const SplatGaussians& gaussians) {
         occupancy_prepared_ = false;
         const auto count = static_cast<std::uint32_t>(gaussians.means.size() / 3);
-        require(count > 0 && gaussians.means.size() == static_cast<std::size_t>(count) * 3, "means must have shape [N, 3]");
+        require(count > 0 && gaussians.means.size() == static_cast<std::size_t>(count) * 3,
+                "means must have shape [N, 3]");
         require(gaussians.opacities.size() == count, "opacities must have shape [N]");
         const bool has_sh = !gaussians.sh.empty();
         const bool has_colors = !gaussians.colors.empty();
@@ -266,18 +283,23 @@ public:
         const bool has_cov = !gaussians.covariances.empty();
         require(has_scales != has_cov, "exactly one of scales or covariances is required");
         if (has_sh) {
-            require(gaussians.sh_degree <= 3 && gaussians.sh_bases >= (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1),
+            require(gaussians.sh_degree <= 3 &&
+                        gaussians.sh_bases >= (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1),
                     "sh_bases does not cover sh_degree");
             require(gaussians.sh.size() == static_cast<std::size_t>(count) * gaussians.sh_bases * 3,
                     "sh must have shape [N, sh_bases, 3]");
         } else {
-            require(gaussians.colors.size() == static_cast<std::size_t>(count) * 3, "colors must have shape [N, 3]");
+            require(gaussians.colors.size() == static_cast<std::size_t>(count) * 3,
+                    "colors must have shape [N, 3]");
         }
         if (has_scales) {
-            require(gaussians.scales.size() == static_cast<std::size_t>(count) * 3, "scales must have shape [N, 3]");
-            require(gaussians.rotations.size() == static_cast<std::size_t>(count) * 4, "rotations must have shape [N, 4]");
+            require(gaussians.scales.size() == static_cast<std::size_t>(count) * 3,
+                    "scales must have shape [N, 3]");
+            require(gaussians.rotations.size() == static_cast<std::size_t>(count) * 4,
+                    "rotations must have shape [N, 4]");
         } else {
-            require(gaussians.covariances.size() == static_cast<std::size_t>(count) * 6, "covariances must have shape [N, 6]");
+            require(gaussians.covariances.size() == static_cast<std::size_t>(count) * 6,
+                    "covariances must have shape [N, 6]");
         }
         const bool any_raw = !gaussians.log_scales.empty() || !gaussians.raw_rotations.empty() ||
                              !gaussians.opacity_logits.empty();
@@ -291,8 +313,7 @@ public:
                     "log_scales must have shape [N, 3]");
             require(gaussians.raw_rotations.size() == static_cast<std::size_t>(count) * 4,
                     "raw_rotations must have shape [N, 4]");
-            require(gaussians.opacity_logits.size() == count,
-                    "opacity_logits must have shape [N]");
+            require(gaussians.opacity_logits.size() == count, "opacity_logits must have shape [N]");
             require(gaussians.filter_3d.empty() || gaussians.filter_3d.size() == count,
                     "filter_3d must be empty or have shape [N]");
         } else {
@@ -305,31 +326,45 @@ public:
         Buffer& means = grow(means_, gaussians.means.size() * sizeof(float));
         Buffer& opacities = grow(opacities_, gaussians.opacities.size() * sizeof(float));
         Buffer& scales = grow(scales_, (has_scales ? gaussians.scales.size() : 1) * sizeof(float));
-        Buffer& rotations = grow(rotations_, (has_scales ? gaussians.rotations.size() : 1) * sizeof(float));
-        Buffer& covariances = grow(covariances_, (has_cov ? gaussians.covariances.size() : 1) * sizeof(float));
+        Buffer& rotations =
+            grow(rotations_, (has_scales ? gaussians.rotations.size() : 1) * sizeof(float));
+        Buffer& covariances =
+            grow(covariances_, (has_cov ? gaussians.covariances.size() : 1) * sizeof(float));
         Buffer& colors = grow(colors_, color_src.size() * sizeof(float));
-        Buffer& raw_log_scales = grow(raw_log_scales_, (raw_chain ? gaussians.log_scales.size() : 1) * sizeof(float));
-        Buffer& raw_rotations = grow(raw_rotations_, (raw_chain ? gaussians.raw_rotations.size() : 1) * sizeof(float));
-        Buffer& opacity_logits = grow(opacity_logits_, (raw_chain ? gaussians.opacity_logits.size() : 1) * sizeof(float));
+        Buffer& raw_log_scales =
+            grow(raw_log_scales_, (raw_chain ? gaussians.log_scales.size() : 1) * sizeof(float));
+        Buffer& raw_rotations =
+            grow(raw_rotations_, (raw_chain ? gaussians.raw_rotations.size() : 1) * sizeof(float));
+        Buffer& opacity_logits = grow(
+            opacity_logits_, (raw_chain ? gaussians.opacity_logits.size() : 1) * sizeof(float));
         Buffer& filter_3d = grow(filter_3d_, (raw_chain ? count : 1) * sizeof(float));
-        context_.write_buffer(means, gaussians.means.data(), gaussians.means.size() * sizeof(float));
-        context_.write_buffer(opacities, gaussians.opacities.data(), gaussians.opacities.size() * sizeof(float));
+        context_.write_buffer(means, gaussians.means.data(),
+                              gaussians.means.size() * sizeof(float));
+        context_.write_buffer(opacities, gaussians.opacities.data(),
+                              gaussians.opacities.size() * sizeof(float));
         if (has_scales) {
-            context_.write_buffer(scales, gaussians.scales.data(), gaussians.scales.size() * sizeof(float));
-            context_.write_buffer(rotations, gaussians.rotations.data(), gaussians.rotations.size() * sizeof(float));
+            context_.write_buffer(scales, gaussians.scales.data(),
+                                  gaussians.scales.size() * sizeof(float));
+            context_.write_buffer(rotations, gaussians.rotations.data(),
+                                  gaussians.rotations.size() * sizeof(float));
         }
         if (has_cov) {
-            context_.write_buffer(covariances, gaussians.covariances.data(), gaussians.covariances.size() * sizeof(float));
+            context_.write_buffer(covariances, gaussians.covariances.data(),
+                                  gaussians.covariances.size() * sizeof(float));
         }
         context_.write_buffer(colors, color_src.data(), color_src.size() * sizeof(float));
         if (raw_chain) {
-            context_.write_buffer(raw_log_scales, gaussians.log_scales.data(), gaussians.log_scales.size_bytes());
-            context_.write_buffer(raw_rotations, gaussians.raw_rotations.data(), gaussians.raw_rotations.size_bytes());
-            context_.write_buffer(opacity_logits, gaussians.opacity_logits.data(), gaussians.opacity_logits.size_bytes());
+            context_.write_buffer(raw_log_scales, gaussians.log_scales.data(),
+                                  gaussians.log_scales.size_bytes());
+            context_.write_buffer(raw_rotations, gaussians.raw_rotations.data(),
+                                  gaussians.raw_rotations.size_bytes());
+            context_.write_buffer(opacity_logits, gaussians.opacity_logits.data(),
+                                  gaussians.opacity_logits.size_bytes());
             if (gaussians.filter_3d.empty()) {
                 zero_buffer(filter_3d, static_cast<std::size_t>(count) * sizeof(float));
             } else {
-                context_.write_buffer(filter_3d, gaussians.filter_3d.data(), gaussians.filter_3d.size_bytes());
+                context_.write_buffer(filter_3d, gaussians.filter_3d.data(),
+                                      gaussians.filter_3d.size_bytes());
             }
         }
         has_sh_ = has_sh;
@@ -347,20 +382,20 @@ public:
     void bind_model_device(const SplatDeviceGaussians& gaussians) {
         occupancy_prepared_ = false;
         require(gaussians.count > 0, "device Gaussian count must be positive");
-        require(gaussians.colors_precomputed || (gaussians.sh_degree <= 3 &&
-                    gaussians.sh_bases >=
-                        (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1)),
+        require(gaussians.colors_precomputed ||
+                    (gaussians.sh_degree <= 3 &&
+                     gaussians.sh_bases >= (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1)),
                 "device sh_bases does not cover sh_degree");
         const std::uint64_t count = gaussians.count;
-        const auto valid = [](const SplatBufferView& view,
-                              const std::uint64_t bytes) {
+        const auto valid = [](const SplatBufferView& view, const std::uint64_t bytes) {
             return view.buffer != VK_NULL_HANDLE && view.bytes >= bytes;
         };
         require(valid(gaussians.means, count * 3 * sizeof(float)),
                 "device means must have shape [N,3]");
-        require(valid(gaussians.sh,
-                      count * (gaussians.colors_precomputed ? 1 : gaussians.sh_bases) * 3 * sizeof(float)),
-                "device SH must have shape [N,B,3]");
+        require(
+            valid(gaussians.sh, count * (gaussians.colors_precomputed ? 1 : gaussians.sh_bases) *
+                                    3 * sizeof(float)),
+            "device SH must have shape [N,B,3]");
         require(valid(gaussians.log_scales, count * 3 * sizeof(float)),
                 "device log scales must have shape [N,3]");
         require(valid(gaussians.raw_rotations, count * 4 * sizeof(float)),
@@ -371,10 +406,9 @@ public:
                 "device filter_3d must have shape [N]");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        const std::uint64_t alignment = std::max<std::uint64_t>(
-            4, properties.limits.minStorageBufferOffsetAlignment);
-        require(gaussians.means.offset % alignment == 0 &&
-                    gaussians.sh.offset % alignment == 0 &&
+        const std::uint64_t alignment =
+            std::max<std::uint64_t>(4, properties.limits.minStorageBufferOffsetAlignment);
+        require(gaussians.means.offset % alignment == 0 && gaussians.sh.offset % alignment == 0 &&
                     gaussians.log_scales.offset % alignment == 0 &&
                     gaussians.raw_rotations.offset % alignment == 0 &&
                     gaussians.opacity_logits.offset % alignment == 0 &&
@@ -394,11 +428,13 @@ public:
         sample_live_ = false;
     }
 
-    void update_means_and_opacities(std::span<const float> means, std::span<const float> opacities) {
+    void update_means_and_opacities(std::span<const float> means,
+                                    std::span<const float> opacities) {
         require(model_ready_, "no Gaussian model is loaded");
         require(!device_model_bound_,
                 "host model updates are invalid while a device model is bound");
-        require(means.size() == static_cast<std::size_t>(count_) * 3, "means must have shape [N, 3]");
+        require(means.size() == static_cast<std::size_t>(count_) * 3,
+                "means must have shape [N, 3]");
         require(opacities.size() == count_, "opacities must have shape [N]");
         const std::scoped_lock lock(context_.dispatch_mutex);
         context_.write_buffer(means_, means.data(), means.size() * sizeof(float));
@@ -416,68 +452,65 @@ public:
         last_frame_has_stats_ = false;
         sample_live_ = false;
     }
-    bool has_model() const noexcept { return model_ready_; }
+    bool has_model() const noexcept {
+        return model_ready_;
+    }
 
     VkDescriptorBufferInfo model_means() const {
         return device_model_bound_
-            ? descriptor(device_model_.means,
-                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
-            : descriptor(means_);
+                   ? descriptor(device_model_.means,
+                                static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+                   : descriptor(means_);
     }
     VkDescriptorBufferInfo model_opacities() const {
-        return device_model_bound_
-            ? descriptor(device_model_.opacity_logits,
-                         static_cast<std::uint64_t>(count_) * sizeof(float))
-            : descriptor(opacities_);
+        return device_model_bound_ ? descriptor(device_model_.opacity_logits,
+                                                static_cast<std::uint64_t>(count_) * sizeof(float))
+                                   : descriptor(opacities_);
     }
     VkDescriptorBufferInfo model_scales() const {
         return device_model_bound_
-            ? descriptor(device_model_.log_scales,
-                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
-            : descriptor(scales_);
+                   ? descriptor(device_model_.log_scales,
+                                static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+                   : descriptor(scales_);
     }
     VkDescriptorBufferInfo model_rotations() const {
         return device_model_bound_
-            ? descriptor(device_model_.raw_rotations,
-                         static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
-            : descriptor(rotations_);
+                   ? descriptor(device_model_.raw_rotations,
+                                static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
+                   : descriptor(rotations_);
     }
     VkDescriptorBufferInfo model_covariances() const {
-        return device_model_bound_
-            ? descriptor(device_model_.filter_3d,
-                         static_cast<std::uint64_t>(count_) * sizeof(float))
-            : descriptor(covariances_);
+        return device_model_bound_ ? descriptor(device_model_.filter_3d,
+                                                static_cast<std::uint64_t>(count_) * sizeof(float))
+                                   : descriptor(covariances_);
     }
     VkDescriptorBufferInfo model_colors() const {
         return device_model_bound_
-            ? descriptor(device_model_.sh,
-                         static_cast<std::uint64_t>(count_) * sh_bases_ * 3 *
-                             sizeof(float))
-            : descriptor(colors_);
+                   ? descriptor(device_model_.sh,
+                                static_cast<std::uint64_t>(count_) * sh_bases_ * 3 * sizeof(float))
+                   : descriptor(colors_);
     }
     VkDescriptorBufferInfo model_log_scales() const {
         return device_model_bound_
-            ? descriptor(device_model_.log_scales,
-                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
-            : descriptor(raw_log_scales_);
+                   ? descriptor(device_model_.log_scales,
+                                static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+                   : descriptor(raw_log_scales_);
     }
     VkDescriptorBufferInfo model_raw_rotations() const {
         return device_model_bound_
-            ? descriptor(device_model_.raw_rotations,
-                         static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
-            : descriptor(raw_rotations_);
+                   ? descriptor(device_model_.raw_rotations,
+                                static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
+                   : descriptor(raw_rotations_);
     }
     VkDescriptorBufferInfo model_opacity_logits() const {
-        return device_model_bound_
-            ? descriptor(device_model_.opacity_logits,
-                         static_cast<std::uint64_t>(count_) * sizeof(float))
-            : descriptor(opacity_logits_);
+        return device_model_bound_ ? descriptor(device_model_.opacity_logits,
+                                                static_cast<std::uint64_t>(count_) * sizeof(float))
+                                   : descriptor(opacity_logits_);
     }
     VkDescriptorBufferInfo model_filter_3d() const {
-        return device_model_bound_
-            ? descriptor(device_model_.filter_3d,
-                         static_cast<std::uint64_t>(count_) * sizeof(float))
-            : descriptor(filter_3d_);
+        return device_model_bound_ ? descriptor(device_model_.filter_3d,
+                                                static_cast<std::uint64_t>(count_) * sizeof(float))
+                                   : descriptor(filter_3d_);
     }
 
     struct FrameCounts {
@@ -491,27 +524,30 @@ public:
     const ComputePipeline& backward_blend_pipeline() const {
         if (last_primitive_ == SplatPrimitive::gaussian_3dgut) {
             if (!environment_flag("SPLAT_DRENDER_GUT_BACKWARD_REFERENCE")) {
-                if (blend_gut_backward_atomic_.valid()) return blend_gut_backward_atomic_;
-                if (blend_gut_backward_subgroup_.valid()) return blend_gut_backward_subgroup_;
+                if (blend_gut_backward_atomic_.valid())
+                    return blend_gut_backward_atomic_;
+                if (blend_gut_backward_subgroup_.valid())
+                    return blend_gut_backward_subgroup_;
             }
             return blend_gut_backward_;
         }
         if (last_frame_has_geometry_) {
             if (subgroup_backward_supported_ && subgroup_size_ == 32u)
-                return blend_backward_geometry_atomic_.valid()
-                    ? blend_backward_geometry_atomic_ : blend_backward_geometry_subgroup_;
+                return blend_backward_geometry_atomic_.valid() ? blend_backward_geometry_atomic_
+                                                               : blend_backward_geometry_subgroup_;
             return blend_backward_;
         }
         if (subgroup_backward_supported_ && subgroup_size_ == 32u) {
             return blend_backward_no_geometry_atomic_.valid()
-                ? blend_backward_no_geometry_atomic_
-                : blend_backward_no_geometry_subgroup_;
+                       ? blend_backward_no_geometry_atomic_
+                       : blend_backward_no_geometry_subgroup_;
         }
         return blend_backward_no_geometry_;
     }
 
     void configure_gut_backward(Push& push) const {
-        if (last_primitive_ != SplatPrimitive::gaussian_3dgut) return;
+        if (last_primitive_ != SplatPrimitive::gaussian_3dgut)
+            return;
         set_float(push, 9, last_fx_);
         set_float(push, 10, last_fy_);
         set_float(push, 11, last_cx_);
@@ -529,12 +565,10 @@ public:
     // Everything the frame computes, up to the blended image. `pack_rgba` adds
     // the 8-bit conversion to the same command batch, which is what the editor
     // preview hands to its own image.
-    FrameCounts record_frame(
-        const SplatCamera& source_camera, const SplatSettings& settings,
-        const bool pack_rgba,
-        const SplatDeviceFrame* destination = nullptr,
-        const bool depth_query_only = false,
-        const bool reuse_projection = false) {
+    FrameCounts record_frame(const SplatCamera& source_camera, const SplatSettings& settings,
+                             const bool pack_rgba, const SplatDeviceFrame* destination = nullptr,
+                             const bool depth_query_only = false,
+                             const bool reuse_projection = false) {
         policy_settings_ = settings;
         // The caller owns this per-frame span. The retained training policy
         // never keeps a pointer into preview-side temporary storage.
@@ -544,18 +578,25 @@ public:
         camera.cx -= settings.pixel_center_offset;
         camera.cy -= settings.pixel_center_offset;
         const bool gut = settings.primitive == SplatPrimitive::gaussian_3dgut;
-        const bool gut_candidates = gut && camera.mode == 0u &&
-            !environment_flag("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
-        const auto emit_constants = [&](std::uint32_t count,std::uint32_t mode,
-                std::uint32_t gx,std::uint32_t gy,int wrap,std::uint32_t n,std::uint32_t slots) {
-            Push p=Impl::emit_constants(count,mode,gx,gy,wrap,n,slots);
+        const bool gut_candidates =
+            gut && camera.mode == 0u && !environment_flag("SPLAT_DRENDER_GUT_CANDIDATE_REFERENCE");
+        const auto emit_constants = [&](std::uint32_t count, std::uint32_t mode, std::uint32_t gx,
+                                        std::uint32_t gy, int wrap, std::uint32_t n,
+                                        std::uint32_t slots) {
+            Push p = Impl::emit_constants(count, mode, gx, gy, wrap, n, slots);
             if (gut_candidates) {
-                p.u[7]=1u; p.u[8]=camera.width; p.u[9]=camera.height;
-                set_float(p,10,camera.fx); set_float(p,11,camera.fy);
-                set_float(p,12,camera.cx); set_float(p,13,camera.cy);
-                if(settings.preview_rings) {
-                    const float sigma=std::round(std::clamp(settings.preview_ring_scale,0.5F,8.F)*256.F)/256.F;
-                    set_float(p,14,sigma*sigma);
+                p.u[7] = 1u;
+                p.u[8] = camera.width;
+                p.u[9] = camera.height;
+                set_float(p, 10, camera.fx);
+                set_float(p, 11, camera.fy);
+                set_float(p, 12, camera.cx);
+                set_float(p, 13, camera.cy);
+                if (settings.preview_rings) {
+                    const float sigma =
+                        std::round(std::clamp(settings.preview_ring_scale, 0.5F, 8.F) * 256.F) /
+                        256.F;
+                    set_float(p, 14, sigma * sigma);
                 }
             }
             return p;
@@ -569,8 +610,8 @@ public:
         require(!gut || has_scales_, "Vulkan 3DGUT requires scales and rotations");
         occupancy_prepared_ = false;
         sample_live_ = false;
-        require(!depth_query_only || (!pack_rgba && destination == nullptr &&
-                    settings.need_depth && !settings.pixel_snapshots),
+        require(!depth_query_only || (!pack_rgba && destination == nullptr && settings.need_depth &&
+                                      !settings.pixel_snapshots),
                 "depth-query preparation cannot render attachments or snapshots");
         require(model_ready_, "no Gaussian model is loaded");
         require(!settings.preview_rings || (!settings.need_depth && !settings.pixel_snapshots),
@@ -583,7 +624,8 @@ public:
         require(camera.width > 0 && camera.height > 0, "camera width and height must be positive");
         require(camera.mode == 0 || camera.mode == 1 || camera.mode == 3 || camera.mode == 4,
                 "camera mode must be pinhole, fisheye, equirectangular, or orthographic");
-        require(camera.world_to_camera.size() == 16 && camera.center.size() == 3, "camera transform must be 16 floats and center 3 floats");
+        require(camera.world_to_camera.size() == 16 && camera.center.size() == 3,
+                "camera transform must be 16 floats and center 3 floats");
         const std::scoped_lock lock(context_.dispatch_mutex);
         const std::uint32_t count = count_;
         const bool has_sh = has_sh_;
@@ -605,14 +647,18 @@ public:
         frame_camera_ = &camera_[camera_slot_];
         const auto transform_count = settings.preview_transforms.size();
         const bool reconstruction = !settings.preview_arrivals.empty();
-        require(!reconstruction || (settings.preview_arrivals.size() == count && has_scales &&
-            !settings.pixel_snapshots && !reuse_projection && !depth_query_only),
-            "Reconstruction animation requires model-sized arrivals and forward-only scaled Gaussians");
+        require(!reconstruction ||
+                    (settings.preview_arrivals.size() == count && has_scales &&
+                     !settings.pixel_snapshots && !reuse_projection && !depth_query_only),
+                "Reconstruction animation requires model-sized arrivals and forward-only scaled "
+                "Gaussians");
         if (reconstruction) {
-            for (const auto v : settings.preview_reconstruction) require(std::isfinite(v), "Nonfinite reconstruction parameters");
+            for (const auto v : settings.preview_reconstruction)
+                require(std::isfinite(v), "Nonfinite reconstruction parameters");
             const auto& r = settings.preview_reconstruction;
-            require(r[2]>r[1] && r[3]>=0.F && r[4]>0.F && r[5]>0.F && r[6]>0.F && r[6]<=1.F,
-                "Invalid reconstruction parameters");
+            require(r[2] > r[1] && r[3] >= 0.F && r[4] > 0.F && r[5] > 0.F && r[6] > 0.F &&
+                        r[6] <= 1.F,
+                    "Invalid reconstruction parameters");
         }
         const auto camera_words = 23 + transform_count * 9 + 9 + settings.preview_arrivals.size();
         require(transform_count <= count, "Too many preview transforms");
@@ -623,22 +669,25 @@ public:
             require(std::isfinite(transform.scale) && transform.scale > 0.F,
                     "Invalid preview transform scale");
             float norm = 0.F;
-            for (const auto value : transform.rotation) norm += value * value;
+            for (const auto value : transform.rotation)
+                norm += value * value;
             require(std::isfinite(norm) && std::abs(norm - 1.F) < 1e-4F &&
                         std::all_of(transform.translation.begin(), transform.translation.end(),
-                            [](float value) { return std::isfinite(value); }),
+                                    [](float value) { return std::isfinite(value); }),
                     "Invalid preview transform rotation or translation");
             previous_end = transform.end_index;
         }
         require(transform_count == 0 || (previous_end == count && has_scales),
                 "Preview transforms require scales and full model coverage");
-        Buffer& camera_buffer = grow(*frame_camera_,
-            camera_words * sizeof(float), BufferMemory::host_visible);
+        Buffer& camera_buffer =
+            grow(*frame_camera_, camera_words * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
         const std::uint32_t grid_y = div_up(camera.height, k_tile);
         const std::uint32_t tiles = grid_x * grid_y;
-        const std::uint32_t tile_bits = tiles > 1 ? 32u - static_cast<std::uint32_t>(std::countl_zero(tiles - 1)) : 0u;
-        const auto pixels = static_cast<std::uint32_t>(static_cast<std::uint64_t>(camera.width) * camera.height);
+        const std::uint32_t tile_bits =
+            tiles > 1 ? 32u - static_cast<std::uint32_t>(std::countl_zero(tiles - 1)) : 0u;
+        const auto pixels =
+            static_cast<std::uint32_t>(static_cast<std::uint64_t>(camera.width) * camera.height);
         const int wrap_width = camera.mode == 3 ? static_cast<int>(camera.width) : 0;
         std::vector<float> placed_camera_pack(camera_words, 0.F);
         float* camera_pack = placed_camera_pack.data();
@@ -653,44 +702,50 @@ public:
             const auto& transform = settings.preview_transforms[i];
             const auto base = 23 + i * 9;
             std::memcpy(&camera_pack[base], &transform.end_index, sizeof(transform.end_index));
-            std::copy(transform.translation.begin(), transform.translation.end(), camera_pack + base + 1);
+            std::copy(transform.translation.begin(), transform.translation.end(),
+                      camera_pack + base + 1);
             camera_pack[base + 4] = transform.scale;
             std::copy(transform.rotation.begin(), transform.rotation.end(), camera_pack + base + 5);
         }
         const auto reconstruction_base = 23 + transform_count * 9;
         camera_pack[reconstruction_base] = reconstruction ? 1.F : 0.F;
         if (reconstruction) {
-            std::copy(settings.preview_reconstruction.begin(),settings.preview_reconstruction.end(),camera_pack+reconstruction_base+1);
-            std::copy(settings.preview_arrivals.begin(),settings.preview_arrivals.end(),camera_pack+reconstruction_base+9);
+            std::copy(settings.preview_reconstruction.begin(),
+                      settings.preview_reconstruction.end(), camera_pack + reconstruction_base + 1);
+            std::copy(settings.preview_arrivals.begin(), settings.preview_arrivals.end(),
+                      camera_pack + reconstruction_base + 9);
         }
         camera_buffer.upload(camera_pack, camera_words * sizeof(float));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
         // GUT uses seven float4 slots for UT bounds, color and ray transforms,
         // even for RGB-only frames. EWA retains its five-slot RGB layout.
-        const std::uint32_t gauss_slots = gut ? (gut_candidates ? 11u : 7u) : settings.need_depth
-            ? k_gauss_slots_geometry
-            : k_gauss_slots_color;
-        Buffer& gauss_f = grow(
-            gauss_f_, static_cast<std::uint64_t>(count) * gauss_slots * sizeof(float) * 4);
-        Buffer& gauss_u = grow(gauss_u_, static_cast<std::uint64_t>(gauss_u_count) * sizeof(std::uint32_t));
+        const std::uint32_t gauss_slots = gut                   ? (gut_candidates ? 11u : 7u)
+                                          : settings.need_depth ? k_gauss_slots_geometry
+                                                                : k_gauss_slots_color;
+        Buffer& gauss_f =
+            grow(gauss_f_, static_cast<std::uint64_t>(count) * gauss_slots * sizeof(float) * 4);
+        Buffer& gauss_u =
+            grow(gauss_u_, static_cast<std::uint64_t>(gauss_u_count) * sizeof(std::uint32_t));
         write_forward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
-        const float ring_sigma = std::round(std::clamp(settings.preview_ring_scale, 0.5F, 8.F) * 256.F) / 256.F;
+        const float ring_sigma =
+            std::round(std::clamp(settings.preview_ring_scale, 0.5F, 8.F) * 256.F) / 256.F;
         std::uint32_t instances = last_instances_;
         Buffer* instance_values = last_instance_values_;
-        Buffer& tile_ranges = grow(tile_ranges_, static_cast<std::uint64_t>(tiles) * 2 * sizeof(std::uint32_t));
+        Buffer& tile_ranges =
+            grow(tile_ranges_, static_cast<std::uint64_t>(tiles) * 2 * sizeof(std::uint32_t));
         if (reuse_projection) {
             // Geometry and sorted instances survive the primary backward.
             Push colors_push{};
             colors_push.u[0] = count;
             colors_push.u[3] = 128u | (settings.need_depth ? k_flag_geometry : 0u);
             dispatch_infos(preprocess_,
-                {model_means(), model_opacities(), model_scales(),
-                 model_rotations(), model_covariances(), model_colors(),
-                 descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
-                 descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
-                colors_push, div_up(count, 256));
+                           {model_means(), model_opacities(), model_scales(), model_rotations(),
+                            model_covariances(), model_colors(), descriptor(camera_buffer),
+                            descriptor(gauss_f), descriptor(gauss_u), descriptor(dummy_),
+                            descriptor(dummy_), descriptor(dummy_)},
+                           colors_push, div_up(count, 256));
             write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
@@ -699,8 +754,7 @@ public:
             prep.u[0] = count;
             prep.u[1] = sh_degree_;
             prep.u[2] = sh_bases_;
-            prep.u[3] = (has_sh ? k_flag_sh : 0) |
-                        (has_scales ? k_flag_scales : 0) |
+            prep.u[3] = (has_sh ? k_flag_sh : 0) | (has_scales ? k_flag_scales : 0) |
                         (settings.need_depth ? k_flag_geometry : 0) |
                         (settings.pixel_snapshots ? k_flag_snapshot : 0) |
                         (device_model_bound_ ? k_flag_raw_parameters : 0) |
@@ -723,13 +777,12 @@ public:
             set_float(prep, 17, settings.kernel_size);
             set_float(prep, 18, settings.scale_modifier);
             prep.u[19] = static_cast<std::uint32_t>(wrap_width);
-            dispatch_infos(
-                preprocess_,
-                {model_means(), model_opacities(), model_scales(),
-                 model_rotations(), model_covariances(), model_colors(),
-                 descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
-                 descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
-                prep, div_up(count, 256));
+            dispatch_infos(preprocess_,
+                           {model_means(), model_opacities(), model_scales(), model_rotations(),
+                            model_covariances(), model_colors(), descriptor(camera_buffer),
+                            descriptor(gauss_f), descriptor(gauss_u), descriptor(dummy_),
+                            descriptor(dummy_), descriptor(dummy_)},
+                           prep, div_up(count, 256));
 
             inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
             inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
@@ -739,7 +792,8 @@ public:
             // that actually overflowed (harvested from its mirror) raises it, so
             // the steady state keeps the sort sized to the seeded capacity instead
             // of growing with every peak view.
-            if (count != capacity_count_ || tiles != capacity_tiles_ || settings.primitive != last_primitive_ ||
+            if (count != capacity_count_ || tiles != capacity_tiles_ ||
+                settings.primitive != last_primitive_ ||
                 gut_candidates != capacity_gut_candidates_ ||
                 (gut && (settings.preview_rings != capacity_gut_rings_ ||
                          (settings.preview_rings && ring_sigma != capacity_gut_ring_sigma_)))) {
@@ -753,36 +807,32 @@ public:
             // Animated footprints can grow abruptly even without a new model.
             // Measure the current demand before sorting so no overflow frame
             // is shown or exported. Model buffers and pipelines stay resident.
-            if (reconstruction) instance_capacity_ = 0;
+            if (reconstruction)
+                instance_capacity_ = 0;
             bool use_gpu_driven = instance_capacity_ != 0;
-            Buffer& frame_counts = grow(
-                frame_counts_, 19 * sizeof(std::uint32_t),
-                BufferMemory::host_visible,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-            Buffer& count_mirrors = grow(
-                count_mirrors_,
-                k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
-                BufferMemory::host_visible);
+            Buffer& frame_counts =
+                grow(frame_counts_, 19 * sizeof(std::uint32_t), BufferMemory::host_visible,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+            Buffer& count_mirrors =
+                grow(count_mirrors_, k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
+                     BufferMemory::host_visible);
             if (use_gpu_driven) {
                 Push control_push{};
                 control_push.u[0] = count;
                 control_push.u[1] = instance_capacity_;
                 control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
-                dispatch(
-                    indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
-                    control_push, 1);
+                dispatch(indirect_control_, {&gauss_u, &frame_counts, &count_mirrors}, control_push,
+                         1);
                 // The control shader publishes this frame's counts into the
                 // batch slot's mirror word; the fence that retires this submission
                 // is what makes the host read safe.
                 mirror_recorded_ = true;
             } else {
-                Push counts_push = emit_constants(
-                    1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
-                dispatch(
-                    emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
-                            &dummy_, &dummy_},
-                    counts_push, 1);
+                Push counts_push =
+                    emit_constants(1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch(emit_,
+                         {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts, &dummy_, &dummy_},
+                         counts_push, 1);
             }
             write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             std::uint32_t frame_count_values[2]{};
@@ -798,34 +848,32 @@ public:
                     // Use the same stable indirect depth/tile pipeline on the
                     // seeded frame as on every subsequent GUT frame.
                     Push control_push{};
-                    control_push.u[0]=count;control_push.u[1]=instance_capacity_;
-                    control_push.u[2]=encoder_ring_.index()*k_count_mirror_words;
-                    dispatch(indirect_control_,{&gauss_u,&frame_counts,&count_mirrors},control_push,1);
-                    mirror_recorded_=true;
-                    use_gpu_driven=true;
+                    control_push.u[0] = count;
+                    control_push.u[1] = instance_capacity_;
+                    control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
+                    dispatch(indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
+                             control_push, 1);
+                    mirror_recorded_ = true;
+                    use_gpu_driven = true;
                 }
             }
-            instances = use_gpu_driven
-                ? instance_capacity_
-                : frame_count_values[0];
-            const std::uint32_t visible = use_gpu_driven
-                ? count
-                : frame_count_values[1];
+            instances = use_gpu_driven ? instance_capacity_ : frame_count_values[0];
+            const std::uint32_t visible = use_gpu_driven ? count : frame_count_values[1];
 
             instance_values = &dummy_;
             Buffer* range_lo = &dummy_;
             Buffer* range_hi = &dummy_;
 
-            zero_buffer(
-                tile_ranges,
-                static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
+            zero_buffer(tile_ranges, static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
             const bool single_sort = !gut && !use_gpu_driven && instances <= k_single_sort_limit;
             if (instances > 0) {
                 if (!use_gpu_driven && visible == 0)
-                    throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
-                const auto key_bytes = static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
-                const std::uint32_t hist_blocks = std::max(
-                    div_up(instances, 1024), div_up(count, 1024));
+                    throw std::runtime_error(
+                        "Vulkan splat preprocessing produced instances without visible Gaussians");
+                const auto key_bytes =
+                    static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
+                const std::uint32_t hist_blocks =
+                    std::max(div_up(instances, 1024), div_up(count, 1024));
                 const std::uint32_t hist_n = 256 * hist_blocks;
                 const std::uint64_t hist_bytes =
                     static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) *
@@ -842,120 +890,119 @@ public:
                 // buffers, the histogram and the compact scratch only live inside
                 // this forward and share the phase arena.
                 const bool survivor_is_zero = !use_gpu_driven && single_sort;
-                phase_begin(phase_aligned(key_bytes) * 5 +
-                            phase_aligned(hist_bytes) + phase_aligned(compact_bytes));
+                phase_begin(phase_aligned(key_bytes) * 5 + phase_aligned(hist_bytes) +
+                            phase_aligned(compact_bytes));
                 Buffer& lo0 = phase_slot(lo0_, key_bytes);
                 Buffer& lo1 = phase_slot(lo1_, key_bytes);
                 Buffer& hi0 = phase_slot(hi0_, key_bytes);
                 Buffer& hi1 = phase_slot(hi1_, key_bytes);
-                Buffer& val0 = survivor_is_zero
-                    ? grow(val0_, key_bytes)
-                    : phase_slot(val0_, key_bytes);
-                Buffer& val1 = survivor_is_zero
-                    ? phase_slot(val1_, key_bytes)
-                    : grow(val1_, key_bytes);
+                Buffer& val0 =
+                    survivor_is_zero ? grow(val0_, key_bytes) : phase_slot(val0_, key_bytes);
+                Buffer& val1 =
+                    survivor_is_zero ? phase_slot(val1_, key_bytes) : grow(val1_, key_bytes);
                 Buffer& hist = phase_slot(hist_space_, hist_bytes);
                 Buffer& compact = phase_slot(compact_, compact_bytes);
                 instance_values = &val0;
                 range_lo = &lo0;
                 range_hi = &hi0;
                 if (use_gpu_driven) {
-                    Push depth_push = emit_constants(
-                        count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    Push depth_push =
+                        emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
                     dispatch(
                         emit_indirect_,
-                        {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_,
-                         &dummy_, &frame_counts},
+                        {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_, &frame_counts},
                         depth_push, div_up(count, 256));
-                    const std::uint32_t depth_hist_n =
-                        256 * div_up(count, 1024);
-                    radix_sort_indirect(
-                        false, count, 1u, 10u * sizeof(std::uint32_t),
-                        lo0, hi0, val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
+                    const std::uint32_t depth_hist_n = 256 * div_up(count, 1024);
+                    radix_sort_indirect(false, count, 1u, 10u * sizeof(std::uint32_t), lo0, hi0,
+                                        val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
                     write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                    Push gather_push = emit_constants(
-                        count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
-                    dispatch_indirect(
-                        emit_indirect_,
-                        {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
-                         &dummy_, &frame_counts},
-                        gather_push, frame_counts, 4u * sizeof(std::uint32_t));
+                    Push gather_push =
+                        emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch_indirect(emit_indirect_,
+                                      {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
+                                       &dummy_, &frame_counts},
+                                      gather_push, frame_counts, 4u * sizeof(std::uint32_t));
                     inclusive_scan(compact, 0, 0, count, count);
-                    Push tile_push = emit_constants(
-                        count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    Push tile_push =
+                        emit_constants(count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
                     dispatch_indirect(
                         emit_indirect_,
-                        {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0,
-                         &compact, &frame_counts},
+                        {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact, &frame_counts},
                         tile_push, frame_counts, 7u * sizeof(std::uint32_t));
                     write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                    const std::uint32_t tile_hist_n =
-                        256 * div_up(instances, 1024);
-                    radix_sort_indirect(
-                        false, instances, 0u, 13u * sizeof(std::uint32_t),
-                        lo1, hi1, val1, lo0, hi0, val0, hist, tile_hist_n,
-                        tile_bits);
+                    const std::uint32_t tile_hist_n = 256 * div_up(instances, 1024);
+                    radix_sort_indirect(false, instances, 0u, 13u * sizeof(std::uint32_t), lo1, hi1,
+                                        val1, lo0, hi0, val0, hist, tile_hist_n, tile_bits);
                     instance_values = &val1;
                     range_lo = &lo1;
                     range_hi = &hi1;
                 } else if (single_sort) {
-                    Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
-                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, emit_push, div_up(count, 256));
-                    radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n, 32u + tile_bits);
+                    Push emit_push =
+                        emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_},
+                             emit_push, div_up(count, 256));
+                    radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n,
+                               32u + tile_bits);
                     write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                 } else {
-                    Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
-                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
-                    radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
+                    Push depth_push =
+                        emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_},
+                             depth_push, div_up(count, 256));
+                    radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist,
+                               256 * div_up(visible, 1024));
                     write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                    Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
-                    dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
+                    Push gather_push =
+                        emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    dispatch(emit_,
+                             {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
                              gather_push, div_up(visible, 256));
                     inclusive_scan(compact, 0, 0, visible, visible);
-                    Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    Push tile_push =
+                        emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
                     dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
                              tile_push, div_up(visible, 256));
                     write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                    radix_sort(
-                        false, instances, lo1, hi1, val1, lo0, hi0, val0,
-                        hist, hist_n, tile_bits);
+                    radix_sort(false, instances, lo1, hi1, val1, lo0, hi0, val0, hist, hist_n,
+                               tile_bits);
                     instance_values = &val1;
                     range_lo = &lo1;
                     range_hi = &hi1;
                 }
                 Push range_push{};
                 if (use_gpu_driven) {
-                    dispatch_indirect(
-                        ranges_indirect_,
-                        {range_lo, range_hi, &tile_ranges, &frame_counts},
-                        range_push, frame_counts,
-                        16u * sizeof(std::uint32_t));
+                    dispatch_indirect(ranges_indirect_,
+                                      {range_lo, range_hi, &tile_ranges, &frame_counts}, range_push,
+                                      frame_counts, 16u * sizeof(std::uint32_t));
                 } else {
                     range_push.u[0] = instances;
                     range_push.u[1] = single_sort ? 1u : 0u;
-                    dispatch(
-                        ranges_, {range_lo, range_hi, &tile_ranges}, range_push,
-                        div_up(instances, 256));
+                    dispatch(ranges_, {range_lo, range_hi, &tile_ranges}, range_push,
+                             div_up(instances, 256));
                 }
             }
         }
 
-        const std::uint32_t bucket_limit = instances == 0
-            ? 0u
-            : static_cast<std::uint32_t>((static_cast<std::uint64_t>(instances) + 31ull * tiles) / 32ull + 1ull);
+        const std::uint32_t bucket_limit =
+            instances == 0
+                ? 0u
+                : static_cast<std::uint32_t>(
+                      (static_cast<std::uint64_t>(instances) + 31ull * tiles) / 32ull + 1ull);
         Buffer* bucket_offsets = &dummy_;
         if (settings.pixel_snapshots) {
             // Backward snapshots index their variable number of per-tile
             // buckets through this inclusive prefix. Generate and scan it on
             // the GPU so a training forward does not synchronize with the CPU.
-            bucket_offsets = &grow(
-                bucket_offsets_,
-                static_cast<std::uint64_t>(tiles + scan_scratch_uints(tiles)) * sizeof(std::uint32_t));
+            bucket_offsets = &grow(bucket_offsets_,
+                                   static_cast<std::uint64_t>(tiles + scan_scratch_uints(tiles)) *
+                                       sizeof(std::uint32_t));
             if (!reuse_projection) {
-                Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count, gauss_slots);
+                Push bucket_push =
+                    emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(
-                    emit_, {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
+                    emit_,
+                    {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
                     bucket_push, div_up(tiles, 256));
                 inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
             }
@@ -969,30 +1016,33 @@ public:
         if (!depth_query_only) {
             const bool gut_rgba_fast = gut && pack_rgba && !settings.need_depth &&
                                        blend_gut_rgba_.valid() && !gut_reference_;
-            Buffer& out_f = gut_rgba_fast ? dummy_ : grow(
-                out_f_, static_cast<std::uint64_t>(pixels) *
-                    ((pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) +
-                     (gut && settings.pixel_snapshots ? 3u : 0u)) * sizeof(float));
-            Buffer* out_u = pack_rgba
-                ? &dummy_
-                : &grow(
-                      out_u_, static_cast<std::uint64_t>(count + pixels + tiles +
-                                                         (settings.pixel_snapshots ? snap_buckets : 1u)) *
-                                  sizeof(std::uint32_t));
+            Buffer& out_f =
+                gut_rgba_fast
+                    ? dummy_
+                    : grow(out_f_, static_cast<std::uint64_t>(pixels) *
+                                       ((pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) +
+                                        (gut && settings.pixel_snapshots ? 3u : 0u)) *
+                                       sizeof(float));
+            Buffer* out_u =
+                pack_rgba ? &dummy_
+                          : &grow(out_u_, static_cast<std::uint64_t>(
+                                              count + pixels + tiles +
+                                              (settings.pixel_snapshots ? snap_buckets : 1u)) *
+                                              sizeof(std::uint32_t));
             // The per-pixel bucket snapshots only exist for the backward pass: a
             // forward frame neither writes nor reads them (at a million instances
             // the buffer is hundreds of megabytes of pure overhead).
-            Buffer& snap = settings.pixel_snapshots
-                ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull *
-                                  (settings.need_depth ? 2ull : 1ull) * sizeof(float) * 4)
-                : dummy_;
+            Buffer& snap =
+                settings.pixel_snapshots
+                    ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull *
+                                      (settings.need_depth ? 2ull : 1ull) * sizeof(float) * 4)
+                    : dummy_;
             if (!pack_rgba) {
-                const std::size_t clear_uints = settings.pixel_snapshots
-                    ? static_cast<std::size_t>(count) + pixels + tiles + snap_buckets
-                    : count;
-                zero_buffer(
-                    *out_u,
-                    clear_uints * sizeof(std::uint32_t));
+                const std::size_t clear_uints =
+                    settings.pixel_snapshots
+                        ? static_cast<std::size_t>(count) + pixels + tiles + snap_buckets
+                        : count;
+                zero_buffer(*out_u, clear_uints * sizeof(std::uint32_t));
             }
 
             Push blend_push{};
@@ -1020,27 +1070,35 @@ public:
             blend_push.u[19] = snap_buckets;
             if (settings.preview_rings) {
                 set_float(blend_push, 19, ring_sigma);
-                if (gut) blend_push.u[3] |= 64u;
+                if (gut)
+                    blend_push.u[3] |= 64u;
             }
-            const ComputePipeline& blend_pipeline = gut
-                ? (gut_rgba_fast ? blend_gut_rgba_ : blend_gut_) : settings.preview_rings ? blend_rings_ : settings.need_depth
-                ? blend_
-                : (settings.pixel_snapshots && !pack_rgba ? blend_training_ : blend_no_geometry_);
+            const ComputePipeline& blend_pipeline =
+                gut                      ? (gut_rgba_fast ? blend_gut_rgba_ : blend_gut_)
+                : settings.preview_rings ? blend_rings_
+                : settings.need_depth
+                    ? blend_
+                    : (settings.pixel_snapshots && !pack_rgba ? blend_training_
+                                                              : blend_no_geometry_);
             Buffer* blend_output = &out_f;
             if (gut_rgba_fast)
-                blend_output = &grow(rgba_, static_cast<std::uint64_t>(pixels)*4,
-                    BufferMemory::device_local,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                blend_output =
+                    &grow(rgba_, static_cast<std::uint64_t>(pixels) * 4, BufferMemory::device_local,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             if (gut)
-                dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap, &camera_buffer},
+                dispatch(blend_pipeline,
+                         {&tile_ranges, instance_values, &gauss_f, blend_output, out_u,
+                          bucket_offsets, &snap, &camera_buffer},
                          blend_push, grid_x, grid_y);
             else
-                dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, blend_output, out_u, bucket_offsets, &snap},
+                dispatch(blend_pipeline,
+                         {&tile_ranges, instance_values, &gauss_f, blend_output, out_u,
+                          bucket_offsets, &snap},
                          blend_push, grid_x, grid_y);
             if (pack_rgba && !gut_rgba_fast) {
-                Buffer& rgba = grow(
-                    rgba_, static_cast<std::uint64_t>(pixels) * 4, BufferMemory::device_local,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                Buffer& rgba =
+                    grow(rgba_, static_cast<std::uint64_t>(pixels) * 4, BufferMemory::device_local,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
                 Push pack_push{};
                 pack_push.u[0] = pixels;
                 dispatch(pack_, {&out_f, &rgba}, pack_push, div_up(pixels, 256));
@@ -1054,13 +1112,11 @@ public:
                     source.normal = {out_f.handle, 4 * plane_bytes, 3 * plane_bytes};
                     source.median_depth = {out_f.handle, 7 * plane_bytes, plane_bytes};
                 }
-                source.radii = {
-                    gauss_u.handle,
-                    static_cast<std::uint64_t>(3) * count * sizeof(std::uint32_t),
-                    static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
+                source.radii = {gauss_u.handle,
+                                static_cast<std::uint64_t>(3) * count * sizeof(std::uint32_t),
+                                static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
                 source.visibility_bits = {
-                    out_u->handle, 0,
-                    static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
+                    out_u->handle, 0, static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
                 source.width = camera.width;
                 source.height = camera.height;
                 record_copy_frame_device(source, *destination);
@@ -1076,20 +1132,20 @@ public:
         submit_batch(forward_profile_enabled_ || gut_dump);
         collect_forward_timestamps();
         if (gut_dump && *gut_dump) {
-            auto dump=[&](const char* name,const Buffer& buffer,std::size_t bytes) {
+            auto dump = [&](const char* name, const Buffer& buffer, std::size_t bytes) {
                 std::vector<unsigned char> values(bytes);
-                context_.read_buffer(buffer,values.data(),bytes);
-                const std::string path=std::string(gut_dump)+"/vk_"+name+".bin";
-                auto* file=std::fopen(path.c_str(),"wb");
-                require(file!=nullptr,"Cannot open GUT Vulkan dump");
-                const auto written=std::fwrite(values.data(),1,bytes,file);
+                context_.read_buffer(buffer, values.data(), bytes);
+                const std::string path = std::string(gut_dump) + "/vk_" + name + ".bin";
+                auto* file = std::fopen(path.c_str(), "wb");
+                require(file != nullptr, "Cannot open GUT Vulkan dump");
+                const auto written = std::fwrite(values.data(), 1, bytes, file);
                 std::fclose(file);
-                require(written==bytes,"Cannot write GUT Vulkan dump");
+                require(written == bytes, "Cannot write GUT Vulkan dump");
             };
-            dump("gauss",gauss_f,std::size_t(count)*gauss_slots*4*sizeof(float));
-            dump("gauss_u",gauss_u,std::size_t(count)*4*sizeof(unsigned));
-            dump("frame",out_f_,std::size_t(pixels)*10*sizeof(float));
-            dump("ranges",tile_ranges,std::size_t(tiles)*2*sizeof(unsigned));
+            dump("gauss", gauss_f, std::size_t(count) * gauss_slots * 4 * sizeof(float));
+            dump("gauss_u", gauss_u, std::size_t(count) * 4 * sizeof(unsigned));
+            dump("frame", out_f_, std::size_t(pixels) * 10 * sizeof(float));
+            dump("ranges", tile_ranges, std::size_t(tiles) * 2 * sizeof(unsigned));
         }
         last_primitive_ = settings.primitive;
         last_gauss_slots_ = gauss_slots;
@@ -1097,7 +1153,8 @@ public:
         last_frame_has_stats_ = !pack_rgba && !depth_query_only;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
         last_instance_values_ = instance_values;
-        std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(), last_transform_.begin());
+        std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(),
+                  last_transform_.begin());
         std::copy(camera.center.begin(), camera.center.end(), last_center_.begin());
         last_width_ = camera.width;
         last_height_ = camera.height;
@@ -1128,9 +1185,9 @@ public:
         return FrameCounts{reported_instances_, reported_visible_};
     }
 
-    SplatForwardOutput collect(
-        const SplatCamera& camera, const SplatSettings& settings, const FrameCounts counts,
-        Buffer& gauss_u, Buffer& out_f, Buffer& out_u) {
+    SplatForwardOutput collect(const SplatCamera& camera, const SplatSettings& settings,
+                               const FrameCounts counts, Buffer& gauss_u, Buffer& out_f,
+                               Buffer& out_u) {
         const std::scoped_lock lock(context_.dispatch_mutex);
         const std::uint32_t count = count_;
         const std::uint32_t pixels =
@@ -1142,52 +1199,55 @@ public:
         output.height = camera.height;
         output.instance_count = static_cast<int>(instances);
         output.visible_count = static_cast<int>(visible);
-        output.color = download_vector<float>(context_, out_f, static_cast<std::size_t>(pixels) * 3);
-        output.alpha = download_vector<float>(context_, out_f, pixels, static_cast<std::size_t>(pixels) * 3 * sizeof(float));
+        output.color =
+            download_vector<float>(context_, out_f, static_cast<std::size_t>(pixels) * 3);
+        output.alpha = download_vector<float>(context_, out_f, pixels,
+                                              static_cast<std::size_t>(pixels) * 3 * sizeof(float));
         if (settings.need_depth) {
-            output.normal = download_vector<float>(context_, out_f, static_cast<std::size_t>(pixels) * 3,
-                                                   static_cast<std::size_t>(pixels) * 4 * sizeof(float));
-            output.median_depth = download_vector<float>(context_, out_f, pixels, static_cast<std::size_t>(pixels) * 7 * sizeof(float));
+            output.normal =
+                download_vector<float>(context_, out_f, static_cast<std::size_t>(pixels) * 3,
+                                       static_cast<std::size_t>(pixels) * 4 * sizeof(float));
+            output.median_depth = download_vector<float>(
+                context_, out_f, pixels, static_cast<std::size_t>(pixels) * 7 * sizeof(float));
         }
         auto visibility_bits = download_vector<std::uint32_t>(context_, out_u, count);
         output.visibility.resize(count);
-        for (std::uint32_t i = 0; i < count; ++i) output.visibility[i] = visibility_bits[i] == 0 ? 0.0F : 1.0F;
+        for (std::uint32_t i = 0; i < count; ++i)
+            output.visibility[i] = visibility_bits[i] == 0 ? 0.0F : 1.0F;
         auto radius_bits = download_vector<std::uint32_t>(
             context_, gauss_u, count, static_cast<std::size_t>(3 * count) * sizeof(std::uint32_t));
         output.radii.resize(count);
-        for (std::uint32_t i = 0; i < count; ++i) output.radii[i] = static_cast<int>(radius_bits[i]);
+        for (std::uint32_t i = 0; i < count; ++i)
+            output.radii[i] = static_cast<int>(radius_bits[i]);
         return output;
     }
 
-public:
+  public:
     SplatForwardOutput render(const SplatCamera& camera, const SplatSettings& settings) {
         const FrameCounts counts = record_frame(camera, settings, false);
         return collect(camera, settings, counts, gauss_u_, out_f_, out_u_);
     }
 
-    SplatDeviceFrame render_device(
-        const SplatCamera& camera, const SplatSettings& settings) {
+    SplatDeviceFrame render_device(const SplatCamera& camera, const SplatSettings& settings) {
         const FrameCounts counts = record_frame(camera, settings, false);
         return make_device_frame(camera, settings, counts);
     }
 
-    SplatDeviceFrame render_device_copy(
-        const SplatCamera& camera, const SplatSettings& settings,
-        const SplatDeviceFrame& destination) {
-        const FrameCounts counts =
-            record_frame(camera, settings, false, &destination);
+    SplatDeviceFrame render_device_copy(const SplatCamera& camera, const SplatSettings& settings,
+                                        const SplatDeviceFrame& destination) {
+        const FrameCounts counts = record_frame(camera, settings, false, &destination);
         return make_device_frame(camera, settings, counts);
     }
 
-    SplatDeviceFrame render_colors_device_copy(
-        const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
-        const SplatSettings& settings, const SplatDeviceFrame& destination) {
+    SplatDeviceFrame render_colors_device_copy(const SplatDeviceGaussians& gaussians,
+                                               const SplatCamera& camera,
+                                               const SplatSettings& settings,
+                                               const SplatDeviceFrame& destination) {
         const auto same_view = [](const SplatBufferView& a, const SplatBufferView& b) {
             return a.buffer == b.buffer && a.offset == b.offset && a.bytes == b.bytes;
         };
-        require(device_model_bound_ && last_frame_has_snapshots_ &&
-                    last_frame_has_geometry_ && settings.need_depth &&
-                    settings.pixel_snapshots && !settings.preview_rings &&
+        require(device_model_bound_ && last_frame_has_snapshots_ && last_frame_has_geometry_ &&
+                    settings.need_depth && settings.pixel_snapshots && !settings.preview_rings &&
                     gaussians.colors_precomputed && gaussians.count == count_ &&
                     same_view(gaussians.means, device_model_.means) &&
                     same_view(gaussians.log_scales, device_model_.log_scales) &&
@@ -1195,31 +1255,32 @@ public:
                     same_view(gaussians.opacity_logits, device_model_.opacity_logits) &&
                     same_view(gaussians.filter_3d, device_model_.filter_3d) &&
                     camera.world_to_camera.size() == last_transform_.size() &&
-                    camera.center.size() == last_center_.size() &&
-                    camera.width == last_width_ && camera.height == last_height_ &&
-                    camera.mode == last_mode_ && camera.fx == last_fx_ &&
-                    camera.fy == last_fy_ && camera.cx - settings.pixel_center_offset == last_cx_ && camera.cy - settings.pixel_center_offset == last_cy_ &&
-                    camera.k1 == last_k1_ && camera.k2 == last_k2_ &&
-                    camera.k3 == last_k3_ && camera.k4 == last_k4_ &&
-                    std::equal(camera.world_to_camera.begin(), camera.world_to_camera.end(), last_transform_.begin()) &&
+                    camera.center.size() == last_center_.size() && camera.width == last_width_ &&
+                    camera.height == last_height_ && camera.mode == last_mode_ &&
+                    camera.fx == last_fx_ && camera.fy == last_fy_ &&
+                    camera.cx - settings.pixel_center_offset == last_cx_ &&
+                    camera.cy - settings.pixel_center_offset == last_cy_ && camera.k1 == last_k1_ &&
+                    camera.k2 == last_k2_ && camera.k3 == last_k3_ && camera.k4 == last_k4_ &&
+                    std::equal(camera.world_to_camera.begin(), camera.world_to_camera.end(),
+                               last_transform_.begin()) &&
                     std::equal(camera.center.begin(), camera.center.end(), last_center_.begin()) &&
                     settings.alpha_clip == policy_settings_.alpha_clip &&
                     settings.near_plane == policy_settings_.near_plane &&
                     settings.compensate_2d == policy_settings_.compensate_2d &&
                     settings.kernel_size == last_kernel_size_ &&
                     settings.scale_modifier == last_scale_modifier_,
-                "color rerender requires unchanged device geometry and camera with live geometry snapshots");
+                "color rerender requires unchanged device geometry and camera with live geometry "
+                "snapshots");
         // Consume the old backward before overwriting colors and snapshots.
         bind_model_device(gaussians);
         const FrameCounts counts = record_frame(camera, settings, false, &destination, false, true);
         return make_device_frame(camera, settings, counts);
     }
 
-    [[nodiscard]] SplatDeviceFrame make_device_frame(
-        const SplatCamera& camera, const SplatSettings& settings,
-        const FrameCounts counts) const {
-        const std::uint64_t pixels =
-            static_cast<std::uint64_t>(camera.width) * camera.height;
+    [[nodiscard]]
+    SplatDeviceFrame make_device_frame(const SplatCamera& camera, const SplatSettings& settings,
+                                       const FrameCounts counts) const {
+        const std::uint64_t pixels = static_cast<std::uint64_t>(camera.width) * camera.height;
         const std::uint64_t plane_bytes = pixels * sizeof(float);
         SplatDeviceFrame frame;
         frame.color = {out_f_.handle, 0, 3 * plane_bytes};
@@ -1228,13 +1289,11 @@ public:
             frame.normal = {out_f_.handle, 4 * plane_bytes, 3 * plane_bytes};
             frame.median_depth = {out_f_.handle, 7 * plane_bytes, plane_bytes};
         }
-        frame.radii = {
-            gauss_u_.handle,
-            static_cast<std::uint64_t>(3) * count_ * sizeof(std::uint32_t),
-            static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
-        frame.visibility_bits = {
-            out_u_.handle, 0,
-            static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
+        frame.radii = {gauss_u_.handle,
+                       static_cast<std::uint64_t>(3) * count_ * sizeof(std::uint32_t),
+                       static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
+        frame.visibility_bits = {out_u_.handle, 0,
+                                 static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
         frame.width = camera.width;
         frame.height = camera.height;
         frame.instance_count = static_cast<int>(counts.instances);
@@ -1242,11 +1301,8 @@ public:
         return frame;
     }
 
-    void copy_frame_device(
-        const SplatDeviceFrame& source,
-        const SplatDeviceFrame& destination) {
-        require(source.width == destination.width &&
-                    source.height == destination.height,
+    void copy_frame_device(const SplatDeviceFrame& source, const SplatDeviceFrame& destination) {
+        require(source.width == destination.width && source.height == destination.height,
                 "copy_frame_device requires matching image extents");
         const std::scoped_lock lock(context_.dispatch_mutex);
         begin_batch();
@@ -1255,7 +1311,8 @@ public:
     }
 
     void pruning_scores_device(const SplatBufferView& scores) {
-        require(last_primitive_ == SplatPrimitive::gaussian_3dgs, "3DGUT pruning scores are not implemented");
+        require(last_primitive_ == SplatPrimitive::gaussian_3dgs,
+                "3DGUT pruning scores are not implemented");
         require(last_frame_has_stats_,
                 "pruning_scores_device requires a latest render with contribution statistics");
         const std::uint64_t bytes = static_cast<std::uint64_t>(count_) * sizeof(float);
@@ -1263,8 +1320,8 @@ public:
                 "device pruning scores buffer is too small");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        const std::uint64_t alignment = std::max<std::uint64_t>(
-            4, properties.limits.minStorageBufferOffsetAlignment);
+        const std::uint64_t alignment =
+            std::max<std::uint64_t>(4, properties.limits.minStorageBufferOffsetAlignment);
         require(scores.offset % alignment == 0,
                 "device pruning scores offset does not satisfy minStorageBufferOffsetAlignment");
         const std::scoped_lock lock(context_.dispatch_mutex);
@@ -1285,18 +1342,20 @@ public:
         push.u[5] = count_;
         push.u[6] = last_pixels_;
         push.u[7] = last_frame_has_geometry_ ? k_gauss_slots_geometry : k_gauss_slots_color;
-        const ComputePipeline& pipeline = pruning_scores_atomic_.valid()
-            ? pruning_scores_atomic_ : pruning_scores_subgroup_.valid()
-                ? pruning_scores_subgroup_ : pruning_scores_;
+        const ComputePipeline& pipeline = pruning_scores_atomic_.valid() ? pruning_scores_atomic_
+                                          : pruning_scores_subgroup_.valid()
+                                              ? pruning_scores_subgroup_
+                                              : pruning_scores_;
         dispatch_infos(pipeline,
-            {descriptor(tile_ranges_), descriptor(*last_instance_values_),
-             descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_),
-             descriptor(scores, bytes)}, push, last_grid_x_, div_up(last_height_, k_tile));
+                       {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                        descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_),
+                        descriptor(scores, bytes)},
+                       push, last_grid_x_, div_up(last_height_, k_tile));
         submit_batch(false);
     }
 
-    void dispatch_median_backward_info(
-        const VkDescriptorBufferInfo& loss_depth, Buffer& median_state) {
+    void dispatch_median_backward_info(const VkDescriptorBufferInfo& loss_depth,
+                                       Buffer& median_state) {
         Push push{};
         push.u[0] = last_width_;
         push.u[1] = last_height_;
@@ -1313,21 +1372,21 @@ public:
         set_float(push, 12, last_k2_);
         set_float(push, 13, last_k3_);
         set_float(push, 14, last_k4_);
-        dispatch_infos(
-            median_backward_,
-            {descriptor(tile_ranges_), descriptor(*last_instance_values_),
-             descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_),
-             loss_depth, descriptor(median_state)},
-            push, last_grid_x_, div_up(last_height_, k_tile));
+        dispatch_infos(median_backward_,
+                       {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                        descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_), loss_depth,
+                        descriptor(median_state)},
+                       push, last_grid_x_, div_up(last_height_, k_tile));
     }
 
     void dispatch_median_backward(Buffer& loss_depth, Buffer& median_state) {
         dispatch_median_backward_info(descriptor(loss_depth), median_state);
     }
 
-    SplatBlendGradients backward_blend(
-        const std::span<const float> dL_color, const std::span<const float> dL_alpha,
-        const std::span<const float> dL_depth, const std::span<const float> dL_normal) {
+    SplatBlendGradients backward_blend(const std::span<const float> dL_color,
+                                       const std::span<const float> dL_alpha,
+                                       const std::span<const float> dL_depth,
+                                       const std::span<const float> dL_normal) {
         require(last_frame_has_snapshots_,
                 "backward_blend requires the latest render to use pixel_snapshots=true");
         require(dL_color.size() == static_cast<std::size_t>(last_pixels_) * 3,
@@ -1336,20 +1395,24 @@ public:
         require(dL_depth.empty() || (last_frame_has_geometry_ && dL_depth.size() == last_pixels_),
                 "dL_median_depth must be empty or have shape [H,W] after a geometry forward");
         require(dL_normal.empty() ||
-                    (last_frame_has_geometry_ && dL_normal.size() == static_cast<std::size_t>(last_pixels_) * 3),
+                    (last_frame_has_geometry_ &&
+                     dL_normal.size() == static_cast<std::size_t>(last_pixels_) * 3),
                 "dL_normal must be empty or have shape [3,H,W] after a geometry forward");
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& loss_color = grow(loss_color_, dL_color.size_bytes());
         Buffer& loss_alpha = grow(loss_alpha_, dL_alpha.size_bytes());
-        Buffer& loss_depth = last_frame_has_geometry_
-            ? grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float))
-            : dummy_;
-        Buffer& loss_normal = last_frame_has_geometry_
-            ? grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float))
-            : dummy_;
-        Buffer& median_state = last_frame_has_geometry_
-            ? grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float))
-            : dummy_;
+        Buffer& loss_depth =
+            last_frame_has_geometry_
+                ? grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float))
+                : dummy_;
+        Buffer& loss_normal =
+            last_frame_has_geometry_
+                ? grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float))
+                : dummy_;
+        Buffer& median_state =
+            last_frame_has_geometry_
+                ? grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float))
+                : dummy_;
         const std::size_t grad_count = static_cast<std::size_t>(count_) * 18;
         Buffer& grad = grow(blend_grad_, grad_count * sizeof(float));
         context_.write_buffer(loss_color, dL_color.data(), dL_color.size_bytes());
@@ -1360,14 +1423,16 @@ public:
             else
                 context_.write_buffer(loss_depth, dL_depth.data(), dL_depth.size_bytes());
             if (dL_normal.empty())
-                zero_buffer(loss_normal, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
+                zero_buffer(loss_normal,
+                            static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
             else
                 context_.write_buffer(loss_normal, dL_normal.data(), dL_normal.size_bytes());
             zero_buffer(median_state, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
         }
         zero_buffer(grad, grad_count * sizeof(float));
 
-        if (last_frame_has_geometry_) dispatch_median_backward(loss_depth, median_state);
+        if (last_frame_has_geometry_)
+            dispatch_median_backward(loss_depth, median_state);
 
         Push push{};
         push.u[0] = last_width_;
@@ -1385,52 +1450,47 @@ public:
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         push.u[13] = !dL_alpha.empty() ? 1u : 0u;
         configure_gut_backward(push);
-        dispatch(
-            backward_blend_pipeline(),
-            {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
-             &bucket_offsets_, &snap_, &loss_color, &loss_alpha,
-             last_primitive_ == SplatPrimitive::gaussian_3dgut ? frame_camera_ : &loss_normal,
-             &median_state, &grad},
-            push, div_up(last_bucket_limit_, 8));
+        dispatch(backward_blend_pipeline(),
+                 {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
+                  &bucket_offsets_, &snap_, &loss_color, &loss_alpha,
+                  last_primitive_ == SplatPrimitive::gaussian_3dgut ? frame_camera_ : &loss_normal,
+                  &median_state, &grad},
+                 push, div_up(last_bucket_limit_, 8));
         flush_batch();
 
         const auto packed = download_vector<float>(context_, grad, grad_count);
         SplatBlendGradients output;
-        output.mean2d.assign(packed.begin(), packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3);
-        output.conic_opacity.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3,
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7);
-        output.colors.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7,
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10);
-        output.ray_plane.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10,
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14);
-        output.normal.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14,
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 17);
+        output.mean2d.assign(packed.begin(),
+                             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3);
+        output.conic_opacity.assign(packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3,
+                                    packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7);
+        output.colors.assign(packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7,
+                             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10);
+        output.ray_plane.assign(packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10,
+                                packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14);
+        output.normal.assign(packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14,
+                             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 17);
         return output;
     }
 
-    SplatModelGradients backward(
-        const std::span<const float> dL_color, const std::span<const float> dL_alpha,
-        const std::span<const float> dL_depth, const std::span<const float> dL_normal) {
+    SplatModelGradients backward(const std::span<const float> dL_color,
+                                 const std::span<const float> dL_alpha,
+                                 const std::span<const float> dL_depth,
+                                 const std::span<const float> dL_normal) {
         // This also leaves the packed blend gradients resident for the model
         // pass below. Keeping this path simple makes the public CPU API useful
         // for parity tests; the device-resident training API can fuse the two
         // submissions without changing either shader.
         (void)backward_blend(dL_color, dL_alpha, dL_depth, dL_normal);
         const std::scoped_lock lock(context_.dispatch_mutex);
-        const std::size_t feature_count = has_sh_
-            ? static_cast<std::size_t>(count_) * sh_bases_ * 3
-            : static_cast<std::size_t>(count_) * 3;
+        const std::size_t feature_count = has_sh_ ? static_cast<std::size_t>(count_) * sh_bases_ * 3
+                                                  : static_cast<std::size_t>(count_) * 3;
         const std::size_t total_count = feature_count + static_cast<std::size_t>(count_) * 26;
         Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
 
         Push push{};
         push.u[0] = count_;
-        push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                    (raw_chain_ ? 4u : 0u) |
+        push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) | (raw_chain_ ? 4u : 0u) |
                     (last_frame_has_geometry_ ? 16u : 0u);
         push.u[2] = last_mode_;
         push.u[3] = last_width_;
@@ -1448,15 +1508,13 @@ public:
         set_float(push, 15, last_kernel_size_);
         set_float(push, 16, last_scale_modifier_);
         push.u[23] = last_primitive_ == SplatPrimitive::gaussian_3dgut ? last_gauss_slots_ : 0u;
-        dispatch_infos(
-            project_backward_,
-            {model_means(), model_opacities(), model_scales(),
-             model_rotations(), model_covariances(), model_colors(),
-             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
-             descriptor(blend_grad_), model_log_scales(),
-             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
-             descriptor(gradient)},
-            push, div_up(count_, 256));
+        dispatch_infos(project_backward_,
+                       {model_means(), model_opacities(), model_scales(), model_rotations(),
+                        model_covariances(), model_colors(), descriptor(*frame_camera_),
+                        descriptor(gauss_f_), descriptor(gauss_u_), descriptor(blend_grad_),
+                        model_log_scales(), model_raw_rotations(), model_opacity_logits(),
+                        model_filter_3d(), descriptor(gradient)},
+                       push, div_up(count_, 256));
         flush_batch();
 
         const auto packed = download_vector<float>(context_, gradient, total_count);
@@ -1468,8 +1526,10 @@ public:
             offset += size;
         };
         take(output.means, static_cast<std::size_t>(count_) * 3);
-        if (has_sh_) take(output.sh, feature_count);
-        else take(output.colors, feature_count);
+        if (has_sh_)
+            take(output.sh, feature_count);
+        else
+            take(output.colors, feature_count);
         take(output.opacities, count_);
         if (has_scales_) {
             take(output.scales, static_cast<std::size_t>(count_) * 3);
@@ -1490,22 +1550,25 @@ public:
         return output;
     }
 
-    void backward_blend_device(
-        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_gradients,
-        const SplatBufferView& dL_depth, const SplatBufferView& dL_normal) {
+    void backward_blend_device(const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+                               const SplatBufferView& packed_gradients,
+                               const SplatBufferView& dL_depth, const SplatBufferView& dL_normal) {
         require(last_frame_has_snapshots_,
                 "backward_blend_device requires the latest render to use pixel_snapshots=true");
-        const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t color_bytes =
+            static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
         const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
         const std::uint64_t depth_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
-        const std::uint64_t normal_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
-        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 18 * sizeof(float);
+        const std::uint64_t normal_bytes =
+            static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t gradient_bytes =
+            static_cast<std::uint64_t>(count_) * 18 * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
         require(dL_alpha.buffer == VK_NULL_HANDLE || dL_alpha.bytes >= alpha_bytes,
                 "device dL_alpha is too small");
-        require(packed_gradients.buffer != VK_NULL_HANDLE && packed_gradients.bytes >= gradient_bytes,
+        require(packed_gradients.buffer != VK_NULL_HANDLE &&
+                    packed_gradients.bytes >= gradient_bytes,
                 "device packed_gradients is too small");
         require(dL_depth.buffer == VK_NULL_HANDLE ||
                     (last_frame_has_geometry_ && dL_depth.bytes >= depth_bytes),
@@ -1515,8 +1578,8 @@ public:
                 "device dL_normal is too small or the forward had no geometry");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        const std::uint64_t alignment = std::max<std::uint64_t>(
-            4, properties.limits.minStorageBufferOffsetAlignment);
+        const std::uint64_t alignment =
+            std::max<std::uint64_t>(4, properties.limits.minStorageBufferOffsetAlignment);
         require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
                     packed_gradients.offset % alignment == 0 &&
                     (dL_depth.buffer == VK_NULL_HANDLE || dL_depth.offset % alignment == 0) &&
@@ -1524,32 +1587,31 @@ public:
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
 
         const std::scoped_lock lock(context_.dispatch_mutex);
-        Buffer& zero_depth = last_frame_has_geometry_
-            ? grow(loss_depth_, depth_bytes)
-            : dummy_;
-        Buffer& zero_normal = last_frame_has_geometry_
-            ? grow(loss_normal_, normal_bytes)
-            : dummy_;
-        Buffer& median_state = last_frame_has_geometry_
-            ? grow(median_state_, depth_bytes * 2)
-            : dummy_;
+        Buffer& zero_depth = last_frame_has_geometry_ ? grow(loss_depth_, depth_bytes) : dummy_;
+        Buffer& zero_normal = last_frame_has_geometry_ ? grow(loss_normal_, normal_bytes) : dummy_;
+        Buffer& median_state =
+            last_frame_has_geometry_ ? grow(median_state_, depth_bytes * 2) : dummy_;
         if (last_frame_has_geometry_) {
-            if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(zero_depth, depth_bytes);
-            if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(zero_normal, normal_bytes);
+            if (dL_depth.buffer == VK_NULL_HANDLE)
+                zero_buffer(zero_depth, depth_bytes);
+            if (dL_normal.buffer == VK_NULL_HANDLE)
+                zero_buffer(zero_normal, normal_bytes);
             zero_buffer(median_state, depth_bytes * 2);
         }
-        const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
-            ? descriptor(zero_depth)
-            : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
-        const VkDescriptorBufferInfo normal_info = dL_normal.buffer == VK_NULL_HANDLE
-            ? descriptor(zero_normal)
-            : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
-        if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
+        const VkDescriptorBufferInfo depth_info =
+            dL_depth.buffer == VK_NULL_HANDLE
+                ? descriptor(zero_depth)
+                : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
+        const VkDescriptorBufferInfo normal_info =
+            dL_normal.buffer == VK_NULL_HANDLE
+                ? descriptor(zero_normal)
+                : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
+        if (last_frame_has_geometry_)
+            dispatch_median_backward_info(depth_info, median_state);
         Push clear_push{};
         clear_push.u[0] = static_cast<std::uint32_t>(gradient_bytes / sizeof(float));
-        dispatch_infos(
-            clear_, {{packed_gradients.buffer, packed_gradients.offset, gradient_bytes}},
-            clear_push, div_up(clear_push.u[0], 256));
+        dispatch_infos(clear_, {{packed_gradients.buffer, packed_gradients.offset, gradient_bytes}},
+                       clear_push, div_up(clear_push.u[0], 256));
 
         Push push{};
         push.u[0] = last_width_;
@@ -1568,17 +1630,22 @@ public:
         push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
         configure_gut_backward(push);
         std::vector<VkDescriptorBufferInfo> infos{
-            descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-            descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
+            descriptor(tile_ranges_),
+            descriptor(*last_instance_values_),
+            descriptor(gauss_f_),
+            descriptor(out_f_),
+            descriptor(out_u_),
+            descriptor(bucket_offsets_),
+            descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
             dL_alpha.buffer != VK_NULL_HANDLE
                 ? VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes}
                 : descriptor(dummy_),
-            last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_) : normal_info, descriptor(median_state),
+            last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_)
+                                                              : normal_info,
+            descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
-        dispatch_infos(
-            backward_blend_pipeline(), infos, push,
-            div_up(last_bucket_limit_, 8));
+        dispatch_infos(backward_blend_pipeline(), infos, push, div_up(last_bucket_limit_, 8));
         flush_batch();
     }
 
@@ -1588,30 +1655,28 @@ public:
 
     std::uint64_t model_gradient_float_count() const noexcept {
         const std::uint64_t feature_count = has_sh_
-            ? static_cast<std::uint64_t>(count_) * sh_bases_ * 3
-            : static_cast<std::uint64_t>(count_) * 3;
+                                                ? static_cast<std::uint64_t>(count_) * sh_bases_ * 3
+                                                : static_cast<std::uint64_t>(count_) * 3;
         // Raw scale/rotation models never consume covariance gradients. The
         // device training layout omits those six zero-only floats per row.
-        return feature_count + static_cast<std::uint64_t>(count_) *
-            (has_scales_ ? 20 : 26);
+        return feature_count + static_cast<std::uint64_t>(count_) * (has_scales_ ? 20 : 26);
     }
 
     std::uint64_t sample_gradient_float_count(const bool omit_appearance) const noexcept {
-        return omit_appearance ? static_cast<std::uint64_t>(count_) *
-            (has_scales_ ? 20 : 26) : model_gradient_float_count();
+        return omit_appearance ? static_cast<std::uint64_t>(count_) * (has_scales_ ? 20 : 26)
+                               : model_gradient_float_count();
     }
 
-    void occupancy_device(
-        const SplatBufferView& points, std::uint32_t count,
-        const SplatCamera& camera, SplatSettings settings,
-        const SplatBufferView& occupancy, const SplatBufferView& inside,
-        bool reuse_prepared_view) {
+    void occupancy_device(const SplatBufferView& points, std::uint32_t count,
+                          const SplatCamera& camera, SplatSettings settings,
+                          const SplatBufferView& occupancy, const SplatBufferView& inside,
+                          bool reuse_prepared_view) {
         require(settings.primitive == SplatPrimitive::gaussian_3dgs,
                 "Vulkan 3DGUT occupancy queries are not implemented");
-        require(count > 0 && points.buffer != VK_NULL_HANDLE && points.bytes >= count*12ull &&
-            occupancy.buffer != VK_NULL_HANDLE && occupancy.bytes >= count*4ull &&
-            inside.buffer != VK_NULL_HANDLE && inside.bytes >= count*4ull,
-            "invalid device occupancy buffers");
+        require(count > 0 && points.buffer != VK_NULL_HANDLE && points.bytes >= count * 12ull &&
+                    occupancy.buffer != VK_NULL_HANDLE && occupancy.bytes >= count * 4ull &&
+                    inside.buffer != VK_NULL_HANDLE && inside.bytes >= count * 4ull,
+                "invalid device occupancy buffers");
         settings.need_depth = true;
         settings.pixel_snapshots = false;
         // Subsequent point chunks use the same projection and sorted tile lists.
@@ -1624,30 +1689,39 @@ public:
         }
         const std::scoped_lock lock(context_.dispatch_mutex);
         Push push{};
-        push.u[0]=count; push.u[1]=last_width_; push.u[2]=last_height_;
-        push.u[3]=last_grid_x_; push.u[4]=last_mode_;
-        set_float(push,6,last_fx_); set_float(push,7,last_fy_);
-        set_float(push,8,last_cx_); set_float(push,9,last_cy_);
-        set_float(push,10,last_k1_); set_float(push,11,last_k2_);
-        set_float(push,12,last_k3_); set_float(push,13,last_k4_);
-        const auto groups=div_up(count,64);
-        dispatch_infos(occupancy_, {descriptor(tile_ranges_), descriptor(*last_instance_values_),
-            descriptor(gauss_f_), descriptor(*frame_camera_), descriptor(points,count*12ull),
-            descriptor(occupancy,count*4ull), descriptor(inside,count*4ull)},
-            push, std::min(groups,65535u), div_up(groups,65535u));
+        push.u[0] = count;
+        push.u[1] = last_width_;
+        push.u[2] = last_height_;
+        push.u[3] = last_grid_x_;
+        push.u[4] = last_mode_;
+        set_float(push, 6, last_fx_);
+        set_float(push, 7, last_fy_);
+        set_float(push, 8, last_cx_);
+        set_float(push, 9, last_cy_);
+        set_float(push, 10, last_k1_);
+        set_float(push, 11, last_k2_);
+        set_float(push, 12, last_k3_);
+        set_float(push, 13, last_k4_);
+        const auto groups = div_up(count, 64);
+        dispatch_infos(occupancy_,
+                       {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                        descriptor(gauss_f_), descriptor(*frame_camera_),
+                        descriptor(points, count * 12ull), descriptor(occupancy, count * 4ull),
+                        descriptor(inside, count * 4ull)},
+                       push, std::min(groups, 65535u), div_up(groups, 65535u));
         sample_live_ = false;
         submit_batch(false);
     }
 
-    void sample_depth_device(
-        const SplatBufferView& world_points, std::uint32_t point_count,
-        const SplatCamera& camera, SplatSettings settings,
-        const SplatBufferView& camera_points, const SplatBufferView& inside) {
+    void sample_depth_device(const SplatBufferView& world_points, std::uint32_t point_count,
+                             const SplatCamera& camera, SplatSettings settings,
+                             const SplatBufferView& camera_points, const SplatBufferView& inside) {
         require(point_count > 0 && world_points.buffer != VK_NULL_HANDLE &&
                     world_points.bytes >= point_count * 12ull,
                 "device sample points must have shape [P,3]");
-        require(camera_points.buffer != VK_NULL_HANDLE && camera_points.bytes >= point_count * 12ull &&
-                    inside.buffer != VK_NULL_HANDLE && inside.bytes >= point_count * 4ull,
+        require(camera_points.buffer != VK_NULL_HANDLE &&
+                    camera_points.bytes >= point_count * 12ull && inside.buffer != VK_NULL_HANDLE &&
+                    inside.bytes >= point_count * 4ull,
                 "device sample destinations are too small");
         settings.need_depth = true;
         settings.pixel_snapshots = false;
@@ -1662,28 +1736,35 @@ public:
         push.u[3] = last_grid_x_;
         push.u[4] = last_mode_;
         push.u[5] = count_;
-        set_float(push, 6, last_fx_); set_float(push, 7, last_fy_);
-        set_float(push, 8, last_cx_); set_float(push, 9, last_cy_);
-        set_float(push, 10, last_k1_); set_float(push, 11, last_k2_);
-        set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
+        set_float(push, 6, last_fx_);
+        set_float(push, 7, last_fy_);
+        set_float(push, 8, last_cx_);
+        set_float(push, 9, last_cy_);
+        set_float(push, 10, last_k1_);
+        set_float(push, 11, last_k2_);
+        set_float(push, 12, last_k3_);
+        set_float(push, 13, last_k4_);
         set_float(push, 14, settings.point_depth_bracket);
         set_float(push, 15, settings.point_depth_tolerance);
         dispatch_depth_queries(world_points, point_count, output_f, output_u, push);
         record_buffer_copy({output_f.handle, output_f.offset, point_count * 12ull}, camera_points);
-        record_buffer_copy({output_u.handle, output_u.offset + point_count * 4ull, point_count * 4ull}, inside);
+        record_buffer_copy(
+            {output_u.handle, output_u.offset + point_count * 4ull, point_count * 4ull}, inside);
         sample_world_points_ = world_points;
         sample_point_count_ = point_count;
         sample_live_ = true;
         submit_batch(false);
     }
 
-    void sample_depth_backward_device(
-        const SplatBufferView& loss, const SplatBufferView& gradient,
-        const SplatBufferView& point_gradient, const bool omit_appearance) {
+    void sample_depth_backward_device(const SplatBufferView& loss, const SplatBufferView& gradient,
+                                      const SplatBufferView& point_gradient,
+                                      const bool omit_appearance) {
         require(sample_live_, "device sample backward requires a live query");
         require(loss.buffer != VK_NULL_HANDLE && loss.bytes >= sample_point_count_ * 12ull &&
-                    point_gradient.buffer != VK_NULL_HANDLE && point_gradient.bytes >= sample_point_count_ * 12ull &&
-                    gradient.buffer != VK_NULL_HANDLE && gradient.bytes >= sample_gradient_float_count(omit_appearance) * sizeof(float),
+                    point_gradient.buffer != VK_NULL_HANDLE &&
+                    point_gradient.bytes >= sample_point_count_ * 12ull &&
+                    gradient.buffer != VK_NULL_HANDLE &&
+                    gradient.bytes >= sample_gradient_float_count(omit_appearance) * sizeof(float),
                 "device sample backward buffers are too small");
         const std::scoped_lock lock(context_.dispatch_mutex);
         const auto bytes = blend_gradient_float_count() * sizeof(float);
@@ -1692,41 +1773,52 @@ public:
         zero_buffer(blend_gradient, bytes);
         Push sample_push{};
         sample_push.u[0] = sample_point_count_;
-        sample_push.u[1] = last_width_; sample_push.u[2] = last_height_;
-        sample_push.u[3] = last_grid_x_; sample_push.u[4] = last_mode_;
+        sample_push.u[1] = last_width_;
+        sample_push.u[2] = last_height_;
+        sample_push.u[3] = last_grid_x_;
+        sample_push.u[4] = last_mode_;
         sample_push.u[5] = count_;
-        set_float(sample_push, 6, last_fx_); set_float(sample_push, 7, last_fy_);
-        set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
-        set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
-        set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
+        set_float(sample_push, 6, last_fx_);
+        set_float(sample_push, 7, last_fy_);
+        set_float(sample_push, 8, last_cx_);
+        set_float(sample_push, 9, last_cy_);
+        set_float(sample_push, 10, last_k1_);
+        set_float(sample_push, 11, last_k2_);
+        set_float(sample_push, 12, last_k3_);
+        set_float(sample_push, 13, last_k4_);
         dispatch_sample_backward(
             {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-             descriptor(*frame_camera_), descriptor(sample_world_points_, sample_point_count_ * 12ull),
-             descriptor(sample_f_), descriptor(sample_u_), descriptor(loss, sample_point_count_ * 12ull),
+             descriptor(*frame_camera_),
+             descriptor(sample_world_points_, sample_point_count_ * 12ull), descriptor(sample_f_),
+             descriptor(sample_u_), descriptor(loss, sample_point_count_ * 12ull),
              descriptor(blend_gradient), descriptor(point_gradient, sample_point_count_ * 12ull)},
             sample_push);
 
         Push project_push{};
         project_push.u[0] = count_;
-        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u) |
-                            (last_frame_has_geometry_ ? 16u : 0u) |
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) | (raw_chain_ ? 4u : 0u) |
+                            (has_scales_ ? 8u : 0u) | (last_frame_has_geometry_ ? 16u : 0u) |
                             (omit_appearance ? 32u : 0u);
-        project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
-        project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
+        project_push.u[2] = last_mode_;
+        project_push.u[3] = last_width_;
+        project_push.u[4] = last_height_;
+        project_push.u[5] = sh_degree_;
         project_push.u[6] = sh_bases_;
-        set_float(project_push, 7, last_fx_); set_float(project_push, 8, last_fy_);
-        set_float(project_push, 9, last_cx_); set_float(project_push, 10, last_cy_);
-        set_float(project_push, 11, last_k1_); set_float(project_push, 12, last_k2_);
-        set_float(project_push, 13, last_k3_); set_float(project_push, 14, last_k4_);
+        set_float(project_push, 7, last_fx_);
+        set_float(project_push, 8, last_fy_);
+        set_float(project_push, 9, last_cx_);
+        set_float(project_push, 10, last_cy_);
+        set_float(project_push, 11, last_k1_);
+        set_float(project_push, 12, last_k2_);
+        set_float(project_push, 13, last_k3_);
+        set_float(project_push, 14, last_k4_);
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
         dispatch_infos(
             project_backward_,
-            {model_means(), model_opacities(), model_scales(),
-             model_rotations(), model_covariances(), model_colors(),
-             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
-             descriptor(blend_gradient), model_log_scales(),
+            {model_means(), model_opacities(), model_scales(), model_rotations(),
+             model_covariances(), model_colors(), descriptor(*frame_camera_), descriptor(gauss_f_),
+             descriptor(gauss_u_), descriptor(blend_gradient), model_log_scales(),
              model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
              descriptor(gradient, sample_gradient_float_count(omit_appearance) * sizeof(float))},
             project_push, div_up(count_, 256));
@@ -1734,9 +1826,8 @@ public:
         submit_batch(false);
     }
 
-    SplatDepthSamples sample_depth(
-        const std::span<const float> world_points, const SplatCamera& camera,
-        SplatSettings settings) {
+    SplatDepthSamples sample_depth(const std::span<const float> world_points,
+                                   const SplatCamera& camera, SplatSettings settings) {
         require(!world_points.empty() && world_points.size() % 3 == 0,
                 "sample_depth world_points must have shape [P,3]");
         settings.need_depth = true;
@@ -1745,10 +1836,10 @@ public:
         const auto point_count = static_cast<std::uint32_t>(world_points.size() / 3);
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& points = grow(sample_points_, world_points.size_bytes());
-        Buffer& output_f = grow(
-            sample_f_, static_cast<std::uint64_t>(point_count) * 4 * sizeof(float));
-        Buffer& output_u = grow(
-            sample_u_, static_cast<std::uint64_t>(point_count) * 2 * sizeof(std::uint32_t));
+        Buffer& output_f =
+            grow(sample_f_, static_cast<std::uint64_t>(point_count) * 4 * sizeof(float));
+        Buffer& output_u =
+            grow(sample_u_, static_cast<std::uint64_t>(point_count) * 2 * sizeof(std::uint32_t));
         context_.write_buffer(points, world_points.data(), world_points.size_bytes());
         zero_buffer(output_f, static_cast<std::size_t>(point_count) * 4 * sizeof(float));
         zero_buffer(output_u, static_cast<std::size_t>(point_count) * 2 * sizeof(std::uint32_t));
@@ -1759,42 +1850,46 @@ public:
         push.u[3] = last_grid_x_;
         push.u[4] = last_mode_;
         push.u[5] = count_;
-        set_float(push, 6, last_fx_); set_float(push, 7, last_fy_);
-        set_float(push, 8, last_cx_); set_float(push, 9, last_cy_);
-        set_float(push, 10, last_k1_); set_float(push, 11, last_k2_);
-        set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
+        set_float(push, 6, last_fx_);
+        set_float(push, 7, last_fy_);
+        set_float(push, 8, last_cx_);
+        set_float(push, 9, last_cy_);
+        set_float(push, 10, last_k1_);
+        set_float(push, 11, last_k2_);
+        set_float(push, 12, last_k3_);
+        set_float(push, 13, last_k4_);
         set_float(push, 14, settings.point_depth_bracket);
         set_float(push, 15, settings.point_depth_tolerance);
         dispatch_depth_queries({points.handle, points.offset, world_points.size_bytes()},
                                point_count, output_f, output_u, push);
         flush_batch();
-        const auto packed_f = download_vector<float>(
-            context_, output_f, static_cast<std::size_t>(point_count) * 4);
+        const auto packed_f =
+            download_vector<float>(context_, output_f, static_cast<std::size_t>(point_count) * 4);
         const auto packed_u = download_vector<std::uint32_t>(
             context_, output_u, static_cast<std::size_t>(point_count) * 2);
         SplatDepthSamples output;
         output.camera_points.assign(
             packed_f.begin(), packed_f.begin() + static_cast<std::ptrdiff_t>(point_count) * 3);
-        output.median_depth.assign(
-            packed_f.begin() + static_cast<std::ptrdiff_t>(point_count) * 3, packed_f.end());
-        output.n_contrib.assign(
-            packed_u.begin(), packed_u.begin() + static_cast<std::ptrdiff_t>(point_count));
-        output.inside.assign(
-            packed_u.begin() + static_cast<std::ptrdiff_t>(point_count), packed_u.end());
+        output.median_depth.assign(packed_f.begin() + static_cast<std::ptrdiff_t>(point_count) * 3,
+                                   packed_f.end());
+        output.n_contrib.assign(packed_u.begin(),
+                                packed_u.begin() + static_cast<std::ptrdiff_t>(point_count));
+        output.inside.assign(packed_u.begin() + static_cast<std::ptrdiff_t>(point_count),
+                             packed_u.end());
         sample_point_count_ = point_count;
         sample_live_ = true;
         return output;
     }
 
-    SplatDepthSampleGradients sample_depth_backward(
-        const std::span<const float> dL_camera_points) {
+    SplatDepthSampleGradients sample_depth_backward(const std::span<const float> dL_camera_points) {
         require(sample_live_, "sample_depth_backward requires a live sample_depth result");
         require(dL_camera_points.size() == static_cast<std::size_t>(sample_point_count_) * 3,
                 "dL_camera_points must have shape [P,3]");
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& loss = grow(sample_loss_, dL_camera_points.size_bytes());
-        Buffer& point_gradient = grow(
-            sample_point_grad_, static_cast<std::uint64_t>(sample_point_count_) * 3 * sizeof(float));
+        Buffer& point_gradient =
+            grow(sample_point_grad_,
+                 static_cast<std::uint64_t>(sample_point_count_) * 3 * sizeof(float));
         const auto sample_blend_bytes =
             static_cast<VkDeviceSize>(blend_gradient_float_count()) * sizeof(float);
         const VkDeviceSize sample_blend_aligned =
@@ -1808,51 +1903,61 @@ public:
                     static_cast<std::size_t>(blend_gradient_float_count()) * sizeof(float));
         Push sample_push{};
         sample_push.u[0] = sample_point_count_;
-        sample_push.u[1] = last_width_; sample_push.u[2] = last_height_;
-        sample_push.u[3] = last_grid_x_; sample_push.u[4] = last_mode_;
+        sample_push.u[1] = last_width_;
+        sample_push.u[2] = last_height_;
+        sample_push.u[3] = last_grid_x_;
+        sample_push.u[4] = last_mode_;
         sample_push.u[5] = count_;
-        set_float(sample_push, 6, last_fx_); set_float(sample_push, 7, last_fy_);
-        set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
-        set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
-        set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
-        dispatch_sample_backward(
-            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-             descriptor(*frame_camera_), descriptor(sample_points_), descriptor(sample_f_),
-             descriptor(sample_u_), descriptor(loss), descriptor(blend_gradient), descriptor(point_gradient)},
-            sample_push);
+        set_float(sample_push, 6, last_fx_);
+        set_float(sample_push, 7, last_fy_);
+        set_float(sample_push, 8, last_cx_);
+        set_float(sample_push, 9, last_cy_);
+        set_float(sample_push, 10, last_k1_);
+        set_float(sample_push, 11, last_k2_);
+        set_float(sample_push, 12, last_k3_);
+        set_float(sample_push, 13, last_k4_);
+        dispatch_sample_backward({descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                                  descriptor(gauss_f_), descriptor(*frame_camera_),
+                                  descriptor(sample_points_), descriptor(sample_f_),
+                                  descriptor(sample_u_), descriptor(loss),
+                                  descriptor(blend_gradient), descriptor(point_gradient)},
+                                 sample_push);
 
         const std::size_t total_count = static_cast<std::size_t>(model_gradient_float_count()) +
-            (has_scales_ ? static_cast<std::size_t>(count_) * 6 : 0);
+                                        (has_scales_ ? static_cast<std::size_t>(count_) * 6 : 0);
         Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
         Push project_push{};
         project_push.u[0] = count_;
-        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u) |
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) | (raw_chain_ ? 4u : 0u) |
                             (last_frame_has_geometry_ ? 16u : 0u);
-        project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
-        project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
+        project_push.u[2] = last_mode_;
+        project_push.u[3] = last_width_;
+        project_push.u[4] = last_height_;
+        project_push.u[5] = sh_degree_;
         project_push.u[6] = sh_bases_;
-        set_float(project_push, 7, last_fx_); set_float(project_push, 8, last_fy_);
-        set_float(project_push, 9, last_cx_); set_float(project_push, 10, last_cy_);
-        set_float(project_push, 11, last_k1_); set_float(project_push, 12, last_k2_);
-        set_float(project_push, 13, last_k3_); set_float(project_push, 14, last_k4_);
+        set_float(project_push, 7, last_fx_);
+        set_float(project_push, 8, last_fy_);
+        set_float(project_push, 9, last_cx_);
+        set_float(project_push, 10, last_cy_);
+        set_float(project_push, 11, last_k1_);
+        set_float(project_push, 12, last_k2_);
+        set_float(project_push, 13, last_k3_);
+        set_float(project_push, 14, last_k4_);
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
-        dispatch_infos(
-            project_backward_,
-            {model_means(), model_opacities(), model_scales(),
-             model_rotations(), model_covariances(), model_colors(),
-             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
-             descriptor(blend_gradient), model_log_scales(),
-             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
-             descriptor(gradient)},
-            project_push, div_up(count_, 256));
+        dispatch_infos(project_backward_,
+                       {model_means(), model_opacities(), model_scales(), model_rotations(),
+                        model_covariances(), model_colors(), descriptor(*frame_camera_),
+                        descriptor(gauss_f_), descriptor(gauss_u_), descriptor(blend_gradient),
+                        model_log_scales(), model_raw_rotations(), model_opacity_logits(),
+                        model_filter_3d(), descriptor(gradient)},
+                       project_push, div_up(count_, 256));
         flush_batch();
 
         const auto packed = download_vector<float>(context_, gradient, total_count);
         SplatDepthSampleGradients result;
-        result.points = download_vector<float>(
-            context_, point_gradient, static_cast<std::size_t>(sample_point_count_) * 3);
+        result.points = download_vector<float>(context_, point_gradient,
+                                               static_cast<std::size_t>(sample_point_count_) * 3);
         std::size_t offset = 0;
         const auto take = [&](std::vector<float>& destination, const std::size_t size) {
             destination.assign(packed.begin() + static_cast<std::ptrdiff_t>(offset),
@@ -1860,11 +1965,12 @@ public:
             offset += size;
         };
         take(result.model.means, static_cast<std::size_t>(count_) * 3);
-        const std::size_t feature_count = has_sh_
-            ? static_cast<std::size_t>(count_) * sh_bases_ * 3
-            : static_cast<std::size_t>(count_) * 3;
-        if (has_sh_) take(result.model.sh, feature_count);
-        else take(result.model.colors, feature_count);
+        const std::size_t feature_count = has_sh_ ? static_cast<std::size_t>(count_) * sh_bases_ * 3
+                                                  : static_cast<std::size_t>(count_) * 3;
+        if (has_sh_)
+            take(result.model.sh, feature_count);
+        else
+            take(result.model.colors, feature_count);
         take(result.model.opacities, count_);
         if (has_scales_) {
             take(result.model.scales, static_cast<std::size_t>(count_) * 3);
@@ -1883,21 +1989,25 @@ public:
         return result;
     }
 
-    void multi_view_loss_device(
-        const SplatDeviceMultiViewInput& input, const SplatDeviceMultiViewOutput& destination) {
+    void multi_view_loss_device(const SplatDeviceMultiViewInput& input,
+                                const SplatDeviceMultiViewOutput& destination) {
         const auto& reference = input.reference_camera;
         const auto& neighbour = input.neighbour_camera;
-        require(reference.mode == 0 && neighbour.mode == 0 &&
-                    reference.width > 0 && reference.height > 0 && neighbour.width > 0 && neighbour.height > 0 &&
-                    reference.world_to_camera.size() == 16 && neighbour.world_to_camera.size() == 16,
+        require(reference.mode == 0 && neighbour.mode == 0 && reference.width > 0 &&
+                    reference.height > 0 && neighbour.width > 0 && neighbour.height > 0 &&
+                    reference.world_to_camera.size() == 16 &&
+                    neighbour.world_to_camera.size() == 16,
                 "device multi-view requires pinhole cameras and valid transforms");
-        require(input.geometry_weight >= 0.F && input.ncc_weight >= 0.F && input.pixel_noise_threshold > 0.F,
+        require(input.geometry_weight >= 0.F && input.ncc_weight >= 0.F &&
+                    input.pixel_noise_threshold > 0.F,
                 "invalid device multi-view weights/threshold");
         const std::uint64_t pixels = static_cast<std::uint64_t>(reference.width) * reference.height;
-        const std::uint64_t neighbour_pixels = static_cast<std::uint64_t>(neighbour.width) * neighbour.height;
+        const std::uint64_t neighbour_pixels =
+            static_cast<std::uint64_t>(neighbour.width) * neighbour.height;
         const bool enable_ncc = input.ncc_weight > 0.F;
         const auto checked = [&](const SplatBufferView& view, std::uint64_t bytes) {
-            require(view.buffer != VK_NULL_HANDLE && view.bytes >= bytes, "device multi-view buffer is too small");
+            require(view.buffer != VK_NULL_HANDLE && view.bytes >= bytes,
+                    "device multi-view buffer is too small");
             return descriptor(view, bytes);
         };
         float rr[9]{};
@@ -1916,13 +2026,11 @@ public:
         for (int row = 0; row < 3; ++row) {
             for (int column = 0; column < 3; ++column) {
                 for (int k = 0; k < 3; ++k)
-                    transform[3 * row + column] +=
-                        rn[3 * row + k] * rr[3 * column + k];
+                    transform[3 * row + column] += rn[3 * row + k] * rr[3 * column + k];
             }
             transform[9 + row] = tn[row];
             for (int column = 0; column < 3; ++column)
-                transform[9 + row] -=
-                    transform[3 * row + column] * tr[column];
+                transform[9 + row] -= transform[3 * row + column] * tr[column];
         }
 
         const std::scoped_lock lock(context_.dispatch_mutex);
@@ -1936,36 +2044,50 @@ public:
         push.u[1] = reference.height;
         push.u[2] = neighbour.width;
         push.u[3] = neighbour.height;
-        set_float(push, 4, reference.fx); set_float(push, 5, reference.fy);
-        set_float(push, 6, reference.cx); set_float(push, 7, reference.cy);
-        set_float(push, 8, neighbour.fx); set_float(push, 9, neighbour.fy);
-        set_float(push, 10, neighbour.cx); set_float(push, 11, neighbour.cy);
+        set_float(push, 4, reference.fx);
+        set_float(push, 5, reference.fy);
+        set_float(push, 6, reference.cx);
+        set_float(push, 7, reference.cy);
+        set_float(push, 8, neighbour.fx);
+        set_float(push, 9, neighbour.fy);
+        set_float(push, 10, neighbour.cx);
+        set_float(push, 11, neighbour.cy);
         set_float(push, 12, input.pixel_noise_threshold);
         push.u[13] = ((input.reference_mask.buffer != VK_NULL_HANDLE) ? 1u : 0u) |
                      ((input.neighbour_mask.buffer != VK_NULL_HANDLE) ? 2u : 0u) |
-                     (input.robust_ncc ? 4u : 0u) |
-                     (enable_ncc ? 8u : 0u);
+                     (input.robust_ncc ? 4u : 0u) | (enable_ncc ? 8u : 0u);
         set_float(push, 14, input.geometry_weight);
         set_float(push, 15, input.ncc_weight);
         set_float(push, 16, input.ncc_lambda_reference);
         set_float(push, 17, input.ncc_sharpness);
         set_float(push, 18, std::clamp(input.ncc_min_weight, 0.0F, 1.0F));
         const std::vector<VkDescriptorBufferInfo> buffers{
-            checked(input.reference_depth, pixels * 4), checked(input.reference_normal, pixels * 12),
+            checked(input.reference_depth, pixels * 4),
+            checked(input.reference_normal, pixels * 12),
             enable_ncc ? checked(input.reference_gray, pixels * 4) : descriptor(dummy_),
-            checked(input.sampled_neighbour_points, pixels * 12), checked(input.sampled_inside, pixels * 4),
+            checked(input.sampled_neighbour_points, pixels * 12),
+            checked(input.sampled_inside, pixels * 4),
             enable_ncc ? checked(input.neighbour_gray, neighbour_pixels * 4) : descriptor(dummy_),
             descriptor(transform_buffer),
-            input.reference_mask.buffer != VK_NULL_HANDLE ? checked(input.reference_mask, pixels * 4) : descriptor(dummy_),
-            input.neighbour_mask.buffer != VK_NULL_HANDLE ? checked(input.neighbour_mask, neighbour_pixels * 4) : descriptor(dummy_),
+            input.reference_mask.buffer != VK_NULL_HANDLE
+                ? checked(input.reference_mask, pixels * 4)
+                : descriptor(dummy_),
+            input.neighbour_mask.buffer != VK_NULL_HANDLE
+                ? checked(input.neighbour_mask, neighbour_pixels * 4)
+                : descriptor(dummy_),
             descriptor(output)};
-        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
+        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16),
+                       div_up(reference.height, 16));
         reduce_multi_view_terms(buffers, push, static_cast<std::uint32_t>(pixels));
         push.u[13] |= 0x80000000u;
-        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
-        record_buffer_copy({output.handle, output.offset, pixels * 4}, destination.reference_depth_gradient);
-        record_buffer_copy({output.handle, output.offset + pixels * 4, pixels * 12}, destination.reference_normal_gradient);
-        record_buffer_copy({output.handle, output.offset + pixels * 16, pixels * 12}, destination.sampled_point_gradient);
+        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16),
+                       div_up(reference.height, 16));
+        record_buffer_copy({output.handle, output.offset, pixels * 4},
+                           destination.reference_depth_gradient);
+        record_buffer_copy({output.handle, output.offset + pixels * 4, pixels * 12},
+                           destination.reference_normal_gradient);
+        record_buffer_copy({output.handle, output.offset + pixels * 16, pixels * 12},
+                           destination.sampled_point_gradient);
         record_buffer_copy({output.handle, output.offset + pixels * 28, 20}, destination.terms);
         submit_batch(false);
     }
@@ -1975,14 +2097,12 @@ public:
         const auto& neighbour = input.neighbour_camera;
         require(reference.mode == 0 && neighbour.mode == 0,
                 "multi_view_loss matches the CUDA pinhole-only training path");
-        require(reference.width > 0 && reference.height > 0 &&
-                    neighbour.width > 0 && neighbour.height > 0,
+        require(reference.width > 0 && reference.height > 0 && neighbour.width > 0 &&
+                    neighbour.height > 0,
                 "multi_view_loss camera dimensions must be positive");
-        require(reference.world_to_camera.size() == 16 &&
-                    neighbour.world_to_camera.size() == 16,
+        require(reference.world_to_camera.size() == 16 && neighbour.world_to_camera.size() == 16,
                 "multi_view_loss camera transforms must contain 16 floats");
-        const std::size_t pixels =
-            static_cast<std::size_t>(reference.width) * reference.height;
+        const std::size_t pixels = static_cast<std::size_t>(reference.width) * reference.height;
         const std::size_t neighbour_pixels =
             static_cast<std::size_t>(neighbour.width) * neighbour.height;
         require(input.reference_depth.size() == pixels,
@@ -1995,12 +2115,11 @@ public:
                 "multi_view_loss sampled_inside must have shape [H,W]");
         const bool enable_ncc = input.ncc_weight > 0.0F;
         require(!enable_ncc || (input.reference_gray.size() == pixels &&
-                    input.neighbour_gray.size() == neighbour_pixels),
+                                input.neighbour_gray.size() == neighbour_pixels),
                 "multi_view_loss NCC images have the wrong shape");
         require(input.reference_mask.empty() || input.reference_mask.size() == pixels,
                 "multi_view_loss reference_mask has the wrong shape");
-        require(input.neighbour_mask.empty() ||
-                    input.neighbour_mask.size() == neighbour_pixels,
+        require(input.neighbour_mask.empty() || input.neighbour_mask.size() == neighbour_pixels,
                 "multi_view_loss neighbour_mask has the wrong shape");
         require(input.geometry_weight >= 0.0F && input.ncc_weight >= 0.0F,
                 "multi_view_loss weights must be non-negative");
@@ -2021,13 +2140,11 @@ public:
         for (int row = 0; row < 3; ++row) {
             for (int column = 0; column < 3; ++column) {
                 for (int k = 0; k < 3; ++k)
-                    transform[3 * row + column] +=
-                        rn[3 * row + k] * rr[3 * column + k];
+                    transform[3 * row + column] += rn[3 * row + k] * rr[3 * column + k];
             }
             transform[9 + row] = tn[row];
             for (int column = 0; column < 3; ++column)
-                transform[9 + row] -=
-                    transform[3 * row + column] * tr[column];
+                transform[9 + row] -= transform[3 * row + column] * tr[column];
         }
 
         const std::scoped_lock lock(context_.dispatch_mutex);
@@ -2036,19 +2153,20 @@ public:
         Buffer& reference_gray = grow(multi_reference_gray_, pixels * sizeof(float));
         Buffer& sampled = grow(multi_sampled_, 3 * pixels * sizeof(float));
         Buffer& inside = grow(multi_inside_, pixels * sizeof(std::uint32_t));
-        Buffer& neighbour_gray = grow(
-            multi_neighbour_gray_, neighbour_pixels * sizeof(float));
+        Buffer& neighbour_gray = grow(multi_neighbour_gray_, neighbour_pixels * sizeof(float));
         Buffer& transform_buffer = grow(multi_transform_, sizeof(transform));
         Buffer& reference_mask = grow(multi_reference_mask_, pixels * sizeof(float));
-        Buffer& neighbour_mask = grow(
-            multi_neighbour_mask_, neighbour_pixels * sizeof(float));
+        Buffer& neighbour_mask = grow(multi_neighbour_mask_, neighbour_pixels * sizeof(float));
         const std::size_t output_count = multi_view_output_count(pixels);
         Buffer& output = grow(multi_output_, output_count * sizeof(float));
-        context_.write_buffer(depth, input.reference_depth.data(), input.reference_depth.size_bytes());
-        context_.write_buffer(normal, input.reference_normal.data(), input.reference_normal.size_bytes());
+        context_.write_buffer(depth, input.reference_depth.data(),
+                              input.reference_depth.size_bytes());
+        context_.write_buffer(normal, input.reference_normal.data(),
+                              input.reference_normal.size_bytes());
         context_.write_buffer(sampled, input.sampled_neighbour_points.data(),
                               input.sampled_neighbour_points.size_bytes());
-        context_.write_buffer(inside, input.sampled_inside.data(), input.sampled_inside.size_bytes());
+        context_.write_buffer(inside, input.sampled_inside.data(),
+                              input.sampled_inside.size_bytes());
         context_.write_buffer(transform_buffer, transform, sizeof(transform));
         if (enable_ncc) {
             context_.write_buffer(reference_gray, input.reference_gray.data(),
@@ -2069,14 +2187,17 @@ public:
         push.u[1] = reference.height;
         push.u[2] = neighbour.width;
         push.u[3] = neighbour.height;
-        set_float(push, 4, reference.fx); set_float(push, 5, reference.fy);
-        set_float(push, 6, reference.cx); set_float(push, 7, reference.cy);
-        set_float(push, 8, neighbour.fx); set_float(push, 9, neighbour.fy);
-        set_float(push, 10, neighbour.cx); set_float(push, 11, neighbour.cy);
+        set_float(push, 4, reference.fx);
+        set_float(push, 5, reference.fy);
+        set_float(push, 6, reference.cx);
+        set_float(push, 7, reference.cy);
+        set_float(push, 8, neighbour.fx);
+        set_float(push, 9, neighbour.fy);
+        set_float(push, 10, neighbour.cx);
+        set_float(push, 11, neighbour.cy);
         set_float(push, 12, input.pixel_noise_threshold);
         push.u[13] = (!input.reference_mask.empty() ? 1u : 0u) |
-                     (!input.neighbour_mask.empty() ? 2u : 0u) |
-                     (input.robust_ncc ? 4u : 0u) |
+                     (!input.neighbour_mask.empty() ? 2u : 0u) | (input.robust_ncc ? 4u : 0u) |
                      (enable_ncc ? 8u : 0u);
         set_float(push, 14, input.geometry_weight);
         set_float(push, 15, input.ncc_weight);
@@ -2084,14 +2205,14 @@ public:
         set_float(push, 17, input.ncc_sharpness);
         set_float(push, 18, std::clamp(input.ncc_min_weight, 0.0F, 1.0F));
         const std::vector<Buffer*> buffers{
-            &depth, &normal, &reference_gray, &sampled, &inside,
-            &neighbour_gray, &transform_buffer, &reference_mask,
-            &neighbour_mask, &output};
+            &depth,          &normal,           &reference_gray, &sampled,        &inside,
+            &neighbour_gray, &transform_buffer, &reference_mask, &neighbour_mask, &output};
         dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
                  div_up(reference.height, 16));
         std::vector<VkDescriptorBufferInfo> reduction_buffers;
         reduction_buffers.reserve(buffers.size());
-        for (const auto* buffer : buffers) reduction_buffers.push_back(descriptor(*buffer));
+        for (const auto* buffer : buffers)
+            reduction_buffers.push_back(descriptor(*buffer));
         reduce_multi_view_terms(reduction_buffers, push, static_cast<std::uint32_t>(pixels));
         push.u[13] |= 0x80000000u;
         dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
@@ -2112,19 +2233,15 @@ public:
         result.geometry_pixels = static_cast<std::uint64_t>(terms[1]);
         result.geometry_candidates = static_cast<std::uint64_t>(terms[4]);
         result.ncc_pixels = static_cast<std::uint64_t>(terms[3]);
-        result.geometry = result.geometry_pixels != 0
-            ? terms[0] / terms[1] : 0.0F;
+        result.geometry = result.geometry_pixels != 0 ? terms[0] / terms[1] : 0.0F;
         result.ncc = result.ncc_pixels != 0 ? terms[2] / terms[3] : 0.0F;
         return result;
     }
 
     SplatDevicePhotometricOutput dispatch_photometric_locked(
-        const VkDescriptorBufferInfo& prediction,
-        const VkDescriptorBufferInfo& target,
-        const VkDescriptorBufferInfo& mask,
-        const bool mask_enabled,
-        const std::uint32_t width, const std::uint32_t height,
-        const float ssim_weight, const float photometric_weight) {
+        const VkDescriptorBufferInfo& prediction, const VkDescriptorBufferInfo& target,
+        const VkDescriptorBufferInfo& mask, const bool mask_enabled, const std::uint32_t width,
+        const std::uint32_t height, const float ssim_weight, const float photometric_weight) {
         const std::size_t pixels = static_cast<std::size_t>(width) * height;
         const std::size_t count = 3 * pixels;
         // The seven per-plane SSIM scratch buffers only live between the
@@ -2146,92 +2263,86 @@ public:
         // Passes 0/1 use work4 only until the loss map is written. The
         // gradient half of output is first written by pass 3, so it can hold
         // work4 without any overlapping read/write within a dispatch.
-        const VkDescriptorBufferInfo work4_view{
-            output.handle, 0, count * sizeof(float)};
-        const std::uint32_t reduction_groups =
-            div_up(static_cast<std::uint32_t>(count), 256);
-        Buffer& reduction = grow(
-            ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float));
+        const VkDescriptorBufferInfo work4_view{output.handle, 0, count * sizeof(float)};
+        const std::uint32_t reduction_groups = div_up(static_cast<std::uint32_t>(count), 256);
+        Buffer& reduction =
+            grow(ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float));
         // The loss output is consumed by the following compute dispatches, so
         // record its clear in their batch instead of paying a standalone
         // transfer submission and queue wait every training step.
         begin_batch();
         const VkDeviceSize output_bytes = 2 * count * sizeof(float);
         vkCmdFillBuffer(command_, output.handle, 0, output_bytes, 0u);
-        VkBufferMemoryBarrier output_fill_barrier{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        VkBufferMemoryBarrier output_fill_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         output_fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        output_fill_barrier.dstAccessMask =
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        output_fill_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         output_fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         output_fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         output_fill_barrier.buffer = output.handle;
         output_fill_barrier.offset = 0;
         output_fill_barrier.size = output_bytes;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
-            &output_fill_barrier, 0, nullptr);
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
+                             &output_fill_barrier, 0, nullptr);
 
         Push push{};
         push.u[0] = width;
         push.u[1] = height;
         set_float(push, 2, ssim_weight);
         push.u[3] = mask_enabled ? 1u : 0u;
-        const float normalization = photometric_weight /
-            static_cast<float>(3U * (width - 10U) * (height - 10U));
+        const float normalization =
+            photometric_weight / static_cast<float>(3U * (width - 10U) * (height - 10U));
         set_float(push, 4, normalization);
         push.u[5] = 0u;
-        const std::vector<VkDescriptorBufferInfo> buffers{
-            prediction, target, mask,
-            descriptor(work0), descriptor(work1), descriptor(work2),
-            descriptor(work3), work4_view, descriptor(dmu),
-            descriptor(dvariance), descriptor(dcovariance), descriptor(output)};
-        dispatch_infos(
-            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        const std::vector<VkDescriptorBufferInfo> buffers{prediction,
+                                                          target,
+                                                          mask,
+                                                          descriptor(work0),
+                                                          descriptor(work1),
+                                                          descriptor(work2),
+                                                          descriptor(work3),
+                                                          work4_view,
+                                                          descriptor(dmu),
+                                                          descriptor(dvariance),
+                                                          descriptor(dcovariance),
+                                                          descriptor(output)};
+        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
         push.u[5] = 1u;
-        dispatch_infos(
-            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
         push.u[5] = 2u;
-        dispatch_infos(
-            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
         push.u[5] = 3u;
-        dispatch_infos(
-            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
         Push reduce_push{};
         reduce_push.u[0] = width;
         reduce_push.u[1] = height;
         reduce_push.u[2] = 0u;
         reduce_push.u[3] = reduction_groups;
         set_float(reduce_push, 4, normalization);
-        const std::vector<VkDescriptorBufferInfo> reduce_buffers{
-            descriptor(output), descriptor(reduction)};
+        const std::vector<VkDescriptorBufferInfo> reduce_buffers{descriptor(output),
+                                                                 descriptor(reduction)};
         dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, reduction_groups);
         reduce_push.u[2] = 1u;
         dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, 1);
 
-        return {
-            {output.handle, 0, count * sizeof(float)},
-            {output.handle, count * sizeof(float), count * sizeof(float)},
-            {reduction.handle, 0, sizeof(float)}};
+        return {{output.handle, 0, count * sizeof(float)},
+                {output.handle, count * sizeof(float), count * sizeof(float)},
+                {reduction.handle, 0, sizeof(float)}};
     }
 
-    SplatPhotometricOutput photometric_loss(
-        const std::span<const float> prediction,
-        const std::span<const float> target,
-        const std::uint32_t width, const std::uint32_t height,
-        const float ssim_weight, const float photometric_weight,
-        const std::span<const float> mask) {
-        require(width > 10 && height > 10,
-                "photometric_loss requires width and height > 10");
+    SplatPhotometricOutput photometric_loss(const std::span<const float> prediction,
+                                            const std::span<const float> target,
+                                            const std::uint32_t width, const std::uint32_t height,
+                                            const float ssim_weight, const float photometric_weight,
+                                            const std::span<const float> mask) {
+        require(width > 10 && height > 10, "photometric_loss requires width and height > 10");
         const std::size_t pixels = static_cast<std::size_t>(width) * height;
         const std::size_t count = 3 * pixels;
         require(prediction.size() == count && target.size() == count,
                 "photometric_loss images must have shape [3,H,W]");
         require(mask.empty() || mask.size() == pixels,
                 "photometric_loss mask must have shape [H,W]");
-        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F &&
-                    photometric_weight >= 0.0F,
+        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F && photometric_weight >= 0.0F,
                 "photometric_loss weights are out of range");
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& prediction_buffer = grow(ssim_prediction_, count * sizeof(float));
@@ -2243,8 +2354,8 @@ public:
             context_.write_buffer(mask_buffer, mask.data(), mask.size_bytes());
         (void)dispatch_photometric_locked(
             descriptor(prediction_buffer), descriptor(target_buffer),
-            mask.empty() ? descriptor(dummy_) : descriptor(mask_buffer),
-            !mask.empty(), width, height, ssim_weight, photometric_weight);
+            mask.empty() ? descriptor(dummy_) : descriptor(mask_buffer), !mask.empty(), width,
+            height, ssim_weight, photometric_weight);
         flush_batch();
         SplatPhotometricOutput result;
         result.gradient = download_vector<float>(context_, ssim_output_, count);
@@ -2252,14 +2363,12 @@ public:
         return result;
     }
 
-    SplatDevicePhotometricOutput fused_l1_ssim_device(
-        const SplatBufferView& prediction, const SplatBufferView& target,
-        const std::uint32_t width, const std::uint32_t height,
-        const float ssim_weight, const float photometric_weight,
-        const SplatBufferView& mask,
-        const SplatBufferView& gradient_destination) {
-        require(width > 10 && height > 10,
-                "fused_l1_ssim_device requires width and height > 10");
+    SplatDevicePhotometricOutput
+    fused_l1_ssim_device(const SplatBufferView& prediction, const SplatBufferView& target,
+                         const std::uint32_t width, const std::uint32_t height,
+                         const float ssim_weight, const float photometric_weight,
+                         const SplatBufferView& mask, const SplatBufferView& gradient_destination) {
+        require(width > 10 && height > 10, "fused_l1_ssim_device requires width and height > 10");
         const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height;
         const std::uint64_t image_bytes = 3 * pixels * sizeof(float);
         const std::uint64_t mask_bytes = pixels * sizeof(float);
@@ -2269,13 +2378,12 @@ public:
                 "device target is too small");
         require(mask.buffer == VK_NULL_HANDLE || mask.bytes >= mask_bytes,
                 "device mask is too small");
-        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F &&
-                    photometric_weight >= 0.0F,
+        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F && photometric_weight >= 0.0F,
                 "photometric_loss weights are out of range");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        const std::uint64_t alignment = std::max<std::uint64_t>(
-            4, properties.limits.minStorageBufferOffsetAlignment);
+        const std::uint64_t alignment =
+            std::max<std::uint64_t>(4, properties.limits.minStorageBufferOffsetAlignment);
         require(prediction.offset % alignment == 0 && target.offset % alignment == 0 &&
                     (mask.buffer == VK_NULL_HANDLE || mask.offset % alignment == 0),
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
@@ -2286,13 +2394,11 @@ public:
             mask.buffer == VK_NULL_HANDLE
                 ? descriptor(dummy_)
                 : VkDescriptorBufferInfo{mask.buffer, mask.offset, mask_bytes},
-            mask.buffer != VK_NULL_HANDLE, width, height,
-            ssim_weight, photometric_weight);
+            mask.buffer != VK_NULL_HANDLE, width, height, ssim_weight, photometric_weight);
         if (gradient_destination.buffer != VK_NULL_HANDLE) {
             require(gradient_destination.bytes >= image_bytes,
                     "photometric gradient destination is too small");
-            VkBufferMemoryBarrier source_barrier{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            VkBufferMemoryBarrier source_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             source_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             source_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             source_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2300,15 +2406,13 @@ public:
             source_barrier.buffer = result.gradient.buffer;
             source_barrier.offset = result.gradient.offset;
             source_barrier.size = result.gradient.bytes;
-            vkCmdPipelineBarrier(command_,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
-                &source_barrier, 0, nullptr);
-            const VkBufferCopy region{
-                result.gradient.offset, gradient_destination.offset,
-                image_bytes};
-            vkCmdCopyBuffer(command_, result.gradient.buffer,
-                gradient_destination.buffer, 1, &region);
+            vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &source_barrier,
+                                 0, nullptr);
+            const VkBufferCopy region{result.gradient.offset, gradient_destination.offset,
+                                      image_bytes};
+            vkCmdCopyBuffer(command_, result.gradient.buffer, gradient_destination.buffer, 1,
+                            &region);
         }
         // The color gradient is consumed by the backward on the same queue, and
         // read_photometric_loss drains through the context's read path before it
@@ -2317,29 +2421,25 @@ public:
         return result;
     }
 
-    void color_correction_device(
-        const std::array<SplatBufferView, 6>& buffers,
-        const std::array<std::uint32_t, 20>& push_words,
-        std::uint32_t groups_x) {
-        const std::array commands{SplatColorCorrectionCommand{
-            buffers, push_words, groups_x}};
+    void color_correction_device(const std::array<SplatBufferView, 6>& buffers,
+                                 const std::array<std::uint32_t, 20>& push_words,
+                                 std::uint32_t groups_x) {
+        const std::array commands{SplatColorCorrectionCommand{buffers, push_words, groups_x}};
         color_correction_batch_device(commands);
     }
 
-    void color_correction_batch_device(
-        std::span<const SplatColorCorrectionCommand> commands) {
+    void color_correction_batch_device(std::span<const SplatColorCorrectionCommand> commands) {
         const std::scoped_lock lock(context_.dispatch_mutex);
         for (const auto& command : commands) {
             std::vector<VkDescriptorBufferInfo> infos;
             infos.reserve(command.buffers.size());
             for (const auto& buffer : command.buffers)
-                infos.push_back(buffer.buffer == VK_NULL_HANDLE
-                    ? descriptor(dummy_)
-                    : descriptor(buffer, buffer.bytes));
+                infos.push_back(buffer.buffer == VK_NULL_HANDLE ? descriptor(dummy_)
+                                                                : descriptor(buffer, buffer.bytes));
             Push push{};
             std::copy(command.push_words.begin(), command.push_words.end(), push.u);
-            dispatch_infos(color_correction_atomic_.valid()
-                               ? color_correction_atomic_ : color_correction_,
+            dispatch_infos(color_correction_atomic_.valid() ? color_correction_atomic_
+                                                            : color_correction_,
                            infos, push, command.groups_x);
         }
         submit_batch(false);
@@ -2347,8 +2447,7 @@ public:
 
     float read_photometric_loss(const SplatDevicePhotometricOutput& output) {
         require(output.loss_scalar.buffer == ssim_reduction_.handle &&
-                    output.loss_scalar.offset == 0 &&
-                    output.loss_scalar.bytes >= sizeof(float),
+                    output.loss_scalar.offset == 0 && output.loss_scalar.bytes >= sizeof(float),
                 "photometric output is not owned by this rasterizer");
         const std::scoped_lock lock(context_.dispatch_mutex);
         float value = 0.0F;
@@ -2356,24 +2455,26 @@ public:
         return value;
     }
 
-    void backward_device(
-        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_model_gradients,
-        const SplatBufferView& dL_depth, const SplatBufferView& dL_normal,
-        const SplatSHAdamUpdate* sh_adam,
-        const SplatStructureAdamUpdate* structure_adam) {
+    void backward_device(const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+                         const SplatBufferView& packed_model_gradients,
+                         const SplatBufferView& dL_depth, const SplatBufferView& dL_normal,
+                         const SplatSHAdamUpdate* sh_adam,
+                         const SplatStructureAdamUpdate* structure_adam) {
         require(last_frame_has_snapshots_,
                 "backward_device requires the latest render to use pixel_snapshots=true");
-        const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t color_bytes =
+            static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
         const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
         const std::uint64_t depth_bytes = alpha_bytes;
         const std::uint64_t normal_bytes = color_bytes;
         const std::uint64_t blend_bytes = blend_gradient_float_count() * sizeof(float);
-        const std::uint64_t model_bytes = structure_adam
-            ? static_cast<std::uint64_t>(count_) * (structure_adam->capture_opacity_gradient ? 2 : 1) * sizeof(float)
-            : (sh_adam ? model_gradient_float_count() -
-            static_cast<std::uint64_t>(count_) * sh_bases_ * 3 :
-            model_gradient_float_count()) * sizeof(float);
+        const std::uint64_t model_bytes =
+            structure_adam ? static_cast<std::uint64_t>(count_) *
+                                 (structure_adam->capture_opacity_gradient ? 2 : 1) * sizeof(float)
+                           : (sh_adam ? model_gradient_float_count() -
+                                            static_cast<std::uint64_t>(count_) * sh_bases_ * 3
+                                      : model_gradient_float_count()) *
+                                 sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
         require(dL_alpha.buffer == VK_NULL_HANDLE || dL_alpha.bytes >= alpha_bytes,
@@ -2389,11 +2490,10 @@ public:
                 "device dL_normal is too small or the forward had no geometry");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        const std::uint64_t alignment = std::max<std::uint64_t>(
-            4, properties.limits.minStorageBufferOffsetAlignment);
+        const std::uint64_t alignment =
+            std::max<std::uint64_t>(4, properties.limits.minStorageBufferOffsetAlignment);
         require(dL_color.offset % alignment == 0 &&
-                    (dL_alpha.buffer == VK_NULL_HANDLE ||
-                     dL_alpha.offset % alignment == 0) &&
+                    (dL_alpha.buffer == VK_NULL_HANDLE || dL_alpha.offset % alignment == 0) &&
                     packed_model_gradients.offset % alignment == 0 &&
                     (dL_depth.buffer == VK_NULL_HANDLE || dL_depth.offset % alignment == 0) &&
                     (dL_normal.buffer == VK_NULL_HANDLE || dL_normal.offset % alignment == 0),
@@ -2404,22 +2504,27 @@ public:
             require(has_sh_ && has_scales_ && raw_chain_ && sh_bases_ <= 16,
                     "fused SH Adam requires raw SH scale/rotation parameters with <=16 bases");
             const std::uint64_t values = static_cast<std::uint64_t>(count_) * sh_bases_ * 3;
-            const SplatBufferView views[]{sh_adam->parameter, sh_adam->first, sh_adam->packed, sh_adam->bounds};
+            const SplatBufferView views[]{sh_adam->parameter, sh_adam->first, sh_adam->packed,
+                                          sh_adam->bounds};
             const std::uint64_t sizes[]{values * 4, (values * 2 + 3) & ~std::uint64_t{3},
-                (values + 3) & ~std::uint64_t{3}, static_cast<std::uint64_t>(count_) * 16};
+                                        (values + 3) & ~std::uint64_t{3},
+                                        static_cast<std::uint64_t>(count_) * 16};
             for (int i = 0; i < 4; ++i)
                 require(views[i].buffer != VK_NULL_HANDLE && views[i].bytes >= sizes[i] &&
-                        views[i].offset % alignment == 0, "invalid fused SH Adam buffer");
+                            views[i].offset % alignment == 0,
+                        "invalid fused SH Adam buffer");
         }
         if (structure_adam) {
             require(sh_adam && has_sh_ && has_scales_ && raw_chain_,
                     "fused structure Adam requires fused SH and raw scale/rotation parameters");
-            const std::uint32_t strides[]{3,3,3,3,4,4,1,1};
+            const std::uint32_t strides[]{3, 3, 3, 3, 4, 4, 1, 1};
             for (int i = 0; i < 8; ++i) {
                 const auto& view = structure_adam->moments[i];
                 require(view.buffer != VK_NULL_HANDLE &&
-                        view.bytes >= static_cast<std::uint64_t>(count_) * strides[i] * sizeof(float) &&
-                        view.offset % alignment == 0, "invalid fused structure Adam moment buffer");
+                            view.bytes >=
+                                static_cast<std::uint64_t>(count_) * strides[i] * sizeof(float) &&
+                            view.offset % alignment == 0,
+                        "invalid fused structure Adam moment buffer");
             }
         }
         // Backward-only scratch joins the phase arena; the blend gradient is
@@ -2437,15 +2542,12 @@ public:
         // All backward shaders use pc.u13 to avoid touching the alpha-gradient
         // descriptor when no alpha objective is active. Binding the tiny dummy
         // buffer removes an image-sized clear and its queue drain.
-        Buffer& zero_depth = last_frame_has_geometry_
-            ? phase_slot(loss_depth_, depth_bytes)
-            : dummy_;
-        Buffer& zero_normal = last_frame_has_geometry_
-            ? phase_slot(loss_normal_, normal_bytes)
-            : dummy_;
-        Buffer& median_state = last_frame_has_geometry_
-            ? phase_slot(median_state_, depth_bytes * 2)
-            : dummy_;
+        Buffer& zero_depth =
+            last_frame_has_geometry_ ? phase_slot(loss_depth_, depth_bytes) : dummy_;
+        Buffer& zero_normal =
+            last_frame_has_geometry_ ? phase_slot(loss_normal_, normal_bytes) : dummy_;
+        Buffer& median_state =
+            last_frame_has_geometry_ ? phase_slot(median_state_, depth_bytes * 2) : dummy_;
         if (last_frame_has_geometry_) {
             if (dL_depth.buffer == VK_NULL_HANDLE)
                 zero_buffer(zero_depth, depth_bytes);
@@ -2453,39 +2555,38 @@ public:
                 zero_buffer(zero_normal, normal_bytes);
             zero_buffer(median_state, depth_bytes * 2);
         }
-        const VkDescriptorBufferInfo alpha_info = dL_alpha.buffer == VK_NULL_HANDLE
-            ? descriptor(dummy_)
-            : VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes};
-        const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
-            ? descriptor(zero_depth)
-            : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
-        const VkDescriptorBufferInfo normal_info = dL_normal.buffer == VK_NULL_HANDLE
-            ? descriptor(zero_normal)
-            : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
-        if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
+        const VkDescriptorBufferInfo alpha_info =
+            dL_alpha.buffer == VK_NULL_HANDLE
+                ? descriptor(dummy_)
+                : VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes};
+        const VkDescriptorBufferInfo depth_info =
+            dL_depth.buffer == VK_NULL_HANDLE
+                ? descriptor(zero_depth)
+                : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
+        const VkDescriptorBufferInfo normal_info =
+            dL_normal.buffer == VK_NULL_HANDLE
+                ? descriptor(zero_normal)
+                : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
+        if (last_frame_has_geometry_)
+            dispatch_median_backward_info(depth_info, median_state);
         begin_batch();
         write_backward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         // The gradient scratch can sit over the loss phase's SSIM workspace
         // in the arena, so bracket the fill with global barriers rather than
         // buffer-scoped ones.
         VkMemoryBarrier fill_before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        fill_before.srcAccessMask =
-            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        fill_before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         fill_before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &fill_before, 0, nullptr,
-            0, nullptr);
-        vkCmdFillBuffer(
-            command_, blend_gradient.handle, blend_gradient.offset,
-            blend_bytes, 0u);
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &fill_before, 0, nullptr, 0,
+                             nullptr);
+        vkCmdFillBuffer(command_, blend_gradient.handle, blend_gradient.offset, blend_bytes, 0u);
         VkMemoryBarrier fill_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        fill_barrier.dstAccessMask =
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &fill_barrier, 0, nullptr, 0, nullptr);
+        fill_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fill_barrier, 0, nullptr,
+                             0, nullptr);
         write_backward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         Push blend_push{};
@@ -2505,22 +2606,27 @@ public:
         blend_push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
         configure_gut_backward(blend_push);
         std::vector<VkDescriptorBufferInfo> blend_infos{
-            descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-            descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
+            descriptor(tile_ranges_),
+            descriptor(*last_instance_values_),
+            descriptor(gauss_f_),
+            descriptor(out_f_),
+            descriptor(out_u_),
+            descriptor(bucket_offsets_),
+            descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
-            alpha_info, last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_) : normal_info,
-            descriptor(median_state), descriptor(blend_gradient)};
+            alpha_info,
+            last_primitive_ == SplatPrimitive::gaussian_3dgut ? descriptor(*frame_camera_)
+                                                              : normal_info,
+            descriptor(median_state),
+            descriptor(blend_gradient)};
         const ComputePipeline& blend_pipeline = backward_blend_pipeline();
-        dispatch_infos(
-            blend_pipeline, blend_infos, blend_push,
-            div_up(last_bucket_limit_, 8));
+        dispatch_infos(blend_pipeline, blend_infos, blend_push, div_up(last_bucket_limit_, 8));
         write_backward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         Push project_push{};
         project_push.u[0] = count_;
-        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u) |
-                            (last_frame_has_geometry_ ? 16u : 0u);
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) | (raw_chain_ ? 4u : 0u) |
+                            (has_scales_ ? 8u : 0u) | (last_frame_has_geometry_ ? 16u : 0u);
         project_push.u[2] = last_mode_;
         project_push.u[3] = last_width_;
         project_push.u[4] = last_height_;
@@ -2536,15 +2642,27 @@ public:
         set_float(project_push, 14, last_k4_);
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
-        project_push.u[23] = last_primitive_ == SplatPrimitive::gaussian_3dgut ? last_gauss_slots_ : 0u;
+        project_push.u[23] =
+            last_primitive_ == SplatPrimitive::gaussian_3dgut ? last_gauss_slots_ : 0u;
         std::vector<VkDescriptorBufferInfo> project_infos{
-            model_means(), model_opacities(), model_scales(), model_rotations(),
-            model_covariances(), model_colors(), descriptor(*frame_camera_), descriptor(gauss_f_),
-            descriptor(gauss_u_), descriptor(blend_gradient), model_log_scales(),
-            model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
+            model_means(),
+            model_opacities(),
+            model_scales(),
+            model_rotations(),
+            model_covariances(),
+            model_colors(),
+            descriptor(*frame_camera_),
+            descriptor(gauss_f_),
+            descriptor(gauss_u_),
+            descriptor(blend_gradient),
+            model_log_scales(),
+            model_raw_rotations(),
+            model_opacity_logits(),
+            model_filter_3d(),
             {packed_model_gradients.buffer, packed_model_gradients.offset, model_bytes}};
         if (sh_adam) {
-            for (const auto& view : {sh_adam->parameter, sh_adam->first, sh_adam->packed, sh_adam->bounds})
+            for (const auto& view :
+                 {sh_adam->parameter, sh_adam->first, sh_adam->packed, sh_adam->bounds})
                 project_infos.push_back({view.buffer, view.offset, view.bytes});
         }
         if (structure_adam) {
@@ -2553,21 +2671,21 @@ public:
             // The encoder slot has retired before host writes. The projection pass
             // is the only reader; the next reuse waits on that slot's fence.
             Buffer& settings = grow(structure_settings_[encoder_ring_.index()],
-                sizeof(structure_adam->settings), BufferMemory::host_visible);
+                                    sizeof(structure_adam->settings), BufferMemory::host_visible);
             settings.upload(structure_adam->settings.data(), sizeof(structure_adam->settings));
             project_infos.push_back(descriptor(settings));
             project_push.u[17] = structure_adam->capture_opacity_gradient ? 1u : 0u;
         }
         // Structure Adam already requires SH and raw scale/rotation parameters.
         // Geometry and other camera types retain their required general shader.
-        const bool pinhole_rgb_adam = structure_adam && last_mode_ == 0 &&
-                                     !last_frame_has_geometry_;
+        const bool pinhole_rgb_adam =
+            structure_adam && last_mode_ == 0 && !last_frame_has_geometry_;
         const auto& project_pipeline = pinhole_rgb_adam ? project_pinhole_rgb_adam_
-            : structure_adam ? project_structure_adam_
-            : sh_adam ? project_sh_adam_ : project_backward_;
-        dispatch_infos(
-            project_pipeline, project_infos, project_push, div_up(count_, 256),
-            1, 1, sh_adam ? &sh_adam->settings : nullptr);
+                                       : structure_adam ? project_structure_adam_
+                                       : sh_adam        ? project_sh_adam_
+                                                        : project_backward_;
+        dispatch_infos(project_pipeline, project_infos, project_push, div_up(count_, 256), 1, 1,
+                       sh_adam ? &sh_adam->settings : nullptr);
         write_backward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         // The packed gradients feed TinyTensor's optimizer batch, which is
         // queued after this submit; only collect_backward_timestamps (a query
@@ -2576,7 +2694,8 @@ public:
         collect_backward_timestamps();
         // Buffer identities stay unchanged, but an in-place structure update
         // invalidates projection/sort reuse and repeated backward on this frame.
-        if (structure_adam) last_frame_has_snapshots_ = false;
+        if (structure_adam)
+            last_frame_has_snapshots_ = false;
     }
 
     SplatRgbaImage render_rgba_device(const SplatCamera& camera, SplatSettings settings) {
@@ -2591,14 +2710,15 @@ public:
         return image;
     }
 
-    void render_rgba(const SplatCamera& camera, const SplatSettings& settings, std::vector<std::uint8_t>& rgba) {
+    void render_rgba(const SplatCamera& camera, const SplatSettings& settings,
+                     std::vector<std::uint8_t>& rgba) {
         const SplatRgbaImage image = render_rgba_device(camera, settings);
         rgba.resize(static_cast<std::size_t>(image.bytes));
         const std::scoped_lock lock(context_.dispatch_mutex);
         context_.read_buffer(rgba_, rgba.data(), rgba.size());
     }
 
-private:
+  private:
     void record_buffer_copy(const SplatBufferView& source, const SplatBufferView& destination) {
         require(destination.buffer != VK_NULL_HANDLE && destination.bytes >= source.bytes,
                 "device copy destination is too small");
@@ -2607,21 +2727,21 @@ private:
         barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
         const VkBufferCopy region{source.offset, destination.offset, source.bytes};
         vkCmdCopyBuffer(command_, source.buffer, destination.buffer, 1, &region);
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
     }
 
-    void record_copy_frame_device(
-        const SplatDeviceFrame& source,
-        const SplatDeviceFrame& destination) {
+    void record_copy_frame_device(const SplatDeviceFrame& source,
+                                  const SplatDeviceFrame& destination) {
         require(recording_, "frame copies require an active command batch");
-        require(source.width == destination.width &&
-                    source.height == destination.height,
+        require(source.width == destination.width && source.height == destination.height,
                 "copy_frame_device requires matching image extents");
         struct CopyPair {
             SplatBufferView source;
@@ -2641,8 +2761,7 @@ private:
         // available to transfer. Scope those dependencies to the copied ranges
         // rather than flushing every compute write in the frame batch.
         const auto source_barrier = [](const SplatBufferView& source) {
-            VkBufferMemoryBarrier barrier{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2653,16 +2772,15 @@ private:
             return barrier;
         };
         std::array<VkBufferMemoryBarrier, 3> barriers{
-            VkBufferMemoryBarrier{}, VkBufferMemoryBarrier{},
-            VkBufferMemoryBarrier{}};
+            VkBufferMemoryBarrier{}, VkBufferMemoryBarrier{}, VkBufferMemoryBarrier{}};
         std::uint32_t barrier_count = 0;
         SplatBufferView color_dependency = source.color;
         color_dependency.bytes = 0;
         const auto extend_color = [&](const SplatBufferView& value) {
-            if (value.buffer == VK_NULL_HANDLE) return;
-            color_dependency.bytes = std::max(
-                color_dependency.bytes,
-                value.offset + value.bytes - color_dependency.offset);
+            if (value.buffer == VK_NULL_HANDLE)
+                return;
+            color_dependency.bytes = std::max(color_dependency.bytes,
+                                              value.offset + value.bytes - color_dependency.offset);
         };
         if (destination.color.buffer != VK_NULL_HANDLE)
             extend_color(source.color);
@@ -2678,13 +2796,12 @@ private:
             barriers[barrier_count++] = source_barrier(source.radii);
         if (destination.visibility_bits.buffer != VK_NULL_HANDLE)
             barriers[barrier_count++] = source_barrier(source.visibility_bits);
-        vkCmdPipelineBarrier(
-            command_,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, barrier_count, barriers.data(), 0, nullptr);
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, barrier_count,
+                             barriers.data(), 0, nullptr);
         for (const CopyPair& pair : pairs) {
-            if (pair.destination.buffer == VK_NULL_HANDLE) continue;
+            if (pair.destination.buffer == VK_NULL_HANDLE)
+                continue;
             require(pair.source.buffer != VK_NULL_HANDLE &&
                         pair.destination.bytes >= pair.source.bytes,
                     "copy_frame_device destination is too small");
@@ -2692,17 +2809,15 @@ private:
             region.srcOffset = pair.source.offset;
             region.dstOffset = pair.destination.offset;
             region.size = pair.source.bytes;
-            vkCmdCopyBuffer(
-                command_, pair.source.buffer, pair.destination.buffer,
-                1, &region);
+            vkCmdCopyBuffer(command_, pair.source.buffer, pair.destination.buffer, 1, &region);
         }
     }
 
     void query_subgroup_properties() {
         VkPhysicalDeviceSubgroupProperties subgroup{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
-        VkPhysicalDeviceProperties2 properties{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &subgroup};
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                               &subgroup};
         vkGetPhysicalDeviceProperties2(context_.physical_device, &properties);
         subgroup_size_ = subgroup.subgroupSize;
         subgroup_vote_supported_ =
@@ -2718,12 +2833,11 @@ private:
 
     void create_backward_timestamp_profiler() {
         backward_profile_enabled_ = environment_flag("SPLAT_DRENDER_PROFILE_BACKWARD");
-        backward_profile_interval_ = environment_interval(
-            "SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL", 100);
-        if (!backward_profile_enabled_) return;
-        if (!create_timestamp_query_pool(
-                backward_timestamp_pool_,
-                "splat_vulkan_backward_profile"))
+        backward_profile_interval_ =
+            environment_interval("SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL", 100);
+        if (!backward_profile_enabled_)
+            return;
+        if (!create_timestamp_query_pool(backward_timestamp_pool_, "splat_vulkan_backward_profile"))
             backward_profile_enabled_ = false;
     }
 
@@ -2732,39 +2846,36 @@ private:
     // scans + the instance tally), the tile sort, and the blend.
     void create_forward_timestamp_profiler() {
         forward_profile_enabled_ = environment_flag("SPLAT_DRENDER_PROFILE_FORWARD");
-        forward_profile_interval_ = environment_interval(
-            "SPLAT_DRENDER_PROFILE_FORWARD_INTERVAL", 100);
-        if (!forward_profile_enabled_) return;
-        if (!create_timestamp_query_pool(
-                forward_timestamp_pool_, "splat_vulkan_forward_profile"))
+        forward_profile_interval_ =
+            environment_interval("SPLAT_DRENDER_PROFILE_FORWARD_INTERVAL", 100);
+        if (!forward_profile_enabled_)
+            return;
+        if (!create_timestamp_query_pool(forward_timestamp_pool_, "splat_vulkan_forward_profile"))
             forward_profile_enabled_ = false;
     }
 
-    bool create_timestamp_query_pool(
-        VkQueryPool& pool, const char* label) {
+    bool create_timestamp_query_pool(VkQueryPool& pool, const char* label) {
         if (!timestamp_properties_queried_) {
             timestamp_properties_queried_ = true;
             std::uint32_t family_count = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(
-                context_.physical_device, &family_count, nullptr);
+            vkGetPhysicalDeviceQueueFamilyProperties(context_.physical_device, &family_count,
+                                                     nullptr);
             std::vector<VkQueueFamilyProperties> families(family_count);
-            vkGetPhysicalDeviceQueueFamilyProperties(
-                context_.physical_device, &family_count, families.data());
-            timestamp_valid_bits_ =
-                context_.queue_family_index < families.size()
-                    ? families[context_.queue_family_index].timestampValidBits
-                    : 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(context_.physical_device, &family_count,
+                                                     families.data());
+            timestamp_valid_bits_ = context_.queue_family_index < families.size()
+                                        ? families[context_.queue_family_index].timestampValidBits
+                                        : 0;
             VkPhysicalDeviceProperties properties{};
             vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
             timestamp_period_ = properties.limits.timestampPeriod;
         }
         if (timestamp_valid_bits_ == 0) {
-            std::fprintf(
-                stderr,
-                "%s disabled: queue has timestampValidBits=0\n", label);
+            std::fprintf(stderr, "%s disabled: queue has timestampValidBits=0\n", label);
             return false;
         }
-        if (pool != VK_NULL_HANDLE) return true;
+        if (pool != VK_NULL_HANDLE)
+            return true;
         VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
         info.queryCount = 6;
@@ -2773,9 +2884,9 @@ private:
         return true;
     }
 
-    void write_forward_timestamp(
-        const std::uint32_t index, const VkPipelineStageFlagBits stage) {
-        if (!forward_profile_enabled_) return;
+    void write_forward_timestamp(const std::uint32_t index, const VkPipelineStageFlagBits stage) {
+        if (!forward_profile_enabled_)
+            return;
         begin_batch();
         if (index == 0) {
             vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 6);
@@ -2784,32 +2895,37 @@ private:
     }
 
     void collect_forward_timestamps() {
-        if (!forward_profile_enabled_) return;
-        std::array<std::uint64_t, 6> timestamps{};
-        if (vkGetQueryPoolResults(
-                context_.device, forward_timestamp_pool_, 0, 6,
-                sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
-                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        if (!forward_profile_enabled_)
             return;
-        const double ticks_to_ms =
-            static_cast<double>(timestamp_period_) / 1.0e6;
-        const double counts_ms = static_cast<double>(timestamp_delta(
-            timestamps[0], timestamps[1], timestamp_valid_bits_)) * ticks_to_ms;
+        std::array<std::uint64_t, 6> timestamps{};
+        if (vkGetQueryPoolResults(context_.device, forward_timestamp_pool_, 0, 6,
+                                  sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+            return;
+        const double ticks_to_ms = static_cast<double>(timestamp_period_) / 1.0e6;
+        const double counts_ms = static_cast<double>(timestamp_delta(timestamps[0], timestamps[1],
+                                                                     timestamp_valid_bits_)) *
+                                 ticks_to_ms;
         const double depth_sort_ms = static_cast<double>(timestamp_delta(
-            timestamps[1], timestamps[2], timestamp_valid_bits_)) * ticks_to_ms;
-        const double expand_ms = static_cast<double>(timestamp_delta(
-            timestamps[2], timestamps[3], timestamp_valid_bits_)) * ticks_to_ms;
+                                         timestamps[1], timestamps[2], timestamp_valid_bits_)) *
+                                     ticks_to_ms;
+        const double expand_ms = static_cast<double>(timestamp_delta(timestamps[2], timestamps[3],
+                                                                     timestamp_valid_bits_)) *
+                                 ticks_to_ms;
         const double tile_sort_ms = static_cast<double>(timestamp_delta(
-            timestamps[3], timestamps[4], timestamp_valid_bits_)) * ticks_to_ms;
-        const double blend_ms = static_cast<double>(timestamp_delta(
-            timestamps[4], timestamps[5], timestamp_valid_bits_)) * ticks_to_ms;
+                                        timestamps[3], timestamps[4], timestamp_valid_bits_)) *
+                                    ticks_to_ms;
+        const double blend_ms = static_cast<double>(timestamp_delta(timestamps[4], timestamps[5],
+                                                                    timestamp_valid_bits_)) *
+                                ticks_to_ms;
         forward_counts_total_ms_ += counts_ms;
         forward_depth_sort_total_ms_ += depth_sort_ms;
         forward_expand_total_ms_ += expand_ms;
         forward_tile_sort_total_ms_ += tile_sort_ms;
         forward_blend_total_ms_ += blend_ms;
         ++forward_profile_samples_;
-        if (forward_profile_samples_ < forward_profile_interval_) return;
+        if (forward_profile_samples_ < forward_profile_interval_)
+            return;
         const double samples = static_cast<double>(forward_profile_samples_);
         std::fprintf(
             stderr,
@@ -2817,15 +2933,12 @@ private:
             "counts_avg_ms=%.4f depth_sort_avg_ms=%.4f expand_avg_ms=%.4f "
             "tile_sort_avg_ms=%.4f blend_avg_ms=%.4f "
             "total_avg_ms=%.4f\n",
-            forward_profile_samples_, count_, last_instances_,
-            forward_counts_total_ms_ / samples,
-            forward_depth_sort_total_ms_ / samples,
-            forward_expand_total_ms_ / samples,
-            forward_tile_sort_total_ms_ / samples,
-            forward_blend_total_ms_ / samples,
-            (forward_counts_total_ms_ + forward_depth_sort_total_ms_ +
-             forward_expand_total_ms_ + forward_tile_sort_total_ms_ +
-             forward_blend_total_ms_) / samples);
+            forward_profile_samples_, count_, last_instances_, forward_counts_total_ms_ / samples,
+            forward_depth_sort_total_ms_ / samples, forward_expand_total_ms_ / samples,
+            forward_tile_sort_total_ms_ / samples, forward_blend_total_ms_ / samples,
+            (forward_counts_total_ms_ + forward_depth_sort_total_ms_ + forward_expand_total_ms_ +
+             forward_tile_sort_total_ms_ + forward_blend_total_ms_) /
+                samples);
         forward_profile_samples_ = 0;
         forward_counts_total_ms_ = 0.0;
         forward_depth_sort_total_ms_ = 0.0;
@@ -2834,60 +2947,57 @@ private:
         forward_blend_total_ms_ = 0.0;
     }
 
-    void write_backward_timestamp(
-        const std::uint32_t index, const VkPipelineStageFlagBits stage) {
-        if (!backward_profile_enabled_) return;
+    void write_backward_timestamp(const std::uint32_t index, const VkPipelineStageFlagBits stage) {
+        if (!backward_profile_enabled_)
+            return;
         if (index == 0) {
-            vkCmdResetQueryPool(
-                command_, backward_timestamp_pool_, 0, 4);
+            vkCmdResetQueryPool(command_, backward_timestamp_pool_, 0, 4);
         }
         vkCmdWriteTimestamp(command_, stage, backward_timestamp_pool_, index);
     }
 
-    [[nodiscard]] static std::uint64_t timestamp_delta(
-        const std::uint64_t begin, const std::uint64_t end,
-        const std::uint32_t valid_bits) {
-        if (valid_bits >= 64) return end - begin;
+    [[nodiscard]]
+    static std::uint64_t timestamp_delta(const std::uint64_t begin, const std::uint64_t end,
+                                         const std::uint32_t valid_bits) {
+        if (valid_bits >= 64)
+            return end - begin;
         const std::uint64_t mask = (std::uint64_t{1} << valid_bits) - 1;
         const std::uint64_t masked_begin = begin & mask;
         const std::uint64_t masked_end = end & mask;
-        return masked_end >= masked_begin
-            ? masked_end - masked_begin
-            : ((mask - masked_begin + 1) + masked_end) & mask;
+        return masked_end >= masked_begin ? masked_end - masked_begin
+                                          : ((mask - masked_begin + 1) + masked_end) & mask;
     }
 
     void collect_backward_timestamps() {
-        if (!backward_profile_enabled_) return;
+        if (!backward_profile_enabled_)
+            return;
         std::array<std::uint64_t, 4> timestamps{};
         const VkResult result = vkGetQueryPoolResults(
-            context_.device, backward_timestamp_pool_, 0, 4,
-            sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
-            VK_QUERY_RESULT_64_BIT);
+            context_.device, backward_timestamp_pool_, 0, 4, sizeof(timestamps), timestamps.data(),
+            sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
         if (result != VK_SUCCESS) {
-            std::fprintf(
-                stderr,
-                "splat_vulkan_backward_profile query result failed: %d\n",
-                static_cast<int>(result));
+            std::fprintf(stderr, "splat_vulkan_backward_profile query result failed: %d\n",
+                         static_cast<int>(result));
             return;
         }
 
-        const double ticks_to_ms =
-            static_cast<double>(timestamp_period_) / 1.0e6;
-        const double fill_ms = static_cast<double>(timestamp_delta(
-            timestamps[0], timestamps[1], timestamp_valid_bits_)) *
-            ticks_to_ms;
-        const double blend_ms = static_cast<double>(timestamp_delta(
-            timestamps[1], timestamps[2], timestamp_valid_bits_)) *
-            ticks_to_ms;
-        const double project_ms = static_cast<double>(timestamp_delta(
-            timestamps[2], timestamps[3], timestamp_valid_bits_)) *
-            ticks_to_ms;
+        const double ticks_to_ms = static_cast<double>(timestamp_period_) / 1.0e6;
+        const double fill_ms = static_cast<double>(timestamp_delta(timestamps[0], timestamps[1],
+                                                                   timestamp_valid_bits_)) *
+                               ticks_to_ms;
+        const double blend_ms = static_cast<double>(timestamp_delta(timestamps[1], timestamps[2],
+                                                                    timestamp_valid_bits_)) *
+                                ticks_to_ms;
+        const double project_ms = static_cast<double>(timestamp_delta(timestamps[2], timestamps[3],
+                                                                      timestamp_valid_bits_)) *
+                                  ticks_to_ms;
         backward_fill_total_ms_ += fill_ms;
         backward_blend_total_ms_ += blend_ms;
         backward_project_total_ms_ += project_ms;
         ++backward_profile_samples_;
 
-        if (backward_profile_samples_ < backward_profile_interval_) return;
+        if (backward_profile_samples_ < backward_profile_interval_)
+            return;
         const double samples = static_cast<double>(backward_profile_samples_);
         std::fprintf(
             stderr,
@@ -2895,11 +3005,10 @@ private:
             "pixels=%u fill_avg_ms=%.4f blend_avg_ms=%.4f project_avg_ms=%.4f "
             "total_avg_ms=%.4f\n",
             backward_profile_samples_, count_, last_bucket_limit_, last_pixels_,
-            backward_fill_total_ms_ / samples,
-            backward_blend_total_ms_ / samples,
+            backward_fill_total_ms_ / samples, backward_blend_total_ms_ / samples,
             backward_project_total_ms_ / samples,
-            (backward_fill_total_ms_ + backward_blend_total_ms_ +
-             backward_project_total_ms_) / samples);
+            (backward_fill_total_ms_ + backward_blend_total_ms_ + backward_project_total_ms_) /
+                samples);
         backward_profile_samples_ = 0;
         backward_fill_total_ms_ = 0.0;
         backward_blend_total_ms_ = 0.0;
@@ -2909,9 +3018,8 @@ private:
     // Every buffer the shaders touch lives in device memory: an unmapped buffer
     // keeps the GPU at VRAM bandwidth instead of running the whole forward over
     // PCIe. Only the tiny per-frame control blocks stay host visible.
-    Buffer alloc(
-        VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) const {
+    Buffer alloc(VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
+                 VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) const {
         // Device-local buffers are uploaded/read/cleared through the transfer
         // path as well as bound as storage. Declaring both capabilities keeps
         // those operations valid under Vulkan validation.
@@ -2921,9 +3029,9 @@ private:
         return context_.create_buffer(std::max<VkDeviceSize>(bytes, 4), usage, memory);
     }
 
-    Buffer& grow(
-        Buffer& buffer, VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
-        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
+    Buffer& grow(Buffer& buffer, VkDeviceSize bytes,
+                 const BufferMemory memory = BufferMemory::device_local,
+                 const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
         if (buffer.size < bytes) {
             drain_before_replace(buffer);
             buffer = alloc(bytes, memory, usage);
@@ -2955,7 +3063,8 @@ private:
     VkDeviceSize phase_alignment_{256};
     void phase_begin(const VkDeviceSize bytes) {
         phase_offset_ = 0;
-        if (phase_arena_.size >= bytes) return;
+        if (phase_arena_.size >= bytes)
+            return;
         // Grow once per phase before any view is recorded: a mid-phase grow
         // would free memory that pending dispatches still reference.
         drain_before_replace(phase_arena_);
@@ -2970,8 +3079,7 @@ private:
             drain_before_replace(view);
             view.destroy_owned();
         }
-        const VkDeviceSize aligned =
-            (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+        const VkDeviceSize aligned = (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
         require(phase_offset_ + aligned <= phase_arena_.size,
                 "Vulkan splat phase arena layout overflow");
         view.bind_view(phase_arena_, phase_offset_, bytes);
@@ -2980,7 +3088,8 @@ private:
     }
 
     void zero_buffer(Buffer& buffer, const std::size_t bytes) {
-        if (bytes == 0) return;
+        if (bytes == 0)
+            return;
         require(bytes <= buffer.size && bytes % 4 == 0,
                 "Vulkan splat clear exceeds the buffer or is unaligned");
         if (buffer.host_visible()) {
@@ -3000,25 +3109,21 @@ private:
         VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr,
-            0, nullptr);
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
         vkCmdFillBuffer(command_, handle, offset, bytes, 0u);
         VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                              VK_ACCESS_SHADER_WRITE_BIT |
-                              VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 1, &after, 0, nullptr, 0, nullptr);
+        after.dstAccessMask =
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 1, &after, 0, nullptr, 0, nullptr);
     }
 
     void begin_batch() {
-        if (recording_) return;
+        if (recording_)
+            return;
         command_ = encoder_ring_.acquire().native();
         recording_ = true;
     }
@@ -3034,20 +3139,22 @@ private:
     // with the GPU still running the previous stage. A stage whose result the
     // host reads (the frame counts, a loss scalar, a download) keeps draining.
     void submit_batch(const bool wait) {
-        if (!recording_) return;
+        if (!recording_)
+            return;
         const std::uint32_t submitted = encoder_ring_.index();
         // A retired arena becomes freeable once k_batch_slots further
         // submissions have rotated the ring past every dormant command buffer
         // that referenced it.
-        for (auto it = retired_arenas_.begin();
-             it != retired_arenas_.end();) {
+        for (auto it = retired_arenas_.begin(); it != retired_arenas_.end();) {
             if (++it->second > k_batch_slots)
                 it = retired_arenas_.erase(it);
             else
                 ++it;
         }
-        if (wait) encoder_ring_.submit_wait();
-        else encoder_ring_.submit();
+        if (wait)
+            encoder_ring_.submit_wait();
+        else
+            encoder_ring_.submit();
         recording_ = false;
         command_ = VK_NULL_HANDLE;
         if (mirror_recorded_) {
@@ -3060,10 +3167,10 @@ private:
     // a floor of one so even a first view that sees nothing leaves room for
     // later frames.
     static std::uint32_t instance_capacity_for(const std::uint32_t instances) {
-        const std::uint64_t padded = static_cast<std::uint64_t>(
-            std::max<std::uint64_t>(instances, 1u) * 2u);
-        return static_cast<std::uint32_t>(std::min<std::uint64_t>(
-            padded, std::numeric_limits<std::uint32_t>::max()));
+        const std::uint64_t padded =
+            static_cast<std::uint64_t>(std::max<std::uint64_t>(instances, 1u) * 2u);
+        return static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(padded, std::numeric_limits<std::uint32_t>::max()));
     }
 
     // The first control words are [instances, visible, overflow, capacity].
@@ -3084,12 +3191,14 @@ private:
     }
 
     void harvest_count_mirror(const std::uint32_t slot) {
-        if (!mirror_pending_[slot]) return;
+        if (!mirror_pending_[slot])
+            return;
         mirror_pending_[slot] = false;
-        if (count_mirrors_.handle == VK_NULL_HANDLE) return;
+        if (count_mirrors_.handle == VK_NULL_HANDLE)
+            return;
         std::uint32_t words[k_count_mirror_words]{};
-        count_mirrors_.download(
-            words, sizeof(words), slot * k_count_mirror_words * sizeof(std::uint32_t));
+        count_mirrors_.download(words, sizeof(words),
+                                slot * k_count_mirror_words * sizeof(std::uint32_t));
         absorb_frame_counts(words);
     }
 
@@ -3098,7 +3207,8 @@ private:
     // the reported-count lag to a few frames without a single host wait.
     void harvest_ready_count_mirrors() {
         for (std::uint32_t slot = 0; slot < k_batch_slots; ++slot) {
-            if (!mirror_pending_[slot]) continue;
+            if (!mirror_pending_[slot])
+                continue;
             const photara::vk::CommandEncoder& encoder = encoder_ring_.at(slot);
             if (!encoder.in_flight() ||
                 vkGetFenceStatus(context_.device, encoder.fence()) == VK_SUCCESS) {
@@ -3121,34 +3231,42 @@ private:
         }
     }
 
-    void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers, const Push& push,
-                  std::uint32_t groups_x, std::uint32_t groups_y = 1,
+    void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
+                  const Push& push, std::uint32_t groups_x, std::uint32_t groups_y = 1,
                   std::uint32_t groups_z = 1) {
         std::vector<VkDescriptorBufferInfo> infos;
         infos.reserve(buffers.size());
-        for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
+        for (const Buffer* buffer : buffers)
+            infos.push_back(descriptor(*buffer));
         dispatch_infos(pipeline, infos, push, groups_x, groups_y, groups_z);
     }
 
-    void dispatch_infos(const ComputePipeline& pipeline, const std::vector<VkDescriptorBufferInfo>& infos,
-                        Push push, std::uint32_t groups_x, std::uint32_t groups_y = 1,
-                        std::uint32_t groups_z = 1, const std::array<float, 8>* sh_settings = nullptr) {
+    void dispatch_infos(const ComputePipeline& pipeline,
+                        const std::vector<VkDescriptorBufferInfo>& infos, Push push,
+                        std::uint32_t groups_x, std::uint32_t groups_y = 1,
+                        std::uint32_t groups_z = 1,
+                        const std::array<float, 8>* sh_settings = nullptr) {
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
-        if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
+        if (groups_x == 0 || groups_y == 0 || groups_z == 0)
+            return;
         begin_batch();
         std::vector<photara::vk::BufferBinding> bindings(infos.size());
-        for (std::uint32_t i = 0; i < infos.size(); ++i) bindings[i] = to_binding(infos[i]);
+        for (std::uint32_t i = 0; i < infos.size(); ++i)
+            bindings[i] = to_binding(infos[i]);
         if (sh_settings) {
-            struct FusedPush { Push base; std::array<float, 8> settings; };
+            struct FusedPush {
+                Push base;
+                std::array<float, 8> settings;
+            };
             static_assert(sizeof(FusedPush) == 128);
             const FusedPush fused{push, *sh_settings};
-            encoder_ring_.acquire().dispatch(
-                pipeline, bindings, &fused, sizeof(fused), groups_x, groups_y, groups_z);
+            encoder_ring_.acquire().dispatch(pipeline, bindings, &fused, sizeof(fused), groups_x,
+                                             groups_y, groups_z);
         } else {
-            encoder_ring_.acquire().dispatch(
-                pipeline, bindings, &push, sizeof(push), groups_x, groups_y, groups_z);
+            encoder_ring_.acquire().dispatch(pipeline, bindings, &push, sizeof(push), groups_x,
+                                             groups_y, groups_z);
         }
     }
 
@@ -3157,34 +3275,38 @@ private:
         sample_grouped_ = !environment_flag("SPLAT_DRENDER_DISABLE_TILED_DEPTH_QUERY");
         if (!sample_grouped_) {
             dispatch_infos(sample_depth_,
-                {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-                 descriptor(*frame_camera_), descriptor(points, count * 12ull),
-                 descriptor(output_f), descriptor(output_u)},
-                push, div_up(count, k_depth_query_threads));
+                           {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                            descriptor(gauss_f_), descriptor(*frame_camera_),
+                            descriptor(points, count * 12ull), descriptor(output_f),
+                            descriptor(output_u)},
+                           push, div_up(count, k_depth_query_threads));
             return;
         }
         Buffer& pixels = grow(sample_pixels_, count * 8ull);
         Buffer& tiles = grow(sample_tiles_, count * 4ull);
-        Buffer& counts = grow(sample_counts_,
-            static_cast<std::uint64_t>(last_tiles_ + scan_scratch_uints(last_tiles_)) * 4ull);
+        Buffer& counts =
+            grow(sample_counts_,
+                 static_cast<std::uint64_t>(last_tiles_ + scan_scratch_uints(last_tiles_)) * 4ull);
         Buffer& order = grow(sample_order_, count * 4ull);
         Buffer& cursors = grow(sample_cursors_, last_tiles_ * 4ull);
         zero_buffer(counts, last_tiles_ * 4ull);
         zero_buffer(cursors, last_tiles_ * 4ull);
         const std::vector<VkDescriptorBufferInfo> group_buffers{
             descriptor(*frame_camera_), descriptor(points, count * 12ull),
-            descriptor(pixels), descriptor(tiles), descriptor(counts), descriptor(order),
-            descriptor(cursors), descriptor(output_f), descriptor(output_u)};
+            descriptor(pixels),         descriptor(tiles),
+            descriptor(counts),         descriptor(order),
+            descriptor(cursors),        descriptor(output_f),
+            descriptor(output_u)};
         push.u[16] = 0u;
         dispatch_infos(sample_depth_group_, group_buffers, push, div_up(count, 256));
         inclusive_scan(counts, 0, 0, last_tiles_, last_tiles_);
         push.u[16] = 1u;
         dispatch_infos(sample_depth_group_, group_buffers, push, div_up(count, 256));
         dispatch_infos(sample_depth_tiled_,
-            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
-             descriptor(pixels), descriptor(counts), descriptor(order),
-             descriptor(output_f), descriptor(output_u)}, push,
-            last_grid_x_, div_up(last_height_, k_tile));
+                       {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+                        descriptor(gauss_f_), descriptor(pixels), descriptor(counts),
+                        descriptor(order), descriptor(output_f), descriptor(output_u)},
+                       push, last_grid_x_, div_up(last_height_, k_tile));
     }
 
     void dispatch_sample_backward(const std::vector<VkDescriptorBufferInfo>& buffers, Push push) {
@@ -3196,7 +3318,8 @@ private:
             // Off-screen points are absent from the tile lists.
             zero_buffer_view(buffers[9].buffer, buffers[9].offset, push.u[0] * 12ull);
             const auto& pipeline = sample_depth_backward_tiled_atomic_.valid()
-                ? sample_depth_backward_tiled_atomic_ : sample_depth_backward_tiled_;
+                                       ? sample_depth_backward_tiled_atomic_
+                                       : sample_depth_backward_tiled_;
             dispatch_infos(pipeline, grouped, push, last_grid_x_, div_up(last_height_, k_tile));
             return;
         }
@@ -3212,8 +3335,8 @@ private:
         }
     }
 
-    void reduce_multi_view_terms(const std::vector<VkDescriptorBufferInfo>& buffers,
-                                Push push, const std::uint32_t pixels) {
+    void reduce_multi_view_terms(const std::vector<VkDescriptorBufferInfo>& buffers, Push push,
+                                 const std::uint32_t pixels) {
         const std::uint32_t terms_base = 7u * pixels;
         std::uint32_t input = terms_base + 5u;
         std::uint32_t scratch = 12u * pixels + 5u;
@@ -3222,32 +3345,37 @@ private:
         while (count > 0) {
             const auto groups = div_up(count, 256);
             const auto output = groups == 1 ? terms_base : scratch;
-            push.u[14] = input; push.u[15] = output; push.u[19] = count;
+            push.u[14] = input;
+            push.u[15] = output;
+            push.u[19] = count;
             dispatch_infos(multi_view_, buffers, push, groups);
-            if (groups == 1) break;
-            input = output; count = groups; scratch += 5u * groups;
+            if (groups == 1)
+                break;
+            input = output;
+            count = groups;
+            scratch += 5u * groups;
         }
     }
 
-    void dispatch_indirect(
-        const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
-        Push push, const Buffer& indirect, const VkDeviceSize offset) {
+    void dispatch_indirect(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
+                           Push push, const Buffer& indirect, const VkDeviceSize offset) {
         set_float(push, 20, policy_settings_.alpha_clip);
         set_float(push, 21, policy_settings_.near_plane);
         push.u[22] = policy_settings_.compensate_2d;
         std::vector<photara::vk::BufferBinding> bindings;
         bindings.reserve(buffers.size());
-        for (const Buffer* buffer : buffers) bindings.push_back(to_binding(*buffer));
+        for (const Buffer* buffer : buffers)
+            bindings.push_back(to_binding(*buffer));
         begin_batch();
         encoder_ring_.acquire().dispatch_indirect(
             pipeline, bindings, &push, sizeof(push),
-            photara::vk::BufferBinding{
-                indirect.handle, offset, sizeof(VkDispatchIndirectCommand)});
+            photara::vk::BufferBinding{indirect.handle, offset, sizeof(VkDispatchIndirectCommand)});
     }
 
     void inclusive_scan(Buffer& buffer, std::uint32_t src, std::uint32_t dst, std::uint32_t count,
                         std::uint32_t scratch) {
-        if (count == 0) return;
+        if (count == 0)
+            return;
         const std::uint32_t blocks = div_up(count, 256);
         Push push{};
         push.u[0] = count;
@@ -3256,15 +3384,16 @@ private:
         push.u[3] = dst;
         push.u[4] = scratch;
         dispatch(scan_, {&buffer}, push, blocks);
-        if (blocks == 1) return;
+        if (blocks == 1)
+            return;
         inclusive_scan(buffer, scratch, scratch + blocks, blocks, scratch + 2 * blocks);
         push.u[1] = 1;
         push.u[4] = scratch + blocks;
         dispatch(scan_, {&buffer}, push, blocks);
     }
 
-    static Push emit_constants(std::uint32_t count, std::uint32_t mode, std::uint32_t grid_x, std::uint32_t grid_y,
-                               int wrap_width, std::uint32_t gaussian_count,
+    static Push emit_constants(std::uint32_t count, std::uint32_t mode, std::uint32_t grid_x,
+                               std::uint32_t grid_y, int wrap_width, std::uint32_t gaussian_count,
                                std::uint32_t gaussian_slots) {
         Push push{};
         push.u[0] = count;
@@ -3287,9 +3416,11 @@ private:
     // the emitter produced, so a 13-bit tile field needs two 8-bit passes
     // instead of four; the two all-zero digit passes it used to run were pure
     // histogram, scan and scatter traffic over every instance.
-    void radix_sort(bool key_is_64, std::uint32_t count, Buffer& lo0, Buffer& hi0, Buffer& val0, Buffer& lo1, Buffer& hi1,
-                    Buffer& val1, Buffer& hist, std::uint32_t hist_n, std::uint32_t key_bits = 32) {
-        if (count == 0) return;
+    void radix_sort(bool key_is_64, std::uint32_t count, Buffer& lo0, Buffer& hi0, Buffer& val0,
+                    Buffer& lo1, Buffer& hi1, Buffer& val1, Buffer& hist, std::uint32_t hist_n,
+                    std::uint32_t key_bits = 32) {
+        if (count == 0)
+            return;
         const std::uint32_t blocks = div_up(count, 1024);
         const std::uint32_t needed = (key_bits + 7u) / 8u;
         const std::uint32_t passes = std::min(8u, (needed + 1u) & ~1u);
@@ -3309,20 +3440,21 @@ private:
             dispatch(hist_, {&in_lo, &in_hi, &hist}, push, blocks);
             inclusive_scan(hist, 0, hist_n, hist_n, 2 * hist_n);
             push.u[4] = hist_n;
-            dispatch(scatter_, {&in_lo, &in_hi, &in_val, &out_lo, &out_hi, &out_val, &hist, &hist}, push, blocks);
+            dispatch(scatter_, {&in_lo, &in_hi, &in_val, &out_lo, &out_hi, &out_val, &hist, &hist},
+                     push, blocks);
             source_is_zero = !source_is_zero;
         }
         if (!source_is_zero) {
-            throw std::logic_error("radix sort pass count must be even so the result stays in buffer 0");
+            throw std::logic_error(
+                "radix sort pass count must be even so the result stays in buffer 0");
         }
     }
 
-    void radix_sort_indirect(
-        const bool key_is_64, const std::uint32_t capacity,
-        const std::uint32_t count_word, const VkDeviceSize dispatch_offset,
-        Buffer& lo0, Buffer& hi0, Buffer& val0, Buffer& lo1, Buffer& hi1,
-        Buffer& val1, Buffer& hist, const std::uint32_t hist_n,
-        const std::uint32_t key_bits) {
+    void radix_sort_indirect(const bool key_is_64, const std::uint32_t capacity,
+                             const std::uint32_t count_word, const VkDeviceSize dispatch_offset,
+                             Buffer& lo0, Buffer& hi0, Buffer& val0, Buffer& lo1, Buffer& hi1,
+                             Buffer& val1, Buffer& hist, const std::uint32_t hist_n,
+                             const std::uint32_t key_bits) {
         const std::uint32_t blocks = div_up(capacity, 1024);
         const std::uint32_t needed = (key_bits + 7u) / 8u;
         const std::uint32_t passes = std::min(8u, (needed + 1u) & ~1u);
@@ -3339,15 +3471,12 @@ private:
             push.u[2] = pass * 8u;
             push.u[3] = key_is_64 ? 1u : 0u;
             push.u[5] = count_word;
-            dispatch(
-                hist_indirect_, {&in_lo, &in_hi, &hist, &frame_counts_},
-                push, blocks);
+            dispatch(hist_indirect_, {&in_lo, &in_hi, &hist, &frame_counts_}, push, blocks);
             inclusive_scan(hist, 0, hist_n, hist_n, 2 * hist_n);
             push.u[4] = hist_n;
             dispatch_indirect(
                 scatter_indirect_,
-                {&in_lo, &in_hi, &in_val, &out_lo, &out_hi, &out_val,
-                 &hist, &hist, &frame_counts_},
+                {&in_lo, &in_hi, &in_val, &out_lo, &out_hi, &out_val, &hist, &hist, &frame_counts_},
                 push, frame_counts_, dispatch_offset);
             source_is_zero = !source_is_zero;
         }
@@ -3575,50 +3704,59 @@ private:
     float last_scale_modifier_{1.0F};
 };
 
-SplatRasterizer::SplatRasterizer(Context& context) : impl_(std::make_unique<Impl>(*context.impl_)) {}
+SplatRasterizer::SplatRasterizer(Context& context) : impl_(std::make_unique<Impl>(*context.impl_)) {
+}
 SplatRasterizer::~SplatRasterizer() = default;
 SplatRasterizer::SplatRasterizer(SplatRasterizer&&) noexcept = default;
 SplatRasterizer& SplatRasterizer::operator=(SplatRasterizer&&) noexcept = default;
 
-SplatForwardOutput SplatRasterizer::forward(const SplatGaussians& gaussians, const SplatCamera& camera,
+SplatForwardOutput SplatRasterizer::forward(const SplatGaussians& gaussians,
+                                            const SplatCamera& camera,
                                             const SplatSettings& settings) {
     impl_->upload_model(gaussians);
     return impl_->render(camera, settings);
 }
 
-void SplatRasterizer::upload_model(const SplatGaussians& gaussians) { impl_->upload_model(gaussians); }
+void SplatRasterizer::upload_model(const SplatGaussians& gaussians) {
+    impl_->upload_model(gaussians);
+}
 
 void SplatRasterizer::bind_model_device(const SplatDeviceGaussians& gaussians) {
     impl_->bind_model_device(gaussians);
 }
 
-void SplatRasterizer::update_means_and_opacities(
-    const std::span<const float> means, const std::span<const float> opacities) {
+void SplatRasterizer::update_means_and_opacities(const std::span<const float> means,
+                                                 const std::span<const float> opacities) {
     impl_->update_means_and_opacities(means, opacities);
 }
 
-void SplatRasterizer::clear_model() { impl_->clear_model(); }
-bool SplatRasterizer::has_model() const noexcept { return impl_->has_model(); }
-SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera, const SplatSettings& settings) {
+void SplatRasterizer::clear_model() {
+    impl_->clear_model();
+}
+bool SplatRasterizer::has_model() const noexcept {
+    return impl_->has_model();
+}
+SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera,
+                                           const SplatSettings& settings) {
     return impl_->render(camera, settings);
 }
 
-SplatBlendGradients SplatRasterizer::backward_blend(
-    const std::span<const float> dL_color, const std::span<const float> dL_alpha,
-    const std::span<const float> dL_median_depth,
-    const std::span<const float> dL_normal) {
+SplatBlendGradients SplatRasterizer::backward_blend(const std::span<const float> dL_color,
+                                                    const std::span<const float> dL_alpha,
+                                                    const std::span<const float> dL_median_depth,
+                                                    const std::span<const float> dL_normal) {
     return impl_->backward_blend(dL_color, dL_alpha, dL_median_depth, dL_normal);
 }
 
-SplatModelGradients SplatRasterizer::backward(
-    const std::span<const float> dL_color, const std::span<const float> dL_alpha,
-    const std::span<const float> dL_median_depth,
-    const std::span<const float> dL_normal) {
+SplatModelGradients SplatRasterizer::backward(const std::span<const float> dL_color,
+                                              const std::span<const float> dL_alpha,
+                                              const std::span<const float> dL_median_depth,
+                                              const std::span<const float> dL_normal) {
     return impl_->backward(dL_color, dL_alpha, dL_median_depth, dL_normal);
 }
 
-SplatDeviceFrame SplatRasterizer::render_device(
-    const SplatCamera& camera, const SplatSettings& settings) {
+SplatDeviceFrame SplatRasterizer::render_device(const SplatCamera& camera,
+                                                const SplatSettings& settings) {
     return impl_->render_device(camera, settings);
 }
 
@@ -3626,118 +3764,114 @@ void SplatRasterizer::pruning_scores_device(const SplatBufferView& scores) {
     impl_->pruning_scores_device(scores);
 }
 
-SplatDeviceFrame SplatRasterizer::render_device_copy(
-    const SplatCamera& camera, const SplatSettings& settings,
-    const SplatDeviceFrame& destination) {
+SplatDeviceFrame SplatRasterizer::render_device_copy(const SplatCamera& camera,
+                                                     const SplatSettings& settings,
+                                                     const SplatDeviceFrame& destination) {
     return impl_->render_device_copy(camera, settings, destination);
 }
 
-SplatDeviceFrame SplatRasterizer::render_colors_device_copy(
-    const SplatDeviceGaussians& gaussians, const SplatCamera& camera,
-    const SplatSettings& settings, const SplatDeviceFrame& destination) {
+SplatDeviceFrame SplatRasterizer::render_colors_device_copy(const SplatDeviceGaussians& gaussians,
+                                                            const SplatCamera& camera,
+                                                            const SplatSettings& settings,
+                                                            const SplatDeviceFrame& destination) {
     return impl_->render_colors_device_copy(gaussians, camera, settings, destination);
 }
 
-void SplatRasterizer::copy_frame_device(
-    const SplatDeviceFrame& source,
-    const SplatDeviceFrame& destination) {
+void SplatRasterizer::copy_frame_device(const SplatDeviceFrame& source,
+                                        const SplatDeviceFrame& destination) {
     impl_->copy_frame_device(source, destination);
 }
 
-void SplatRasterizer::backward_blend_device(
-    const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-    const SplatBufferView& packed_gradients,
-    const SplatBufferView& dL_median_depth, const SplatBufferView& dL_normal) {
-    impl_->backward_blend_device(
-        dL_color, dL_alpha, packed_gradients, dL_median_depth, dL_normal);
+void SplatRasterizer::backward_blend_device(const SplatBufferView& dL_color,
+                                            const SplatBufferView& dL_alpha,
+                                            const SplatBufferView& packed_gradients,
+                                            const SplatBufferView& dL_median_depth,
+                                            const SplatBufferView& dL_normal) {
+    impl_->backward_blend_device(dL_color, dL_alpha, packed_gradients, dL_median_depth, dL_normal);
 }
 
 std::uint64_t SplatRasterizer::blend_gradient_float_count() const noexcept {
     return impl_->blend_gradient_float_count();
 }
 
-void SplatRasterizer::backward_device(
-    const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-    const SplatBufferView& packed_model_gradients,
-    const SplatBufferView& dL_median_depth, const SplatBufferView& dL_normal,
-    const SplatSHAdamUpdate* sh_adam,
-        const SplatStructureAdamUpdate* structure_adam) {
-    impl_->backward_device(
-        dL_color, dL_alpha, packed_model_gradients, dL_median_depth, dL_normal, sh_adam, structure_adam);
+void SplatRasterizer::backward_device(const SplatBufferView& dL_color,
+                                      const SplatBufferView& dL_alpha,
+                                      const SplatBufferView& packed_model_gradients,
+                                      const SplatBufferView& dL_median_depth,
+                                      const SplatBufferView& dL_normal,
+                                      const SplatSHAdamUpdate* sh_adam,
+                                      const SplatStructureAdamUpdate* structure_adam) {
+    impl_->backward_device(dL_color, dL_alpha, packed_model_gradients, dL_median_depth, dL_normal,
+                           sh_adam, structure_adam);
 }
 
 std::uint64_t SplatRasterizer::model_gradient_float_count() const noexcept {
     return impl_->model_gradient_float_count();
 }
 
-SplatDepthSamples SplatRasterizer::sample_depth(
-    const std::span<const float> world_points, const SplatCamera& camera,
-    const SplatSettings& settings) {
+SplatDepthSamples SplatRasterizer::sample_depth(const std::span<const float> world_points,
+                                                const SplatCamera& camera,
+                                                const SplatSettings& settings) {
     return impl_->sample_depth(world_points, camera, settings);
 }
 
-SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
-    const std::span<const float> dL_camera_points) {
+SplatDepthSampleGradients
+SplatRasterizer::sample_depth_backward(const std::span<const float> dL_camera_points) {
     return impl_->sample_depth_backward(dL_camera_points);
 }
 
-void SplatRasterizer::occupancy_device(
-    const SplatBufferView& points, std::uint32_t count,
-    const SplatCamera& camera, const SplatSettings& settings,
-    const SplatBufferView& occupancy, const SplatBufferView& inside,
-    bool reuse_prepared_view) {
-    impl_->occupancy_device(points,count,camera,settings,occupancy,inside,reuse_prepared_view);
+void SplatRasterizer::occupancy_device(const SplatBufferView& points, std::uint32_t count,
+                                       const SplatCamera& camera, const SplatSettings& settings,
+                                       const SplatBufferView& occupancy,
+                                       const SplatBufferView& inside, bool reuse_prepared_view) {
+    impl_->occupancy_device(points, count, camera, settings, occupancy, inside,
+                            reuse_prepared_view);
 }
 
-void SplatRasterizer::sample_depth_device(
-    const SplatBufferView& points, std::uint32_t count, const SplatCamera& camera,
-    const SplatSettings& settings, const SplatBufferView& camera_points, const SplatBufferView& inside) {
+void SplatRasterizer::sample_depth_device(const SplatBufferView& points, std::uint32_t count,
+                                          const SplatCamera& camera, const SplatSettings& settings,
+                                          const SplatBufferView& camera_points,
+                                          const SplatBufferView& inside) {
     impl_->sample_depth_device(points, count, camera, settings, camera_points, inside);
 }
-void SplatRasterizer::sample_depth_backward_device(
-    const SplatBufferView& loss, const SplatBufferView& model, const SplatBufferView& points,
-    const bool omit_appearance) {
+void SplatRasterizer::sample_depth_backward_device(const SplatBufferView& loss,
+                                                   const SplatBufferView& model,
+                                                   const SplatBufferView& points,
+                                                   const bool omit_appearance) {
     impl_->sample_depth_backward_device(loss, model, points, omit_appearance);
 }
-std::uint64_t SplatRasterizer::sample_gradient_float_count(const bool omit_appearance) const noexcept {
+std::uint64_t
+SplatRasterizer::sample_gradient_float_count(const bool omit_appearance) const noexcept {
     return impl_->sample_gradient_float_count(omit_appearance);
 }
-void SplatRasterizer::multi_view_loss_device(
-    const SplatDeviceMultiViewInput& input, const SplatDeviceMultiViewOutput& output) {
+void SplatRasterizer::multi_view_loss_device(const SplatDeviceMultiViewInput& input,
+                                             const SplatDeviceMultiViewOutput& output) {
     impl_->multi_view_loss_device(input, output);
 }
 
-SplatMultiViewOutput SplatRasterizer::multi_view_loss(
-    const SplatMultiViewInput& input) {
+SplatMultiViewOutput SplatRasterizer::multi_view_loss(const SplatMultiViewInput& input) {
     return impl_->multi_view_loss(input);
 }
 
 SplatPhotometricOutput SplatRasterizer::photometric_loss(
-    const std::span<const float> prediction,
-    const std::span<const float> target,
-    const std::uint32_t width, const std::uint32_t height,
-    const float ssim_weight, const float photometric_weight,
-    const std::span<const float> mask) {
-    return impl_->photometric_loss(
-        prediction, target, width, height, ssim_weight,
-        photometric_weight, mask);
+    const std::span<const float> prediction, const std::span<const float> target,
+    const std::uint32_t width, const std::uint32_t height, const float ssim_weight,
+    const float photometric_weight, const std::span<const float> mask) {
+    return impl_->photometric_loss(prediction, target, width, height, ssim_weight,
+                                   photometric_weight, mask);
 }
 
 SplatDevicePhotometricOutput SplatRasterizer::fused_l1_ssim_device(
-    const SplatBufferView& prediction, const SplatBufferView& target,
-    const std::uint32_t width, const std::uint32_t height,
-    const float ssim_weight, const float photometric_weight,
-    const SplatBufferView& mask,
-    const SplatBufferView& gradient_destination) {
-    return impl_->fused_l1_ssim_device(
-        prediction, target, width, height, ssim_weight,
-        photometric_weight, mask, gradient_destination);
+    const SplatBufferView& prediction, const SplatBufferView& target, const std::uint32_t width,
+    const std::uint32_t height, const float ssim_weight, const float photometric_weight,
+    const SplatBufferView& mask, const SplatBufferView& gradient_destination) {
+    return impl_->fused_l1_ssim_device(prediction, target, width, height, ssim_weight,
+                                       photometric_weight, mask, gradient_destination);
 }
 
-void SplatRasterizer::color_correction_device(
-    const std::array<SplatBufferView, 6>& buffers,
-    const std::array<std::uint32_t, 20>& push_words,
-    std::uint32_t groups_x) {
+void SplatRasterizer::color_correction_device(const std::array<SplatBufferView, 6>& buffers,
+                                              const std::array<std::uint32_t, 20>& push_words,
+                                              std::uint32_t groups_x) {
     impl_->color_correction_device(buffers, push_words, groups_x);
 }
 
@@ -3746,17 +3880,17 @@ void SplatRasterizer::color_correction_batch_device(
     impl_->color_correction_batch_device(commands);
 }
 
-float SplatRasterizer::read_photometric_loss(
-    const SplatDevicePhotometricOutput& output) {
+float SplatRasterizer::read_photometric_loss(const SplatDevicePhotometricOutput& output) {
     return impl_->read_photometric_loss(output);
 }
 
-void SplatRasterizer::render_rgba(
-    const SplatCamera& camera, const SplatSettings& settings, std::vector<std::uint8_t>& rgba) {
+void SplatRasterizer::render_rgba(const SplatCamera& camera, const SplatSettings& settings,
+                                  std::vector<std::uint8_t>& rgba) {
     impl_->render_rgba(camera, settings, rgba);
 }
 
-SplatRgbaImage SplatRasterizer::render_rgba_device(const SplatCamera& camera, const SplatSettings& settings) {
+SplatRgbaImage SplatRasterizer::render_rgba_device(const SplatCamera& camera,
+                                                   const SplatSettings& settings) {
     return impl_->render_rgba_device(camera, settings);
 }
 

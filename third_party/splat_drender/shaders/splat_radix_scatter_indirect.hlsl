@@ -22,7 +22,8 @@ groupshared uint chunk_count[256];
 
 [numthreads(256, 1, 1)]
 void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
-    if (control[2] != 0u) return;
+    if (control[2] != 0u)
+        return;
     uint n = control[pc.u5];
     uint num_blocks = pc.u1;
     uint tid = group_thread;
@@ -39,19 +40,21 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         GroupMemoryBarrierWithGroupSync();
         uint rank = 0u;
         if (valid) {
-            [loop] for (uint earlier = 0u; earlier < tid; ++earlier)
-                rank += digits[earlier] == digit ? 1u : 0u;
+            [loop] for (uint earlier = 0u; earlier < tid; ++earlier) rank +=
+                digits[earlier] == digit ? 1u : 0u;
             uint hist_index = digit * num_blocks + group_id.x;
             uint exclusive = hist_scan[pc.u4 + hist_index] - hist[hist_index];
             uint dest = exclusive + chunk_base[digit] + rank;
             out_lo[dest] = lo;
-            if (pc.u3 != 0u) out_hi[dest] = hi;
+            if (pc.u3 != 0u)
+                out_hi[dest] = hi;
             out_val[dest] = value;
         }
         GroupMemoryBarrierWithGroupSync();
         chunk_count[tid] = 0u;
         GroupMemoryBarrierWithGroupSync();
-        if (valid) InterlockedAdd(chunk_count[digit], 1u);
+        if (valid)
+            InterlockedAdd(chunk_count[digit], 1u);
         GroupMemoryBarrierWithGroupSync();
         chunk_base[tid] += chunk_count[tid];
         GroupMemoryBarrierWithGroupSync();

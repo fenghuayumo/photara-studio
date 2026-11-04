@@ -10,7 +10,8 @@
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint pixels = pc.u0;
     uint index = dispatch_id.x;
-    if (index >= pixels) return;
+    if (index >= pixels)
+        return;
     uint r = uint(saturate(image[index]) * 255.0f + 0.5f);
     uint g = uint(saturate(image[pixels + index]) * 255.0f + 0.5f);
     uint b = uint(saturate(image[2u * pixels + index]) * 255.0f + 0.5f);

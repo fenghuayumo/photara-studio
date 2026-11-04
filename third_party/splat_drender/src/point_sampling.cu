@@ -16,12 +16,12 @@ using namespace splat_drender;
 
 namespace splat_drender::kernels {
 
-__global__ void preprocess_points(
-    const int count, const float* __restrict__ points,
-    const float* __restrict__ view, CameraIntrinsics K, int width, int height,
-    ws::PointState ps, bool fixed_list) {
+__global__ void preprocess_points(const int count, const float* __restrict__ points,
+                                  const float* __restrict__ view, CameraIntrinsics K, int width,
+                                  int height, ws::PointState ps, bool fixed_list) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    if (i >= count)
+        return;
     const int grid_x = (width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (height + cfg::kTileHeight - 1) / cfg::kTileHeight;
     if (fixed_list) {
@@ -31,9 +31,11 @@ __global__ void preprocess_points(
     ps.touched[i] = 0;
     const float3 p = make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
     const float3 t = mat::xform_point(p, view);
-    if (!camera_visible(t, K.mode, K.near_plane)) return;
+    if (!camera_visible(t, K.mode, K.near_plane))
+        return;
     const Projection pr = project(t, K, width, height);
-    if (!pr.valid) return;
+    if (!pr.valid)
+        return;
     if (pr.pixel_x < 0.f || pr.pixel_x > width - 1.f || pr.pixel_y < 0.f ||
         pr.pixel_y > height - 1.f)
         return;
@@ -45,28 +47,31 @@ __global__ void preprocess_points(
         const int y = min(grid_y - 1, max(0, int((pr.pixel_y + 0.5f) / cfg::kTileHeight)));
         ps.point_key[0][i] = unsigned(y * grid_x + x);
     }
-
 }
 
 // Sentinel key == tiles is sorted after every real tile. Invalid points must
 // neither index ranges[tiles] nor leave the final valid range open.
-__global__ void extract_point_ranges(int count, const unsigned* keys,
-    int tiles, uint2* ranges) {
+__global__ void extract_point_ranges(int count, const unsigned* keys, int tiles, uint2* ranges) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    if (i >= count)
+        return;
     const unsigned tile = keys[i];
-    if (tile >= unsigned(tiles)) return;
-    if (i == 0 || keys[i - 1] != tile) ranges[tile].x = unsigned(i);
-    if (i == count - 1 || keys[i + 1] != tile) ranges[tile].y = unsigned(i + 1);
+    if (tile >= unsigned(tiles))
+        return;
+    if (i == 0 || keys[i - 1] != tile)
+        ranges[tile].x = unsigned(i);
+    if (i == count - 1 || keys[i + 1] != tile)
+        ranges[tile].y = unsigned(i + 1);
 }
 
-__global__ void emit_point_instances(
-    const int count, const float2* __restrict__ point2d,
-    const unsigned* __restrict__ tile_offset,
-    const unsigned* __restrict__ touched, int grid_x, int grid_y,
-    unsigned* __restrict__ key_out, unsigned* __restrict__ value_out) {
+__global__ void emit_point_instances(const int count, const float2* __restrict__ point2d,
+                                     const unsigned* __restrict__ tile_offset,
+                                     const unsigned* __restrict__ touched, int grid_x, int grid_y,
+                                     unsigned* __restrict__ key_out,
+                                     unsigned* __restrict__ value_out) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count || touched[i] == 0) return;
+    if (i >= count || touched[i] == 0)
+        return;
     const float2 p = point2d[i];
     const int x = min(grid_x - 1, max(0, int((p.x + 0.5f) / cfg::kTileWidth)));
     const int y = min(grid_y - 1, max(0, int((p.y + 0.5f) / cfg::kTileHeight)));
@@ -99,12 +104,11 @@ struct GaussianBatch {
     float4 plane[cfg::kTileThreads];
 };
 
-__device__ inline void fetch_gaussians(
-    const uint2& grange, int round, int thread_rank,
-    const unsigned* __restrict__ gauss_value,
-    const float2* __restrict__ mean2d,
-    const float4* __restrict__ conic_opacity,
-    const float4* __restrict__ ray_plane, GaussianBatch& batch) {
+__device__ inline void fetch_gaussians(const uint2& grange, int round, int thread_rank,
+                                       const unsigned* __restrict__ gauss_value,
+                                       const float2* __restrict__ mean2d,
+                                       const float4* __restrict__ conic_opacity,
+                                       const float4* __restrict__ ray_plane, GaussianBatch& batch) {
     const int progress = round * cfg::kTileThreads + thread_rank;
     if (grange.x + progress < int(grange.y)) {
         const unsigned g = gauss_value[grange.x + progress];
@@ -114,14 +118,15 @@ __device__ inline void fetch_gaussians(
     }
 }
 
-__device__ inline void evaluate_gaussian(const float2 gxy, const float4 co,
-                                         const float4 rp, PointRegs& p, float alpha_clip) {
+__device__ inline void evaluate_gaussian(const float2 gxy, const float4 co, const float4 rp,
+                                         PointRegs& p, float alpha_clip) {
     const float2 d = make_float2(gxy.x - p.xy.x, gxy.y - p.xy.y);
-    const float power = -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                        co.y * d.x * d.y;
-    if (power > 0.f) return;
+    const float power = -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
+    if (power > 0.f)
+        return;
     const float alpha = fminf(alpha_clip, co.w * expf(power));
-    if (alpha < cfg::kAlphaFloor) return;
+    if (alpha < cfg::kAlphaFloor)
+        return;
     const float test_t = p.T_gauss * (1.f - alpha);
     if (test_t < cfg::kTransmittanceFloor) {
         p.done = true;
@@ -137,38 +142,29 @@ __device__ inline void evaluate_gaussian(const float2 gxy, const float4 co,
     p.T_gauss = test_t;
 }
 
-}  // namespace
+} // namespace
 
 // MODE 0: occupancy only (single traversal).
 // MODE 1: median depth (seed pass + bisection, like the pixel blender).
 template <int MODE>
 __global__ void __launch_bounds__(cfg::kTileThreads)
-evaluate_points(const uint2* __restrict__ tile_range,
-                 const unsigned* __restrict__ gauss_value,
-                 const uint2* __restrict__ point_range,
-                 const unsigned* __restrict__ point_value, int width,
-                 int height, CameraIntrinsics K,
-                 const float2* __restrict__ point2d,
-                 const float* __restrict__ point_t,
-                 const float2* __restrict__ mean2d,
-                 const float4* __restrict__ conic_opacity,
-                 const float4* __restrict__ ray_plane,
-                 const float depth_bracket,
-                 const float depth_tolerance,
-                 float* __restrict__ out_occupancy,
-                 float3* __restrict__ out_ray_point,
-                 float* __restrict__ out_median_depth,
-                 unsigned* __restrict__ out_n_contrib, bool* __restrict__ inside) {
+    evaluate_points(const uint2* __restrict__ tile_range, const unsigned* __restrict__ gauss_value,
+                    const uint2* __restrict__ point_range, const unsigned* __restrict__ point_value,
+                    int width, int height, CameraIntrinsics K, const float2* __restrict__ point2d,
+                    const float* __restrict__ point_t, const float2* __restrict__ mean2d,
+                    const float4* __restrict__ conic_opacity, const float4* __restrict__ ray_plane,
+                    const float depth_bracket, const float depth_tolerance,
+                    float* __restrict__ out_occupancy, float3* __restrict__ out_ray_point,
+                    float* __restrict__ out_median_depth, unsigned* __restrict__ out_n_contrib,
+                    bool* __restrict__ inside) {
     auto block = cg::this_thread_block();
     const int tile = blockIdx.x;
     const uint2 grange = tile_range[tile];
     const uint2 prange = point_range[tile];
     const int gauss_todo = grange.y - grange.x;
-    const int gauss_rounds =
-        (gauss_todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
+    const int gauss_rounds = (gauss_todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
     const int pts_per_round = cfg::kTileThreads * kPts;
-    const int point_rounds =
-        (int(prange.y - prange.x) + pts_per_round - 1) / pts_per_round;
+    const int point_rounds = (int(prange.y - prange.x) + pts_per_round - 1) / pts_per_round;
 
     __shared__ GaussianBatch batch;
 
@@ -177,8 +173,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
         int n_pts = 0;
 #pragma unroll
         for (int p = 0; p < kPts; ++p) {
-            const int progress =
-                (rp * pts_per_round + p * cfg::kTileThreads) + block.thread_rank();
+            const int progress = (rp * pts_per_round + p * cfg::kTileThreads) + block.thread_rank();
             if (prange.x + progress < int(prange.y)) {
                 const unsigned pid = point_value[prange.x + progress];
                 pts[p].idx = pid;
@@ -193,46 +188,43 @@ evaluate_points(const uint2* __restrict__ tile_range,
 
         unsigned contributor = 0;
         int remaining = gauss_todo;
-        for (int round = 0; round < gauss_rounds;
-             ++round, remaining -= cfg::kTileThreads) {
+        for (int round = 0; round < gauss_rounds; ++round, remaining -= cfg::kTileThreads) {
             __syncthreads();
-            fetch_gaussians(grange, round, block.thread_rank(), gauss_value,
-                            mean2d, conic_opacity, ray_plane, batch);
+            fetch_gaussians(grange, round, block.thread_rank(), gauss_value, mean2d, conic_opacity,
+                            ray_plane, batch);
             __syncthreads();
             const int n = min(cfg::kTileThreads, remaining);
             for (int j = 0; j < n; ++j) {
                 contributor++;
 #pragma unroll
                 for (int p = 0; p < kPts; ++p) {
-                    if (!pts[p].active || pts[p].done) continue;
+                    if (!pts[p].active || pts[p].done)
+                        continue;
                     if (MODE == 1) {
                         // Seed pass: track T, depth seed, last contributor.
                         const float2 d =
-                            make_float2(batch.xy[j].x - pts[p].xy.x,
-                                        batch.xy[j].y - pts[p].xy.y);
+                            make_float2(batch.xy[j].x - pts[p].xy.x, batch.xy[j].y - pts[p].xy.y);
                         const float4 co = batch.conic[j];
-                        const float power = -0.5f * (co.x * d.x * d.x +
-                                                     co.z * d.y * d.y) -
-                                            co.y * d.x * d.y;
-                        if (power > 0.f) continue;
-                        const float alpha =
-                            fminf(K.alpha_clip, co.w * expf(power));
-                        if (alpha < cfg::kAlphaFloor) continue;
+                        const float power =
+                            -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
+                        if (power > 0.f)
+                            continue;
+                        const float alpha = fminf(K.alpha_clip, co.w * expf(power));
+                        if (alpha < cfg::kAlphaFloor)
+                            continue;
                         const float test_t = pts[p].T_gauss * (1.f - alpha);
                         if (test_t < cfg::kTransmittanceFloor) {
                             pts[p].done = true;
                             continue;
                         }
                         const float4 rpl = batch.plane[j];
-                        const float t =
-                            rpl.x * d.x + rpl.y * d.y + rpl.z;
-                        pts[p].depth_seed =
-                            pts[p].T_gauss > 0.5f ? t : pts[p].depth_seed;
+                        const float t = rpl.x * d.x + rpl.y * d.y + rpl.z;
+                        pts[p].depth_seed = pts[p].T_gauss > 0.5f ? t : pts[p].depth_seed;
                         pts[p].T_gauss = test_t;
                         pts[p].last_contributor = contributor;
                     } else {
-                        evaluate_gaussian(batch.xy[j], batch.conic[j],
-                                          batch.plane[j], pts[p], K.alpha_clip);
+                        evaluate_gaussian(batch.xy[j], batch.conic[j], batch.plane[j], pts[p],
+                                          K.alpha_clip);
                     }
                 }
             }
@@ -246,16 +238,15 @@ evaluate_points(const uint2* __restrict__ tile_range,
             unsigned local_max = 0;
 #pragma unroll
             for (int p = 0; p < kPts; ++p)
-                if (pts[p].active) local_max = max(local_max, pts[p].last_contributor);
-            const unsigned block_max =
-                mat::block_max(local_max, warp_scratch);
+                if (pts[p].active)
+                    local_max = max(local_max, pts[p].last_contributor);
+            const unsigned block_max = mat::block_max(local_max, warp_scratch);
 
             float depth_min[kPts], depth_max[kPts];
             float T_p[kPts][cfg::kDepthSplit + 1];
             bool in_range[kPts];
-            const float seed_window = depth_bracket > 0.f
-                ? depth_bracket
-                : cfg::kDepthSeedWindowTesting;
+            const float seed_window =
+                depth_bracket > 0.f ? depth_bracket : cfg::kDepthSeedWindowTesting;
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {
                 depth_min[p] = fmaxf(pts[p].depth_seed - seed_window, 0.f);
@@ -270,19 +261,18 @@ evaluate_points(const uint2* __restrict__ tile_range,
 #pragma unroll
                 for (int p = 0; p < kPts; ++p)
 #pragma unroll
-                    for (int s = s0; s < s1; ++s) T_p[p][s] = 1.f;
+                    for (int s = s0; s < s1; ++s)
+                        T_p[p][s] = 1.f;
                 float interval[kPts];
 #pragma unroll
                 for (int p = 0; p < kPts; ++p)
-                    interval[p] = (depth_max[p] - depth_min[p]) *
-                                  (1.f / float(cfg::kDepthSplit));
+                    interval[p] = (depth_max[p] - depth_min[p]) * (1.f / float(cfg::kDepthSplit));
 
                 bool done[kPts];
                 int n_done = 0;
 #pragma unroll
                 for (int p = 0; p < kPts; ++p) {
-                    done[p] = !pts[p].active || !in_range[p] ||
-                              pts[p].last_contributor == 0;
+                    done[p] = !pts[p].active || !in_range[p] || pts[p].last_contributor == 0;
                     n_done += int(done[p]);
                 }
                 unsigned contributor2 = 0;
@@ -293,27 +283,26 @@ evaluate_points(const uint2* __restrict__ tile_range,
                 for (int round = 0; round < gauss_rounds;
                      ++round, remaining -= cfg::kTileThreads, todo -= cfg::kTileThreads) {
                     __syncthreads();
-                    fetch_gaussians(grange, round, block.thread_rank(),
-                                    gauss_value, mean2d, conic_opacity,
-                                    ray_plane, batch);
+                    fetch_gaussians(grange, round, block.thread_rank(), gauss_value, mean2d,
+                                    conic_opacity, ray_plane, batch);
                     __syncthreads();
                     const int n = min(cfg::kTileThreads, min(remaining, todo));
                     for (int j = 0; j < n; ++j) {
                         contributor2++;
 #pragma unroll
                         for (int p = 0; p < kPts; ++p) {
-                            if (done[p]) continue;
-                            const float2 d =
-                                make_float2(batch.xy[j].x - pts[p].xy.x,
-                                            batch.xy[j].y - pts[p].xy.y);
+                            if (done[p])
+                                continue;
+                            const float2 d = make_float2(batch.xy[j].x - pts[p].xy.x,
+                                                         batch.xy[j].y - pts[p].xy.y);
                             const float4 co = batch.conic[j];
                             const float power =
-                                -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                                co.y * d.x * d.y;
-                            if (power > 0.f) continue;
-                            const float alpha =
-                                fminf(K.alpha_clip, co.w * expf(power));
-                            if (alpha < cfg::kAlphaFloor) continue;
+                                -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
+                            if (power > 0.f)
+                                continue;
+                            const float alpha = fminf(K.alpha_clip, co.w * expf(power));
+                            if (alpha < cfg::kAlphaFloor)
+                                continue;
                             const float4 rpl = batch.plane[j];
                             const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
                             const float rsigma = rpl.w;
@@ -326,15 +315,15 @@ evaluate_points(const uint2* __restrict__ tile_range,
                             // of them). Both let the per-probe expf/rsqrt go
                             // away; only the band actually touching the
                             // bracket needs the full loop.
-                            const float w_lo =
-                                depth_min[p] + interval[p] * float(s0);
-                            const float w_hi =
-                                depth_min[p] + interval[p] * float(s1 - 1);
-                            int band = 0;  // 0 = touches, 1 = behind, -1 = in front
+                            const float w_lo = depth_min[p] + interval[p] * float(s0);
+                            const float w_hi = depth_min[p] + interval[p] * float(s1 - 1);
+                            int band = 0; // 0 = touches, 1 = behind, -1 = in front
                             if (ball) {
                                 const float band_half = cfg::kDepthBandSigmas / rsigma;
-                                if (t_peak - band_half > w_hi) band = 1;
-                                else if (t_peak + band_half < w_lo) band = -1;
+                                if (t_peak - band_half > w_hi)
+                                    band = 1;
+                                else if (t_peak + band_half < w_lo)
+                                    band = -1;
                             }
                             if (band == 1) {
                                 // Nothing to accumulate.
@@ -346,15 +335,12 @@ evaluate_points(const uint2* __restrict__ tile_range,
                             } else {
 #pragma unroll
                                 for (int s = s0; s < s1; ++s) {
-                                    const float ts =
-                                        depth_min[p] + interval[p] * float(s);
+                                    const float ts = depth_min[p] + interval[p] * float(s);
                                     const float delta = (ts - t_peak) * rsigma;
-                                    const float g =
-                                        ball ? expf(-0.5f * delta * delta) : 0.f;
+                                    const float g = ball ? expf(-0.5f * delta * delta) : 0.f;
                                     const float omg = 1.f - alpha * g;
                                     const float rv = rsqrtf(omg);
-                                    T_p[p][s] *=
-                                        (ts > t_peak ? (1.f - alpha) : omg) * rv;
+                                    T_p[p][s] *= (ts > t_peak ? (1.f - alpha) : omg) * rv;
                                 }
                             }
                             if (contributor2 >= pts[p].last_contributor) {
@@ -367,8 +353,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
 #pragma unroll
                 for (int p = 0; p < kPts; ++p) {
                     if (first)
-                        in_range[p] = (T_p[p][0] >= 0.5f) &&
-                                      (T_p[p][cfg::kDepthSplit] <= 0.5f) &&
+                        in_range[p] = (T_p[p][0] >= 0.5f) && (T_p[p][cfg::kDepthSplit] <= 0.5f) &&
                                       in_range[p];
                     int sid = 0;
 #pragma unroll
@@ -390,12 +375,9 @@ evaluate_points(const uint2* __restrict__ tile_range,
                     float local_widest = 0.f;
 #pragma unroll
                     for (int p = 0; p < kPts; ++p)
-                        if (in_range[p] && pts[p].active &&
-                            pts[p].last_contributor != 0)
-                            local_widest = fmaxf(
-                                local_widest, depth_max[p] - depth_min[p]);
-                    if (mat::block_max(local_widest, depth_scratch) <=
-                        depth_tolerance)
+                        if (in_range[p] && pts[p].active && pts[p].last_contributor != 0)
+                            local_widest = fmaxf(local_widest, depth_max[p] - depth_min[p]);
+                    if (mat::block_max(local_widest, depth_scratch) <= depth_tolerance)
                         break;
                 }
                 refine(std::false_type{});
@@ -403,16 +385,14 @@ evaluate_points(const uint2* __restrict__ tile_range,
 
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {
-                if (!pts[p].active) continue;
-                const float w_max = __saturatef(
-                    (T_p[p][0] - 0.5f) / (T_p[p][0] - T_p[p][cfg::kDepthSplit]));
+                if (!pts[p].active)
+                    continue;
+                const float w_max =
+                    __saturatef((T_p[p][0] - 0.5f) / (T_p[p][0] - T_p[p][cfg::kDepthSplit]));
                 const float w_min = 1.f - w_max;
-                const float md = in_range[p]
-                                     ? w_max * depth_max[p] + w_min * depth_min[p]
-                                     : 0.f;
+                const float md = in_range[p] ? w_max * depth_max[p] + w_min * depth_min[p] : 0.f;
                 const float3 ray = pixel_unit_ray(pts[p].xy.x, pts[p].xy.y, K);
-                out_ray_point[pts[p].idx] =
-                    make_float3(ray.x * md, ray.y * md, ray.z * md);
+                out_ray_point[pts[p].idx] = make_float3(ray.x * md, ray.y * md, ray.z * md);
                 out_median_depth[pts[p].idx] = md;
                 out_n_contrib[pts[p].idx] = pts[p].last_contributor;
                 inside[pts[p].idx] = in_range[p];
@@ -420,7 +400,8 @@ evaluate_points(const uint2* __restrict__ tile_range,
         } else {
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {
-                if (!pts[p].active) continue;
+                if (!pts[p].active)
+                    continue;
                 out_occupancy[pts[p].idx] = 1.f - pts[p].T_point;
                 inside[pts[p].idx] = true;
             }
@@ -430,33 +411,23 @@ evaluate_points(const uint2* __restrict__ tile_range,
 
 // Backward of evaluate_points<1>: per-point median-depth gradients
 // propagated to the Gaussian geometry and to the query points themselves.
-__global__ void __launch_bounds__(cfg::kTileThreads)
-sample_depth_backward(const uint2* __restrict__ tile_range,
-                      const unsigned* __restrict__ gauss_value,
-                      const uint2* __restrict__ point_range,
-                      const unsigned* __restrict__ point_value,
-                      CameraIntrinsics K, const float2* __restrict__ point2d,
-                      const float2* __restrict__ mean2d,
-                      const float4* __restrict__ conic_opacity,
-                      const float4* __restrict__ ray_plane,
-                      const unsigned* __restrict__ n_contrib,
-                      const float* __restrict__ median_depth,
-                      const bool* __restrict__ inside,
-                      const float3* __restrict__ dL_dray_points,
-                      ws::GradState gs,
-                      float2* __restrict__ dL_dpoint2d,
-                      const int width, const int height) {
+__global__ void __launch_bounds__(cfg::kTileThreads) sample_depth_backward(
+    const uint2* __restrict__ tile_range, const unsigned* __restrict__ gauss_value,
+    const uint2* __restrict__ point_range, const unsigned* __restrict__ point_value,
+    CameraIntrinsics K, const float2* __restrict__ point2d, const float2* __restrict__ mean2d,
+    const float4* __restrict__ conic_opacity, const float4* __restrict__ ray_plane,
+    const unsigned* __restrict__ n_contrib, const float* __restrict__ median_depth,
+    const bool* __restrict__ inside, const float3* __restrict__ dL_dray_points, ws::GradState gs,
+    float2* __restrict__ dL_dpoint2d, const int width, const int height) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
     const int tile = blockIdx.x;
     const uint2 grange = tile_range[tile];
     const uint2 prange = point_range[tile];
     const int gauss_todo = grange.y - grange.x;
-    const int gauss_rounds =
-        (gauss_todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
+    const int gauss_rounds = (gauss_todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
     const int pts_per_round = cfg::kTileThreads * kPts;
-    const int point_rounds =
-        (int(prange.y - prange.x) + pts_per_round - 1) / pts_per_round;
+    const int point_rounds = (int(prange.y - prange.x) + pts_per_round - 1) / pts_per_round;
 
     __shared__ GaussianBatch batch;
 
@@ -471,8 +442,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
         bool any_active = false;
 #pragma unroll
         for (int p = 0; p < kPts; ++p) {
-            const int progress = (rp * pts_per_round + p * cfg::kTileThreads) +
-                                 block.thread_rank();
+            const int progress = (rp * pts_per_round + p * cfg::kTileThreads) + block.thread_rank();
             if (prange.x + progress < int(prange.y)) {
                 const unsigned pid = point_value[prange.x + progress];
                 idx[p] = pid;
@@ -485,28 +455,25 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
 
                 const float3 dl = dL_dray_points[pid];
                 if (is_pinhole(K.mode)) {
-                    const float2 nf = make_float2((xy[p].x - K.cx) / K.fx,
-                                                  (xy[p].y - K.cy) / K.fy);
+                    const float2 nf = make_float2((xy[p].x - K.cx) / K.fx, (xy[p].y - K.cy) / K.fy);
                     const float rln = rnorm3df(nf.x, nf.y, 1.f);
                     const float rln2 = 1.f / (nf.x * nf.x + nf.y * nf.y + 1.f);
                     const float depth = mdepth[p] * rln;
                     const float dl_depth = dl.x * nf.x + dl.y * nf.y + dl.z;
                     dL_dDepth[p] = rln * dl_depth;
                     const float aux = dl_depth * rln2;
-                    const float2 dnf = make_float2(
-                        (dl.x - aux * nf.x) * depth, (dl.y - aux * nf.y) * depth);
+                    const float2 dnf =
+                        make_float2((dl.x - aux * nf.x) * depth, (dl.y - aux * nf.y) * depth);
                     dL_dxy[p] = make_float2(dnf.x / K.fx, dnf.y / K.fy);
                 }
                 if (is_fisheye(K.mode) || is_equirect(K.mode)) {
                     const float3 ray = pixel_unit_ray(xy[p].x, xy[p].y, K);
-                    dL_dDepth[p] =
-                        ray.x * dl.x + ray.y * dl.y + ray.z * dl.z;
+                    dL_dDepth[p] = ray.x * dl.x + ray.y * dl.y + ray.z * dl.z;
                     // Both models place the query along its pixel ray, so the
                     // point-to-pixel chain is the projection Jacobian either
                     // way; a panorama differentiates its own polar mapping.
-                    const Projection pj = is_equirect(K.mode)
-                        ? project_equirect(ray, width, height)
-                        : project_fisheye(ray, K);
+                    const Projection pj = is_equirect(K.mode) ? project_equirect(ray, width, height)
+                                                              : project_fisheye(ray, K);
                     const float3 ju = make_float3(pj.J.du[0], pj.J.du[1], pj.J.du[2]);
                     const float3 jv = make_float3(pj.J.dv[0], pj.J.dv[1], pj.J.dv[2]);
                     const float aa = mat::dot3(ju, ju);
@@ -514,17 +481,14 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                     const float bb = mat::dot3(jv, jv);
                     const float det = aa * bb - ab * ab;
                     dL_dxy[p] = make_float2(
-                        mdepth[p] * mat::dot3(dl, make_float3(
-                            (bb * ju.x - ab * jv.x) / det,
-                            (bb * ju.y - ab * jv.y) / det,
-                            (bb * ju.z - ab * jv.z) / det)),
-                        mdepth[p] * mat::dot3(dl, make_float3(
-                            (aa * jv.x - ab * ju.x) / det,
-                            (aa * jv.y - ab * ju.y) / det,
-                            (aa * jv.z - ab * ju.z) / det)));
+                        mdepth[p] * mat::dot3(dl, make_float3((bb * ju.x - ab * jv.x) / det,
+                                                              (bb * ju.y - ab * jv.y) / det,
+                                                              (bb * ju.z - ab * jv.z) / det)),
+                        mdepth[p] * mat::dot3(dl, make_float3((aa * jv.x - ab * ju.x) / det,
+                                                              (aa * jv.y - ab * ju.y) / det,
+                                                              (aa * jv.z - ab * ju.z) / det)));
                 }
-                if (!is_pinhole(K.mode) && !is_equirect(K.mode) &&
-                    !is_fisheye(K.mode)) {
+                if (!is_pinhole(K.mode) && !is_equirect(K.mode) && !is_fisheye(K.mode)) {
                     dL_dDepth[p] = 0.f;
                     dL_dxy[p] = make_float2(0.f, 0.f);
                 }
@@ -540,25 +504,24 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
         unsigned local_max = 0;
 #pragma unroll
         for (int p = 0; p < kPts; ++p)
-            if (!done[p]) local_max = max(local_max, last_contrib[p]);
-        const unsigned block_max =
-            mat::block_max(local_max, warp_scratch);
-        const int rounds =
-            (int(block_max) + cfg::kTileThreads - 1) / cfg::kTileThreads;
+            if (!done[p])
+                local_max = max(local_max, last_contrib[p]);
+        const unsigned block_max = mat::block_max(local_max, warp_scratch);
+        const int rounds = (int(block_max) + cfg::kTileThreads - 1) / cfg::kTileThreads;
 
         // ---- dT/dtm accumulation ----
         float dL_dmt_dT_dtm[kPts];
         {
             float dT_dtm[kPts];
 #pragma unroll
-            for (int p = 0; p < kPts; ++p) dT_dtm[p] = 0.f;
+            for (int p = 0; p < kPts; ++p)
+                dT_dtm[p] = 0.f;
             int todo = int(block_max);
             unsigned contributor = 0;
-            for (int round = 0; round < rounds;
-                 ++round, todo -= cfg::kTileThreads) {
+            for (int round = 0; round < rounds; ++round, todo -= cfg::kTileThreads) {
                 __syncthreads();
-                fetch_gaussians(grange, round, block.thread_rank(), gauss_value,
-                                mean2d, conic_opacity, ray_plane, batch);
+                fetch_gaussians(grange, round, block.thread_rank(), gauss_value, mean2d,
+                                conic_opacity, ray_plane, batch);
                 __syncthreads();
                 const int n = min(cfg::kTileThreads, todo);
                 for (int j = 0; j < n; ++j) {
@@ -566,25 +529,25 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
 #pragma unroll
                     for (int p = 0; p < kPts; ++p) {
                         // Forward stores a one-based inclusive contributor count.
-                        if (done[p] || contributor > last_contrib[p]) continue;
-                        const float2 d = make_float2(batch.xy[j].x - xy[p].x,
-                                                     batch.xy[j].y - xy[p].y);
+                        if (done[p] || contributor > last_contrib[p])
+                            continue;
+                        const float2 d =
+                            make_float2(batch.xy[j].x - xy[p].x, batch.xy[j].y - xy[p].y);
                         const float4 co = batch.conic[j];
                         const float power =
-                            -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                            co.y * d.x * d.y;
-                        if (power > 0.f) continue;
-                        const float alpha =
-                            fminf(K.alpha_clip, co.w * expf(power));
-                        if (alpha < cfg::kAlphaFloor) continue;
+                            -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
+                        if (power > 0.f)
+                            continue;
+                        const float alpha = fminf(K.alpha_clip, co.w * expf(power));
+                        if (alpha < cfg::kAlphaFloor)
+                            continue;
                         const float4 rpl = batch.plane[j];
                         const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
                         const float rsigma = rpl.w;
                         const float t_delta = (mdepth[p] - t_peak) * rsigma;
                         const float G_exp = expf(-0.5f * t_delta * t_delta);
                         const float Gt = alpha * G_exp;
-                        dT_dtm[p] +=
-                            -0.25f * Gt / (1.f - Gt) * fabsf(t_delta) * rsigma;
+                        dT_dtm[p] += -0.25f * Gt / (1.f - Gt) * fabsf(t_delta) * rsigma;
                     }
                 }
             }
@@ -596,15 +559,13 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
         // ---- main backward traversal ----
         int todo = int(block_max);
         unsigned contributor = block_max;
-        for (int round = 0; round < rounds;
-             ++round, todo -= cfg::kTileThreads) {
+        for (int round = 0; round < rounds; ++round, todo -= cfg::kTileThreads) {
             __syncthreads();
             const int progress = round * cfg::kTileThreads + block.thread_rank();
             if (progress < int(block_max)) {
                 // Reverse fetch: slot j of this batch holds list position
                 // block_max - (round * kTileThreads + j) - 1.
-                const unsigned g =
-                    gauss_value[grange.x + int(block_max) - progress - 1];
+                const unsigned g = gauss_value[grange.x + int(block_max) - progress - 1];
                 batch.xy[block.thread_rank()] = mean2d[g];
                 batch.conic[block.thread_rank()] = conic_opacity[g];
                 batch.plane[block.thread_rank()] = ray_plane[g];
@@ -618,21 +579,18 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                 float alpha_raw[kPts];
 #pragma unroll
                 for (int p = 0; p < kPts; ++p) {
-                    const float2 d = make_float2(batch.xy[j].x - xy[p].x,
-                                                 batch.xy[j].y - xy[p].y);
+                    const float2 d = make_float2(batch.xy[j].x - xy[p].x, batch.xy[j].y - xy[p].y);
                     const float4 co = batch.conic[j];
                     const float power =
-                        -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                        co.y * d.x * d.y;
+                        -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
                     G[p] = expf(power);
                     alpha_raw[p] = co.w * G[p];
-                    const bool valid = !(done[p] ||
-                                         (contributor >= last_contrib[p]) ||
-                                         (power > 0.f) ||
-                                         (alpha_raw[p] < cfg::kAlphaFloor));
+                    const bool valid = !(done[p] || (contributor >= last_contrib[p]) ||
+                                         (power > 0.f) || (alpha_raw[p] < cfg::kAlphaFloor));
                     any_valid = any_valid || valid;
                 }
-                if (!warp.any(any_valid)) continue;
+                if (!warp.any(any_valid))
+                    continue;
 
                 float dL_dt_local = 0.f;
                 float2 dL_dplane_local = make_float2(0.f, 0.f);
@@ -641,17 +599,14 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                 float dL_drsigma_local = 0.f;
 #pragma unroll
                 for (int p = 0; p < kPts; ++p) {
-                    const float2 d = make_float2(batch.xy[j].x - xy[p].x,
-                                                 batch.xy[j].y - xy[p].y);
+                    const float2 d = make_float2(batch.xy[j].x - xy[p].x, batch.xy[j].y - xy[p].y);
                     const float4 co = batch.conic[j];
                     const float power =
-                        -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                        co.y * d.x * d.y;
-                    const bool valid = !(done[p] ||
-                                         (contributor >= last_contrib[p]) ||
-                                         (power > 0.f) ||
-                                         (alpha_raw[p] < cfg::kAlphaFloor));
-                    if (!valid) continue;
+                        -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
+                    const bool valid = !(done[p] || (contributor >= last_contrib[p]) ||
+                                         (power > 0.f) || (alpha_raw[p] < cfg::kAlphaFloor));
+                    if (!valid)
+                        continue;
                     const float alpha = fminf(K.alpha_clip, alpha_raw[p]);
 
                     const float4 rpl = batch.plane[j];
@@ -664,10 +619,8 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                     float dL_dGt = dL_dmt_dT_dtm[p] * 0.25f / (1.f - Gt);
                     dL_dGt = mdepth[p] > t_peak ? dL_dGt : -dL_dGt;
                     dL_dGt = rsigma > 0.f ? dL_dGt : 0.f;
-                    float dL_dopa =
-                        dL_dGt * G_exp -
-                        dL_dmt_dT_dtm[p] *
-                            (t_delta > 0.f ? 0.5f / (1.f - alpha) : 0.f);
+                    float dL_dopa = dL_dGt * G_exp -
+                                    dL_dmt_dT_dtm[p] * (t_delta > 0.f ? 0.5f / (1.f - alpha) : 0.f);
                     const float dL_ddelta = -dL_dGt * Gt * t_delta;
                     dL_drsigma_local += dL_ddelta * (mdepth[p] - t_peak);
                     const float dL_dt_peak = -dL_ddelta * rsigma;
@@ -704,10 +657,8 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                 mat::warp_sum(dL_dconic_local);
                 mat::warp_sum(dL_drsigma_local);
                 if (warp.thread_rank() == 0) {
-                    const int progress2 =
-                        round * cfg::kTileThreads + j;
-                    const unsigned g = gauss_value
-                        [grange.x + int(block_max) - progress2 - 1];
+                    const int progress2 = round * cfg::kTileThreads + j;
+                    const unsigned g = gauss_value[grange.x + int(block_max) - progress2 - 1];
                     atomicAdd(&gs.d_ray_plane[g].x, dL_dplane_local.x);
                     atomicAdd(&gs.d_ray_plane[g].y, dL_dplane_local.y);
                     atomicAdd(&gs.d_ray_plane[g].z, dL_dt_local);
@@ -724,8 +675,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
 
 #pragma unroll
         for (int p = 0; p < kPts; ++p) {
-            const int progress = (rp * pts_per_round + p * cfg::kTileThreads) +
-                                 block.thread_rank();
+            const int progress = (rp * pts_per_round + p * cfg::kTileThreads) + block.thread_rank();
             if (prange.x + progress < int(prange.y))
                 dL_dpoint2d[idx[p]] = dL_dxy[p];
         }
@@ -733,13 +683,14 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
 }
 
 // Unprojects dL/d(pixel) back to dL/d(world point).
-__global__ void point_2d_backward(
-    const int count, const float* __restrict__ points,
-    const float* __restrict__ view, CameraIntrinsics K, int width, int height,
-    const unsigned* __restrict__ touched, const float2* __restrict__ dL_dpoint2d,
-    float3* __restrict__ dL_dpoint3d) {
+__global__ void point_2d_backward(const int count, const float* __restrict__ points,
+                                  const float* __restrict__ view, CameraIntrinsics K, int width,
+                                  int height, const unsigned* __restrict__ touched,
+                                  const float2* __restrict__ dL_dpoint2d,
+                                  float3* __restrict__ dL_dpoint3d) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count || touched[i] == 0) return;
+    if (i >= count || touched[i] == 0)
+        return;
     const float3 m = make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
     const float3 t = mat::xform_point(m, view);
     float3 grad;
@@ -747,12 +698,12 @@ __global__ void point_2d_backward(
         const float rz = 1.f / (t.z + 1.0e-7f);
         const float sx = t.x * rz, sy = t.y * rz;
         const float2 g = dL_dpoint2d[i];
-        grad.x = (K.fx * (view[0] - sx * view[2]) * g.x +
-                  K.fy * (view[1] - sy * view[2]) * g.y) * rz;
-        grad.y = (K.fx * (view[4] - sx * view[6]) * g.x +
-                  K.fy * (view[5] - sy * view[6]) * g.y) * rz;
-        grad.z = (K.fx * (view[8] - sx * view[10]) * g.x +
-                  K.fy * (view[9] - sy * view[10]) * g.y) * rz;
+        grad.x =
+            (K.fx * (view[0] - sx * view[2]) * g.x + K.fy * (view[1] - sy * view[2]) * g.y) * rz;
+        grad.y =
+            (K.fx * (view[4] - sx * view[6]) * g.x + K.fy * (view[5] - sy * view[6]) * g.y) * rz;
+        grad.z =
+            (K.fx * (view[8] - sx * view[10]) * g.x + K.fy * (view[9] - sy * view[10]) * g.y) * rz;
     } else {
         const Projection pj = project(t, K, width, height);
         if (pj.valid) {
@@ -770,88 +721,68 @@ __global__ void point_2d_backward(
     dL_dpoint3d[i] = grad;
 }
 
-}  // namespace splat_drender::kernels
+} // namespace splat_drender::kernels
 
 namespace splat_drender::launch {
 
-void preprocess_points(int count, const float* points, const float* view,
-                       CameraIntrinsics K, int width, int height,
-                       ws::PointState ps, bool fixed_list) {
-    kernels::preprocess_points<<<(count + cfg::kGaussianBlock - 1) /
-                                     cfg::kGaussianBlock,
-                                 cfg::kGaussianBlock>>>(count, points, view, K,
-                                                        width, height, ps, fixed_list);
+void preprocess_points(int count, const float* points, const float* view, CameraIntrinsics K,
+                       int width, int height, ws::PointState ps, bool fixed_list) {
+    kernels::preprocess_points<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                                 cfg::kGaussianBlock>>>(count, points, view, K, width, height, ps,
+                                                        fixed_list);
 }
 
 void extract_point_ranges(int count, const unsigned* keys, int tiles, uint2* ranges) {
     kernels::extract_point_ranges<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
-        cfg::kGaussianBlock>>>(count, keys, tiles, ranges);
+                                    cfg::kGaussianBlock>>>(count, keys, tiles, ranges);
 }
 
-void emit_point_instances(int count, const float2* point2d,
-                          const unsigned* tile_offset,
-                          const unsigned* touched, int grid_x, int grid_y,
-                          unsigned* key_out, unsigned* value_out) {
-    kernels::emit_point_instances<<<(count + cfg::kGaussianBlock - 1) /
-                                        cfg::kGaussianBlock,
-                                    cfg::kGaussianBlock>>>(
-        count, point2d, tile_offset, touched, grid_x, grid_y, key_out,
-        value_out);
+void emit_point_instances(int count, const float2* point2d, const unsigned* tile_offset,
+                          const unsigned* touched, int grid_x, int grid_y, unsigned* key_out,
+                          unsigned* value_out) {
+    kernels::emit_point_instances<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                                    cfg::kGaussianBlock>>>(count, point2d, tile_offset, touched,
+                                                           grid_x, grid_y, key_out, value_out);
 }
 
-void evaluate_points(bool median_mode, const uint2* tile_range,
-                     const unsigned* gauss_value, const uint2* point_range,
-                     const unsigned* point_value, int width, int height,
-                     CameraIntrinsics K, const float2* point2d,
-                     const float* point_t, const float2* mean2d,
-                     const float4* conic_opacity, const float4* ray_plane,
-                     const float depth_bracket, const float depth_tolerance,
-                     float* out_occupancy, float3* out_ray_point,
-                     float* out_median_depth, unsigned* out_n_contrib,
+void evaluate_points(bool median_mode, const uint2* tile_range, const unsigned* gauss_value,
+                     const uint2* point_range, const unsigned* point_value, int width, int height,
+                     CameraIntrinsics K, const float2* point2d, const float* point_t,
+                     const float2* mean2d, const float4* conic_opacity, const float4* ray_plane,
+                     const float depth_bracket, const float depth_tolerance, float* out_occupancy,
+                     float3* out_ray_point, float* out_median_depth, unsigned* out_n_contrib,
                      bool* inside, int tiles) {
     if (median_mode) {
         kernels::evaluate_points<1><<<tiles, cfg::kTileThreads>>>(
-            tile_range, gauss_value, point_range, point_value, width, height,
-            K, point2d, point_t, mean2d, conic_opacity, ray_plane,
-            depth_bracket, depth_tolerance,
-            out_occupancy, out_ray_point, out_median_depth, out_n_contrib,
-            inside);
+            tile_range, gauss_value, point_range, point_value, width, height, K, point2d, point_t,
+            mean2d, conic_opacity, ray_plane, depth_bracket, depth_tolerance, out_occupancy,
+            out_ray_point, out_median_depth, out_n_contrib, inside);
     } else {
         kernels::evaluate_points<0><<<tiles, cfg::kTileThreads>>>(
-            tile_range, gauss_value, point_range, point_value, width, height,
-            K, point2d, point_t, mean2d, conic_opacity, ray_plane,
-            depth_bracket, depth_tolerance,
-            out_occupancy, out_ray_point, out_median_depth, out_n_contrib,
-            inside);
+            tile_range, gauss_value, point_range, point_value, width, height, K, point2d, point_t,
+            mean2d, conic_opacity, ray_plane, depth_bracket, depth_tolerance, out_occupancy,
+            out_ray_point, out_median_depth, out_n_contrib, inside);
     }
 }
 
-void sample_depth_backward(const uint2* tile_range,
-                           const unsigned* gauss_value,
-                           const uint2* point_range,
-                           const unsigned* point_value, CameraIntrinsics K,
-                           const float2* point2d, const float2* mean2d,
-                           const float4* conic_opacity,
-                           const float4* ray_plane, const unsigned* n_contrib,
-                           const float* median_depth, const bool* inside,
-                           const float3* dL_dray_points, ws::GradState gs,
-                           float2* dL_dpoint2d, int tiles, int width,
-                           int height) {
+void sample_depth_backward(const uint2* tile_range, const unsigned* gauss_value,
+                           const uint2* point_range, const unsigned* point_value,
+                           CameraIntrinsics K, const float2* point2d, const float2* mean2d,
+                           const float4* conic_opacity, const float4* ray_plane,
+                           const unsigned* n_contrib, const float* median_depth, const bool* inside,
+                           const float3* dL_dray_points, ws::GradState gs, float2* dL_dpoint2d,
+                           int tiles, int width, int height) {
     kernels::sample_depth_backward<<<tiles, cfg::kTileThreads>>>(
-        tile_range, gauss_value, point_range, point_value, K, point2d, mean2d,
-        conic_opacity, ray_plane, n_contrib, median_depth, inside,
-        dL_dray_points, gs, dL_dpoint2d, width, height);
+        tile_range, gauss_value, point_range, point_value, K, point2d, mean2d, conic_opacity,
+        ray_plane, n_contrib, median_depth, inside, dL_dray_points, gs, dL_dpoint2d, width, height);
 }
 
-void point_2d_backward(int count, const float* points, const float* view,
-                       CameraIntrinsics K, int width, int height,
-                       const unsigned* touched, const float2* dL_dpoint2d,
+void point_2d_backward(int count, const float* points, const float* view, CameraIntrinsics K,
+                       int width, int height, const unsigned* touched, const float2* dL_dpoint2d,
                        float3* dL_dpoint3d) {
-    kernels::point_2d_backward<<<(count + cfg::kGaussianBlock - 1) /
-                                     cfg::kGaussianBlock,
-                                 cfg::kGaussianBlock>>>(
-        count, points, view, K, width, height, touched, dL_dpoint2d,
-        dL_dpoint3d);
+    kernels::point_2d_backward<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+                                 cfg::kGaussianBlock>>>(count, points, view, K, width, height,
+                                                        touched, dL_dpoint2d, dL_dpoint3d);
 }
 
-}  // namespace splat_drender::launch
+} // namespace splat_drender::launch
