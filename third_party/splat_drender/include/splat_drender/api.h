@@ -30,6 +30,15 @@ struct CameraView {
     const float* center = nullptr;
 };
 
+// Optional raw training parameters. 3DGS projection can activate these in
+// registers; the legacy activated-array API remains available to all callers.
+struct RawActivation {
+    const float* log_scales = nullptr;
+    const float* quaternions = nullptr;
+    const float* opacity_logits = nullptr;
+    const float* filter_3d = nullptr;
+};
+
 struct Gaussians {
     int count = 0;
     const float* means = nullptr; // [N,3]
@@ -37,13 +46,14 @@ struct Gaussians {
     const float* sh = nullptr;        // [N,sh_bases,3]
     const float* colors = nullptr;    // [N,3] precomputed view color
     const float* opacities = nullptr; // [N], already activated
-    // Exactly one of (scales, rotations) / covariances must be provided.
+    // Exactly one of (scales, rotations), covariances, or raw must be provided.
     const float* scales = nullptr;      // [N,3], already activated
     const float* rotations = nullptr;   // [N,4], scalar-first
     const float* covariances = nullptr; // [N,6], upper triangular
     int sh_degree = 0;
     int sh_bases = 0;
     Primitive primitive = Primitive::gaussian_3dgs;
+    RawActivation raw{};
 };
 
 struct RenderSettings {

@@ -163,7 +163,7 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g, con
         launch::preprocess_gaussians(
             g.count, g.sh_degree, g.sh_bases, g.means, g.sh, g.colors, g.opacities, g.scales,
             g.rotations, g.covariances, cam.world_to_camera, cam.center, K, cam.width, cam.height,
-            s.kernel_size, s.scale_modifier, grid_x, grid_y, wrap_width, geometry, gst, radii);
+            s.kernel_size, s.scale_modifier, grid_x, grid_y, wrap_width, geometry, gst, radii, g.raw);
     check_cuda(cudaGetLastError(), "preprocess_gaussians");
 
     SortCounts counts;
@@ -401,7 +401,7 @@ void run_gaussian_backward(const Gaussians& g, const CameraView& cam, const Rend
         cam.center, intrinsics_of(cam), cam.width, cam.height, s.kernel_size, s.scale_modifier,
         radius, gst.clamped, gst, gs, grads.means, grads.sh, grads.colors, grads.opacities,
         grads.scales, grads.rotations, grads.covariances, grads.sh_adam, grads.structure_adam,
-        g.primitive == Primitive::gaussian_3dgut);
+        g.primitive == Primitive::gaussian_3dgut, g.raw);
     check_cuda(cudaGetLastError(), "gaussian_backward");
 }
 
@@ -419,7 +419,10 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools, const Gaussians& 
                                   const RenderOutputs& out) {
     check(g.count > 0 && cam.width > 0 && cam.height > 0, "empty inputs");
     check((g.sh != nullptr) != (g.colors != nullptr), "exactly one color source required");
-    check((g.scales != nullptr) != (g.covariances != nullptr),
+    check(!g.raw.log_scales || (g.primitive == Primitive::gaussian_3dgs &&
+          g.raw.quaternions && g.raw.opacity_logits && !g.covariances && !g.scales &&
+          !g.rotations && !g.opacities), "invalid raw activation inputs");
+    check((g.scales != nullptr || g.raw.log_scales != nullptr) != (g.covariances != nullptr),
           "exactly one covariance source required");
     check(out.color && out.alpha && out.visibility && out.radii, "forward outputs required");
     if (s.need_depth)

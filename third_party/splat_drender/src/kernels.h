@@ -18,7 +18,7 @@ void preprocess_gaussians(int count, int sh_degree, int sh_bases, const float* m
                           const float* view, const float* camera_center, CameraIntrinsics K,
                           int width, int height, float kernel_size, float scale_modifier,
                           int grid_x, int grid_y, int wrap_width, bool geometry,
-                          ws::GaussianState st, int* radii);
+                          ws::GaussianState st, int* radii, RawActivation raw = {});
 
 void emit_depth_entries(int count, const unsigned* visible_offset, const unsigned* visible_flag,
                         const unsigned* depth_key, unsigned* key_out, unsigned* value_out);
@@ -88,7 +88,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree, int 
                        const bool* clamped, ws::GaussianState st, ws::GradState gs,
                        float* grad_mean, float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation, float* grad_cov,
-                       SHAdam sh_adam = {}, StructureAdam structure_adam = {}, bool gut = false);
+                       SHAdam sh_adam = {}, StructureAdam structure_adam = {}, bool gut = false, RawActivation raw = {});
 
 void preprocess_points(int count, const float* points, const float* view, CameraIntrinsics K,
                        int width, int height, ws::PointState ps, bool fixed_list);

@@ -220,9 +220,15 @@ splat_drender::Gaussians gaussians_of(
     g.primitive = static_cast<splat_drender::Primitive>(model.render_method);
     g.count = static_cast<int>(model.size());
     g.means = model.means.ptr<float>();
-    g.opacities = activated.opacities.ptr<float>();
-    g.scales = activated.scales.ptr<float>();
-    g.rotations = activated.quaternions.ptr<float>();
+    if (activated.scales.is_valid()) {
+        g.opacities = activated.opacities.ptr<float>();
+        g.scales = activated.scales.ptr<float>();
+        g.rotations = activated.quaternions.ptr<float>();
+    } else {
+        g.raw = {model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
+            model.opacity_logits.ptr<float>(),
+            model.filter_3d.is_valid() ? model.filter_3d.ptr<float>() : nullptr};
+    }
     g.sh_degree = static_cast<int>(options.active_sh_degree);
     g.sh_bases = model.sh.is_valid() && model.sh.shape().rank() == 3
                      ? static_cast<int>(model.sh.shape()[1])
@@ -338,7 +344,8 @@ RenderResult Rasterizer::forward(
     context->colors_precomp = requested_options.colors_precomp;
     context->options.active_sh_degree =
         std::min(requested_options.active_sh_degree, model.sh_degree);
-    context->activated = detail::activate_parameters(model);
+    if (model.render_method != RenderMethod::gaussian_3dgs || !requested_options.fuse_activation)
+        context->activated = detail::activate_parameters(model);
     context->constants = prepare_camera_constants(camera);
 
     const std::size_t pixels = static_cast<std::size_t>(camera.width) * camera.height;
@@ -491,7 +498,25 @@ ModelGradients Rasterizer::backward(
          structure_adam->opacity_first.numel() != model.opacity_logits.numel() ||
          structure_adam->opacity_second.numel() != model.opacity_logits.numel()))
         throw std::invalid_argument("Incompatible fused structure Adam context/state");
+    // Capture diagnostics before fused Adam mutates the model. Keep this
+    // separate from `activated` so enabling dumps still exercises raw kernels.
+    const char* dump_prefix = std::getenv("PHOTARA_SPLAT_GRAD_DUMP");
+    unsigned dump_call = 0;
+    bool dump_selected = false;
+    if (dump_prefix) {
+        static unsigned calls = 0;
+        dump_call = ++calls;
+        dump_selected = calls <= 3 || calls == 10 || calls == 50 || calls == 100;
+    }
+    auto diagnostic_activation = context.activated;
+    if (dump_selected && !diagnostic_activation.scales.is_valid())
+        diagnostic_activation = detail::activate_parameters(model);
     const bool fuse_structure = structure_adam != nullptr;
+    auto activated = context.activated;
+    // Auxiliary/standalone optimizers use the existing activation chain rule.
+    // Materialize only on that path; ordinary fused training keeps no arrays.
+    if (!fuse_structure && !activated.scales.is_valid())
+        activated = detail::activate_parameters(model);
     if (!fuse_structure)
         gradients.means = tinytensor::Tensor::zeros_like(model.means);
     // Precomputed feature colors bypass SH entirely (including normal-field
@@ -619,22 +644,22 @@ ModelGradients Rasterizer::backward(
         grads.densify_weight_den = scatter_densify ? densify_weight_den.ptr<float>() : nullptr;
         splat_drender::Rasterizer::backward(
             pools_of(*rendered.context.impl),
-            gaussians_of(model, context.activated, context.options, context.colors_precomp),
+            gaussians_of(model, activated, context.options, context.colors_precomp),
             camera_view_of(context.camera, context.constants, context.options),
             settings_of(context.options), context.forward, fwd_out, dL, grads);
     }
     if (!fuse_structure)
         detail::chain_parameter_gradients(
-            model, context.activated, grad_scales, grad_quaternions, grad_opacities, gradients);
+            model, activated, grad_scales, grad_quaternions, grad_opacities, gradients);
     gradients.refine_weight = std::move(refine_weight);
     gradients.densify_weight = std::move(densify_weight);
     gradients.densify_weight_den = std::move(densify_weight_den);
     if (context.colors_precomp.is_valid())
         gradients.colors_precomp = std::move(grad_colors);
-    if (const char* prefix = std::getenv("PHOTARA_SPLAT_GRAD_DUMP")) {
-        static int calls = 0;
-        ++calls;
-        if (calls <= 3 || calls == 10 || calls == 50 || calls == 100) {
+    if (dump_prefix) {
+        const char* prefix = dump_prefix;
+        const unsigned calls = dump_call;
+        if (dump_selected) {
 
             auto dump = [&](const char* name, const tinytensor::Tensor& tensor) {
                 if (!tensor.is_valid())
@@ -654,9 +679,9 @@ ModelGradients Rasterizer::backward(
             dump(".rawscale", grad_scales);
             dump(".rawquat", grad_quaternions);
             dump(".inputmeans", model.means);
-            dump(".inputscales", context.activated.scales);
-            dump(".inputrot", context.activated.quaternions);
-            dump(".inputopa", context.activated.opacities);
+            dump(".inputscales", diagnostic_activation.scales);
+            dump(".inputrot", diagnostic_activation.quaternions);
+            dump(".inputopa", diagnostic_activation.opacities);
             dump(".inputsh", model.sh);
             dump(".inputcamera", context.constants.storage);
             dump(".gc", grad_color);

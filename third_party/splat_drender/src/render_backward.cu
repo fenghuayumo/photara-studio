@@ -15,6 +15,7 @@
 // gaussian_backward fuses the EWA geometry backward, the mean2d->mean3d
 // chain and the SH backward into one launch.
 #include "device/geometry.cuh"
+#include "device/activation.cuh"
 #include "kernels.h"
 #include "splat_drender/buffers.h"
 #include "splat_drender/sh_adam_quant.cuh"
@@ -648,16 +649,15 @@ __device__ inline void add_shape_regularizer_grads(const float* log_scales,
 
 __device__ inline void update_structure_adam_row(int i, float3 d_mean, float3 d_scale, float4 d_rot,
                                                  float d_opacity,
-                                                 const float* __restrict__ activated_scales,
-                                                 const float* __restrict__ activated_opacities,
-                                                 const StructureAdam& a) {
+                                                 float3 activated_scales,
+                                                 float activated_opacity,
+                                                 const StructureAdam& a, const float* unfiltered_scale) {
     const float filter_squared = a.filter_3d != nullptr ? a.filter_3d[i] * a.filter_3d[i] : 0.f;
-    const float activated_opacity = activated_opacities[i];
     float grad_log[3];
     for (int axis = 0; axis < 3; ++axis) {
         const int offset = 3 * i + axis;
-        const float raw_scale = expf(a.log_scales[offset]);
-        const float filtered_scale = activated_scales[offset];
+        const float raw_scale = unfiltered_scale ? unfiltered_scale[axis] : expf(a.log_scales[offset]);
+        const float filtered_scale = (&activated_scales.x)[axis];
         const float scale_grad = axis == 0 ? d_scale.x : axis == 1 ? d_scale.y : d_scale.z;
         grad_log[axis] =
             scale_grad * raw_scale * raw_scale / filtered_scale +
@@ -705,7 +705,7 @@ __device__ inline void update_structure_adam_row(int i, float3 d_mean, float3 d_
                 a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon, -12.f, 12.f);
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false, bool Gut = false>
+template <bool HasSH, bool HasCov, bool FusedSH, bool PinholeRGB = false, bool Gut = false, bool Raw = false>
 __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
     gaussian_backward(const int count, const int sh_degree, const int sh_bases,
                       const float* __restrict__ means, const float* __restrict__ sh,
@@ -718,7 +718,7 @@ __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
                       float* __restrict__ grad_mean, float* __restrict__ grad_sh,
                       float* __restrict__ grad_colors, float* __restrict__ grad_opacity,
                       float* __restrict__ grad_scale, float* __restrict__ grad_rotation,
-                      float* __restrict__ grad_cov, SHAdam sh_adam, StructureAdam structure_adam) {
+                      float* __restrict__ grad_cov, SHAdam sh_adam, StructureAdam structure_adam, RawActivation raw) {
     // Fused SH keeps the coefficients of this thread's Gaussian in a shared
     // tile instead of a 48-register row: the warp then updates all 32 rows it
     // owns with one lane per column, which is the coalesced pattern the
@@ -736,6 +736,10 @@ __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
     float3 d_scale = make_float3(0.f, 0.f, 0.f);
     float4 d_rot = make_float4(0.f, 0.f, 0.f, 0.f);
     float d_opacity = 0.f;
+    ActivatedRow activated{};
+    // Fused Adam still decays moments and applies priors for culled rows.
+    if constexpr (Raw)
+        if (i < count) activated = activate_row(raw, i);
     // Culled rows keep zero grads: Adam moments still decay, matching the
     // standalone optimizer on a zeroed gradient buffer.
     if (i < count && radius[i] > 0) {
@@ -767,7 +771,11 @@ __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
             io.scale = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
             io.rotation = rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
             io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
-            io.opacity = opacities[i];
+            if constexpr (Raw) {
+                io.scale = &activated.scale;
+                io.rotation = &activated.rotation;
+            }
+            io.opacity = Raw ? activated.opacity : opacities[i];
             geo::splat_backward<PinholeRGB>(io);
             d_mean = io.grad_mean;
             d_opacity = io.grad_opacity;
@@ -846,8 +854,10 @@ __global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
     }
     if constexpr (!HasCov) {
         if (structure_adam.means && i < count)
-            update_structure_adam_row(i, d_mean, d_scale, d_rot, d_opacity, scales, opacities,
-                                      structure_adam);
+            update_structure_adam_row(i, d_mean, d_scale, d_rot, d_opacity,
+                Raw ? activated.scale : reinterpret_cast<const float3*>(scales)[i],
+                Raw ? activated.opacity : opacities[i], structure_adam,
+                Raw ? &activated.unfiltered_scale.x : nullptr);
     }
 }
 
@@ -907,7 +917,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree, int 
                        const bool* clamped, ws::GaussianState st, ws::GradState gs,
                        float* grad_mean, float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation, float* grad_cov, SHAdam sh_adam,
-                       StructureAdam structure_adam, bool gut) {
+                       StructureAdam structure_adam, bool gut, RawActivation raw) {
     auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
@@ -915,12 +925,18 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree, int 
         auto launch_kernel = [&](auto rgb_c, auto gut_c) {
             constexpr bool kPinholeRGB = decltype(rgb_c)::value;
             constexpr bool kGut = decltype(gut_c)::value;
-            kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB, kGut>
-                <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock, cfg::kGaussianBlock>>>(
-                    count, sh_degree, sh_bases, means, sh, opacities, scales, rotations, cov6, view,
-                    camera_center, K, width, height, kernel_size, scale_modifier, radius, clamped,
-                    st, gs, grad_mean, grad_sh, grad_colors, grad_opacity, grad_scale,
-                    grad_rotation, grad_cov, sh_adam, structure_adam);
+            const auto launch_activation = [&](auto raw_c) {
+                kernels::gaussian_backward<kSH, kCov, kFused, kPinholeRGB, kGut, decltype(raw_c)::value>
+                    <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock, cfg::kGaussianBlock>>>(
+                        count, sh_degree, sh_bases, means, sh, opacities, scales, rotations, cov6, view,
+                        camera_center, K, width, height, kernel_size, scale_modifier, radius, clamped,
+                        st, gs, grad_mean, grad_sh, grad_colors, grad_opacity, grad_scale,
+                        grad_rotation, grad_cov, sh_adam, structure_adam, raw);
+            };
+            if constexpr (!kCov && !kGut) {
+                if (raw.log_scales) launch_activation(std::true_type{});
+                else launch_activation(std::false_type{});
+            } else launch_activation(std::false_type{});
         };
         // GUT already differentiated the 3D response in gut::backward. Keep
         // EWA projection backward out of its SH/Adam kernel's compiled state.

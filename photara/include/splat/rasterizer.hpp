@@ -34,6 +34,10 @@ struct RasterizeOptions {
     // geometry/camera unchanged. Overwrites internal frame and snapshots.
     bool reuse_projection{false};
     bool debug{false};
+    // CUDA 3DGS can activate raw parameters inside projection/backward. The
+    // trainer enables this when the structure optimizer can also be fused;
+    // standalone gradient callers retain the materialized activation chain.
+    bool fuse_activation{false};
     // Inference/preview callers can omit all backward-only pixel state.
     bool record_backward_state{true};
     bool compact_pixel_snapshots{true};

@@ -1582,6 +1582,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_exclude_from_default(photara_preview_sidecar_test)
         add_dependencies(photara_tests photara_preview_sidecar_test)
         add_executable(photara_splat_test tests/splat_test.cpp)
+        add_executable(photara_splat_cuda_frontend_test tests/splat_cuda_frontend_test.cpp)
+        target_link_libraries(photara_splat_cuda_frontend_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.cuda_frontend COMMAND photara_splat_cuda_frontend_test)
+        if(WIN32)
+            add_custom_command(TARGET photara_splat_cuda_frontend_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_splat_cuda_frontend_test>
+                    $<TARGET_FILE_DIR:photara_splat_cuda_frontend_test> COMMAND_EXPAND_LISTS)
+        endif()
         add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
         target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.formats COMMAND photara_splat_formats_test)
@@ -1847,6 +1856,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_splat_checkpoint_test
         photara_splat_test
         photara_splat_formats_test
+        photara_splat_cuda_frontend_test
         photara_splat_usdc_test
         photara_splat_deployment_test
         photara_splat_merge_test

@@ -2,6 +2,7 @@
 // instance emission, and the single-pass tile blender producing color,
 // alpha, normal and median depth.
 #include "device/geometry.cuh"
+#include "device/activation.cuh"
 #include "device/tiles.cuh"
 #include "kernels.h"
 #include "splat_drender/buffers.h"
@@ -26,7 +27,7 @@ SD_D2 inline unsigned depth_bits(float d) {
 // bounds and the visibility scan flag into one launch.
 // GEOMETRY = false skips the ray-plane / footprint-normal stores; the caller
 // then leaves those two arrays unallocated (color-only photometric steps).
-template <bool GEOMETRY>
+template <bool GEOMETRY, bool RAW>
 __global__ void
 preprocess_gaussians(const int count, const int sh_degree, const int sh_bases,
                      const float* __restrict__ means, const float* __restrict__ sh,
@@ -35,7 +36,7 @@ preprocess_gaussians(const int count, const int sh_degree, const int sh_bases,
                      const float* __restrict__ cov6, const float* __restrict__ view,
                      const float* __restrict__ camera_center, CameraIntrinsics K, int width,
                      int height, float kernel_size, float scale_modifier, int grid_x, int grid_y,
-                     int wrap_width, ws::GaussianState st, int* __restrict__ radii) {
+                     int wrap_width, ws::GaussianState st, int* __restrict__ radii, RawActivation raw) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count)
         return;
@@ -53,6 +54,13 @@ preprocess_gaussians(const int count, const int sh_degree, const int sh_bases,
     geo::Splat splat;
     const float3* scale_ptr = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
     const float4* rot_ptr = rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
+    ActivatedRow activated;
+    if constexpr (RAW) {
+        activated = activate_row(raw, i);
+        scale_ptr = &activated.scale;
+        rot_ptr = &activated.rotation;
+    }
+    const float opacity = RAW ? activated.opacity : opacities[i];
     const float* cov_ptr = cov6 ? cov6 + 6 * i : nullptr;
     if (!geo::project_splat(mean, view, K, width, height, kernel_size, scale_modifier, scale_ptr,
                             rot_ptr, cov_ptr, splat))
@@ -68,7 +76,7 @@ preprocess_gaussians(const int count, const int sh_degree, const int sh_bases,
         return;
     const float det_inv = 1.f / det;
     const float4 conic_opacity = make_float4(splat.cov2d[2] * det_inv, -splat.cov2d[1] * det_inv,
-                                             splat.cov2d[0] * det_inv, opacities[i] * splat.coef);
+                                             splat.cov2d[0] * det_inv, opacity * splat.coef);
 
     const float mid = 0.5f * (splat.cov2d[0] + splat.cov2d[2]);
     const float root = sqrtf(fmaxf(0.1f, mid * mid - det));
@@ -526,18 +534,21 @@ void preprocess_gaussians(int count, int sh_degree, int sh_bases, const float* m
                           const float* view, const float* camera_center, CameraIntrinsics K,
                           int width, int height, float kernel_size, float scale_modifier,
                           int grid_x, int grid_y, int wrap_width, bool geometry,
-                          ws::GaussianState st, int* radii) {
+                          ws::GaussianState st, int* radii, RawActivation raw) {
     const unsigned blocks = (count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock;
-    if (geometry) {
-        kernels::preprocess_gaussians<true><<<blocks, cfg::kGaussianBlock>>>(
-            count, sh_degree, sh_bases, means, sh, colors, opacities, scales, rotations, cov6, view,
-            camera_center, K, width, height, kernel_size, scale_modifier, grid_x, grid_y,
-            wrap_width, st, radii);
+    const auto dispatch = [&](auto geometry_c, auto raw_c) {
+        kernels::preprocess_gaussians<decltype(geometry_c)::value, decltype(raw_c)::value>
+            <<<blocks, cfg::kGaussianBlock>>>(
+                count, sh_degree, sh_bases, means, sh, colors, opacities, scales, rotations, cov6,
+                view, camera_center, K, width, height, kernel_size, scale_modifier, grid_x, grid_y,
+                wrap_width, st, radii, raw);
+    };
+    if (raw.log_scales) {
+        if (geometry) dispatch(std::true_type{}, std::true_type{});
+        else dispatch(std::false_type{}, std::true_type{});
     } else {
-        kernels::preprocess_gaussians<false><<<blocks, cfg::kGaussianBlock>>>(
-            count, sh_degree, sh_bases, means, sh, colors, opacities, scales, rotations, cov6, view,
-            camera_center, K, width, height, kernel_size, scale_modifier, grid_x, grid_y,
-            wrap_width, st, radii);
+        if (geometry) dispatch(std::true_type{}, std::false_type{});
+        else dispatch(std::false_type{}, std::false_type{});
     }
 }
 
