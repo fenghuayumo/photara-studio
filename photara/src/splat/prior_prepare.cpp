@@ -2,6 +2,7 @@
 #include "sam/model_cache.hpp"
 #include "inference/models/moge.hpp"
 #include "splat/prior.hpp"
+#include "native_prior.hpp"
 #include "training_data_loader.hpp"
 #include "core/logging.hpp"
 #include <algorithm>
@@ -94,10 +95,6 @@ void prepare_training_priors(
     for (std::size_t i = 0; i < scene.views.size(); ++i) {
         if (held_out && i % split == 0)
             continue;
-        if (training_data::training_camera(scene.views[i], training).model != CameraModel::pinhole)
-            throw std::invalid_argument(
-                "AI priors require pinhole training cameras; enable pinhole undistortion for "
-                "fisheye captures. Panoramas are not supported.");
         ++total;
     }
     if (!total)
@@ -121,7 +118,10 @@ void prepare_training_priors(
     }
     const auto model_name = std::filesystem::absolute(model).lexically_normal().generic_u8string();
     std::ostringstream identity;
-    identity << "photara-ai-priors-v1\n"
+    const bool native = std::any_of(scene.views.begin(), scene.views.end(), [&](const auto& view) {
+        return uses_native_splat_projection(training_data::training_camera(view, training).model);
+    });
+    identity << (native ? "photara-ai-priors-v2-native-faces\n" : "photara-ai-priors-v1\n")
              << std::string(model_name.begin(), model_name.end()) << '\n'
              << std::filesystem::file_size(model) << '\n'
              << std::filesystem::last_write_time(model).time_since_epoch().count() << '\n'
@@ -168,35 +168,71 @@ void prepare_training_priors(
             manifest << "# model=" << predictor->model_info().id
                      << " revision=" << predictor->model_info().revision << " tokens=" << tokens
                      << " eval_split_every=" << split << '\n'
+                     << "# Native maps use per-face scales; native scale/MAD columns are "
+                        "placeholders, support counts may overlap.\n"
                      << "view\tscale\tlog_ratio_mad\tsparse_inliers\tvalid_fraction\tseconds\n";
         }
         const auto start = std::chrono::steady_clock::now();
-        const auto image = training_data::prior_input_image(view, training);
-        const auto prediction = predictor->predict(
-            {image, inference::PinholeIntrinsics{camera.fx, camera.fy, camera.cx, camera.cy}});
-        const auto alignment =
-            need_depth ? align(scene, i, camera, prediction) : Alignment{1., 0., 0};
         TrainingPrior prior;
-        prior.camera = camera;
-        const auto count = prediction.depth.size();
-        if (need_depth)
-            prior.depth.resize(count);
-        if (need_normals)
-            prior.normals.resize(3 * count);
+        Alignment alignment{1., 0., 0};
+        const auto count = std::size_t(camera.width) * camera.height;
         std::size_t valid = 0;
-        for (std::size_t pixel = 0; pixel < count; ++pixel) {
-            if (!prediction.valid[pixel])
-                continue;
-            if (need_depth) {
-                const double depth = prediction.depth[pixel] * alignment.scale;
-                if (!(depth > 0) || depth > std::numeric_limits<float>::max())
-                    continue;
-                prior.depth[pixel] = static_cast<float>(depth);
-            }
+        if (uses_native_splat_projection(camera.model)) {
+            const auto source = training_data::load_training_image(view, training);
+            unsigned face_index = 0;
+            prior = detail::predict_native_prior(
+                source.rgb, source.mask, camera, need_depth, need_normals,
+                [&](const io::RgbImage& image, const Camera& tile) {
+                    return predictor->predict(
+                        {image, inference::PinholeIntrinsics{tile.fx, tile.fy, tile.cx, tile.cy}});
+                },
+                [&](const Camera& tile, const inference::GeometryPrior& prediction) {
+                    const auto face = face_index++;
+                    try {
+                        const auto support = align(scene, i, tile, prediction);
+                        alignment.samples += support.samples;
+                        core::Logger::instance().info(
+                            "AI native prior view=", view.id, " face=", face,
+                            " scale=", support.scale, " sparse_inliers=", support.samples);
+                        return support.scale;
+                    } catch (const std::runtime_error& error) {
+                        core::Logger::instance().warning(
+                            "AI native prior view=", view.id, " face=", face,
+                            " depth unavailable: ", error.what());
+                        return 0.;
+                    }
+                },
+                std::clamp(std::max(camera.width, camera.height) / 4, 256U, 768U));
+            for (std::size_t pixel = 0; pixel < count; ++pixel)
+                valid += (!prior.depth.empty() && prior.depth[pixel] > 0) ||
+                         (!prior.normals.empty() &&
+                          (prior.normals[pixel] != 0 || prior.normals[count + pixel] != 0 ||
+                           prior.normals[2 * count + pixel] != 0));
+        } else {
+            const auto image = training_data::prior_input_image(view, training);
+            const auto prediction = predictor->predict(
+                {image, inference::PinholeIntrinsics{camera.fx, camera.fy, camera.cx, camera.cy}});
+            alignment = need_depth ? align(scene, i, camera, prediction) : Alignment{1., 0., 0};
+            prior.camera = camera;
+
+            if (need_depth)
+                prior.depth.resize(count);
             if (need_normals)
-                for (int c = 0; c < 3; ++c)
-                    prior.normals[c * count + pixel] = prediction.normals[pixel][c];
-            ++valid;
+                prior.normals.resize(3 * count);
+            for (std::size_t pixel = 0; pixel < count; ++pixel) {
+                if (!prediction.valid[pixel])
+                    continue;
+                if (need_depth) {
+                    const double depth = prediction.depth[pixel] * alignment.scale;
+                    if (!(depth > 0) || depth > std::numeric_limits<float>::max())
+                        continue;
+                    prior.depth[pixel] = static_cast<float>(depth);
+                }
+                if (need_normals)
+                    for (int c = 0; c < 3; ++c)
+                        prior.normals[c * count + pixel] = prediction.normals[pixel][c];
+                ++valid;
+            }
         }
         save_training_prior(path, view.path, prior);
         const double seconds =

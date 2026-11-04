@@ -43,10 +43,12 @@ bool near(float a, float b) {
            std::abs(a - b) <= 1e-4F * std::max(1.F, std::abs(b));
 }
 void check_camera(const Camera& stored, const Camera& requested) {
-    if (stored.model != CameraModel::pinhole || requested.model != CameraModel::pinhole ||
-        stored.width != requested.width || stored.height != requested.height ||
-        !near(stored.fx, requested.fx) || !near(stored.fy, requested.fy) ||
-        !near(stored.cx, requested.cx) || !near(stored.cy, requested.cy))
+    if (stored.model != requested.model || !near(stored.k1, requested.k1) ||
+        !near(stored.k2, requested.k2) || !near(stored.k3, requested.k3) ||
+        !near(stored.k4, requested.k4) || stored.width != requested.width ||
+        stored.height != requested.height || !near(stored.fx, requested.fx) ||
+        !near(stored.fy, requested.fy) || !near(stored.cx, requested.cx) ||
+        !near(stored.cy, requested.cy))
         throw std::invalid_argument(
             "Training prior camera/resolution changed; regenerate the prior cache");
     for (std::size_t i = 0; i < 16; ++i)
@@ -61,12 +63,16 @@ std::string source_name(const std::filesystem::path& path) {
 } // namespace
 void TrainingPrior::validate() const {
     const auto count = static_cast<std::uint64_t>(camera.width) * camera.height;
-    if (camera.model != CameraModel::pinhole || !count || count > 100'000'000 ||
-        (depth.empty() && normals.empty()) || (!depth.empty() && depth.size() != count) ||
+    if ((camera.model != CameraModel::pinhole && !uses_native_splat_projection(camera.model)) ||
+        !count || count > 100'000'000 || (depth.empty() && normals.empty()) ||
+        (!depth.empty() && depth.size() != count) ||
         (!normals.empty() && normals.size() != 3 * count) || !std::isfinite(camera.fx) ||
         camera.fx <= 0 || !std::isfinite(camera.fy) || camera.fy <= 0 ||
         !std::isfinite(camera.cx) || !std::isfinite(camera.cy))
         throw std::invalid_argument("Invalid training prior camera or map dimensions");
+    for (float value : {camera.k1, camera.k2, camera.k3, camera.k4})
+        if (!std::isfinite(value))
+            throw std::invalid_argument("Nonfinite prior distortion");
     for (float value : camera.world_to_camera)
         if (!std::isfinite(value))
             throw std::invalid_argument("Nonfinite training prior camera pose");
@@ -93,10 +99,18 @@ void save_training_prior(
     prior.validate();
     const auto name = source_name(source_image);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    output.write("PHPRIOR2", 8);
+    const bool native = uses_native_splat_projection(prior.camera.model);
+    output.write(native ? "PHPRIOR3" : "PHPRIOR2", 8);
     const std::uint32_t maps = (prior.depth.empty() ? 0U : 1U) | (prior.normals.empty() ? 0U : 2U);
     write(output, maps);
     write_camera(output, prior.camera);
+    if (native) {
+        write(output, static_cast<std::uint32_t>(prior.camera.model));
+        write(output, prior.camera.k1);
+        write(output, prior.camera.k2);
+        write(output, prior.camera.k3);
+        write(output, prior.camera.k4);
+    }
     write(output, static_cast<std::uint32_t>(name.size()));
     output.write(name.data(), name.size());
     write(output, static_cast<std::uint64_t>(std::filesystem::file_size(source_image)));
@@ -124,10 +138,11 @@ TrainingPrior load_training_prior(
     std::ifstream input(path, std::ios::binary);
     char magic[8];
     input.read(magic, 8);
-    if (!input || (std::string(magic, 8) != "PHPRIOR1" && std::string(magic, 8) != "PHPRIOR2"))
+    if (!input || (std::string(magic, 8) != "PHPRIOR1" && std::string(magic, 8) != "PHPRIOR2" &&
+                   std::string(magic, 8) != "PHPRIOR3"))
         throw std::runtime_error("Missing or invalid training prior: " + path.string());
     std::uint32_t maps = 3;
-    if (std::string(magic, 8) == "PHPRIOR2")
+    if (std::string(magic, 8) != "PHPRIOR1")
         read(input, maps);
     if (!maps || (maps & ~3U))
         throw std::runtime_error("Invalid training prior map flags");
@@ -136,6 +151,15 @@ TrainingPrior load_training_prior(
             "Requested training prior map is missing; regenerate the prior cache");
     TrainingPrior prior;
     prior.camera = read_camera(input);
+    if (std::string(magic, 8) == "PHPRIOR3") {
+        std::uint32_t model;
+        read(input, model);
+        prior.camera.model = static_cast<CameraModel>(model);
+        read(input, prior.camera.k1);
+        read(input, prior.camera.k2);
+        read(input, prior.camera.k3);
+        read(input, prior.camera.k4);
+    }
     check_camera(prior.camera, full_camera);
     std::uint32_t length;
     read(input, length);
@@ -190,6 +214,10 @@ TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& ca
     expected.fy *= sy;
     expected.cx = (expected.cx + .5F) * sx - .5F;
     expected.cy = (expected.cy + .5F) * sy - .5F;
+    if (expected.model == CameraModel::equirectangular) {
+        expected.cx = prior.camera.cx * sx;
+        expected.cy = prior.camera.cy * sy;
+    }
     check_camera(expected, camera);
     TrainingPrior result;
     result.camera = camera;

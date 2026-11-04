@@ -458,7 +458,7 @@ constexpr Entry k_entries[] = {
     {"Training prepares priors automatically and reuses compatible maps. Leave the folder empty to use the task cache.", "训练前自动准备先验并复用兼容缓存；目录留空时使用任务缓存。", "学習前に事前情報を準備し、互換キャッシュを再利用します。空欄ではタスクキャッシュを使用します。", "학습 전에 사전 정보를 준비하고 호환 캐시를 재사용합니다. 비워 두면 작업 캐시를 사용합니다."},
     {"Select the folder containing aligned view_*.prior files for these cameras and images.", "选择包含与当前相机和图像对应的 view_*.prior 文件的目录。", "現在のカメラと画像に対応するview_*.priorフォルダーを選択してください。", "현재 카메라 및 이미지에 맞는 view_*.prior 파일 폴더를 선택하세요."},
     {"Both weights are zero. Prior preparation and loading are skipped.", "两个权重均为 0，将跳过先验准备和加载。", "両方の重みが0のため、事前情報の準備と読込を省略します。", "두 가중치가 모두 0이므로 사전 정보 준비와 로드를 건너뜁니다."},
-    {"Requires pinhole views. Fisheye images are rectified; panoramas are not supported.", "需要针孔视图。鱼眼图像会先校正，暂不支持全景图像。", "ピンホール画像が必要です。魚眼画像は補正されます。パノラマは未対応です。", "핀홀 뷰가 필요합니다. 어안 이미지는 보정되며 파노라마는 지원하지 않습니다."},
+    {"Supports pinhole, native fisheye and panoramas. Native views use overlapping perspective AI predictions.", "支持针孔、原生鱼眼和全景。原生视图通过重叠透视图生成 AI 先验。", "ピンホール、魚眼、パノラマに対応。重複する透視画像から AI 事前情報を生成します。", "핀홀, 어안 및 파노라마를 지원합니다. 겹치는 투시 영상에서 AI 사전 정보를 생성합니다."},
     {"Choose a local MoGe-2 normal GGUF model before training.", "训练前请选择本地 MoGe-2 法线 GGUF 模型。", "学習前にローカルのMoGe-2法線GGUFモデルを選択してください。", "학습 전에 로컬 MoGe-2 법선 GGUF 모델을 선택하세요."},
     {"MoGe inference is unavailable in this build. Choose an existing aligned cache.", "此构建不支持 MoGe 推理，请使用已有的对齐先验缓存。", "このビルドはMoGe推論に未対応です。既存のキャッシュを選択してください。", "이 빌드에서는 MoGe 추론을 지원하지 않습니다. 기존 정렬 캐시를 선택하세요."},
 

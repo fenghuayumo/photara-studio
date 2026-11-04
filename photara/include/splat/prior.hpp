@@ -4,7 +4,8 @@
 #include <vector>
 
 namespace photara::splat {
-// Pinhole camera-Z depth in scene units, and camera-space predicted unit normals.
+// Scene-unit camera-Z depth for pinhole/fisheye, ray distance for panorama.
+// Predicted unit normals are in the original camera coordinate system.
 // Either map may be empty when not requested. Zero pixels mean unavailable.
 // Prior validity never masks RGB fitting.
 struct TrainingPrior {

@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
         photara::splat::TrainingOptions training;
         training.max_image_dimension = static_cast<unsigned>(std::stoul(argv[5]));
         training.use_source_resolution = true;
-        training.undistort_to_pinhole = true;
+        training.undistort_to_pinhole = false;
         training.evaluation_split_every = static_cast<unsigned>(std::stoul(argv[7]));
         training.prior_directory = argv[4];
         training.lambda_d = lambda_d; training.lambda_n = lambda_n;

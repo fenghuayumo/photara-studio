@@ -164,7 +164,7 @@ void draw_ai_priors(App& app) {
     weight("AI normal weight", "##ai_normal_weight", settings.ai_normal_weight);
     if (settings.ai_depth_weight == 0.F && settings.ai_normal_weight == 0.F)
         objective_note("Both weights are zero. Prior preparation and loading are skipped.");
-    objective_note("Requires pinhole views. Fisheye images are rectified; panoramas are not supported.");
+    objective_note("Supports pinhole, native fisheye and panoramas. Native views use overlapping perspective AI predictions.");
 }
 
 void draw_training_objective(App& app) {

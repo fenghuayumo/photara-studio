@@ -86,7 +86,7 @@ void launch(Push push, const std::array<Tensor, 6>& tensors) {
 }
 Push camera_push(std::uint32_t mode, const Camera& camera) {
     if ((camera.model != CameraModel::pinhole &&
-         !((mode == 0 || mode == 9) && uses_native_splat_projection(camera.model))) || camera.width == 0 || camera.height == 0 ||
+         !((mode == 0 || mode == 9 || mode == 11 || mode == 12) && uses_native_splat_projection(camera.model))) || camera.width == 0 || camera.height == 0 ||
         !(camera.fx > 0.F) || !(camera.fy > 0.F))
         throw std::invalid_argument("Vulkan geometry operation requires a valid supported camera");
     Push push;

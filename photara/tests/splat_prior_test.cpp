@@ -1,4 +1,5 @@
 #include "splat/prior.hpp"
+#include "native_prior.hpp"
 #include "splat/trainer.hpp"
 #include "training_data_loader.hpp"
 #include "cuda_ops.hpp"
@@ -28,7 +29,67 @@ template<class F> void fails(F action) {
     try { action(); } catch (const std::exception&) { return; }
     throw std::runtime_error("Expected invalid prior failure");
 }
-void losses(tinytensor::Device device) {
+
+void native_priors() {
+    const auto directory=std::filesystem::temp_directory_path()/
+        ("photara_native_prior_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const auto source=directory/"image.png";
+    photara::io::RgbImage image{64,32,std::vector<std::uint8_t>(64*32*3,128)};
+    photara::io::save_rgb_png(image,source);
+    for(auto model:{photara::CameraModel::opencv_fisheye,photara::CameraModel::equirectangular}) {
+        Camera c; c.width=64;c.height=32;c.model=model;c.fx=c.fy=15;c.cx=32;c.cy=16;
+        c.k1=.02F;c.k2=-.001F;c.k3=.0001F;c.k4=-.000001F;
+        c.world_to_camera={0,0,-1,0, 0,1,0,0, 1,0,0,0, .1F,.2F,.3F,1};
+        if(model==photara::CameraModel::equirectangular) {
+            c.fx=float(64/(2*photara::k_pi));c.fy=float(32/photara::k_pi);c.k1=c.k2=c.k3=c.k4=0;
+        }
+        const auto fake=[](const photara::io::RgbImage& img,const Camera& tile) {
+            photara::inference::GeometryPrior p;p.width=img.width;p.height=img.height;
+            const auto count=std::size_t(p.width)*p.height;
+            p.depth.resize(count);p.normals.resize(count);p.valid.assign(count,1);
+            for(unsigned y=0;y<p.height;++y)for(unsigned x=0;x<p.width;++x) {
+                const auto i=std::size_t(y)*p.width+x;
+                const Eigen::Vector3d ray=Eigen::Vector3d{(x-tile.cx)/tile.fx,(y-tile.cy)/tile.fy,1}.normalized();
+                p.depth[i]=float(ray.z()); // radius one, scaled to two scene units below.
+                for(unsigned ch=0;ch<3;++ch)p.normals[i][ch]=float(-ray[ch]);
+            }
+            return p;
+        };
+        for(auto maps:{std::pair{true,false},std::pair{false,true},std::pair{true,true}}) {
+            unsigned alignments=0;
+            const auto prior=detail::predict_native_prior(image,{},c,maps.first,maps.second,fake,
+                [&](const Camera&,const auto&){++alignments;return 2.;},128);
+            check((alignments>0)==maps.first,"Normal-only prediction required scale support");
+            check(prior.depth.empty()!=maps.first && prior.normals.empty()!=maps.second,"Independent native maps lost");
+            for(unsigned y=0;y<c.height;++y)for(unsigned x=0;x<c.width;++x) {
+                auto ray=detail::prior_source_ray(c,x,y);const auto i=std::size_t(y)*c.width+x;
+                if(ray.isZero()) {if(maps.first)close(prior.depth[i],0);continue;}
+                if(maps.first && prior.depth[i]>0) check(std::abs(prior.depth[i]-2*(model==photara::CameraModel::equirectangular?1:ray.z()))<.04,
+                    "Native prior depth convention/coverage mismatch");
+                if(maps.second && (prior.normals[i]!=0 || prior.normals[64*32+i]!=0 || prior.normals[2*64*32+i]!=0)) for(unsigned ch=0;ch<3;++ch)
+                    check(std::abs(prior.normals[ch*64*32+i]+ray[ch])<.03,"Native normal rotation/coverage mismatch");
+            }
+            if(maps.first) check(std::count_if(prior.depth.begin(),prior.depth.end(),[](float x){return x>0;})>900,"Native prior coverage is too sparse");
+            const auto path=directory/"native.prior";save_training_prior(path,source,prior);
+            const auto roundtrip=load_training_prior(path,source,c,maps.first,maps.second);
+            check(roundtrip.depth==prior.depth && roundtrip.normals==prior.normals,"Native prior cache roundtrip");
+            auto wrong=c;wrong.k1+=.01F;fails([&]{(void)load_training_prior(path,source,wrong,maps.first,maps.second);});
+            wrong=c;wrong.model=photara::CameraModel::pinhole;fails([&]{(void)load_training_prior(path,source,wrong,maps.first,maps.second);});
+            auto small=c;small.width/=2;small.height/=2;small.fx*=.5F;small.fy*=.5F;
+            small.cx=model==photara::CameraModel::equirectangular?c.cx*.5F:(c.cx+.5F)*.5F-.5F;
+            small.cy=model==photara::CameraModel::equirectangular?c.cy*.5F:(c.cy+.5F)*.5F-.5F;
+            const auto resized=resize_training_prior(prior,small);
+            check(resized.camera.model==model,"Native prior resize changed projection");
+        }
+        photara::io::GrayImage zero{64,32,std::vector<std::uint8_t>(64*32)};
+        fails([&]{(void)detail::predict_native_prior(image,zero,c,true,true,fake,[](const auto&,const auto&){return 2.;},32);});
+        fails([&]{(void)detail::predict_native_prior(image,{},c,true,false,fake,[](const auto&,const auto&){return 0.;},32);});
+    }
+    // Delete only the known files created by this fixture.
+    std::filesystem::remove(directory/"native.prior");std::filesystem::remove(source);std::filesystem::remove(directory);
+}
+void losses(tinytensor::Device device, photara::CameraModel camera_model=photara::CameraModel::pinhole) {
     constexpr std::size_t n = 64;
     std::vector<float> d(n,4.5F), td(n,4.F), normal(3*n), target(3*n), mask(n,1.F);
     for (std::size_t i=0;i<n;++i) { normal[2*n+i]=-.9F; target[i]=-.6F; target[2*n+i]=-.8F; }
@@ -38,6 +99,7 @@ void losses(tinytensor::Device device) {
     rendered.median_depth=Tensor::from_vector(d,{8,8},device);
     rendered.normal=Tensor::from_vector(normal,{3,8,8},device);
     TrainingView view;
+    view.camera.model=camera_model;
     view.camera.width=view.camera.height=8; view.camera.fx=view.camera.fy=32;
     view.rgb=Tensor::zeros({3,8,8},device); view.depth=Tensor::from_vector(td,{8,8},device);
     view.normal=Tensor::from_vector(target,{3,8,8},device); view.mask=Tensor::from_vector(mask,{8,8},device);
@@ -87,16 +149,22 @@ void losses(tinytensor::Device device) {
         "Inactive priors allocated geometry gradients during warmup");
     std::cout << "Prior loss/gradient checks passed on " << (device==tinytensor::Device::CUDA?"CUDA":"Vulkan") << '\n';
 }
-void parameter_gradients(tinytensor::Device device) {
+void parameter_gradients(tinytensor::Device device, photara::CameraModel camera_model=photara::CameraModel::pinhole) {
     // Audit the complete AI loss -> rasterizer -> Gaussian parameter chain.
     // A rotated camera and overlapping anisotropic splats exercise camera
     // coordinates, normal blending, median depth and opacity derivatives.
     Camera camera;
     camera.width=48; camera.height=32;
     camera.fx=38; camera.fy=36; camera.cx=23.2F; camera.cy=15.1F;
+    camera.model=camera_model;
+    if(camera_model==photara::CameraModel::opencv_fisheye) {camera.k1=.02F;camera.k2=-.001F;}
+    if(camera_model==photara::CameraModel::equirectangular) {
+        camera.fx=float(camera.width/(2*photara::k_pi));camera.fy=float(camera.height/photara::k_pi);
+        camera.cx=camera.width*.5F;camera.cy=camera.height*.5F;
+    }
     const float c=std::cos(.23F), s=std::sin(.23F);
     camera.world_to_camera={c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1};
-    const std::size_t pixels=camera.width*camera.height, pixel=16*camera.width+30;
+    const std::size_t pixels=camera.width*camera.height, pixel=16*camera.width+(camera_model==photara::CameraModel::equirectangular?26:30);
     const std::vector<float> parameters={
         -.10F,.04F,2.F, .05F,-.02F,2.12F,
         std::log(.22F),std::log(.16F),std::log(.09F),
@@ -274,10 +342,18 @@ void cache() {
 int main(int argc, char** argv) {
     try {
         if (argc == 1) {
-            cache(); losses(tinytensor::Device::CUDA); parameter_gradients(tinytensor::Device::CUDA);
+            native_priors(); cache(); losses(tinytensor::Device::CUDA);
+            losses(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);
+            losses(tinytensor::Device::CUDA,photara::CameraModel::equirectangular); parameter_gradients(tinytensor::Device::CUDA);
+            parameter_gradients(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);
+            parameter_gradients(tinytensor::Device::CUDA,photara::CameraModel::equirectangular);
         } else if (argc == 2 && std::string_view(argv[1]) == "--vulkan") {
 #if defined(TINYTENSOR_HAS_VULKAN)
+            losses(tinytensor::Device::Vulkan,photara::CameraModel::opencv_fisheye);
+            losses(tinytensor::Device::Vulkan,photara::CameraModel::equirectangular);
             losses(tinytensor::Device::Vulkan); parameter_gradients(tinytensor::Device::Vulkan);
+            parameter_gradients(tinytensor::Device::Vulkan,photara::CameraModel::opencv_fisheye);
+            parameter_gradients(tinytensor::Device::Vulkan,photara::CameraModel::equirectangular);
 #else
             throw std::runtime_error("Vulkan is unavailable in this build");
 #endif

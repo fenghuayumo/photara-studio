@@ -1697,8 +1697,7 @@ std::string build_train_command(
             }
             command << " --splat-prior-dir " << quote(directory)
                     << " --splat-lambda-d " << settings.ai_depth_weight
-                    << " --splat-lambda-n " << settings.ai_normal_weight
-                    << " --splat-undistort=true";
+                    << " --splat-lambda-n " << settings.ai_normal_weight;
         }
     }
     for (const auto& field : photara::splat::k_training_loss_fields)
