@@ -98,16 +98,6 @@ tinytensor::Tensor normal_features_backward(
     const tinytensor::Tensor& normal_features,
     const tinytensor::Tensor& grad_normals);
 
-// Upload one packed RGBA8 word per pixel and expand it on CUDA. Packing the
-// host cache cuts its footprint and per-step PCIe traffic by 3-4x compared
-// with cached planar float RGB plus a separate float mask.
-DecodedTrainingPixels upload_packed_training_pixels(
-    const std::vector<int>& rgba,
-    std::uint32_t width,
-    std::uint32_t height,
-    bool decode_mask,
-    bool decode_gray);
-
 // Expand a resident RGBA8 image without another host upload.
 DecodedTrainingPixels decode_packed_training_pixels(
     const tinytensor::Tensor& packed,

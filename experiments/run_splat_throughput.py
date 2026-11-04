@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--start-iteration", type=int, default=16000)
     parser.add_argument("--max-resolution", type=int)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--progressive", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.steps <= 10000 or args.log_interval < 1 or args.steps % args.log_interval:
         parser.error("steps must be 1..10000 and divisible by log-interval")
@@ -31,10 +32,12 @@ def main():
     command = [str(exe), str(args.dataset.resolve()), str(args.images.resolve()),
                str(args.model.resolve()), str(out), str(args.steps),
                str(args.log_interval), str(int(args.profile)), str(args.prefetch)]
-    if args.start_iteration != 16000 or args.max_resolution is not None:
+    if args.start_iteration != 16000 or args.max_resolution is not None or args.progressive:
         command.append(str(args.start_iteration))
-    if args.max_resolution is not None:
-        command.append(str(args.max_resolution))
+    if args.max_resolution is not None or args.progressive:
+        command.append(str(args.max_resolution if args.max_resolution is not None else 0))
+    if args.progressive:
+        command.append("1")
     with out.with_suffix(".gpu.csv").open("wb") as gpu, out.with_suffix(".log").open("wb") as log:
         monitor = subprocess.Popen(["nvidia-smi", "--query-gpu=timestamp,utilization.gpu,utilization.memory,power.draw,memory.used,clocks.sm",
                                     "--format=csv,nounits", "--loop-ms=200"], stdout=gpu,

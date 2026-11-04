@@ -5087,7 +5087,18 @@ void test_training_device_cache() {
     require(asynchronous.stats().uploaded_bytes ==
                 3 * options.training_device_cache_bytes,
             "Host prefetch did not re-upload the evicted view");
+    const auto before_scale_memory = asynchronous.stats();
+    require(before_scale_memory.device_ring_bytes > 0 &&
+            before_scale_memory.device_logical_peak_bytes >= before_scale_memory.device_ring_bytes &&
+            before_scale_memory.pinned_host_bytes > 0,
+            "Loader memory accounting omitted upload staging");
     asynchronous.set_resolution_scale(0.5F);
+    const auto after_scale_memory = asynchronous.stats();
+    require(after_scale_memory.device_tensor_live_bytes >=
+                async_first.rgb.bytes() + async_neighbour.rgb.bytes() + async_prefetched.rgb.bytes(),
+            "Loader memory accounting lost outputs retained across a scale transition");
+    require(after_scale_memory.device_ring_bytes == before_scale_memory.device_ring_bytes,
+            "Scale transition unexpectedly changed retained upload-ring accounting");
     require(asynchronous.stats().device_resident_bytes == 0,
             "Resolution transition retained packed CUDA views");
 
@@ -5125,6 +5136,79 @@ void test_training_device_cache() {
     compare(tuner.get(0), reference,
             "Adaptive device cache changed supervision");
 
+    std::filesystem::remove_all(root);
+}
+
+// Independent scalar interpolation/rounding oracle for the optimized CPU
+// image path. Noninteger resize ratios exercise RGB rounding and border pixels.
+void test_training_image_sampling_reference() {
+    using namespace photara;
+    const auto root = std::filesystem::temp_directory_path() / "photara_sampling_reference";
+    std::filesystem::create_directories(root);
+    io::RgbImage source{323, 259, std::vector<std::uint8_t>(323 * 259 * 3)};
+    std::uint32_t random = 0x12345678U;
+    for (auto& byte : source.pixels) {
+        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+        byte = static_cast<std::uint8_t>(random);
+    }
+    const auto path = root / "source.png";
+    io::save_rgb_png(source, path);
+    for (int projection = 0; projection < 3; ++projection) {
+        for (const auto size : {std::pair{257U, 193U}, std::pair{646U, 518U}}) {
+            mvs::MvsView view;
+            view.path = path;
+            if (projection != 0) {
+                view.source_model = projection == 2 ? CameraModel::opencv_fisheye : CameraModel::pinhole;
+                view.k1 = -0.04F; view.k2 = 0.003F; view.p1 = 0.001F; view.p2 = -0.002F;
+            }
+            view.src_width = source.width; view.src_height = source.height;
+            view.width = size.first; view.height = size.second;
+            view.fx = view.fy = view.src_fx = view.src_fy = 200.F;
+            view.cx = view.src_cx = 161.F; view.cy = view.src_cy = 129.F;
+            splat::TrainingOptions options;
+            options.use_source_resolution = false; options.use_mask = false;
+            options.undistort_to_pinhole = true;
+            options.max_image_dimension = 0;
+            const auto image = splat::training_data::load_training_image(view, options);
+            const auto width = image.rgb.width, height = image.rgb.height;
+            const float scale_x = static_cast<float>(width) / source.width;
+            const float scale_y = static_cast<float>(height) / source.height;
+            for (std::uint32_t y = 0; y < height; ++y) {
+                for (std::uint32_t x = 0; x < width; ++x) {
+                    float sx = (static_cast<float>(x) + .5F) / scale_x - .5F;
+                    float sy = (static_cast<float>(y) + .5F) / scale_y - .5F;
+                    if (projection != 0) {
+                        const auto& camera = image.camera;
+                        const double xn = (static_cast<double>(x) - camera.cx) / camera.fx;
+                        const double yn = (static_cast<double>(y) - camera.cy) / camera.fy;
+                        const auto projected = project_camera_plane(
+                            view.source_model, xn, yn, view.k1, view.k2, view.p1, view.p2);
+                        sx = static_cast<float>(view.src_fx * projected.x + view.src_cx);
+                        sy = static_cast<float>(view.src_fy * projected.y + view.src_cy);
+                    }
+                    const bool outside = sx < 0 || sy < 0 || sx > source.width - 1 || sy > source.height - 1;
+                    for (std::size_t channel = 0; channel < 3; ++channel) {
+                        std::uint8_t expected = 0;
+                        if (!outside) {
+                            const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
+                            const int x1 = std::min(x0 + 1, static_cast<int>(source.width) - 1);
+                            const int y1 = std::min(y0 + 1, static_cast<int>(source.height) - 1);
+                            const float tx = sx - x0, ty = sy - y0;
+                            const auto at = [&](int px, int py) {
+                                return static_cast<float>(source.pixels[(py * source.width + px) * 3 + channel]);
+                            };
+                            const float value = at(x0, y0) * ((1.F-tx)*(1.F-ty)) +
+                                at(x1, y0) * (tx*(1.F-ty)) + at(x0, y1) * ((1.F-tx)*ty) +
+                                at(x1, y1) * (tx*ty);
+                            expected = static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.F, 255.F)));
+                        }
+                        require(image.rgb.pixels[(static_cast<std::size_t>(y)*width+x)*3+channel] == expected,
+                                "Optimized image sampling changed scalar reference bytes");
+                    }
+                }
+            }
+        }
+    }
     std::filesystem::remove_all(root);
 }
 
@@ -5194,10 +5278,17 @@ void test_compressed_training_cache(
     require(cache.stats().host_compressed_bytes > 0 &&
             cache.stats().host_resident_bytes <= options.training_view_cache_bytes,
             "Compressed cache failed to share the host RAM budget");
+    require(cache.stats().host_decodes == views.size() &&
+            cache.stats().read_decode_ms > 0 && cache.stats().pack_ms > 0 &&
+            cache.stats().compress_ms > 0,
+            "Cold host stages were not recorded");
     // View 0 no longer fits in the decoded hot set. Removing its source makes
     // an accidental re-decode fail instead of silently passing the comparison.
     std::filesystem::rename(views[0].path, root / "saved.png");
     compare(cache.get(0));
+    require(cache.stats().host_restores == 1 && cache.stats().decompress_ms > 0 &&
+            cache.stats().host_decodes == views.size(),
+            "Compressed restore was counted as image decode");
     require(cache.stats().host_compressed_hits == 1,
             "Cold hot-set miss did not restore the compressed supervision");
     (void)cache.get(1).rgb.to_vector();
@@ -8409,6 +8500,7 @@ int main(int argc, char** argv) {
         try {
             test_jpeg_dct_scaled_training_view();
             test_training_device_cache();
+            test_training_image_sampling_reference();
             test_compressed_training_cache();
             std::cout << "Training data cache tests passed\n";
             return 0;
@@ -8852,6 +8944,7 @@ int main(int argc, char** argv) {
         test_mask_loading();
         test_jpeg_dct_scaled_training_view();
         test_training_device_cache();
+        test_training_image_sampling_reference();
         test_compressed_training_cache();
 #ifdef TINYTENSOR_HAS_VULKAN
         test_compressed_training_cache(photara::splat::TrainingBackend::vulkan);

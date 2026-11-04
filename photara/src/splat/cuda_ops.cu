@@ -2086,20 +2086,6 @@ __global__ void reset_opacity_kernel(
 
 } // namespace
 
-DecodedTrainingPixels upload_packed_training_pixels(
-    const std::vector<int>& rgba,
-    const std::uint32_t width,
-    const std::uint32_t height,
-    const bool decode_mask,
-    const bool decode_gray) {
-    const std::size_t pixels = static_cast<std::size_t>(width) * height;
-    if (rgba.size() != pixels)
-        throw std::invalid_argument("GGGS packed training image size does not match camera");
-    const auto packed =
-        tinytensor::Tensor::from_vector(rgba, {height, width}, tinytensor::Device::CUDA);
-    return decode_packed_training_pixels(packed, width, height, decode_mask, decode_gray);
-}
-
 DecodedTrainingPixels decode_packed_training_pixels(
     const tinytensor::Tensor& packed,
     const std::uint32_t width,

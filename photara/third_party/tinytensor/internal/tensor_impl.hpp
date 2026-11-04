@@ -1099,6 +1099,8 @@ namespace tinytensor {
         const TensorShape& shape() const { return shape_; }
         Device device() const { return device_; }
         DataType dtype() const { return dtype_; }
+        // Non-owning diagnostics: does not materialize or extend storage lifetime.
+        std::weak_ptr<void> storage_lifetime() const noexcept { return data_owner_; }
         bool owns_memory() const { return static_cast<bool>(data_owner_) && !is_view_; }
         bool is_view() const { return is_view_; }
         bool is_external_storage() const { return has_external_storage(); }

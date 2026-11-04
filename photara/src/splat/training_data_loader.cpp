@@ -320,7 +320,8 @@ void sample_rgb(
                  static_cast<std::size_t>(channel)]);
     };
     const auto quantize = [](const float value) {
-        return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.F, 255.F)));
+        return static_cast<std::uint8_t>(
+            static_cast<double>(std::clamp(value, 0.F, 255.F)) + 0.5);
     };
     red = quantize(
         at(x0, y0, 0) * w00 + at(x1, y0, 0) * w10 + at(x0, y1, 0) * w01 + at(x1, y1, 0) * w11);
@@ -330,46 +331,66 @@ void sample_rgb(
         at(x0, y0, 2) * w00 + at(x1, y0, 2) * w10 + at(x0, y1, 2) * w01 + at(x1, y1, 2) * w11);
 }
 
-std::pair<float, float> source_coordinate(
-    const mvs::MvsView& view,
-    const std::uint32_t x,
-    const std::uint32_t y,
-    const Camera& output_camera,
-    const io::RgbImage& source) {
-    if (uses_native_splat_projection(output_camera.model)) {
-        const float scale_x = static_cast<float>(output_camera.width) / source.width;
-        const float scale_y = static_cast<float>(output_camera.height) / source.height;
-        return {
-            (static_cast<float>(x) + 0.5F) / scale_x - 0.5F,
-            (static_cast<float>(y) + 0.5F) / scale_y - 0.5F};
+// Prepare separable image coordinates once per column/row, not per pixel.
+// Image resampling only needs projected x/y; computing the BA Jacobians in
+// project_camera_plane for every pixel is unnecessary here. Preserve the
+// original floating-point operation order, including JPEG metadata scaling.
+class ImageSourceCoordinates {
+  public:
+    ImageSourceCoordinates(const mvs::MvsView& view, const Camera& camera,
+                           const io::RgbImage& source)
+        : view_(view), source_width_(source.width), source_height_(source.height),
+          metadata_width_(view.src_width != 0 ? view.src_width : view.width),
+          metadata_height_(view.src_height != 0 ? view.src_height : view.height),
+          linear_(uses_native_splat_projection(camera.model) ||
+                  (view.source_model != CameraModel::opencv_fisheye && view.k1 == 0.F &&
+                   view.k2 == 0.F && view.p1 == 0.F && view.p2 == 0.F)),
+          x_(camera.width), y_(camera.height) {
+        const float scale_x = static_cast<float>(camera.width) / source.width;
+        const float scale_y = static_cast<float>(camera.height) / source.height;
+        for (std::size_t x = 0; x < x_.size(); ++x)
+            x_[x] = linear_ ? static_cast<double>((static_cast<float>(x) + 0.5F) / scale_x - 0.5F) :
+                (static_cast<double>(x) - camera.cx) / camera.fx;
+        for (std::size_t y = 0; y < y_.size(); ++y)
+            y_[y] = linear_ ? static_cast<double>((static_cast<float>(y) + 0.5F) / scale_y - 0.5F) :
+                (static_cast<double>(y) - camera.cy) / camera.fy;
     }
-    const bool distorted = view.source_model == CameraModel::opencv_fisheye || view.k1 != 0.F ||
-                           view.k2 != 0.F || view.p1 != 0.F || view.p2 != 0.F;
-    if (!distorted) {
-        const float scale_x = static_cast<float>(output_camera.width) / source.width;
-        const float scale_y = static_cast<float>(output_camera.height) / source.height;
-        return {
-            (static_cast<float>(x) + 0.5F) / scale_x - 0.5F,
-            (static_cast<float>(y) + 0.5F) / scale_y - 0.5F};
+
+    std::pair<float, float> at(const std::uint32_t column, const std::uint32_t row) const {
+        const double x = x_[column], y = y_[row];
+        if (linear_)
+            return {static_cast<float>(x), static_cast<float>(y)};
+        const double k1 = view_.k1, k2 = view_.k2, p1 = view_.p1, p2 = view_.p2;
+        const double r2 = x*x + y*y;
+        double px, py;
+        if (view_.source_model == CameraModel::opencv_fisheye) {
+            const double r = std::sqrt(r2);
+            const double theta = std::atan(r);
+            const double t2 = theta*theta;
+            const double poly = 1.0 + t2*(k1 + t2*(k2 + t2*(p1 + t2*p2)));
+            const double scale = r > 1e-8 ? theta*poly/r : 1.0;
+            px = x*scale; py = y*scale;
+        } else {
+            const double radial = 1 + k1*r2 + k2*r2*r2;
+            px = x*radial + 2*p1*x*y + p2*(r2+2*x*x);
+            py = y*radial + p1*(r2+2*y*y) + 2*p2*x*y;
+        }
+        float sx = static_cast<float>(view_.src_fx * px + view_.src_cx);
+        float sy = static_cast<float>(view_.src_fy * py + view_.src_cy);
+        if (metadata_width_ != 0 && metadata_height_ != 0 &&
+            (source_width_ != metadata_width_ || source_height_ != metadata_height_)) {
+            sx = (sx + 0.5F) * static_cast<float>(source_width_) / metadata_width_ - 0.5F;
+            sy = (sy + 0.5F) * static_cast<float>(source_height_) / metadata_height_ - 0.5F;
+        }
+        return {sx, sy};
     }
-    const double xn = (static_cast<double>(x) - output_camera.cx) / output_camera.fx;
-    const double yn = (static_cast<double>(y) - output_camera.cy) / output_camera.fy;
-    const auto pixel =
-        project_camera_plane(view.source_model, xn, yn, view.k1, view.k2, view.p1, view.p2);
-    float source_x = static_cast<float>(view.src_fx * pixel.x + view.src_cx);
-    float source_y = static_cast<float>(view.src_fy * pixel.y + view.src_cy);
-    // JPEG DCT scaling can reduce the decoded source relative to the camera
-    // metadata. Distortion is evaluated in normalized coordinates, then the
-    // resulting metadata-space pixel is mapped into the decoded bitmap.
-    const std::uint32_t metadata_width = view.src_width != 0 ? view.src_width : view.width;
-    const std::uint32_t metadata_height = view.src_height != 0 ? view.src_height : view.height;
-    if (metadata_width != 0 && metadata_height != 0 &&
-        (source.width != metadata_width || source.height != metadata_height)) {
-        source_x = (source_x + 0.5F) * static_cast<float>(source.width) / metadata_width - 0.5F;
-        source_y = (source_y + 0.5F) * static_cast<float>(source.height) / metadata_height - 0.5F;
-    }
-    return {source_x, source_y};
-}
+
+  private:
+    const mvs::MvsView& view_;
+    std::uint32_t source_width_, source_height_, metadata_width_, metadata_height_;
+    bool linear_;
+    std::vector<double> x_, y_;
+};
 std::filesystem::path find_mask_path(
     const std::filesystem::path& directory,
     const std::filesystem::path& image_path) {
@@ -461,6 +482,44 @@ float sample_projected_foreground_coverage(
             (sample(x0, y0 + 1) * (1.F - tx) + sample(x0 + 1, y0 + 1) * tx) * ty,
         0.F, 1.F);
 }
+
+using LoadClock = std::chrono::steady_clock;
+double elapsed_ms(const LoadClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(LoadClock::now() - start).count();
+}
+struct HostStageTimes {
+    double read_decode{}, mask_load{}, pack{}, prior{}, compress{}, decompress{};
+};
+struct WallTimer {
+    double& total;
+    LoadClock::time_point start = LoadClock::now();
+    ~WallTimer() { total += elapsed_ms(start); }
+};
+
+// Observe ownership without keeping any GPU buffer alive. Shared depth/normal
+// tensors and Vulkan cache hits must not be counted a second time.
+struct DeviceMemoryLedger {
+    struct Allocation { std::weak_ptr<void> owner; std::size_t bytes; };
+    std::unordered_map<const void*, Allocation> allocations;
+    std::size_t peak{};
+    void track(const tinytensor::Tensor& tensor) {
+        if (tensor.is_valid() && !tensor.has_lazy_expr())
+            allocations[tensor.storage_ptr()] = {tensor.storage_lifetime(), tensor.bytes()};
+    }
+    void track(const TrainingView& view) {
+        for (const auto* tensor : {&view.rgb, &view.gray, &view.mask, &view.depth, &view.normal})
+            track(*tensor);
+    }
+    std::size_t live() {
+        std::size_t bytes = 0;
+        for (auto it = allocations.begin(); it != allocations.end();) {
+            if (it->second.owner.expired()) it = allocations.erase(it);
+            else { bytes += it->second.bytes; ++it; }
+        }
+        return bytes;
+    }
+    void sample(const std::size_t ring_bytes) { peak = std::max(peak, live() + ring_bytes); }
+};
 
 struct HostTrainingView {
     Camera camera;
@@ -556,6 +615,7 @@ std::shared_ptr<HostTrainingView> decompress_host_view(
 struct HostTrainingLoad {
     std::shared_ptr<HostTrainingView> view;
     std::shared_ptr<const CompressedHostTrainingView> compressed;
+    HostStageTimes times;
     double host_load_ms{0.0};
     bool compressed_hit{false};
     bool compression_attempted{false};
@@ -631,6 +691,11 @@ class PinnedStagingPool {
             free_.push_back(std::move(buffer));
     }
 
+    std::size_t capacity() const {
+        std::size_t bytes = 0;
+        for (const auto& buffer : free_) bytes += buffer->capacity();
+        return bytes;
+    }
     void clear() {
         free_.clear();
     }
@@ -674,6 +739,14 @@ class DeviceUploadRing {
 
     DeviceUploadRing(const DeviceUploadRing&) = delete;
     DeviceUploadRing& operator=(const DeviceUploadRing&) = delete;
+
+    std::size_t capacity() const {
+        std::size_t bytes = 0;
+        for (const auto& slot : slots_) bytes += slot.capacity;
+        return bytes;
+    }
+    std::size_t growth_peak() const { return growth_peak_; }
+    void set_ledger(DeviceMemoryLedger* ledger) { ledger_ = ledger; }
 
     // Hand out a slot whose readers finished. Never blocks: returning nullptr
     // simply keeps the caller on the synchronous upload path.
@@ -743,10 +816,12 @@ class DeviceUploadRing {
             cudaEventSynchronize(slot.reusable);
     }
 
-    static bool grow(Slot& slot, const std::size_t bytes) {
+    bool grow(Slot& slot, const std::size_t bytes) {
         void* pointer = nullptr;
         if (cudaMalloc(&pointer, bytes) != cudaSuccess)
             return false;
+        growth_peak_ = std::max(growth_peak_, capacity() + bytes);
+        if (ledger_) ledger_->sample(capacity() + bytes);
         if (slot.data != nullptr)
             cudaFree(slot.data);
         slot.data = static_cast<std::uint8_t*>(pointer);
@@ -755,6 +830,8 @@ class DeviceUploadRing {
     }
 
     std::array<Slot, k_slot_count> slots_{};
+    std::size_t growth_peak_{};
+    DeviceMemoryLedger* ledger_{};
 };
 
 std::size_t packed_training_view_bytes(
@@ -807,15 +884,19 @@ HostTrainingView load_host_training_view(
     const mvs::MvsView& view,
     const TrainingOptions& options,
     const float resolution_scale = 1.F,
-    const bool parallel_pack = true) {
+    const bool parallel_pack = true,
+    HostStageTimes* times = nullptr) {
     tinytensor::TraceScope load_scope("data.host_load_pack");
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument("Cannot build a GGGS training view with empty dimensions");
     Camera camera = training_data::training_camera(view, options, resolution_scale);
+    auto stage_started = LoadClock::now();
     const io::RgbImage source = [&] {
         tinytensor::TraceScope scope("data.read_decode");
         return io::load_rgb_with_minimum_size(view.path, camera.width, camera.height);
     }();
+    if (times) times->read_decode += elapsed_ms(stage_started);
+    stage_started = LoadClock::now();
     const std::size_t pixels = static_cast<std::size_t>(camera.width) * camera.height;
     io::GrayImage source_mask;
     bool has_source_mask = false;
@@ -829,6 +910,8 @@ HostTrainingView load_host_training_view(
             has_source_mask = !source_mask.pixels.empty();
         }
     }
+    if (times) times->mask_load += elapsed_ms(stage_started);
+    stage_started = LoadClock::now();
     const bool has_projected_mask =
         view.foreground_mask.size() == static_cast<std::size_t>(view.width) * view.height;
     // Older/internal MVS paths used binary 0/1 masks while projected bounds
@@ -855,59 +938,65 @@ HostTrainingView load_host_training_view(
         camera.width == source.width && camera.height == source.height &&
         (uses_native_splat_projection(camera.model) ||
          (view.k1 == 0.F && view.k2 == 0.F && view.p1 == 0.F && view.p2 == 0.F));
+    const auto coordinates = direct_source ? std::optional<ImageSourceCoordinates>{} :
+        std::optional<ImageSourceCoordinates>{std::in_place, view, camera, source};
 #if defined(PHOTARA_HAS_OPENMP)
 #pragma omp parallel for schedule(static) if (parallel_pack && pixels >= 4096)
 #endif
-    for (std::int64_t linear = 0; linear < static_cast<std::int64_t>(pixels); ++linear) {
-        const auto pixel = static_cast<std::size_t>(linear);
-        const auto x = static_cast<std::uint32_t>(pixel % camera.width);
-        const auto y = static_cast<std::uint32_t>(pixel / camera.width);
-        std::uint8_t red{};
-        std::uint8_t green{};
-        std::uint8_t blue{};
-        std::uint8_t alpha{255};
-        bool lens_valid = true;
-        if (native_fisheye) {
-            const float px =
-                (float(x) + options.rasterization.pixel_center_offset - camera.cx) / camera.fx;
-            const float py =
-                (float(y) + options.rasterization.pixel_center_offset - camera.cy) / camera.fy;
-            lens_valid = camera.fx > 0.F && camera.fy > 0.F && fisheye_limit > 0.F &&
-                         px * px + py * py < fisheye_limit * fisheye_limit;
-        }
-        if (direct_source) {
-            red = source.pixels[3 * pixel];
-            green = source.pixels[3 * pixel + 1];
-            blue = source.pixels[3 * pixel + 2];
-            if (has_source_mask) {
-                const float coverage =
-                    source_mask.width == source.width && source_mask.height == source.height
-                        ? static_cast<float>(source_mask.pixels[pixel]) / 255.F
-                        : sample_mask_coverage(
-                              source_mask, source, static_cast<float>(x), static_cast<float>(y));
-                alpha = quantize_channel(coverage);
+    for (std::int64_t row = 0; row < static_cast<std::int64_t>(camera.height); ++row) {
+        const auto y = static_cast<std::uint32_t>(row);
+        const auto row_offset = static_cast<std::size_t>(y) * camera.width;
+        for (std::uint32_t x = 0; x < camera.width; ++x) {
+            const auto pixel = row_offset + x;
+            std::uint8_t red{};
+            std::uint8_t green{};
+            std::uint8_t blue{};
+            std::uint8_t alpha{255};
+            bool lens_valid = true;
+            if (native_fisheye) {
+                const float px =
+                    (float(x) + options.rasterization.pixel_center_offset - camera.cx) / camera.fx;
+                const float py =
+                    (float(y) + options.rasterization.pixel_center_offset - camera.cy) / camera.fy;
+                lens_valid = camera.fx > 0.F && camera.fy > 0.F && fisheye_limit > 0.F &&
+                             px * px + py * py < fisheye_limit * fisheye_limit;
             }
+            if (direct_source) {
+                red = source.pixels[3 * pixel];
+                green = source.pixels[3 * pixel + 1];
+                blue = source.pixels[3 * pixel + 2];
+                if (has_source_mask) {
+                    const float coverage =
+                        source_mask.width == source.width && source_mask.height == source.height
+                            ? static_cast<float>(source_mask.pixels[pixel]) / 255.F
+                            : sample_mask_coverage(
+                                  source_mask, source, static_cast<float>(x), static_cast<float>(y));
+                    alpha = quantize_channel(coverage);
+                }
+                if (has_projected_mask)
+                    alpha = std::min(
+                        alpha, quantize_channel(sample_projected_foreground_coverage(
+                                   view, camera, x, y, projected_mask_denominator)));
+                rgba[pixel] = pack_rgba(red, green, blue, lens_valid ? alpha : 0);
+                continue;
+            }
+            const auto [sx, sy] = coordinates->at(x, y);
+            if (validity_only && (sx < 0.F || sy < 0.F || sx > static_cast<float>(source.width - 1) ||
+                                  sy > static_cast<float>(source.height - 1)))
+                alpha = 0;
+            sample_rgb(source, sx, sy, red, green, blue);
+            if (has_source_mask)
+                alpha = quantize_channel(sample_mask_coverage(source_mask, source, sx, sy));
             if (has_projected_mask)
                 alpha = std::min(
                     alpha, quantize_channel(sample_projected_foreground_coverage(
                                view, camera, x, y, projected_mask_denominator)));
             rgba[pixel] = pack_rgba(red, green, blue, lens_valid ? alpha : 0);
-            continue;
         }
-        const auto [sx, sy] = source_coordinate(view, x, y, camera, source);
-        if (validity_only && (sx < 0.F || sy < 0.F || sx > static_cast<float>(source.width - 1) ||
-                              sy > static_cast<float>(source.height - 1)))
-            alpha = 0;
-        sample_rgb(source, sx, sy, red, green, blue);
-        if (has_source_mask)
-            alpha = quantize_channel(sample_mask_coverage(source_mask, source, sx, sy));
-        if (has_projected_mask)
-            alpha = std::min(
-                alpha, quantize_channel(sample_projected_foreground_coverage(
-                           view, camera, x, y, projected_mask_denominator)));
-        rgba[pixel] = pack_rgba(red, green, blue, lens_valid ? alpha : 0);
     }
 
+    if (times) times->pack += elapsed_ms(stage_started);
+    stage_started = LoadClock::now();
     std::vector<float> depth;
     std::vector<float> normals;
     if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
@@ -938,10 +1027,12 @@ HostTrainingView load_host_training_view(
     }
     const bool has_mask = has_source_mask || has_projected_mask || validity_only || native_fisheye;
 
+    if (times) times->prior += elapsed_ms(stage_started);
     return {camera, std::move(rgba), std::move(depth), std::move(normals), has_mask, validity_only};
 }
 
-TrainingView upload_training_view(const HostTrainingView& host, const TrainingOptions& options) {
+TrainingView upload_training_view(const HostTrainingView& host, const TrainingOptions& options,
+                                  DeviceMemoryLedger* ledger = nullptr, std::size_t ring_bytes = 0) {
     TrainingView result;
     result.camera = host.camera;
     const bool decode_gray = options.multi_view_ncc_weight > 0.F;
@@ -965,17 +1056,26 @@ TrainingView upload_training_view(const HostTrainingView& host, const TrainingOp
         } else {
             packed = tinytensor::Tensor::from_vector(host.rgba, {height, width}, device);
         }
+        if (ledger) ledger->track(packed);
         result.rgb = tinytensor::Tensor::empty({std::size_t{3}, height, width}, device);
         result.gray = decode_gray ? tinytensor::Tensor::empty({height, width}, device)
                                   : tinytensor::Tensor::zeros({std::size_t{1}}, device);
         result.mask = host.has_mask ? tinytensor::Tensor::empty({height, width}, device)
                                     : tinytensor::Tensor::zeros({std::size_t{1}}, device);
+        if (ledger) { ledger->track(result); ledger->sample(ring_bytes); }
         tinytensor::vulkan::unpack_training_pixels(
             packed, result.rgb, decode_gray ? &result.gray : nullptr,
             host.has_mask ? &result.mask : nullptr);
     } else {
-        auto decoded = detail::upload_packed_training_pixels(
-            host.rgba, host.camera.width, host.camera.height, host.has_mask, decode_gray);
+        const auto packed = tinytensor::Tensor::from_vector(
+            host.rgba, {host.camera.height, host.camera.width}, device);
+        auto decoded = detail::decode_packed_training_pixels(
+            packed, host.camera.width, host.camera.height, host.has_mask, decode_gray);
+        if (ledger) {
+            ledger->track(packed);
+            ledger->track(decoded.rgb); ledger->track(decoded.gray); ledger->track(decoded.mask);
+            ledger->sample(ring_bytes);
+        }
         result.rgb = std::move(decoded.rgb);
         result.gray = std::move(decoded.gray);
         result.mask = std::move(decoded.mask);
@@ -1037,6 +1137,7 @@ struct TrainingDataLoader::Impl {
           capacity_bytes_(
               options.adaptive_training_cache ? std::size_t{0} : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
+        device_ring_.set_ledger(&memory_);
         if (options_.backend == TrainingBackend::cuda && options_.training_async_upload &&
             options_.training_device_cache_bytes != 0) {
             const cudaError_t error =
@@ -1079,6 +1180,18 @@ struct TrainingDataLoader::Impl {
     }
 
     TrainingView get(const std::size_t index) {
+        auto view = get_impl(index);
+        memory_.track(view);
+        memory_.sample(device_ring_.capacity());
+        return view;
+    }
+
+    TrainingView upload_view(const HostTrainingView& host) {
+        WallTimer timer{upload_submit_ms_};
+        return upload_training_view(host, options_, &memory_, device_ring_.capacity());
+    }
+
+    TrainingView get_impl(const std::size_t index) {
         tinytensor::TraceScope get_scope("data.get_wall");
         struct Timer {
             double& total;
@@ -1106,7 +1219,7 @@ struct TrainingDataLoader::Impl {
             const HostTrainingView& host = host_view(index);
             if (host_resident)
                 ++host_hits_;
-            TrainingView view = upload_training_view(host, options_);
+            TrainingView view = upload_view(host);
             uploaded_bytes_ += packed_host_bytes(host);
             device_hit_rate_ = static_cast<double>(device_hits_) / static_cast<double>(requests_);
             insert_vulkan_entry(index, view);
@@ -1148,9 +1261,9 @@ struct TrainingDataLoader::Impl {
                                   sizeof(float) * (host.depth.size() + host.normal.size());
         uploaded_bytes_ += bytes;
         if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_)
-            return upload_training_view(host, options_);
+            return upload_view(host);
         if (!make_room_for_device_bytes(bytes))
-            return upload_training_view(host, options_);
+            return upload_view(host);
         DeviceEntry entry = allocate_device_entry(
             index, host.camera, host.has_mask, host.mask_is_validity, !host.depth.empty(),
             !host.normal.empty());
@@ -1189,14 +1302,17 @@ struct TrainingDataLoader::Impl {
                 const auto start = std::chrono::steady_clock::now();
                 load.compressed_hit = compressed != nullptr;
                 load.compressed = compressed;
-                load.view = compressed ? decompress_host_view(*compressed) :
-                    std::make_shared<HostTrainingView>(
+                if (compressed) {
+                    WallTimer timer{load.times.decompress};
+                    load.view = decompress_host_view(*compressed);
+                } else load.view = std::make_shared<HostTrainingView>(
                     // Prefetch already parallelizes across images. A full
                     // OpenMP team per short-lived async task oversubscribes
                     // the CPU and competes with the training submit thread.
-                    load_host_training_view(source_[index], options_, scale, false));
+                    load_host_training_view(source_[index], options_, scale, false, &load.times));
                 if (!compressed && compress) {
                     load.compression_attempted = true;
+                    WallTimer timer{load.times.compress};
                     load.compressed = compress_host_view(*load.view);
                 }
                 load.host_load_ms = std::chrono::duration<double, std::milli>(
@@ -1234,7 +1350,21 @@ struct TrainingDataLoader::Impl {
             return;
         // std::future from std::launch::async joins on destruction. Clear all
         // old-scale work before publishing the new scale and dropping buffers.
+        const auto transition_started = LoadClock::now();
         clear_pending_device_uploads();
+        // Consume timings even for old-scale jobs that will not enter the cache.
+        for (auto& [index, future] : prefetches_) {
+            try {
+                record_host_times(future.get());
+            } catch (const std::exception& error) {
+                // Old-scale results were previously discarded by future
+                // destruction; a failed unused job must not abort the new scale.
+                core::Logger::instance().warning(
+                    "splat_data_cache discarded_prefetch_failed index=", index,
+                    " error=", error.what());
+            }
+        }
+        prefetches_.clear();
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
@@ -1259,6 +1389,8 @@ struct TrainingDataLoader::Impl {
         staging_.ensure(0);
         staging_pool_.clear();
         device_ring_.drain();
+        transition_wait_ms_ += elapsed_ms(transition_started);
+        memory_.sample(device_ring_.capacity());
     }
 
     void set_epoch_plan(const std::vector<std::size_t>* order, const std::size_t cursor) {
@@ -1309,7 +1441,7 @@ struct TrainingDataLoader::Impl {
             " released_packed_bytes=", resident, " action=disable_device_cache");
     }
 
-    CacheStats stats() const {
+    CacheStats stats() {
         CacheStats result;
         result.requests = requests_;
         result.device_hits = device_hits_;
@@ -1333,6 +1465,20 @@ struct TrainingDataLoader::Impl {
         result.host_compressed_hits = compressed_hits_;
         result.host_compressed_entries = compressed_entries_.size();
         result.host_compression_enabled = compressed_capacity_bytes_ != 0;
+        result.host_decodes = host_decodes_; result.host_restores = host_restores_;
+        result.read_decode_ms = read_decode_ms_; result.mask_load_ms = mask_load_ms_;
+        result.pack_ms = pack_ms_; result.prior_ms = prior_ms_;
+        result.compress_ms = compress_ms_; result.decompress_ms = decompress_ms_;
+        result.host_wait_ms = host_wait_ms_; result.upload_submit_ms = upload_submit_ms_;
+        result.transition_wait_ms = transition_wait_ms_;
+        result.device_tensor_live_bytes = memory_.live();
+        memory_.sample(device_ring_.capacity());
+        result.device_logical_peak_bytes = memory_.peak;
+        result.device_ring_bytes = device_ring_.capacity();
+        result.device_ring_growth_peak_bytes = device_ring_.growth_peak();
+        result.pinned_host_bytes = staging_.capacity() + staging_pool_.capacity();
+        for (const auto& [index, upload] : device_uploads_)
+            if (upload.staging) result.pinned_host_bytes += upload.staging->capacity();
         result.get_wall_ms = get_wall_ms_;
         result.host_hits = host_hits_;
         result.prefetch_issued = prefetch_issued_;
@@ -1436,7 +1582,7 @@ struct TrainingDataLoader::Impl {
         const bool has_mask,
         const bool mask_is_validity,
         const bool has_depth,
-        const bool has_normal) const {
+        const bool has_normal) {
         DeviceEntry entry;
         entry.index = index;
         entry.bytes = sizeof(int) * camera.width * camera.height;
@@ -1455,6 +1601,8 @@ struct TrainingDataLoader::Impl {
         if (has_normal)
             entry.normal = tinytensor::Tensor::empty(
                 {std::size_t{3}, camera.height, camera.width}, tinytensor::Device::CUDA);
+        memory_.track(entry.rgba); memory_.track(entry.depth); memory_.track(entry.normal);
+        memory_.sample(device_ring_.capacity());
         return entry;
     }
 
@@ -1474,6 +1622,7 @@ struct TrainingDataLoader::Impl {
     }
 
     void copy_device_entry_with_pinned_staging(const HostTrainingView& host, DeviceEntry& entry) {
+        WallTimer timer{upload_submit_ms_};
         const std::size_t rgba_bytes = sizeof(int) * host.rgba.size();
         const std::size_t depth_bytes = sizeof(float) * host.depth.size();
         const std::size_t normal_bytes = sizeof(float) * host.normal.size();
@@ -1525,6 +1674,7 @@ struct TrainingDataLoader::Impl {
         const auto [pending, inserted] = device_uploads_.try_emplace(index);
         if (!inserted)
             return false;
+        WallTimer timer{upload_submit_ms_};
         PendingDeviceUpload& upload = pending->second;
         DeviceUploadRing::Slot* slot = device_ring_.try_acquire(bytes);
         if (slot == nullptr) {
@@ -1590,6 +1740,7 @@ struct TrainingDataLoader::Impl {
     // slot is recycled: the pool never sees a copy-engine write, and the hop is
     // ordered ahead of the expansion kernels that read it.
     [[nodiscard]] bool consume_device_upload(const std::size_t index, DeviceEntry& entry) {
+        WallTimer timer{upload_submit_ms_};
         const auto found = device_uploads_.find(index);
         if (found == device_uploads_.end())
             return false;
@@ -1763,7 +1914,18 @@ struct TrainingDataLoader::Impl {
         compressed_cached_bytes_ += bytes;
     }
 
+    void record_host_times(const HostTrainingLoad& load) {
+        if (load.compressed_hit) ++host_restores_; else ++host_decodes_;
+        read_decode_ms_ += load.times.read_decode;
+        mask_load_ms_ += load.times.mask_load;
+        pack_ms_ += load.times.pack;
+        prior_ms_ += load.times.prior;
+        compress_ms_ += load.times.compress;
+        decompress_ms_ += load.times.decompress;
+    }
+
     void accept_host_load(const std::size_t index, HostTrainingLoad load) {
+        record_host_times(load);
         note_host_load(load.host_load_ms);
         if (load.compressed_hit)
             ++compressed_hits_;
@@ -1794,17 +1956,20 @@ struct TrainingDataLoader::Impl {
         HostTrainingLoad load;
         const auto prefetched = prefetches_.find(index);
         if (prefetched != prefetches_.end()) {
-            load = prefetched->second.get();
+            { WallTimer timer{host_wait_ms_}; load = prefetched->second.get(); }
             prefetches_.erase(prefetched);
         } else {
             const auto start = std::chrono::steady_clock::now();
             load.compressed = cached_compressed_view(index);
             load.compressed_hit = load.compressed != nullptr;
-            load.view = load.compressed ? decompress_host_view(*load.compressed) :
-                std::make_shared<HostTrainingView>(
-                    load_host_training_view(source_[index], options_, resolution_scale_));
+            if (load.compressed) {
+                WallTimer timer{load.times.decompress};
+                load.view = decompress_host_view(*load.compressed);
+            } else load.view = std::make_shared<HostTrainingView>(
+                load_host_training_view(source_[index], options_, resolution_scale_, true, &load.times));
             if (!load.compressed && compressed_capacity_bytes_ != 0) {
                 load.compression_attempted = true;
+                WallTimer timer{load.times.compress};
                 load.compressed = compress_host_view(*load.view);
             }
             load.host_load_ms = std::chrono::duration<double, std::milli>(
@@ -1897,6 +2062,11 @@ struct TrainingDataLoader::Impl {
     std::size_t async_upload_failures_{};
     std::size_t host_hits_{};
     std::size_t prefetch_issued_{};
+    DeviceMemoryLedger memory_;
+    std::size_t host_decodes_{}, host_restores_{};
+    double read_decode_ms_{}, mask_load_ms_{}, pack_ms_{}, prior_ms_{};
+    double compress_ms_{}, decompress_ms_{}, host_wait_ms_{}, upload_submit_ms_{};
+    double transition_wait_ms_{};
     double get_wall_ms_{};
     // Prefetch lookahead sizing: how long a host load takes versus how long one
     // training iteration takes. Both are exponentially smoothed on the training

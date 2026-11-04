@@ -322,6 +322,65 @@ DeviceVramSample sample_device_vram(const bool vulkan_backend) {
     return sample;
 }
 
+// CPU timing sums can exceed wall time because host jobs overlap. GPU times
+// below are submission/wait wall times, not CUDA event execution durations.
+void log_data_diagnostics(const data::CacheStats& cache, const data::CacheStats& previous,
+                          const unsigned iteration, const char* boundary,
+                          const bool vulkan_backend) {
+    core::Logger::instance().info(
+        "splat_data_stages iteration=", iteration, " boundary=", boundary,
+        " decodes=", cache.host_decodes - previous.host_decodes,
+        " restores=", cache.host_restores - previous.host_restores,
+        " read_decode_ms=", cache.read_decode_ms - previous.read_decode_ms,
+        " mask_load_ms=", cache.mask_load_ms - previous.mask_load_ms,
+        " pack_ms=", cache.pack_ms - previous.pack_ms,
+        " prior_ms=", cache.prior_ms - previous.prior_ms,
+        " compress_ms=", cache.compress_ms - previous.compress_ms,
+        " decompress_ms=", cache.decompress_ms - previous.decompress_ms,
+        " host_wait_ms=", cache.host_wait_ms - previous.host_wait_ms,
+        " upload_submit_ms=", cache.upload_submit_ms - previous.upload_submit_ms,
+        " transition_wait_ms=", cache.transition_wait_ms - previous.transition_wait_ms);
+    std::uint64_t pool_used = 0, pool_reserved = 0, pool_high = 0;
+    bool pool_valid = false;
+    std::size_t vk_reserved = 0, vk_live = 0, vk_free = 0;
+    std::size_t live_requested = 0, bucket_padding = 0, bucket_cached = 0;
+    if (!vulkan_backend) {
+        std::tie(live_requested, bucket_padding) =
+            tinytensor::CudaMemoryPool::instance().live_requested_and_bucket_padding();
+        bucket_cached = tinytensor::SizeBucketedPool::instance().stats().bytes_cached.load();
+        int device = 0;
+        cudaMemPool_t pool{};
+        pool_valid = cudaGetDevice(&device) == cudaSuccess &&
+            cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &pool_used) == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &pool_reserved) == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &pool_high) == cudaSuccess;
+    }
+    if (vulkan_backend) {
+        const auto pool = tinytensor::vulkan::buffer_pool_stats();
+        vk_reserved = pool.reserved_bytes; vk_live = pool.live_bytes; vk_free = pool.free_bytes;
+    }
+    const auto vram = sample_device_vram(vulkan_backend);
+    core::Logger::instance().info(
+        "splat_data_memory iteration=", iteration, " boundary=", boundary,
+        " backend=", vulkan_backend ? "vulkan" : "cuda",
+        " cache_payload_bytes=", cache.device_resident_bytes,
+        " pending_payload_bytes=", cache.async_upload_pending_bytes,
+        " tensor_live_bytes=", cache.device_tensor_live_bytes,
+        " ring_bytes=", cache.device_ring_bytes,
+        " logical_peak_bytes=", cache.device_logical_peak_bytes,
+        " ring_growth_peak_bytes=", cache.device_ring_growth_peak_bytes,
+        " pinned_host_bytes=", cache.pinned_host_bytes,
+        " allocator_live_requested_bytes=", live_requested,
+        " allocator_bucket_padding_bytes=", bucket_padding,
+        " allocator_bucket_cached_bytes=", bucket_cached,
+        " pool_valid=", pool_valid, " pool_used_bytes=", pool_used,
+        " pool_reserved_bytes=", pool_reserved, " pool_reserved_high_bytes=", pool_high,
+        " vulkan_buffer_reserved_bytes=", vk_reserved,
+        " vulkan_buffer_live_bytes=", vk_live, " vulkan_buffer_free_bytes=", vk_free,
+        " device_used_bytes=", vram.used);
+}
+
 // Device-wide memory in use, i.e. the number nvidia-smi reports. It includes
 // the allocator cache and the CUDA async pool (so it shows what training
 // actually holds, not only what is live), but it also includes every other
@@ -1632,7 +1691,14 @@ GaussianModel Trainer::train(
             data::progressive_resolution_scale(iteration, options_);
         if (std::abs(requested_resolution_scale - active_resolution_scale) > 1e-6F) {
             active_resolution_scale = requested_resolution_scale;
+            const auto before_transition = view_cache.stats();
+            log_data_diagnostics(before_transition, previous_cache_stats, iteration,
+                                 "before_scale", vulkan_backend);
             view_cache.set_resolution_scale(active_resolution_scale);
+            const auto after_transition = view_cache.stats();
+            log_data_diagnostics(after_transition, before_transition, iteration,
+                                 "after_scale", vulkan_backend);
+            previous_cache_stats = after_transition;
             // The new scale has a cold image cache. Start a complete epoch so
             // every training view is prepared once before any is revisited.
             // Continuing a partial old-scale epoch can leave its earlier views
@@ -2584,6 +2650,7 @@ GaussianModel Trainer::train(
                     " host_resident_mib=", cache.host_resident_bytes / (1024 * 1024),
                     " compressed_mib=", cache.host_compressed_bytes / (1024 * 1024),
                     " step_ms=", steps == 0 ? 0.0 : interval_ms / steps);
+                log_data_diagnostics(cache, previous_cache_stats, iteration, "progress", vulkan_backend);
                 previous_cache_stats = cache;
                 cache_log_started = now;
             }
@@ -2612,6 +2679,7 @@ GaussianModel Trainer::train(
     }
     {
         const auto cache = view_cache.stats();
+        log_data_diagnostics(cache, previous_cache_stats, completed_iteration, "final", vulkan_backend);
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests, " device_hits=", cache.device_hits,
             " async_upload_hits=", cache.async_upload_hits,

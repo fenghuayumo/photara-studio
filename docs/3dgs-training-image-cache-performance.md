@@ -219,3 +219,222 @@ and `phase-summary.json`. GPU percentages are mean 200-ms samples bounded by
 the matching iteration timestamps; per-update time uses the wall interval.
 Preview is disabled here, so these results do not rule out additional costs in
 an editor instance that remains slow after all its views have been prepared.
+
+
+## Stage diagnostics and cold CPU pipeline (2026-11-04)
+
+`CacheStats` now carries completed-job CPU wall-time totals for file read/decode,
+mask loading, projection/bilinear sampling/packing, priors, Zstd compression and
+restoration. Background jobs return their counters with their futures; the
+training thread alone aggregates them. `host_wait_ms` measures waiting for a
+prefetched result; synchronous work remains visible in the individual stages
+and `get_wall_ms`. `upload_submit_ms` is host API/submission/wait wall time,
+not GPU kernel execution time. The counters require no new GPU event fences.
+Parallel job durations overlap, so their sum is not training wall time.
+Discarded old-scale futures contribute completed-job counters during a scale
+change; unused failed old-scale jobs are logged and discarded.
+
+Normal logs add `splat_data_stages` and `splat_data_memory` at the existing
+roughly two-second cadence, before/after each resolution transition, and at
+training completion. Stage deltas belong to the reporting window, not the
+exact wall-time lifetime of each job. The analysis script reports these as
+`completed_job_stage_sums`; a diagnostic window can straddle a phase boundary.
+
+The memory accounting separates:
+
+- `cache_payload_bytes`: image-cache payload only.
+- `pending_payload_bytes`: payload currently assigned to ring uploads, already
+  inside ring capacity; **do not add it to ring bytes**.
+- `tensor_live_bytes`: unique logical allocations created by the loader,
+  including decoded outputs still held by callers after cache eviction or a
+  scale change. Shared depth/normal storage is counted once. Non-owning weak
+  storage references do not extend GPU lifetime.
+- `ring_bytes`: actual retained CUDA upload-slot capacity. Growing a slot
+  allocates its replacement before freeing the old block; both allocations
+  contribute to the logical peak and `ring_growth_peak_bytes`.
+- `logical_peak_bytes`: high-water mark of tracked tensor payload plus ring
+  capacity at loader allocation/return boundaries. Allocator padding,
+  freed-but-retained buffers, driver internals and unrelated allocations are
+  outside this logical measure.
+- `pinned_host_bytes`: synchronous, free and in-flight pinned upload staging;
+  this is host RAM, not device VRAM.
+- CUDA allocator requested bytes, bucket padding and retained bucket cache,
+  plus driver pool used/reserved/high-water values. These are process-wide,
+  overlapping views, not extra loader allocations to add together. Driver
+  pool counters can be unreliable under WDDM; `pool_valid` describes API
+  success, not proof of physical residency.
+- Vulkan buffer-pool reserved/live/free bytes on that backend, without querying
+  CUDA. `device_used_bytes` is the existing device/heap sample and must not be
+  mistaken for loader-only memory.
+
+### Progressive benchmark and memory observations
+
+The throughput harness now accepts optional `PROGRESSIVE` after
+`MAX_RESOLUTION`; the Python runner exposes `--progressive`. A preserved
+`ed674aa` loader executable and the instrumented/optimized executables use the
+same 994,506-row PLY, 702 training views, 4096 cap, prefetch 4 with unchanged
+adaptive policy, 30K schedule and model-only warm start at iteration 2800.
+They run 5000 updates through iteration 7800, crossing both 3001 and 6001.
+Preview, geometry supervision and stage CUDA profiling remain disabled.
+This measures a resumed training window with reinitialized optimizer state,
+not full training from scratch or a convergence comparison.
+
+| Window | Original repeat (s) | Instrumented (s) | CPU optimized (s) | Final build repeat (s) |
+| --- | ---: | ---: | ---: | ---: |
+| 3000--3800 | 7.081 | 7.143 | 6.507 | 7.657 |
+| 3800--6000 | 14.653 | 14.676 | 15.089 | 15.061 |
+| 6000--6800 | 32.710 | 29.585 | 27.298 | 29.129 |
+| 6800--7800 | 20.024 | 19.345 | 19.731 | 19.707 |
+| Whole 2800--7800 window | 75.671 | 72.002 | 69.794 | 72.943 |
+
+The first optimized full-resolution cold window is 7.7% shorter than the
+instrumented control, and the whole window is 3.1% shorter. The final-build
+repeat takes 72.943 s overall, slightly longer than the instrumented control;
+its cold full-resolution window takes 29.129 s. This variability does not
+establish a repeatable end-to-end percentage gain, despite the CPU byte-level
+microbenchmark improvement. These are individual diagnostic runs, not confidence
+intervals. Random refinement and system load vary. An
+initial original run took 105.062 s and had much higher sampled device memory;
+it is retained as an outlier/context check rather than used as evidence of
+optimization benefit. The original repeat was run after the optimized arm.
+No source images, input PLY or user worker processes were modified.
+
+The instrumented full-resolution cold phase reports about 25.8 s accumulated
+read/decode, 254.4 s packing and 60.4 s compression across 701 completed jobs.
+Packing accounts for roughly 75% of those three stages; GPU JPEG decode alone
+would leave the dominant CPU work. Later compressed restores have little
+foreground waiting. The optimization therefore keeps CPU decoding and changes
+only the row-major pixel loop and byte quantization: it removes per-pixel
+integer coordinate division and replaces CRT `lround` calls with nonnegative
+truncation after adding 0.5 in **double** precision. Widening preserves values
+immediately below half-integers. RGB interpolation arithmetic, masks, camera
+projection and cache/prefetch budgets are unchanged.
+
+At both transition points the image-cache payload, pending uploads and tracked
+image tensors drop to zero in this fixture. The ring remains at 4.6875 MiB
+following 3001 and 18.75 MiB following 6001; after warming full resolution it
+reaches 75 MiB, with an 84.375 MiB ring-only growth overlap. The loader logical
+peak is 480.469 MiB in both instrumented and optimized arms, reached in the
+quarter-resolution cache. Maximum sampled device-wide memory was 8865 MiB in
+the original repeat, 8761 MiB instrumented and 8796 MiB CPU optimized. The
+half-resolution window's sampled peak rose from 6148 to 6243 MiB between the
+original repeat and optimized run. These observations show no added logical
+GPU footprint from the CPU optimization; they do **not** prove identical
+physical peaks. The final-build repeat samples 8809 MiB overall, including
+8809 MiB in 6000--6800; its logical loader peak and ring capacities remain the
+same. Sampling is 200 ms and model/allocator trajectories differ.
+
+Artifacts: `build/loader-stages-baseline`, `build/loader-stages-baseline-repeat`,
+`build/loader-stages-instrumented`, `build/loader-stages-cpu-optimized`,
+`build/loader-stages-final`, their
+`.log`, `.gpu.csv` and `.summary.json` siblings, and
+`build/loader-stages-comparison.json`. Each summary records the executable hash
+and exact command. Recreate the comparison with:
+
+```powershell
+python experiments/analyze_splat_pipeline.py build/loader-stages-baseline build/loader-stages-baseline-repeat build/loader-stages-instrumented build/loader-stages-cpu-optimized build/loader-stages-final --output build/loader-stages-comparison.json
+```
+
+### CPU byte-equivalence check
+
+The harness has a CPU-only `--host-images DATASET IMAGES OUTPUT_CSV` mode,
+preparing the first twelve views at quarter, half and full scale. Run the
+reference and optimized binaries with `OMP_NUM_THREADS=1` to match a background
+prefetch job. All 36 output RGB/mask hashes match. Reference versus optimized
+preparation totals (excluding hash computation) are 547.6/520.0 ms at quarter,
+1412.7/1310.6 ms at half and 4403.7/3964.1 ms at full resolution. This first
+single-thread microbenchmark shows a 10.0% full-resolution reduction, separate
+from the end-to-end training result. Artifacts are
+`build/loader-host-reference.csv` and `build/loader-host-optimized.csv`.
+
+A scalar interpolation oracle additionally checks randomized PNG up/downsampling
+against `std::lround`, including border behavior and half-integer cases. Cache
+tests check retained-output and upload-ring accounting across scale changes.
+CUDA/Vulkan focused cache tests and the complete rasterizer regression pass.
+The final Release test, throughput and Studio targets build successfully.
+
+The next measured optimization target remains CPU projection/sampling/packing.
+GPU decoding should only be reconsidered together with that stage, including
+its extra device scratch and any download needed for the host compressed cache.
+No cache-budget or prefetch-count increase is part of this change.
+
+
+### Implementation cleanup
+
+The final runtime has one image preparation implementation. The unused
+`upload_packed_training_pixels` wrapper was removed; upload and buffer tracking
+now remain in the loader, which calls the shared CUDA pixel expansion kernel.
+Historical benchmark executables (`before_image_cache`, `ed674aa`,
+`host_reference`, `telemetry`) were deleted after verification. Their logs,
+commands, hashes and measurements remain as evidence; rerunning those historical
+arms requires rebuilding the corresponding revision. The scalar test oracle
+is validation code, not an alternative runtime implementation. CUDA/Vulkan
+backends and decoded-cache fallback remain supported paths of the same loader.
+
+
+## Further cold-pass projection preparation
+
+The loader already overlaps background host jobs with current-view GPU work,
+using the same adaptive lookahead and two device upload slots. A lookahead
+queue hides latency only while the producer sustains the GPU's consumption
+rate. At a new resolution every training view is cold; host jobs still perform
+read/decode, resampling/packing and lossless compression before publishing the
+future. Compression is therefore currently part of the ready-to-consume
+critical path. Warm compressed-cache restores avoid the expensive first-pass
+projection and have almost no foreground future waits in this fixture.
+
+`ImageSourceCoordinates` now prepares the separable x/y axes once per image
+column/row and evaluates only projected x/y, without the generic BA projection
+Jacobian. The previous per-pixel coordinate helper is replaced, not retained
+as a selectable runtime path. Brown and fisheye projection expression order,
+float pixel conversion and JPEG metadata-space scaling are preserved. No
+image-sized remap cache is introduced: temporary axes are O(width + height),
+about 50 KiB for a 2560x3840 image, and are released after host preparation.
+The direct-copy path does not allocate these axes. GPU allocations, cache
+budgets, compression level and prefetch policy remain unchanged.
+
+The same 36 real-image RGB/mask hashes match the previous scalar implementation
+at quarter, half and full resolution. Single-thread preparation totals are
+428.3, 946.9 and 2710.4 ms, versus 520.0, 1310.6 and 3964.1 ms in the previous
+row-loop microbenchmark: a 31.6% full-resolution reduction. These timings are
+individual runs; output equality is the stronger invariant. The independent
+scalar image oracle now also checks Brown-distorted and fisheye-to-pinhole
+projection against `project_camera_plane`, in addition to linear resizing.
+
+The matched 2800--7800 training diagnostic was repeated on the same dataset,
+model and settings used above, with no other training arm running concurrently:
+
+| Metric | Before axis preparation | After axis preparation |
+| --- | ---: | ---: |
+| 6000--7000 wall time (s) | 31.373 | 29.403 |
+| 6000--7000 mean sampled GPU utilization (%) | 58.16 | 67.88 |
+| 6000--6800 foreground future wait (s) | 13.68 | 10.75 |
+| 6000--6800 accumulated packing time (s) | 224.63 | 167.82 |
+| Whole 5000-update window (s) | 69.782 | 68.837 |
+| 6000--7000 sampled device peak (MiB) | 8700 | 8496 |
+
+The cold interval improves by 6.3% and GPU utilization rises by about 9.7
+percentage points in this pair. It still contains waits; this does not imply
+that prefetching can sustain the GPU indefinitely when CPU preparation is
+slower. Accumulated stage times overlap and are reported by completion window.
+Model refinement is nondeterministic and device memory is sampled every 200 ms,
+so the peak difference is not evidence of a guaranteed VRAM saving. The loader
+logical peak remains 480.469 MiB and full-resolution upload-ring capacity
+remains 75 MiB.
+
+Artifacts: `build/loader-cold-pack-before`, `build/loader-cold-pack-after`, their
+`.log`, `.gpu.csv` and `.summary.json` siblings; `build/loader-host-coordinates.csv`
+and `build/loader-cold-pack-comparison.json`. The analyzer additionally reports
+6000--7000 and 7000--7800 windows. The initially tried packet-based RGB sampler
+was slower in the microbenchmark and is not part of the runtime.
+
+Release test/throughput/Studio builds, CUDA/Vulkan cache tests and the complete
+rasterizer regression pass with the coordinate preparation change. The final
+same-window repeat (`build/loader-cold-pack-after-repeat`) reports 62.165 s
+for all 5000 updates, 24.809 s and 77.37% sampled GPU utilization for
+6000--7000, and 6.72 s foreground future waits in the cold 6000--6800 window.
+Accumulated packing is 136.85 s in that window, versus 224.63 s before.
+The two optimized runs span 24.8--29.4 s and 67.9--77.4% utilization in
+6000--7000; report that range rather than a guaranteed acceleration factor.
+The final repeat's sampled peak is 8146 MiB for 6000--7000 (8307 MiB over
+7000--7800), with unchanged logical loader memory/ring capacities.

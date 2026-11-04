@@ -39,6 +39,16 @@ struct CacheStats {
     std::size_t host_compressed_hits{};
     std::size_t host_compressed_entries{};
     bool host_compression_enabled{};
+    // CPU wall time summed across completed jobs (parallel jobs overlap).
+    std::size_t host_decodes{}, host_restores{};
+    double read_decode_ms{}, mask_load_ms{}, pack_ms{}, prior_ms{};
+    double compress_ms{}, decompress_ms{}, host_wait_ms{}, upload_submit_ms{};
+    double transition_wait_ms{};
+    // Logical payload, deduplicated by allocation; excludes allocator padding.
+    // Includes outputs still owned by callers after eviction/scale changes.
+    std::size_t device_tensor_live_bytes{}, device_logical_peak_bytes{};
+    std::size_t device_ring_bytes{}, device_ring_growth_peak_bytes{};
+    std::size_t pinned_host_bytes{};
     double get_wall_ms{};
     // Requests served without a host decode, background host loads issued, and
     // the measured host-load / iteration cadence that drives the adaptive
