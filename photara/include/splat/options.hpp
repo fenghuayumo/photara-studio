@@ -383,6 +383,8 @@ struct TrainingOptions {
     bool progressive_resolution{false};
     unsigned progressive_resolution_interval{3'000};
     float progressive_initial_scale{0.25F};
+    // Large datasets share this budget between decoded lookahead and lossless
+    // compressed supervision, avoiding repeated image decode/undistortion.
     std::size_t training_view_cache_bytes{std::size_t{6} * 1024 * 1024 * 1024};
     // Expand the host budget when possible. The device budget is a hard upper
     // bound even in adaptive mode. Zero disables the host-side decoded-image

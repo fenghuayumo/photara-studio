@@ -32,6 +32,13 @@ struct CacheStats {
     std::size_t device_budget_rollbacks{};
     std::size_t dataset_packed_bytes{};
     std::size_t host_budget_bytes{};
+    // Resident decoded + compressed entries, excluding bounded in-flight work.
+    std::size_t host_resident_bytes{};
+    std::size_t host_compressed_bytes{};
+    // Completed restores, including background prefetches, without image decode.
+    std::size_t host_compressed_hits{};
+    std::size_t host_compressed_entries{};
+    bool host_compression_enabled{};
     double get_wall_ms{};
     // Requests served without a host decode, background host loads issued, and
     // the measured host-load / iteration cadence that drives the adaptive

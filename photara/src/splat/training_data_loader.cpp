@@ -14,6 +14,7 @@
 #include "vulkan/ops.hpp"
 
 #include <Eigen/Geometry>
+#include <zstd.h>
 
 #include <algorithm>
 #include <bit>
@@ -477,12 +478,87 @@ struct HostTrainingView {
     }
 };
 
+// Keep expensive decode/undistortion results across epochs without requiring
+// the entire RGBA dataset to fit in RAM. All channels, including validity masks
+// and floating-point priors, are restored bit for bit.
+struct CompressedHostTrainingView {
+    Camera camera;
+    std::vector<std::uint8_t> rgba, depth, normal;
+    std::size_t rgba_count{}, depth_count{}, normal_count{};
+    bool has_mask{}, mask_is_validity{};
+
+    [[nodiscard]] std::size_t bytes() const noexcept {
+        return sizeof(*this) + rgba.capacity() + depth.capacity() + normal.capacity();
+    }
+};
+
+template <typename T>
+std::vector<std::uint8_t> compress_host_channel(const std::vector<T>& source) {
+    if (source.empty())
+        return {};
+    std::vector<std::uint8_t> buffer(ZSTD_compressBound(source.size() * sizeof(T)));
+    const std::size_t size = ZSTD_compress(
+        buffer.data(), buffer.size(), source.data(), source.size() * sizeof(T), 1);
+    if (ZSTD_isError(size))
+        throw std::runtime_error(std::string("Training cache compression failed: ") +
+                                 ZSTD_getErrorName(size));
+    // A resize alone retains compressBound bytes and defeats the RAM saving.
+    return {buffer.begin(), buffer.begin() + size};
+}
+
+template <typename T>
+std::vector<T> decompress_host_channel(
+    const std::vector<std::uint8_t>& source, const std::size_t count) {
+    if (count == 0)
+        return {};
+    std::vector<T> result(count);
+    const std::size_t size = ZSTD_decompress(
+        result.data(), result.size() * sizeof(T), source.data(), source.size());
+    if (ZSTD_isError(size) || size != result.size() * sizeof(T))
+        throw std::runtime_error("Training cache decompression failed");
+    return result;
+}
+
+std::shared_ptr<const CompressedHostTrainingView> compress_host_view(
+    const HostTrainingView& source) {
+    auto result = std::make_shared<CompressedHostTrainingView>();
+    result->camera = source.camera;
+    result->rgba_count = source.rgba.size();
+    result->depth_count = source.depth.size();
+    result->normal_count = source.normal.size();
+    result->has_mask = source.has_mask;
+    result->mask_is_validity = source.mask_is_validity;
+    result->rgba = compress_host_channel(source.rgba);
+    result->depth = compress_host_channel(source.depth);
+    result->normal = compress_host_channel(source.normal);
+    // Compression must recover a meaningful amount of RAM to justify its
+    // CPU work and the smaller decoded hot set.
+    if (result->bytes() >= source.bytes() - source.bytes() / 4)
+        return {};
+    return result;
+}
+
+std::shared_ptr<HostTrainingView> decompress_host_view(
+    const CompressedHostTrainingView& source) {
+    auto result = std::make_shared<HostTrainingView>();
+    result->camera = source.camera;
+    result->has_mask = source.has_mask;
+    result->mask_is_validity = source.mask_is_validity;
+    result->rgba = decompress_host_channel<int>(source.rgba, source.rgba_count);
+    result->depth = decompress_host_channel<float>(source.depth, source.depth_count);
+    result->normal = decompress_host_channel<float>(source.normal, source.normal_count);
+    return result;
+}
+
 // Result of a background host load. The duration is carried alongside the view
 // so the training thread can fold it into the prefetch-lookahead estimate
 // without any cross-thread synchronisation.
 struct HostTrainingLoad {
     std::shared_ptr<HostTrainingView> view;
+    std::shared_ptr<const CompressedHostTrainingView> compressed;
     double host_load_ms{0.0};
+    bool compressed_hit{false};
+    bool compression_attempted{false};
 };
 
 class PinnedStagingBuffer {
@@ -1105,15 +1181,24 @@ struct TrainingDataLoader::Impl {
         if (prefetches_.contains(index) || prefetches_.size() >= prefetch_limit())
             return;
         const float scale = resolution_scale_;
+        const auto compressed = cached_compressed_view(index);
+        const bool compress = compressed_capacity_bytes_ != 0;
         prefetches_.emplace(
-            index, std::async(std::launch::async, [this, index, scale] {
+            index, std::async(std::launch::async, [this, index, scale, compressed, compress] {
                 HostTrainingLoad load;
                 const auto start = std::chrono::steady_clock::now();
-                load.view = std::make_shared<HostTrainingView>(
+                load.compressed_hit = compressed != nullptr;
+                load.compressed = compressed;
+                load.view = compressed ? decompress_host_view(*compressed) :
+                    std::make_shared<HostTrainingView>(
                     // Prefetch already parallelizes across images. A full
                     // OpenMP team per short-lived async task oversubscribes
                     // the CPU and competes with the training submit thread.
                     load_host_training_view(source_[index], options_, scale, false));
+                if (!compressed && compress) {
+                    load.compression_attempted = true;
+                    load.compressed = compress_host_view(*load.view);
+                }
                 load.host_load_ms = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - start)
                                         .count();
@@ -1129,6 +1214,8 @@ struct TrainingDataLoader::Impl {
         if (found != device_lookup_.end())
             return found->second->has_mask && !found->second->mask_is_validity;
         if (const auto cached = cached_host_view(index))
+            return cached->has_mask && !cached->mask_is_validity;
+        if (const auto cached = cached_compressed_view(index))
             return cached->has_mask && !cached->mask_is_validity;
 
         const mvs::MvsView& view = source_[index];
@@ -1151,6 +1238,9 @@ struct TrainingDataLoader::Impl {
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
+        compressed_entries_.clear();
+        compressed_lookup_.clear();
+        compressed_cached_bytes_ = 0;
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
@@ -1238,6 +1328,11 @@ struct TrainingDataLoader::Impl {
         result.device_budget_rollbacks = device_budget_rollbacks_;
         result.dataset_packed_bytes = dataset_packed_bytes_;
         result.host_budget_bytes = capacity_bytes_;
+        result.host_resident_bytes = cached_bytes_ + compressed_cached_bytes_;
+        result.host_compressed_bytes = compressed_cached_bytes_;
+        result.host_compressed_hits = compressed_hits_;
+        result.host_compressed_entries = compressed_entries_.size();
+        result.host_compression_enabled = compressed_capacity_bytes_ != 0;
         result.get_wall_ms = get_wall_ms_;
         result.host_hits = host_hits_;
         result.prefetch_issued = prefetch_issued_;
@@ -1632,6 +1727,63 @@ struct TrainingDataLoader::Impl {
     };
     using Entries = std::list<Entry>;
 
+    struct CompressedEntry {
+        std::size_t index{};
+        std::size_t bytes{};
+        std::shared_ptr<const CompressedHostTrainingView> view;
+    };
+    using CompressedEntries = std::list<CompressedEntry>;
+
+    std::shared_ptr<const CompressedHostTrainingView> cached_compressed_view(
+        const std::size_t index) {
+        const auto found = compressed_lookup_.find(index);
+        if (found == compressed_lookup_.end())
+            return {};
+        compressed_entries_.splice(
+            compressed_entries_.begin(), compressed_entries_, found->second);
+        return compressed_entries_.front().view;
+    }
+
+    void store_compressed_view(
+        const std::size_t index, std::shared_ptr<const CompressedHostTrainingView> view) {
+        if (!view || compressed_lookup_.contains(index))
+            return;
+        const std::size_t bytes = view->bytes();
+        if (bytes > compressed_capacity_bytes_)
+            return;
+        while (!compressed_entries_.empty() &&
+               compressed_cached_bytes_ + bytes > compressed_capacity_bytes_) {
+            const auto victim = select_eviction_victim(compressed_entries_);
+            compressed_cached_bytes_ -= victim->bytes;
+            compressed_lookup_.erase(victim->index);
+            compressed_entries_.erase(victim);
+        }
+        compressed_entries_.push_front({index, bytes, std::move(view)});
+        compressed_lookup_[index] = compressed_entries_.begin();
+        compressed_cached_bytes_ += bytes;
+    }
+
+    void accept_host_load(const std::size_t index, HostTrainingLoad load) {
+        note_host_load(load.host_load_ms);
+        if (load.compressed_hit)
+            ++compressed_hits_;
+        if (load.compression_attempted && !load.compressed && compressed_capacity_bytes_ != 0) {
+            // Noise-like images can be expensive to compress without saving
+            // enough RAM. Revert to the ordinary decoded cache for this scale;
+            // already-running tasks remain valid but add no compressed entries.
+            compressed_entries_.clear();
+            compressed_lookup_.clear();
+            compressed_cached_bytes_ = 0;
+            compressed_capacity_bytes_ = 0;
+            decoded_capacity_bytes_ = capacity_bytes_;
+            core::Logger::instance().info(
+                "splat_host_cache compression_disabled reason=insufficient_savings view=", index,
+                " raw_bytes=", load.view->bytes());
+        }
+        store_compressed_view(index, std::move(load.compressed));
+        store_host_view(index, std::move(load.view));
+    }
+
     const HostTrainingView& host_view(const std::size_t index) {
         tinytensor::TraceScope scope("data.host_get_wait");
         if (index >= source_.size())
@@ -1639,22 +1791,26 @@ struct TrainingDataLoader::Impl {
         if (const auto cached = cached_host_view(index))
             return *cached;
 
-        std::shared_ptr<HostTrainingView> loaded;
+        HostTrainingLoad load;
         const auto prefetched = prefetches_.find(index);
         if (prefetched != prefetches_.end()) {
-            HostTrainingLoad result = prefetched->second.get();
+            load = prefetched->second.get();
             prefetches_.erase(prefetched);
-            note_host_load(result.host_load_ms);
-            loaded = std::move(result.view);
         } else {
             const auto start = std::chrono::steady_clock::now();
-            loaded = std::make_shared<HostTrainingView>(
-                load_host_training_view(source_[index], options_, resolution_scale_));
-            note_host_load(
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-                    .count());
+            load.compressed = cached_compressed_view(index);
+            load.compressed_hit = load.compressed != nullptr;
+            load.view = load.compressed ? decompress_host_view(*load.compressed) :
+                std::make_shared<HostTrainingView>(
+                    load_host_training_view(source_[index], options_, resolution_scale_));
+            if (!load.compressed && compressed_capacity_bytes_ != 0) {
+                load.compression_attempted = true;
+                load.compressed = compress_host_view(*load.view);
+            }
+            load.host_load_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - start).count();
         }
-        store_host_view(index, std::move(loaded));
+        accept_host_load(index, std::move(load));
         return *entries_.front().view;
     }
 
@@ -1662,18 +1818,23 @@ struct TrainingDataLoader::Impl {
         if (cached_host_view(index))
             return;
         const std::size_t loaded_bytes = loaded->bytes();
-        while (!entries_.empty() &&
-               (capacity_bytes_ == 0 || cached_bytes_ + loaded_bytes > capacity_bytes_)) {
-            const auto evicted = select_eviction_victim(entries_);
-            cached_bytes_ -= evicted->bytes;
-            lookup_.erase(evicted->index);
-            entries_.erase(evicted);
-        }
+        trim_decoded_views(loaded_bytes);
         // Keep one decoded view even when caching is disabled or a single
         // image exceeds the budget. It remains valid until the next miss.
         entries_.push_front({index, loaded_bytes, std::move(loaded)});
         lookup_[index] = entries_.begin();
         cached_bytes_ += loaded_bytes;
+    }
+
+    void trim_decoded_views(const std::size_t incoming_bytes) {
+        const std::size_t budget = decoded_capacity_bytes_;
+        while (!entries_.empty() &&
+               cached_bytes_ + incoming_bytes > budget) {
+            const auto evicted = select_eviction_victim(entries_);
+            cached_bytes_ -= evicted->bytes;
+            lookup_.erase(evicted->index);
+            entries_.erase(evicted);
+        }
     }
 
     void collect_ready_host_prefetches() {
@@ -1685,8 +1846,7 @@ struct TrainingDataLoader::Impl {
             HostTrainingLoad result = it->second.get();
             const std::size_t index = it->first;
             it = prefetches_.erase(it);
-            note_host_load(result.host_load_ms);
-            store_host_view(index, std::move(result.view));
+            accept_host_load(index, std::move(result));
         }
     }
 
@@ -1709,6 +1869,10 @@ struct TrainingDataLoader::Impl {
     // memory: see DeviceUploadRing.
     DeviceUploadRing device_ring_;
     std::size_t capacity_bytes_{};
+    std::size_t decoded_capacity_bytes_{};
+    std::size_t compressed_capacity_bytes_{};
+    std::size_t compressed_cached_bytes_{};
+    std::size_t compressed_hits_{};
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
@@ -1749,6 +1913,8 @@ struct TrainingDataLoader::Impl {
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
+    CompressedEntries compressed_entries_;
+    std::unordered_map<std::size_t, CompressedEntries::iterator> compressed_lookup_;
     std::unordered_map<std::size_t, std::future<HostTrainingLoad>> prefetches_;
     // Epoch access plan. Positions index the trainer's shuffled order; entries
     // outside the plan (for example held-out views) are evicted first.
@@ -1991,11 +2157,35 @@ struct TrainingDataLoader::Impl {
 
     void update_cache_budgets() {
         dataset_packed_bytes_ = 0;
+        std::size_t largest_host_view_bytes = 0;
         for (const mvs::MvsView& view : source_) {
-            dataset_packed_bytes_ = saturate_add(
-                dataset_packed_bytes_,
-                packed_training_view_bytes(view, options_, resolution_scale_));
+            const auto bytes = packed_training_view_bytes(view, options_, resolution_scale_);
+            dataset_packed_bytes_ = saturate_add(dataset_packed_bytes_, bytes);
+            largest_host_view_bytes = std::max(largest_host_view_bytes, bytes);
         }
+        largest_host_view_bytes = saturate_add(largest_host_view_bytes, sizeof(HostTrainingView));
+        const auto configure_host_cache = [this, largest_host_view_bytes] {
+            decoded_capacity_bytes_ = capacity_bytes_;
+            compressed_capacity_bytes_ = 0;
+            const std::size_t mean_bytes = source_.empty() ? 0 :
+                dataset_packed_bytes_ / source_.size();
+            // Small datasets stay decoded. When they do not fit, reserve a
+            // bounded hot set for upload/prefetch and use the rest for lossless
+            // supervision. This shares the existing RAM budget, not a new one.
+            if (dataset_packed_bytes_ > capacity_bytes_ && mean_bytes >= 64 * 1024 &&
+                capacity_bytes_ / 2 > largest_host_view_bytes) {
+                decoded_capacity_bytes_ = std::max(
+                    largest_host_view_bytes,
+                    std::min<std::size_t>(capacity_bytes_ / 4, 512 * k_mib));
+                compressed_capacity_bytes_ = capacity_bytes_ - decoded_capacity_bytes_;
+            }
+            core::Logger::instance().info(
+                "splat_host_cache compression_enabled=", compressed_capacity_bytes_ != 0,
+                " resolution_scale=", resolution_scale_,
+                " decoded_budget_bytes=", decoded_capacity_bytes_,
+                " compressed_budget_bytes=", compressed_capacity_bytes_,
+                " dataset_packed_bytes=", dataset_packed_bytes_);
+        };
 
         // A random per-epoch view order bounds the best possible device-cache
         // hit rate by the resident fraction of the epoch. Datasets such as
@@ -2033,6 +2223,7 @@ struct TrainingDataLoader::Impl {
         // shared by the Vulkan tensor runtime.
         if (options_.backend == TrainingBackend::vulkan) {
             capacity_bytes_ = options_.training_view_cache_bytes;
+            configure_host_cache();
             device_capacity_bytes_ = options_.training_device_cache_bytes;
             device_ceiling_bytes_ = 0;
             // Unlike CUDA there is no adaptive growth path here (the ceiling
@@ -2047,6 +2238,7 @@ struct TrainingDataLoader::Impl {
 
         if (!options_.adaptive_training_cache) {
             capacity_bytes_ = options_.training_view_cache_bytes;
+            configure_host_cache();
             device_capacity_bytes_ = 0;
             if (options_.training_device_cache_bytes != 0) {
                 std::size_t free_bytes{}, total_bytes{};
@@ -2071,6 +2263,7 @@ struct TrainingDataLoader::Impl {
                                    : std::min(available_ram - available_ram / 4, hard_limit);
             capacity_bytes_ = std::min(desired, ram_limit);
         }
+        configure_host_cache();
 
         device_capacity_bytes_ = 0;
         if (options_.training_device_cache_bytes == 0)

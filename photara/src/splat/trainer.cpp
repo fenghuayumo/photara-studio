@@ -1554,6 +1554,8 @@ GaussianModel Trainer::train(
 
     auto interval_started = std::chrono::steady_clock::now();
     const auto optimization_started = interval_started;
+    auto cache_log_started = interval_started;
+    auto previous_cache_stats = view_cache.stats();
     const unsigned first_training_iteration = completed_iteration + 1;
     unsigned last_progress_iteration = completed_iteration;
     double ema_step_ms = 0.0;
@@ -1631,6 +1633,12 @@ GaussianModel Trainer::train(
         if (std::abs(requested_resolution_scale - active_resolution_scale) > 1e-6F) {
             active_resolution_scale = requested_resolution_scale;
             view_cache.set_resolution_scale(active_resolution_scale);
+            // The new scale has a cold image cache. Start a complete epoch so
+            // every training view is prepared once before any is revisited.
+            // Continuing a partial old-scale epoch can leave its earlier views
+            // cold until late in the next shuffled epoch (nearly two passes).
+            std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
+            shuffled_view_cursor = 0;
             focus_view_masks.clear();
             focus_mask_cache_bytes = 0;
             all_cameras.clear();
@@ -2556,6 +2564,29 @@ GaussianModel Trainer::train(
                  vram.total});
             interval_started = now;
             last_progress_iteration = iteration;
+            // Ordinary editor runs need evidence of cache reuse too. These are
+            // CPU counters only; logging does not insert a device fence.
+            if (now - cache_log_started >= std::chrono::seconds(2)) {
+                const auto cache = view_cache.stats();
+                const auto requests = cache.requests - previous_cache_stats.requests;
+                core::Logger::instance().info(
+                    "splat_data_pipeline iteration=", iteration,
+                    " gaussians=", model.size(),
+                    " image=", target.camera.width, "x", target.camera.height,
+                    " compression_enabled=", cache.host_compression_enabled,
+                    " compressed_views=", cache.host_compressed_entries,
+                    " compressed_restores=",
+                    cache.host_compressed_hits - previous_cache_stats.host_compressed_hits,
+                    " host_hits=", cache.host_hits - previous_cache_stats.host_hits,
+                    " requests=", requests,
+                    " data_get_mean_ms=", requests == 0 ? 0.0 :
+                        (cache.get_wall_ms - previous_cache_stats.get_wall_ms) / requests,
+                    " host_resident_mib=", cache.host_resident_bytes / (1024 * 1024),
+                    " compressed_mib=", cache.host_compressed_bytes / (1024 * 1024),
+                    " step_ms=", steps == 0 ? 0.0 : interval_ms / steps);
+                previous_cache_stats = cache;
+                cache_log_started = now;
+            }
         }
         completed_iteration = iteration;
         checkpoint_step(iteration, !continue_training);
@@ -2579,7 +2610,7 @@ GaussianModel Trainer::train(
             "splat_preview_frames_queued=", preview_frames_queued,
             " editor_ack_frames=", preview_ack_frames, " acknowledged=", has_preview_ack ? 1 : 0);
     }
-    if (options_.profile_cuda) {
+    {
         const auto cache = view_cache.stats();
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests, " device_hits=", cache.device_hits,
@@ -2597,6 +2628,9 @@ GaussianModel Trainer::train(
             " device_budget_rollbacks=", cache.device_budget_rollbacks,
             " device_hit_rate=", cache.device_hit_rate,
             " host_budget_bytes=", cache.host_budget_bytes,
+            " host_resident_bytes=", cache.host_resident_bytes,
+            " host_compressed_bytes=", cache.host_compressed_bytes,
+            " host_compressed_hits=", cache.host_compressed_hits,
             " dataset_packed_bytes=", cache.dataset_packed_bytes, " host_hits=", cache.host_hits,
             " prefetch_issued=", cache.prefetch_issued, " prefetch_depth=", cache.prefetch_depth,
             " host_load_mean_ms=", cache.host_load_mean_ms, " step_mean_ms=", cache.step_mean_ms);

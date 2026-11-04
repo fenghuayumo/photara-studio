@@ -10,8 +10,8 @@
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 9 && argc != 10) throw std::runtime_error(
-            "DATASET IMAGES MODEL OUTPUT STEPS LOG_INTERVAL PROFILE PREFETCH [START_ITERATION]");
+        if (argc < 9 || argc > 11) throw std::runtime_error(
+            "DATASET IMAGES MODEL OUTPUT STEPS LOG_INTERVAL PROFILE PREFETCH [START_ITERATION [MAX_RESOLUTION]]");
         using namespace photara::splat;
         photara::core::Logger::instance().set_levels(
             photara::core::LogLevel::info, photara::core::LogLevel::off);
@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
         apply_strategy_defaults(options);
         options.use_mask = false;
         options.use_source_resolution = true;
-        options.max_image_dimension = 0;
+        options.max_image_dimension = argc > 10 ? std::stoul(argv[10]) : 0;
         options.progressive_resolution = false;
         options.initial_point_budget = 500000;
         options.densification_cap = 1500000;

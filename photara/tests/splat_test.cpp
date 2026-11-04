@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -5127,6 +5128,142 @@ void test_training_device_cache() {
     std::filesystem::remove_all(root);
 }
 
+void test_compressed_training_cache(
+    const photara::splat::TrainingBackend backend = photara::splat::TrainingBackend::cuda) {
+    using namespace photara;
+    const auto root = std::filesystem::temp_directory_path() /
+        (backend == splat::TrainingBackend::cuda ?
+            "photara_compressed_training_cache_test_cuda" :
+            "photara_compressed_training_cache_test_vulkan");
+    std::filesystem::create_directories(root);
+    constexpr std::size_t pixels = 256 * 256;
+    std::vector<mvs::MvsView> views(6);
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        auto& view = views[i];
+        view.path = root / (std::to_string(i) + ".png");
+        io::RgbImage image{256, 256, std::vector<std::uint8_t>(pixels * 3)};
+        for (std::size_t p = 0; p < pixels; ++p)
+            for (std::size_t c = 0; c < 3; ++c)
+                image.pixels[3 * p + c] = static_cast<std::uint8_t>(p + 17 * i + 31 * c);
+        io::save_rgb_png(image, view.path);
+        view.width = view.src_width = view.height = view.src_height = 256;
+        view.fx = view.fy = view.src_fx = view.src_fy = 200.F;
+        view.cx = view.cy = view.src_cx = view.src_cy = 127.5F;
+        view.k1 = -0.04F;
+        view.k2 = 0.003F;
+        view.p1 = 0.001F;
+        view.p2 = -0.002F;
+        view.foreground_mask.resize(pixels);
+        view.depth_map.depth.resize(pixels);
+        view.depth_map.normal.resize(pixels);
+        for (std::size_t p = 0; p < pixels; ++p) {
+            view.foreground_mask[p] = static_cast<std::uint8_t>(p % 256);
+            view.depth_map.depth[p] = 1.F + static_cast<float>(p % 97) / 128.F;
+            view.depth_map.normal[p] = mvs::Vec3f(0.F, -0.F, 1.F);
+        }
+    }
+    splat::TrainingOptions options;
+    options.backend = backend;
+    options.use_mask = options.use_mvs_depth = options.use_mvs_normals = true;
+    options.multi_view_ncc_weight = 0.6F;
+    options.adaptive_training_cache = false;
+    options.training_device_cache_bytes = 0;
+    options.training_view_cache_bytes = 3 * 1024 * 1024;
+    options.training_prefetch_views = 1;
+    const auto expected = splat::make_training_view(views[0], options);
+    const auto compare = [&](const splat::TrainingView& actual) {
+        const auto same_bits = [](const tinytensor::Tensor& a, const tinytensor::Tensor& b) {
+            const auto av = a.to_vector(), bv = b.to_vector();
+            return av.size() == bv.size() &&
+                std::equal(av.begin(), av.end(), bv.begin(), [](float x, float y) {
+                    return std::bit_cast<std::uint32_t>(x) == std::bit_cast<std::uint32_t>(y);
+                });
+        };
+        require(same_bits(actual.rgb, expected.rgb) &&
+                same_bits(actual.gray, expected.gray) &&
+                same_bits(actual.mask, expected.mask) &&
+                same_bits(actual.depth, expected.depth) &&
+                same_bits(actual.normal, expected.normal) &&
+                actual.has_mask == expected.has_mask &&
+                actual.mask_is_validity == expected.mask_is_validity,
+                "Compressed cache changed RGB/mask/gray/depth/normal supervision");
+    };
+    splat::training_data::TrainingDataLoader cache(views, options);
+    for (std::size_t i = 0; i < views.size(); ++i)
+        (void)cache.get(i).rgb.to_vector();
+    require(cache.stats().host_compressed_bytes > 0 &&
+            cache.stats().host_resident_bytes <= options.training_view_cache_bytes,
+            "Compressed cache failed to share the host RAM budget");
+    // View 0 no longer fits in the decoded hot set. Removing its source makes
+    // an accidental re-decode fail instead of silently passing the comparison.
+    std::filesystem::rename(views[0].path, root / "saved.png");
+    compare(cache.get(0));
+    require(cache.stats().host_compressed_hits == 1,
+            "Cold hot-set miss did not restore the compressed supervision");
+    (void)cache.get(1).rgb.to_vector();
+    (void)cache.get(2).rgb.to_vector();
+    (void)cache.get(3).rgb.to_vector();
+    const auto hits_before_prefetch = cache.stats().host_compressed_hits;
+    cache.prefetch(0);
+    compare(cache.get(0));
+    require(cache.stats().host_compressed_hits == hits_before_prefetch + 1 &&
+            cache.stats().host_resident_bytes <= options.training_view_cache_bytes,
+            "Background prefetch did not restore bounded compressed supervision");
+    cache.set_resolution_scale(0.5F);
+    require(cache.stats().host_resident_bytes == 0 &&
+            cache.stats().host_compressed_bytes == 0,
+            "Resolution transition retained compressed supervision");
+    std::filesystem::rename(root / "saved.png", views[0].path);
+    const auto resized = cache.get(0);
+    require(resized.camera.width == 128 && resized.camera.height == 128,
+            "Resolution transition restored a stale compressed view");
+
+    // Incompressible supervision must fall back to the full decoded budget,
+    // rather than repeatedly recompressing it in a tiny hot set.
+    std::uint32_t random_state = 0x12345678;
+    const auto random_byte = [&] {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 17;
+        random_state ^= random_state << 5;
+        return static_cast<std::uint8_t>(random_state);
+    };
+    for (auto& view : views) {
+        view.k1 = view.k2 = view.p1 = view.p2 = 0.F;
+        io::RgbImage image{256, 256, std::vector<std::uint8_t>(pixels * 3)};
+        for (auto& channel : image.pixels)
+            channel = random_byte();
+        for (auto& alpha : view.foreground_mask)
+            alpha = random_byte();
+        io::save_rgb_png(image, view.path);
+    }
+    options.use_mvs_depth = options.use_mvs_normals = false;
+    options.training_view_cache_bytes = 1024 * 1024;
+    splat::training_data::TrainingDataLoader noise_cache(views, options);
+    const auto noise_first = noise_cache.get(0).rgb.to_vector();
+    // Keep the intervening view alive while Vulkan's deferred upload/unpack
+    // commands are submitted, as the training loop does for its target.
+    const auto noise_second = noise_cache.get(1);
+    (void)noise_second.rgb.to_vector();
+    require(noise_cache.get(0).rgb.to_vector() == noise_first,
+            "Incompressible supervision changed on decoded cache hit");
+    require(noise_cache.stats().host_hits == 1,
+            "Incompressible supervision did not reuse the full decoded cache");
+    require(noise_cache.stats().host_compressed_bytes == 0,
+            "Incompressible supervision was retained in the compressed tier");
+    require(noise_cache.stats().host_resident_bytes <= options.training_view_cache_bytes,
+            "Incompressible supervision exceeded the decoded RAM budget");
+
+    options.training_view_cache_bytes = 16 * 1024 * 1024;
+    splat::training_data::TrainingDataLoader fitting_cache(views, options);
+    (void)fitting_cache.get(0).rgb.to_vector();
+    (void)fitting_cache.get(1).rgb.to_vector();
+    (void)fitting_cache.get(0).rgb.to_vector();
+    require(fitting_cache.stats().host_hits == 1 &&
+            fitting_cache.stats().host_compressed_bytes == 0,
+            "Dataset that fits in RAM was needlessly compressed");
+    std::filesystem::remove_all(root);
+}
+
 void test_splat_quantile_selection() {
     using namespace photara;
     for (const std::size_t count : {1U, 2U, 11U, 257U, 100003U}) {
@@ -8256,6 +8393,30 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 #include "splat_panorama_backward.hpp"
 
 int main(int argc, char** argv) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (argc > 1 && std::string(argv[1]) == "--data-cache-vulkan-only") {
+        try {
+            test_compressed_training_cache(photara::splat::TrainingBackend::vulkan);
+            std::cout << "Vulkan training data cache tests passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Vulkan training data cache test failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
+#endif
+    if (argc > 1 && std::string(argv[1]) == "--data-cache-only") {
+        try {
+            test_jpeg_dct_scaled_training_view();
+            test_training_device_cache();
+            test_compressed_training_cache();
+            std::cout << "Training data cache tests passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Training data cache test failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc > 1 && std::string(argv[1]) == "--panorama-backward-only") {
         try {
             test_panorama_side_ray_backward();
@@ -8691,6 +8852,10 @@ int main(int argc, char** argv) {
         test_mask_loading();
         test_jpeg_dct_scaled_training_view();
         test_training_device_cache();
+        test_compressed_training_cache();
+#ifdef TINYTENSOR_HAS_VULKAN
+        test_compressed_training_cache(photara::splat::TrainingBackend::vulkan);
+#endif
         test_splat_quantile_selection();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
