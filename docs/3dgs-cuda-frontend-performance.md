@@ -138,3 +138,43 @@ These are current-path samples, not a new matched before/after speedup claim.
 & build/photara/Release/photara_splat_cuda_frontend_test.exe --bench 1000000 120
 & build/photara/Release/photara_splat_cuda_frontend_test.exe --bench 1000000 120 3dgut
 ```
+
+## Vulkan follow-up
+
+CUDA cleanup was committed as `8e5a178`. Vulkan training was already consuming
+raw log scales, quaternions and opacity logits directly: `splat_preprocess.hlsl`
+activates them inside projection, and projection backward already fuses SH and
+structure Adam. There is no equivalent three-array forward activation to remove.
+
+An experiment reused the 3DGS backward activation results in the chain rule
+and the fused Adam priors. It preserved the GUT-specific rounded arithmetic.
+The existing Vulkan/GUT/geometry/structure-Adam regressions passed, but the
+synthetic 1M-row timing did not show a stable improvement: early rounds varied
+around 3.1 ms in both versions, while longer trajectories rose toward 3.7 ms
+in both. The extra shader state/branches were therefore removed. No Vulkan
+production shader change is retained.
+
+The benchmark now supports `--bench-vulkan`, allocating matching Vulkan Adam
+state and image-gradient tensors. Fixture tensors are created directly on the
+selected device, avoiding unnecessary CUDA initialization and CUDA/Vulkan teardown
+interactions in a Vulkan-only benchmark. Its timing boundaries drain both TinyTensor
+submissions and the shared device, so outstanding rasterizer work is included.
+The old saved benchmark binary only drained TinyTensor at boundaries; the
+exploratory samples above must not be treated as a precise speedup percentage.
+
+```powershell
+& build/photara/Release/photara_splat_cuda_frontend_test.exe --bench-vulkan 1000000 120
+& build/photara/Release/photara_splat_cuda_frontend_test.exe --bench-vulkan 1000000 120 3dgut
+```
+
+A proposed extension of the CUDA frontend's strict standalone-Adam comparison
+to Vulkan failed on both original and experimental shaders for a small geometry
+case (second moment 0.010871, difference 2.32831e-8; limit about 1.1e-8). It was
+not introduced as a passing Vulkan test and existing tolerances were not widened.
+Vulkan correctness continues to use the dedicated oracle/finite-difference,
+geometry, GUT parity and structure-Adam suites.
+
+The final Vulkan-only benchmark completed with exit code 0 for both methods:
+1M rows / 120 steps / three rounds measured 3DGS at 3.125/3.142/3.126 ms and
+3DGUT at 3.435/3.436/3.435 ms. These are current production-path observations.
+The final native four-suite regression and the updated frontend test passed.

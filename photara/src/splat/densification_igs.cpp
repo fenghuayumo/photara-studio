@@ -2,6 +2,7 @@
 
 #include "core/logging.hpp"
 #include "densification_internal.hpp"
+#include "igs_selection_cuda.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -87,8 +88,7 @@ double device_busy_ms() {
 // `mask` selects." Vulkan resolves ranks and thresholds on the GPU, with one
 // final count readback and no sort. It preserves the bitonic-selected set and caps
 // itself at the number of qualifying rows, so the caller never needs a
-// separate count. Every other backend keeps the host sort it has always used,
-// because that is the rule the CUDA path selects its parents with.
+// separate count. CUDA uses its device Tensor sort; CPU retains host sorting.
 tinytensor::Tensor select_front(
     const tinytensor::Tensor& values,
     const tinytensor::Tensor& mask,
@@ -174,6 +174,12 @@ tinytensor::Tensor weighted_gumbel_sample(
     double* sort_ms = nullptr) {
     if (requested == 0 || weights.numel() == 0)
         return {};
+    if (weights.device() == tinytensor::Device::CUDA) {
+        const std::uint64_t high = random();
+        const std::uint64_t low = random();
+        const auto seed = (high << 32) | low;
+        return gpu_detail::igs_weighted_sample_cuda(weights, requested, seed, count_ms, sort_ms);
+    }
     if (weights.device() == tinytensor::Device::Vulkan) {
         // Keep the million-row selection on the GPU. Downloading all weights
         // for a host partial_sort left the queue idle at every IGS refinement.

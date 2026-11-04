@@ -3,6 +3,7 @@
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/optimizer.hpp"
 #include <cuda_runtime_api.h>
+#include "vulkan/backend.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -25,7 +26,11 @@ void require(bool ok, const char* message) {
 void sync() {
     require(cudaDeviceSynchronize() == cudaSuccess, "CUDA synchronization failed");
 }
-GaussianModel fixture(std::size_t n, unsigned degree, bool filter) {
+GaussianModel fixture(
+    std::size_t n,
+    unsigned degree,
+    bool filter,
+    tinytensor::Device device = cuda) {
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> uniform(-1.F, 1.F);
     const std::size_t bases = (degree + 1) * (degree + 1);
@@ -49,13 +54,13 @@ GaussianModel fixture(std::size_t n, unsigned degree, bool filter) {
         v = uniform(rng) * .1F;
     GaussianModel m;
     m.sh_degree = degree;
-    m.means = Tensor::from_vector(xyz, {n, 3}, cuda);
-    m.log_scales = Tensor::from_vector(scales, {n, 3}, cuda);
-    m.quaternions = Tensor::from_vector(q, {n, 4}, cuda);
-    m.opacity_logits = Tensor::from_vector(opacity, {n, 1}, cuda);
-    m.sh = Tensor::from_vector(sh, {n, bases, 3}, cuda);
+    m.means = Tensor::from_vector(xyz, {n, 3}, device);
+    m.log_scales = Tensor::from_vector(scales, {n, 3}, device);
+    m.quaternions = Tensor::from_vector(q, {n, 4}, device);
+    m.opacity_logits = Tensor::from_vector(opacity, {n, 1}, device);
+    m.sh = Tensor::from_vector(sh, {n, bases, 3}, device);
     if (filter)
-        m.filter_3d = Tensor::full({n, 1}, .001F, cuda);
+        m.filter_3d = Tensor::full({n, 1}, .001F, device);
     return m;
 }
 GaussianModel clone(GaussianModel m) {
@@ -205,14 +210,15 @@ struct Optimizer {
     StructureAdamUpdate structure;
     SHAdamUpdate sh;
     explicit Optimizer(const GaussianModel& m) {
-        structure.means_first = Tensor::full(m.means.shape(), .001F, cuda);
-        structure.means_second = Tensor::full(m.means.shape(), .01F, cuda);
-        structure.scales_first = Tensor::full(m.log_scales.shape(), .001F, cuda);
-        structure.scales_second = Tensor::full(m.log_scales.shape(), .01F, cuda);
-        structure.rotations_first = Tensor::full(m.quaternions.shape(), .001F, cuda);
-        structure.rotations_second = Tensor::full(m.quaternions.shape(), .01F, cuda);
-        structure.opacity_first = Tensor::full(m.opacity_logits.shape(), .001F, cuda);
-        structure.opacity_second = Tensor::full(m.opacity_logits.shape(), .01F, cuda);
+        const auto device = m.means.device();
+        structure.means_first = Tensor::full(m.means.shape(), .001F, device);
+        structure.means_second = Tensor::full(m.means.shape(), .01F, device);
+        structure.scales_first = Tensor::full(m.log_scales.shape(), .001F, device);
+        structure.scales_second = Tensor::full(m.log_scales.shape(), .01F, device);
+        structure.rotations_first = Tensor::full(m.quaternions.shape(), .001F, device);
+        structure.rotations_second = Tensor::full(m.quaternions.shape(), .01F, device);
+        structure.opacity_first = Tensor::full(m.opacity_logits.shape(), .001F, device);
+        structure.opacity_second = Tensor::full(m.opacity_logits.shape(), .01F, device);
         structure.means_lr = 1e-5F;
         structure.scales_lr = 1e-4F;
         structure.quaternions_lr = 1e-4F;
@@ -221,7 +227,7 @@ struct Optimizer {
         structure.scale_reg = 1e-5F;
         structure.minimum_log_scale = -12.F;
         structure.maximum_log_scale = 0.F;
-        auto state = detail::make_sh_adam_quant(m.size(), m.sh.shape()[1] * 3, cuda);
+        auto state = detail::make_sh_adam_quant(m.size(), m.sh.shape()[1] * 3, device);
         sh.first = state.first;
         sh.packed = state.packed;
         sh.bounds = state.bounds;
@@ -429,19 +435,29 @@ void correctness() {
     sync();
     std::cout << "CUDA frontend forward/gradient/Adam parity passed\n";
 }
-void benchmark(std::size_t n, unsigned iterations, RenderMethod method) {
+void benchmark(std::size_t n, unsigned iterations, RenderMethod method, bool vulkan) {
+    const auto device = vulkan ? tinytensor::Device::Vulkan : cuda;
+    const auto wait_gpu = [&] {
+        if (vulkan) {
+            tinytensor::vulkan::synchronize();
+            require(
+                vkDeviceWaitIdle(tinytensor::vulkan::device_handles().device) == VK_SUCCESS,
+                "Vulkan benchmark synchronization failed");
+        } else
+            sync();
+    };
     Rasterizer raster;
     const auto c = camera(960, 540);
     for (unsigned round = 0; round < 3; ++round) {
-        auto m = fixture(n, 3, false);
+        auto m = fixture(n, 3, false, device);
         m.render_method = method;
         Optimizer optimizer(m);
         RasterizeOptions o;
         configure_rasterization(o, TrainingOptions{});
         o.active_sh_degree = 3;
         o.require_depth = false;
-        const auto gc = Tensor::full({3, c.height, c.width}, 1e-6F, cuda);
-        const auto ga = Tensor::zeros({c.height, c.width}, cuda);
+        const auto gc = Tensor::full({3, c.height, c.width}, 1e-6F, device);
+        const auto ga = Tensor::zeros({c.height, c.width}, device);
         const auto step = [&] {
             const auto frame = raster.forward(m, c, o);
             (void)raster.backward(
@@ -449,37 +465,45 @@ void benchmark(std::size_t n, unsigned iterations, RenderMethod method) {
         };
         for (unsigned warm = 0; warm < 5; ++warm)
             step();
-        sync();
+        wait_gpu();
         cudaMemPool_t pool{};
-        require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "default pool");
-        std::uint64_t zero = 0;
-        require(
-            cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess,
-            "reset pool peak");
+        if (!vulkan) {
+            require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "default pool");
+            std::uint64_t zero = 0;
+            require(
+                cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess,
+                "reset pool peak");
+        }
         const auto start = std::chrono::steady_clock::now();
         for (unsigned i = 0; i < iterations; ++i)
             step();
-        sync();
+        wait_gpu();
         const double ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count() /
             iterations;
         std::uint64_t peak = 0;
-        require(
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
-            "pool peak");
-        std::cout << "frontend_bench method="
-                  << (method == RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs") << " count=" << n
-                  << " round=" << round << " ms=" << ms << " peak_bytes=" << peak << std::endl;
+        if (!vulkan)
+            require(
+                cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
+                "pool peak");
+        std::cout << "frontend_bench backend=" << (vulkan ? "vulkan" : "cuda")
+                  << " method=" << (method == RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs")
+                  << " count=" << n << " round=" << round << " ms=" << ms;
+        if (!vulkan)
+            std::cout << " peak_bytes=" << peak;
+        std::cout << std::endl;
     }
 }
 int main(int argc, char** argv) {
     try {
-        if (argc > 1 && std::string(argv[1]) == "--bench")
+        if (argc > 1 &&
+            (std::string(argv[1]) == "--bench" || std::string(argv[1]) == "--bench-vulkan"))
             benchmark(
                 argc > 2 ? std::stoul(argv[2]) : 1000000, argc > 3 ? std::stoul(argv[3]) : 40,
                 argc > 4 && std::string(argv[4]) == "3dgut" ? RenderMethod::gaussian_3dgut
-                                                            : RenderMethod::gaussian_3dgs);
+                                                            : RenderMethod::gaussian_3dgs,
+                std::string(argv[1]) == "--bench-vulkan");
         else {
             comparison_guards();
             audit_errors = argc > 1 && std::string(argv[1]) == "--audit-errors";

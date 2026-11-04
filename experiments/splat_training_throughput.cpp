@@ -10,8 +10,8 @@
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 9) throw std::runtime_error(
-            "DATASET IMAGES MODEL OUTPUT STEPS LOG_INTERVAL PROFILE PREFETCH");
+        if (argc != 9 && argc != 10) throw std::runtime_error(
+            "DATASET IMAGES MODEL OUTPUT STEPS LOG_INTERVAL PROFILE PREFETCH [START_ITERATION]");
         using namespace photara::splat;
         photara::core::Logger::instance().set_levels(
             photara::core::LogLevel::info, photara::core::LogLevel::off);
@@ -43,7 +43,10 @@ int main(int argc, char** argv) {
         options.training_prefetch_views = std::stoul(argv[8]);
         options.checkpoint_path = output / "warm-start.json";
         options.resume_checkpoint = true;
-        const unsigned start = 16000, steps = std::stoul(argv[5]);
+        const unsigned start = argc > 9 ? std::stoul(argv[9]) : 16000;
+        const unsigned steps = std::stoul(argv[5]);
+        if (start >= options.iterations || steps > options.iterations - start)
+            throw std::runtime_error("Benchmark window exceeds training iterations");
         if (!steps || steps > 10000 || options.log_interval == 0 ||
             steps % options.log_interval != 0)
             throw std::runtime_error("Steps must be 1..10000 and divisible by LOG_INTERVAL");

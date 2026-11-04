@@ -42,9 +42,9 @@ IgsSelection select_igs_parents(
 // across the backends from the per-step statistics: the recycle-fraction/best-row/cap
 // pruning policy, the accumulated-gradient gate, opacity x edge-factor
 // replacement sampling, forced oversized splits and the exact-alpha
-// random-axis split. Weighted sampling intentionally uses the common seeded
-// host rule at the sparse refinement boundary so CUDA and Vulkan select the
-// same parents. Shared device plumbing lives in densification_internal.hpp.
+// random-axis split. Weighted sampling stays on each GPU backend and preserves
+// the Gumbel/Plackett-Luce distribution, with backend-local seeded sequences.
+// Shared device plumbing lives in densification_internal.hpp.
 class IgsStrategy {
   public:
     RefinementCounts refine(
