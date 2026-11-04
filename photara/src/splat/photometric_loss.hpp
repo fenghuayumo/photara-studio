@@ -29,8 +29,7 @@ void photometric_loss(
 
 // Vulkan training entry point. The render, target, mask and returned gradient
 // are all VkBuffer slices on the same device. No image/gradient readback occurs.
-[[nodiscard]] splat_drender::vulkan::SplatDevicePhotometricOutput
-photometric_loss(
+[[nodiscard]] splat_drender::vulkan::SplatDevicePhotometricOutput photometric_loss(
     splat_drender::vulkan::SplatRasterizer& rasterizer,
     const splat_drender::vulkan::SplatDeviceFrame& prediction,
     const splat_drender::vulkan::SplatBufferView& target,
@@ -43,4 +42,4 @@ photometric_loss(
     splat_drender::vulkan::SplatRasterizer& rasterizer,
     const splat_drender::vulkan::SplatDevicePhotometricOutput& output);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

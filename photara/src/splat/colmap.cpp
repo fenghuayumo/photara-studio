@@ -45,24 +45,36 @@ struct ColmapPoint {
 
 int camera_parameter_count(const int model) {
     switch (model) {
-    case 0: return 3;   // SIMPLE_PINHOLE
-    case 1: return 4;   // PINHOLE
-    case 2: return 4;   // SIMPLE_RADIAL
-    case 3: return 5;   // RADIAL
-    case 4: return 8;   // OPENCV
-    case 5: return 8;   // OPENCV_FISHEYE
-    case 6: return 12;  // FULL_OPENCV
-    case 7: return 5;   // FOV
-    case 8: return 4;   // SIMPLE_RADIAL_FISHEYE
-    case 9: return 5;   // RADIAL_FISHEYE
-    case 10: return 12; // THIN_PRISM_FISHEYE
-    case 17: return 2;  // EQUIRECTANGULAR (LichtFeld / COLMAP fork)
-    default: return -1;
+    case 0:
+        return 3; // SIMPLE_PINHOLE
+    case 1:
+        return 4; // PINHOLE
+    case 2:
+        return 4; // SIMPLE_RADIAL
+    case 3:
+        return 5; // RADIAL
+    case 4:
+        return 8; // OPENCV
+    case 5:
+        return 8; // OPENCV_FISHEYE
+    case 6:
+        return 12; // FULL_OPENCV
+    case 7:
+        return 5; // FOV
+    case 8:
+        return 4; // SIMPLE_RADIAL_FISHEYE
+    case 9:
+        return 5; // RADIAL_FISHEYE
+    case 10:
+        return 12; // THIN_PRISM_FISHEYE
+    case 17:
+        return 2; // EQUIRECTANGULAR (LichtFeld / COLMAP fork)
+    default:
+        return -1;
     }
 }
 
-template <typename T>
-T read_binary(std::istream& stream, const char* field) {
+template <typename T> T read_binary(std::istream& stream, const char* field) {
     T value{};
     stream.read(reinterpret_cast<char*>(&value), sizeof(T));
     if (!stream)
@@ -74,14 +86,14 @@ std::string read_c_string(std::istream& stream) {
     std::string value;
     char character{};
     while (stream.get(character)) {
-        if (character == '\0') return value;
+        if (character == '\0')
+            return value;
         value.push_back(character);
     }
     throw std::runtime_error("Truncated COLMAP image name");
 }
 
-std::filesystem::path resolve_model_directory(
-    const std::filesystem::path& requested) {
+std::filesystem::path resolve_model_directory(const std::filesystem::path& requested) {
     const auto has_model = [](const std::filesystem::path& path) {
         return (std::filesystem::is_regular_file(path / "cameras.bin") &&
                 std::filesystem::is_regular_file(path / "images.bin") &&
@@ -90,10 +102,14 @@ std::filesystem::path resolve_model_directory(
                 std::filesystem::is_regular_file(path / "images.txt") &&
                 std::filesystem::is_regular_file(path / "points3D.txt"));
     };
-    if (has_model(requested)) return requested;
-    if (has_model(requested / "sparse" / "0")) return requested / "sparse" / "0";
-    if (has_model(requested / "sparse")) return requested / "sparse";
-    if (has_model(requested / "0")) return requested / "0";
+    if (has_model(requested))
+        return requested;
+    if (has_model(requested / "sparse" / "0"))
+        return requested / "sparse" / "0";
+    if (has_model(requested / "sparse"))
+        return requested / "sparse";
+    if (has_model(requested / "0"))
+        return requested / "0";
     throw std::invalid_argument(
         "COLMAP model must contain cameras/images/points3D .bin or .txt files: " +
         requested.string());
@@ -102,7 +118,8 @@ std::filesystem::path resolve_model_directory(
 std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_binary(
     const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP cameras.bin");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP cameras.bin");
     const std::uint64_t count = read_binary<std::uint64_t>(stream, "camera count");
     std::unordered_map<std::uint32_t, ColmapCamera> cameras;
     cameras.reserve(static_cast<std::size_t>(count));
@@ -114,8 +131,8 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_binary(
         camera.height = read_binary<std::uint64_t>(stream, "camera height");
         const int parameter_count = camera_parameter_count(camera.model);
         if (parameter_count < 0)
-            throw std::runtime_error("Unsupported COLMAP camera model id " +
-                                     std::to_string(camera.model));
+            throw std::runtime_error(
+                "Unsupported COLMAP camera model id " + std::to_string(camera.model));
         camera.parameters.resize(static_cast<std::size_t>(parameter_count));
         for (double& parameter : camera.parameters)
             parameter = read_binary<double>(stream, "camera parameter");
@@ -126,7 +143,8 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_binary(
 
 std::vector<ColmapImage> read_images_binary(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP images.bin");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP images.bin");
     const std::uint64_t count = read_binary<std::uint64_t>(stream, "image count");
     std::vector<ColmapImage> images;
     images.reserve(static_cast<std::size_t>(count));
@@ -142,8 +160,7 @@ std::vector<ColmapImage> read_images_binary(const std::filesystem::path& path) {
             image.translation(axis) = read_binary<double>(stream, "translation");
         image.camera_id = read_binary<std::uint32_t>(stream, "camera id");
         image.name = std::filesystem::u8path(read_c_string(stream));
-        const std::uint64_t observations =
-            read_binary<std::uint64_t>(stream, "point2D count");
+        const std::uint64_t observations = read_binary<std::uint64_t>(stream, "point2D count");
         for (std::uint64_t point = 0; point < observations; ++point) {
             (void)read_binary<double>(stream, "point2D x");
             (void)read_binary<double>(stream, "point2D y");
@@ -156,7 +173,8 @@ std::vector<ColmapImage> read_images_binary(const std::filesystem::path& path) {
 
 std::vector<ColmapPoint> read_points_binary(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP points3D.bin");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP points3D.bin");
     const std::uint64_t count = read_binary<std::uint64_t>(stream, "point count");
     std::vector<ColmapPoint> points;
     points.reserve(static_cast<std::size_t>(count));
@@ -171,8 +189,7 @@ std::vector<ColmapPoint> read_points_binary(const std::filesystem::path& path) {
         const std::uint64_t track = read_binary<std::uint64_t>(stream, "track length");
         point.image_ids.reserve(static_cast<std::size_t>(track));
         for (std::uint64_t observation = 0; observation < track; ++observation) {
-            point.image_ids.push_back(
-                read_binary<std::uint32_t>(stream, "track image id"));
+            point.image_ids.push_back(read_binary<std::uint32_t>(stream, "track image id"));
             (void)read_binary<std::uint32_t>(stream, "track point2D index");
         }
         points.push_back(std::move(point));
@@ -183,7 +200,8 @@ std::vector<ColmapPoint> read_points_binary(const std::filesystem::path& path) {
 bool next_data_line(std::istream& stream, std::string& line) {
     while (std::getline(stream, line)) {
         const auto first = line.find_first_not_of(" \t\r");
-        if (first != std::string::npos && line[first] != '#') return true;
+        if (first != std::string::npos && line[first] != '#')
+            return true;
     }
     return false;
 }
@@ -193,11 +211,19 @@ int camera_model_id(std::string name) {
         return static_cast<char>(std::toupper(c));
     });
     static const std::unordered_map<std::string, int> ids{
-        {"SIMPLE_PINHOLE", 0}, {"PINHOLE", 1}, {"SIMPLE_RADIAL", 2},
-        {"RADIAL", 3}, {"OPENCV", 4}, {"OPENCV_FISHEYE", 5},
-        {"FULL_OPENCV", 6}, {"FOV", 7}, {"SIMPLE_RADIAL_FISHEYE", 8},
-        {"RADIAL_FISHEYE", 9}, {"THIN_PRISM_FISHEYE", 10},
-        {"EQUIRECTANGULAR", 17}, {"SPHERICAL", 17}};
+        {"SIMPLE_PINHOLE", 0},
+        {"PINHOLE", 1},
+        {"SIMPLE_RADIAL", 2},
+        {"RADIAL", 3},
+        {"OPENCV", 4},
+        {"OPENCV_FISHEYE", 5},
+        {"FULL_OPENCV", 6},
+        {"FOV", 7},
+        {"SIMPLE_RADIAL_FISHEYE", 8},
+        {"RADIAL_FISHEYE", 9},
+        {"THIN_PRISM_FISHEYE", 10},
+        {"EQUIRECTANGULAR", 17},
+        {"SPHERICAL", 17}};
     const auto iterator = ids.find(name);
     return iterator == ids.end() ? -1 : iterator->second;
 }
@@ -205,7 +231,8 @@ int camera_model_id(std::string name) {
 std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_text(
     const std::filesystem::path& path) {
     std::ifstream stream(path);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP cameras.txt");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP cameras.txt");
     std::unordered_map<std::uint32_t, ColmapCamera> cameras;
     std::string line;
     while (next_data_line(stream, line)) {
@@ -218,7 +245,8 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_text(
         if (!row || camera.model < 0)
             throw std::runtime_error("Invalid COLMAP camera row: " + line);
         double value{};
-        while (row >> value) camera.parameters.push_back(value);
+        while (row >> value)
+            camera.parameters.push_back(value);
         const int parameter_count = camera_parameter_count(camera.model);
         if (parameter_count < 0 ||
             camera.parameters.size() != static_cast<std::size_t>(parameter_count))
@@ -230,17 +258,18 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_text(
 
 std::vector<ColmapImage> read_images_text(const std::filesystem::path& path) {
     std::ifstream stream(path);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP images.txt");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP images.txt");
     std::vector<ColmapImage> images;
     std::string line;
     while (next_data_line(stream, line)) {
         std::istringstream row(line);
         ColmapImage image;
         double qw{}, qx{}, qy{}, qz{};
-        row >> image.id >> qw >> qx >> qy >> qz >>
-            image.translation.x() >> image.translation.y() >> image.translation.z() >>
-            image.camera_id;
-        if (!row) throw std::runtime_error("Invalid COLMAP image row: " + line);
+        row >> image.id >> qw >> qx >> qy >> qz >> image.translation.x() >> image.translation.y() >>
+            image.translation.z() >> image.camera_id;
+        if (!row)
+            throw std::runtime_error("Invalid COLMAP image row: " + line);
         std::string name;
         std::getline(row, name);
         const auto first = name.find_first_not_of(" \t");
@@ -258,7 +287,8 @@ std::vector<ColmapImage> read_images_text(const std::filesystem::path& path) {
 
 std::vector<ColmapPoint> read_points_text(const std::filesystem::path& path) {
     std::ifstream stream(path);
-    if (!stream) throw std::runtime_error("Cannot open COLMAP points3D.txt");
+    if (!stream)
+        throw std::runtime_error("Cannot open COLMAP points3D.txt");
     std::vector<ColmapPoint> points;
     std::string line;
     while (next_data_line(stream, line)) {
@@ -266,15 +296,17 @@ std::vector<ColmapPoint> read_points_text(const std::filesystem::path& path) {
         std::uint64_t id{};
         unsigned red{}, green{}, blue{};
         ColmapPoint point;
-        row >> id >> point.position.x() >> point.position.y() >> point.position.z() >>
-            red >> green >> blue >> point.error;
-        if (!row) throw std::runtime_error("Invalid COLMAP point row: " + line);
+        row >> id >> point.position.x() >> point.position.y() >> point.position.z() >> red >>
+            green >> blue >> point.error;
+        if (!row)
+            throw std::runtime_error("Invalid COLMAP point row: " + line);
         point.color = {
             static_cast<std::uint8_t>(std::min(red, 255U)),
             static_cast<std::uint8_t>(std::min(green, 255U)),
             static_cast<std::uint8_t>(std::min(blue, 255U))};
         std::uint32_t image_id{}, point2d{};
-        while (row >> image_id >> point2d) point.image_ids.push_back(image_id);
+        while (row >> image_id >> point2d)
+            point.image_ids.push_back(image_id);
         points.push_back(std::move(point));
     }
     return points;
@@ -292,8 +324,10 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
         view.fx = view.fy = static_cast<float>(p[0]);
         view.cx = static_cast<float>(p[1]);
         view.cy = static_cast<float>(p[2]);
-        if (camera.model >= 2) view.k1 = static_cast<float>(p[3]);
-        if (camera.model == 3) view.k2 = static_cast<float>(p[4]);
+        if (camera.model >= 2)
+            view.k1 = static_cast<float>(p[3]);
+        if (camera.model == 3)
+            view.k2 = static_cast<float>(p[4]);
     } else if (camera.model == 1 || camera.model == 4) {
         view.fx = static_cast<float>(p[0]);
         view.fy = static_cast<float>(p[1]);
@@ -321,7 +355,8 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
             view.cx = static_cast<float>(p[1]);
             view.cy = static_cast<float>(p[2]);
             view.k1 = static_cast<float>(p[3]);
-            if (camera.model == 9) view.k2 = static_cast<float>(p[4]);
+            if (camera.model == 9)
+                view.k2 = static_cast<float>(p[4]);
         }
     } else if (camera.model == 17) {
         view.source_model = CameraModel::equirectangular;
@@ -342,15 +377,11 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
     view.src_cy = view.cy;
 }
 
-void match_selected_image_resolution(
-    const io::ImageSize& selected, mvs::MvsView& view) {
-    if (selected.width == view.src_width &&
-        selected.height == view.src_height)
+void match_selected_image_resolution(const io::ImageSize& selected, mvs::MvsView& view) {
+    if (selected.width == view.src_width && selected.height == view.src_height)
         return;
-    const float scale_x =
-        static_cast<float>(selected.width) / view.src_width;
-    const float scale_y =
-        static_cast<float>(selected.height) / view.src_height;
+    const float scale_x = static_cast<float>(selected.width) / view.src_width;
+    const float scale_y = static_cast<float>(selected.height) / view.src_height;
     const auto scale_principal = [](const float value, const float scale) {
         return (value + 0.5F) * scale - 0.5F;
     };
@@ -368,24 +399,20 @@ void match_selected_image_resolution(
     view.src_height = selected.height;
 }
 
-}  // namespace
+} // namespace
 
 ColmapLoadResult load_colmap_scene(
     const std::filesystem::path& requested_model_directory,
     const std::filesystem::path& image_directory) {
     const std::filesystem::path model_directory =
         resolve_model_directory(requested_model_directory);
-    const bool binary = std::filesystem::is_regular_file(
-        model_directory / "cameras.bin");
-    const auto cameras = binary
-        ? read_cameras_binary(model_directory / "cameras.bin")
-        : read_cameras_text(model_directory / "cameras.txt");
-    auto images = binary
-        ? read_images_binary(model_directory / "images.bin")
-        : read_images_text(model_directory / "images.txt");
-    const auto points = binary
-        ? read_points_binary(model_directory / "points3D.bin")
-        : read_points_text(model_directory / "points3D.txt");
+    const bool binary = std::filesystem::is_regular_file(model_directory / "cameras.bin");
+    const auto cameras = binary ? read_cameras_binary(model_directory / "cameras.bin")
+                                : read_cameras_text(model_directory / "cameras.txt");
+    auto images = binary ? read_images_binary(model_directory / "images.bin")
+                         : read_images_text(model_directory / "images.txt");
+    const auto points = binary ? read_points_binary(model_directory / "points3D.bin")
+                               : read_points_text(model_directory / "points3D.txt");
     if (cameras.empty() || images.empty())
         throw std::runtime_error("COLMAP reconstruction has no cameras or images");
 
@@ -418,29 +445,26 @@ ColmapLoadResult load_colmap_scene(
     result.scene.sparse_points.reserve(points.size());
     result.scene.dense_cloud.points.reserve(points.size());
     for (const ColmapPoint& source : points) {
-        if (!source.position.allFinite()) continue;
+        if (!source.position.allFinite())
+            continue;
         mvs::SparsePoint sparse;
         sparse.position = source.position.cast<float>();
         for (const std::uint32_t image_id : source.image_ids) {
             const auto view = image_to_view.find(image_id);
-            if (view != image_to_view.end()) sparse.view_ids.push_back(view->second);
+            if (view != image_to_view.end())
+                sparse.view_ids.push_back(view->second);
         }
         std::sort(sparse.view_ids.begin(), sparse.view_ids.end());
         sparse.view_ids.erase(
-            std::unique(sparse.view_ids.begin(), sparse.view_ids.end()),
-            sparse.view_ids.end());
-        sparse.color = mvs::Vec3f(
-            source.color[0] / 255.F,
-            source.color[1] / 255.F,
-            source.color[2] / 255.F);
+            std::unique(sparse.view_ids.begin(), sparse.view_ids.end()), sparse.view_ids.end());
+        sparse.color =
+            mvs::Vec3f(source.color[0] / 255.F, source.color[1] / 255.F, source.color[2] / 255.F);
 
         mvs::DensePoint point;
         point.position = sparse.position;
         point.normal = mvs::Vec3f::UnitZ();
-        point.color = mvs::Vec3f(
-            source.color[0] / 255.F,
-            source.color[1] / 255.F,
-            source.color[2] / 255.F);
+        point.color =
+            mvs::Vec3f(source.color[0] / 255.F, source.color[1] / 255.F, source.color[2] / 255.F);
         point.weight = static_cast<float>(sparse.view_ids.size()) /
                        static_cast<float>(1.0 + std::max(source.error, 0.0));
         point.views = sparse.view_ids;
@@ -450,4 +474,4 @@ ColmapLoadResult load_colmap_scene(
     return result;
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

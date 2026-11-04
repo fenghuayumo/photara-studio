@@ -48,10 +48,11 @@ struct CacheStats {
 // background threads (see TrainingOptions::training_prefetch_views); every CUDA
 // call stays on the calling thread.
 class TrainingDataLoader {
-public:
+  public:
     TrainingDataLoader(
         const std::vector<mvs::MvsView>& source,
-        const TrainingOptions& options, float resolution_scale = 1.F);
+        const TrainingOptions& options,
+        float resolution_scale = 1.F);
     ~TrainingDataLoader();
 
     TrainingDataLoader(TrainingDataLoader&&) noexcept;
@@ -80,22 +81,23 @@ public:
     void ensure_device_headroom(std::size_t bytes);
     [[nodiscard]] CacheStats stats() const;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
 // Same decode/undistortion/resizing as training, without allocating GPU tensors.
 [[nodiscard]] io::RgbImage prior_input_image(
-    const mvs::MvsView& view, const TrainingOptions& options);
+    const mvs::MvsView& view,
+    const TrainingOptions& options);
 
 [[nodiscard]] float progressive_resolution_scale(
-    unsigned iteration, const TrainingOptions& options);
+    unsigned iteration,
+    const TrainingOptions& options);
 
-[[nodiscard]] std::vector<std::vector<std::size_t>>
-compute_multi_view_neighbours(
+[[nodiscard]] std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
     const std::vector<Camera>& cameras,
     const std::vector<std::size_t>& active_indices,
     const TrainingOptions& options);
 
-}  // namespace photara::splat::training_data
+} // namespace photara::splat::training_data

@@ -52,8 +52,7 @@ struct DensificationStats {
 };
 
 // Clear selected parent moments without temporary zero tensors or per-state scatters.
-void zero_adam_rows(const tinytensor::Tensor& indices,
-    const std::array<AdamState*, 6>& states);
+void zero_adam_rows(const tinytensor::Tensor& indices, const std::array<AdamState*, 6>& states);
 
 struct AdcPlusPruneResult {
     tinytensor::Tensor keep_indices;
@@ -90,13 +89,11 @@ ActivatedParameters activate_parameters(const GaussianModel& model);
 
 // Exact per-axis finite quantiles, returned as min.xyz/max.xyz. Only six
 // floats cross to the CPU; the full position array stays on the device.
-std::array<float, 6> percentile_bounds(
-    const tinytensor::Tensor& means, float percentile);
+std::array<float, 6> percentile_bounds(const tinytensor::Tensor& means, float percentile);
 
 // Convert GaussianWrapping's [direction.xyz, orientation_logit] features to
 // normalize(direction) * tanh(logit), and chain gradients back to features.
-tinytensor::Tensor normal_features_to_normals(
-    const tinytensor::Tensor& normal_features);
+tinytensor::Tensor normal_features_to_normals(const tinytensor::Tensor& normal_features);
 tinytensor::Tensor normal_features_backward(
     const tinytensor::Tensor& normal_features,
     const tinytensor::Tensor& grad_normals);
@@ -114,8 +111,10 @@ DecodedTrainingPixels upload_packed_training_pixels(
 // Expand a resident RGBA8 image without another host upload.
 DecodedTrainingPixels decode_packed_training_pixels(
     const tinytensor::Tensor& packed,
-    std::uint32_t width, std::uint32_t height,
-    bool decode_mask, bool decode_gray);
+    std::uint32_t width,
+    std::uint32_t height,
+    bool decode_mask,
+    bool decode_gray);
 
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
 // parameters and clear model.filter_3d. This is available for explicit model
@@ -135,9 +134,9 @@ AdcPlusPruneResult adc_plus_prune(
 // device masks so a caller can keep its own recycle/cap policy on the GPU
 // instead of paying a host round trip. Nothing crosses back to the host.
 struct PruneMasks {
-    tinytensor::Tensor keep;       // Bool {N}: not hard and opacity >= floor
-    tinytensor::Tensor hard;       // Bool {N}: non-finite / out of bounds
-    tinytensor::Tensor opacities;  // Float32 {N}: sigmoid(opacity_logits)
+    tinytensor::Tensor keep;      // Bool {N}: not hard and opacity >= floor
+    tinytensor::Tensor hard;      // Bool {N}: non-finite / out of bounds
+    tinytensor::Tensor opacities; // Float32 {N}: sigmoid(opacity_logits)
 };
 
 PruneMasks prune_masks(
@@ -163,15 +162,13 @@ MultiViewLoss add_multi_view_loss(
     bool collect_scalar_terms,
     tinytensor::Tensor* stability_accumulator = nullptr);
 
-GeometryDistributionSummary summarize_geometry_distribution(
-    const GaussianModel& model);
+GeometryDistributionSummary summarize_geometry_distribution(const GaussianModel& model);
 
 OpacityProgressStats summarize_opacity_progress(
     const tinytensor::Tensor& opacity_logits,
     const tinytensor::Tensor& opacity_gradients);
 
-tinytensor::Tensor unproject_depth_to_world(
-    const tinytensor::Tensor& depth, const Camera& camera);
+tinytensor::Tensor unproject_depth_to_world(const tinytensor::Tensor& depth, const Camera& camera);
 
 void add_sample_depth_point_gradients(
     const Camera& reference_camera,
@@ -183,15 +180,18 @@ void add_sample_depth_model_gradients(
     ModelGradients& model_gradients);
 
 void chain_parameter_gradients(
-    const GaussianModel& model, const ActivatedParameters& activated,
+    const GaussianModel& model,
+    const ActivatedParameters& activated,
     const tinytensor::Tensor& grad_scales,
     const tinytensor::Tensor& grad_quaternions,
     const tinytensor::Tensor& grad_opacities,
     ModelGradients& gradients);
 
 LossGradients compute_training_loss(
-    const RenderResult& rendered, const TrainingView& target,
-    const TrainingOptions& options, bool collect_scalar_terms,
+    const RenderResult& rendered,
+    const TrainingView& target,
+    const TrainingOptions& options,
+    bool collect_scalar_terms,
     bool depth_normal_active = false,
     // False when the render carried no depth/normal channels
     // (RasterizeOptions::require_depth off): the two full-image gradient
@@ -201,22 +201,30 @@ LossGradients compute_training_loss(
     bool ai_prior_active = true);
 
 LossGradients compute_normal_field_loss(
-    const RenderResult& rendered, const Camera& camera, float weight,
+    const RenderResult& rendered,
+    const Camera& camera,
+    float weight,
     bool collect_scalar_terms = false);
 
 void add_model_gradients(
-    const ModelGradients& source, ModelGradients& destination,
+    const ModelGradients& source,
+    ModelGradients& destination,
     bool include_refine_weight = false);
 
 DensificationStats make_densification_stats(
     std::size_t count,
     tinytensor::Device device = tinytensor::Device::CUDA);
 
-void add_sh_regularization(const tinytensor::Tensor& sh,
-    tinytensor::Tensor& gradient, float weight);
+void add_sh_regularization(
+    const tinytensor::Tensor& sh,
+    tinytensor::Tensor& gradient,
+    float weight);
 
-void add_geometry_regularization(const GaussianModel& model,
-    ModelGradients& gradients, float opacity_weight, float scale_weight);
+void add_geometry_regularization(
+    const GaussianModel& model,
+    ModelGradients& gradients,
+    float opacity_weight,
+    float scale_weight);
 
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
@@ -238,8 +246,10 @@ void accumulate_densification_stats(
 // shared screen threshold with an internal 30-degree oversize gate. Independent
 // of image resolution, camera orientation, longitude seam and latitude stretch.
 tinytensor::Tensor panorama_densification_sizes(
-    const GaussianModel& model, const std::array<float, 3>& camera_position,
-    float screen_threshold, float scale_modifier = 1.F);
+    const GaussianModel& model,
+    const std::array<float, 3>& camera_position,
+    float screen_threshold,
+    float scale_modifier = 1.F);
 
 // Per-pixel nonnegative (1 - SSIM contrast-structure)^power, shape [H, W].
 tinytensor::Tensor compute_ssim_cs_error_map(
@@ -331,28 +341,36 @@ void relocate_long_axis(
 // reach scales with each local sqrt(scale) axis. `scaler` follows the
 // noise_lr -> noise_lr_final exponential schedule.
 void inject_emc_noise(
-    GaussianModel& model, const tinytensor::Tensor& radii,
-    float scaler, unsigned seed);
+    GaussianModel& model,
+    const tinytensor::Tensor& radii,
+    float scaler,
+    unsigned seed);
 
-// Per-splat shape regularizer gradients: effective-rank (entropy) penalty on the relative squared scale
-// shares, the soft log-axis-ratio hinge, and quaternion norm pull. Weights arrive
-// already decay-scheduled and divided by the splat count.
+// Per-splat shape regularizer gradients: effective-rank (entropy) penalty on the relative squared
+// scale shares, the soft log-axis-ratio hinge, and quaternion norm pull. Weights arrive already
+// decay-scheduled and divided by the splat count.
 void apply_shape_regularizers(
-    GaussianModel& model, ModelGradients& gradients,
-    float erank_weight, float erank_s3_weight,
-    float quat_weight, float axis_ratio_weight = 0.F, float max_axis_ratio = 100.F);
+    GaussianModel& model,
+    ModelGradients& gradients,
+    float erank_weight,
+    float erank_s3_weight,
+    float quat_weight,
+    float axis_ratio_weight = 0.F,
+    float max_axis_ratio = 100.F);
 
 // EMC soft on-screen limit: over the limit, each step spends
 // penalty * log2(screen / limit) shares of one scale learning-rate step,
 // distributed across the local axes by exp(2 * (log_scale - log_scale_max))
 // so a flat splat stays flat while it shrinks.
 void apply_oversize_penalty(
-    GaussianModel& model, const tinytensor::Tensor& radii,
-    float inverse_resolution, float screen_limit, float penalty,
+    GaussianModel& model,
+    const tinytensor::Tensor& radii,
+    float inverse_resolution,
+    float screen_limit,
+    float penalty,
     float scales_lr);
 
-void apply_adc_decay(
-    GaussianModel& model, float opacity_decay, float scale_decay);
+void apply_adc_decay(GaussianModel& model, float opacity_decay, float scale_decay);
 
 tinytensor::Tensor adc_plus_footprint_weights(
     const tinytensor::Tensor& gradients,
@@ -369,4 +387,4 @@ void inject_adc_noise(
 
 void reset_opacity(GaussianModel& model, float maximum_opacity);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

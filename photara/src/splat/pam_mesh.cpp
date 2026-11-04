@@ -49,7 +49,8 @@ std::size_t pam_host_cache_budget() {
 #ifdef _WIN32
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
-    if (GlobalMemoryStatusEx(&status)) available = status.ullAvailPhys;
+    if (GlobalMemoryStatusEx(&status))
+        available = status.ullAvailPhys;
 #elif defined(__linux__)
     std::ifstream memory("/proc/meminfo");
     std::string line;
@@ -57,12 +58,14 @@ std::size_t pam_host_cache_budget() {
         if (line.starts_with("MemAvailable:")) {
             std::istringstream row(line.substr(13));
             std::size_t kb = 0;
-            if (row >> kb) available = kb * 1024;
+            if (row >> kb)
+                available = kb * 1024;
             break;
         }
     }
 #endif
-    if (!available) return 4 * gib;
+    if (!available)
+        return 4 * gib;
     // Leave room for Delaunay, sample staging, the OS and other applications.
     // Use at most half the remaining headroom, and never exceed 8 GiB.
     const auto reserve = std::min(available, 4 * gib);
@@ -70,7 +73,7 @@ std::size_t pam_host_cache_budget() {
 }
 
 class KnnTree {
-public:
+  public:
     explicit KnnTree(std::vector<mvs::Vec3f> points)
         : points_(std::move(points)), order_(points_.size()) {
         std::iota(order_.begin(), order_.end(), std::size_t{0});
@@ -87,11 +90,12 @@ public:
             packed.push_back(node.right);
             packed.push_back(node.axis);
         }
-        return tinytensor::Tensor::from_vector(
-            packed, {nodes_.size(), std::size_t{4}}, device);
+        return tinytensor::Tensor::from_vector(packed, {nodes_.size(), std::size_t{4}}, device);
     }
 
-    [[nodiscard]] int root() const { return root_; }
+    [[nodiscard]] int root() const {
+        return root_;
+    }
 
     [[nodiscard]] tinytensor::Tensor upload_bounds(tinytensor::Device device) const {
         std::vector<float> packed;
@@ -100,11 +104,10 @@ public:
             packed.insert(packed.end(), node.minimum.data(), node.minimum.data() + 3);
             packed.insert(packed.end(), node.maximum.data(), node.maximum.data() + 3);
         }
-        return tinytensor::Tensor::from_vector(
-            packed, {nodes_.size(), std::size_t{6}}, device);
+        return tinytensor::Tensor::from_vector(packed, {nodes_.size(), std::size_t{6}}, device);
     }
 
-private:
+  private:
     struct Node {
         std::size_t point{};
         int left{-1};
@@ -114,7 +117,8 @@ private:
     };
 
     int build(const std::size_t begin, const std::size_t end) {
-        if (begin >= end) return -1;
+        if (begin >= end)
+            return -1;
         mvs::Vec3f minimum = points_[order_[begin]];
         mvs::Vec3f maximum = minimum;
         for (std::size_t i = begin + 1; i < end; ++i) {
@@ -132,11 +136,10 @@ private:
                 return points_[left](axis) < points_[right](axis);
             });
         const int node = static_cast<int>(nodes_.size());
-        nodes_.push_back({
-            order_[middle], -1, -1, static_cast<std::uint8_t>(axis), minimum, maximum});
+        nodes_.push_back(
+            {order_[middle], -1, -1, static_cast<std::uint8_t>(axis), minimum, maximum});
         nodes_[static_cast<std::size_t>(node)].left = build(begin, middle);
-        nodes_[static_cast<std::size_t>(node)].right =
-            build(middle + 1, end);
+        nodes_[static_cast<std::size_t>(node)].right = build(middle + 1, end);
         return node;
     }
 
@@ -156,9 +159,9 @@ struct HostGaussianField {
     KnnTree tree;
 
     explicit HostGaussianField(const GaussianModel& model)
-        : means(build_means(model)), normals(model.size()),
-          scales(model.size()), inverse_variances(model.size()), rotations(model.size()),
-          opacities(model.size()), tree(means) {
+        : means(build_means(model)), normals(model.size()), scales(model.size()),
+          inverse_variances(model.size()), rotations(model.size()), opacities(model.size()),
+          tree(means) {
         const auto features = model.normal_features.to_vector();
         std::vector<float> scales, quaternions;
         if (model.means.device() == tinytensor::Device::Vulkan) {
@@ -167,56 +170,50 @@ struct HostGaussianField {
             scales = model.log_scales.to_vector();
             quaternions = model.quaternions.to_vector();
             opacities = model.opacity_logits.to_vector();
-            const auto filter = model.filter_3d.is_valid()
-                ? model.filter_3d.to_vector() : std::vector<float>{};
-            for (std::size_t i=0;i<model.size();++i) {
-                const float f2=filter.empty()?0.F:filter[i]*filter[i];
-                float ratio=1.F;
-                for (unsigned axis=0;axis<3;++axis) {
-                    const float raw=std::exp(scales[3*i+axis]);
-                    scales[3*i+axis]=std::sqrt(raw*raw+f2);
-                    ratio*=raw/scales[3*i+axis];
+            const auto filter =
+                model.filter_3d.is_valid() ? model.filter_3d.to_vector() : std::vector<float>{};
+            for (std::size_t i = 0; i < model.size(); ++i) {
+                const float f2 = filter.empty() ? 0.F : filter[i] * filter[i];
+                float ratio = 1.F;
+                for (unsigned axis = 0; axis < 3; ++axis) {
+                    const float raw = std::exp(scales[3 * i + axis]);
+                    scales[3 * i + axis] = std::sqrt(raw * raw + f2);
+                    ratio *= raw / scales[3 * i + axis];
                 }
-                float norm=0.F;
-                for (unsigned j=0;j<4;++j) norm+=quaternions[4*i+j]*quaternions[4*i+j];
-                const float inv=1.F/std::sqrt(std::max(norm,1e-20F));
-                for (unsigned j=0;j<4;++j) quaternions[4*i+j]*=inv;
-                const float v=opacities[i];
-                const float e=std::exp(-std::abs(v));
-                opacities[i]=(v>=0.F?1.F/(1.F+e):e/(1.F+e))*ratio;
+                float norm = 0.F;
+                for (unsigned j = 0; j < 4; ++j)
+                    norm += quaternions[4 * i + j] * quaternions[4 * i + j];
+                const float inv = 1.F / std::sqrt(std::max(norm, 1e-20F));
+                for (unsigned j = 0; j < 4; ++j)
+                    quaternions[4 * i + j] *= inv;
+                const float v = opacities[i];
+                const float e = std::exp(-std::abs(v));
+                opacities[i] = (v >= 0.F ? 1.F / (1.F + e) : e / (1.F + e)) * ratio;
             }
         } else {
-            const auto activated=detail::activate_parameters(model);
-            scales=activated.scales.to_vector();
-            quaternions=activated.quaternions.to_vector();
-            opacities=activated.opacities.to_vector();
+            const auto activated = detail::activate_parameters(model);
+            scales = activated.scales.to_vector();
+            quaternions = activated.quaternions.to_vector();
+            opacities = activated.opacities.to_vector();
         }
         for (std::size_t index = 0; index < model.size(); ++index) {
             mvs::Vec3f direction{
-                features[4 * index], features[4 * index + 1],
-                features[4 * index + 2]};
+                features[4 * index], features[4 * index + 1], features[4 * index + 2]};
             if (direction.allFinite() && direction.squaredNorm() > 1e-20F)
                 direction.normalize();
             else
                 direction = mvs::Vec3f::UnitZ();
-            normals[index] =
-                direction * std::tanh(features[4 * index + 3]);
-            this->scales[index] = mvs::Vec3f{
-                scales[3 * index], scales[3 * index + 1],
-                scales[3 * index + 2]};
+            normals[index] = direction * std::tanh(features[4 * index + 3]);
+            this->scales[index] =
+                mvs::Vec3f{scales[3 * index], scales[3 * index + 1], scales[3 * index + 2]};
             inverse_variances[index] = mvs::Vec3f{
-                1.F / std::max(
-                    scales[3 * index] * scales[3 * index], 1e-20F),
-                1.F / std::max(
-                    scales[3 * index + 1] * scales[3 * index + 1],
-                    1e-20F),
-                1.F / std::max(
-                    scales[3 * index + 2] * scales[3 * index + 2],
-                    1e-20F)};
+                1.F / std::max(scales[3 * index] * scales[3 * index], 1e-20F),
+                1.F / std::max(scales[3 * index + 1] * scales[3 * index + 1], 1e-20F),
+                1.F / std::max(scales[3 * index + 2] * scales[3 * index + 2], 1e-20F)};
             rotations[index] = Eigen::Quaternionf(
-                quaternions[4 * index], quaternions[4 * index + 1],
-                quaternions[4 * index + 2],
-                quaternions[4 * index + 3]).toRotationMatrix();
+                                   quaternions[4 * index], quaternions[4 * index + 1],
+                                   quaternions[4 * index + 2], quaternions[4 * index + 3])
+                                   .toRotationMatrix();
         }
     }
 
@@ -229,20 +226,19 @@ struct HostGaussianField {
             packed.insert(packed.end(), rotations[i].data(), rotations[i].data() + 9);
             packed.push_back(opacities[i]);
         }
-        return {tree.upload_nodes(device), tinytensor::Tensor::from_vector(
-            packed, {means.size(), std::size_t{19}}, device),
+        return {
+            tree.upload_nodes(device),
+            tinytensor::Tensor::from_vector(packed, {means.size(), std::size_t{19}}, device),
             tree.root(), tree.upload_bounds(device)};
     }
 
-private:
-    static std::vector<mvs::Vec3f> build_means(
-        const GaussianModel& model) {
+  private:
+    static std::vector<mvs::Vec3f> build_means(const GaussianModel& model) {
         const auto values = model.means.to_vector();
         std::vector<mvs::Vec3f> result(model.size());
         for (std::size_t index = 0; index < result.size(); ++index)
-            result[index] = mvs::Vec3f{
-                values[3 * index], values[3 * index + 1],
-                values[3 * index + 2]};
+            result[index] =
+                mvs::Vec3f{values[3 * index], values[3 * index + 1], values[3 * index + 2]};
         return result;
     }
 };
@@ -252,18 +248,20 @@ tinytensor::Tensor upload_points(std::span<const mvs::Vec3f> points, tinytensor:
     packed.reserve(points.size() * 3);
     for (const auto& point : points)
         packed.insert(packed.end(), point.data(), point.data() + 3);
-    return tinytensor::Tensor::from_vector(
-        packed, {points.size(), std::size_t{3}}, device);
+    return tinytensor::Tensor::from_vector(packed, {points.size(), std::size_t{3}}, device);
 }
 
 tinytensor::Tensor evaluate_global_occupancy_device(
-    const GaussianModel& model, const mvs::MvsScene& scene,
+    const GaussianModel& model,
+    const mvs::MvsScene& scene,
     const tinytensor::Tensor& points,
     const TrainingOptions& training_options,
-    const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache, bool pivot_mask = false) {
+    const std::size_t chunk_size,
+    const float mask_background_threshold,
+    OccupancyCache* cache,
+    bool pivot_mask = false) {
     const std::size_t point_count = points.shape()[0];
-    const auto device=model.means.device();
+    const auto device = model.means.device();
     auto result = tinytensor::Tensor::ones({point_count}, device);
     Rasterizer rasterizer;
     RasterizeOptions raster_options;
@@ -273,12 +271,14 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     // Mask projection uses host double precision. Download once for all
     // masked views; unmasked refinement stays entirely on the device.
     std::vector<float> host_points;
-    const bool has_masks = std::any_of(scene.views.begin(), scene.views.end(), [](const auto& view) {
-            return !view.foreground_mask.empty() && view.foreground_mask.size() ==
-                static_cast<std::size_t>(view.width) * view.height;
+    const bool has_masks =
+        std::any_of(scene.views.begin(), scene.views.end(), [](const auto& view) {
+            return !view.foreground_mask.empty() &&
+                   view.foreground_mask.size() ==
+                       static_cast<std::size_t>(view.width) * view.height;
         });
-    auto all_observed = tinytensor::Tensor::zeros(
-        {point_count}, device, tinytensor::DataType::Bool);
+    auto all_observed =
+        tinytensor::Tensor::zeros({point_count}, device, tinytensor::DataType::Bool);
     if (has_masks)
         host_points = points.to_vector();
     // Prepare a view once, then query all its point chunks before moving on.
@@ -290,38 +290,38 @@ tinytensor::Tensor evaluate_global_occupancy_device(
             const auto query = points.slice(0, begin, begin + count);
             OccupancyResult view_result;
 #ifdef TINYTENSOR_HAS_VULKAN
-            if (device==tinytensor::Device::Vulkan) {
-                view_result=detail::vulkan_occupancy(cache->state,
-                    model,query,camera_from_mvs_view(view),raster_options,begin != 0);
+            if (device == tinytensor::Device::Vulkan) {
+                view_result = detail::vulkan_occupancy(
+                    cache->state, model, query, camera_from_mvs_view(view), raster_options,
+                    begin != 0);
             } else
 #endif
-            view_result = rasterizer.evaluate_occupancy(*cache, view_index, query);
+                view_result = rasterizer.evaluate_occupancy(*cache, view_index, query);
             tinytensor::Tensor possibly_foreground = view_result.inside;
             tinytensor::Tensor definitely_background;
-            const std::size_t mask_pixels =
-                static_cast<std::size_t>(view.width) * view.height;
+            const std::size_t mask_pixels = static_cast<std::size_t>(view.width) * view.height;
             if (view.foreground_mask.size() == mask_pixels) {
                 const float mask_denominator =
-                    *std::max_element(
-                        view.foreground_mask.begin(),
-                        view.foreground_mask.end()) <= 1
-                    ? 1.F
-                    : 255.F;
+                    *std::max_element(view.foreground_mask.begin(), view.foreground_mask.end()) <= 1
+                        ? 1.F
+                        : 255.F;
                 std::vector<float> sampled_mask(count, 0.F);
                 for (std::size_t i = 0; i < count; ++i) {
-                    const Eigen::Vector3d camera =
-                        view.pose.transform_world_to_camera(
-                            Eigen::Map<const mvs::Vec3f>(host_points.data() + 3 * (begin + i)).cast<double>());
-                    if (!(camera.z() > 0.0)) continue;
-                    const float pixel_x = view.fx *
-                        static_cast<float>(camera.x() / camera.z()) + view.cx;
-                    const float pixel_y = view.fy *
-                        static_cast<float>(camera.y() / camera.z()) + view.cy;
+                    const Eigen::Vector3d camera = view.pose.transform_world_to_camera(
+                        Eigen::Map<const mvs::Vec3f>(host_points.data() + 3 * (begin + i))
+                            .cast<double>());
+                    if (!(camera.z() > 0.0))
+                        continue;
+                    const float pixel_x =
+                        view.fx * static_cast<float>(camera.x() / camera.z()) + view.cx;
+                    const float pixel_y =
+                        view.fy * static_cast<float>(camera.y() / camera.z()) + view.cy;
                     // GW builds a pixel-center normalized grid but calls
                     // grid_sample with align_corners=True, including zero padding.
                     const float x = (pixel_x + 0.5F) * (view.width - 1.F) / view.width;
                     const float y = (pixel_y + 0.5F) * (view.height - 1.F) / view.height;
-                    if (x <= -1.F || y <= -1.F || x >= view.width || y >= view.height) continue;
+                    if (x <= -1.F || y <= -1.F || x >= view.width || y >= view.height)
+                        continue;
                     const auto x0 = static_cast<int>(std::floor(x));
                     const auto y0 = static_cast<int>(std::floor(y));
                     const auto x1 = x0 + 1;
@@ -330,31 +330,30 @@ tinytensor::Tensor evaluate_global_occupancy_device(
                     const float ty = y - static_cast<float>(y0);
                     const auto alpha = [&](const int px, const int py) {
                         if (px < 0 || py < 0 || px >= static_cast<int>(view.width) ||
-                            py >= static_cast<int>(view.height)) return 0.F;
-                        return static_cast<float>(view.foreground_mask[
-                            static_cast<std::size_t>(py) * view.width + px]) /
-                            mask_denominator;
+                            py >= static_cast<int>(view.height))
+                            return 0.F;
+                        return static_cast<float>(
+                                   view.foreground_mask
+                                       [static_cast<std::size_t>(py) * view.width + px]) /
+                               mask_denominator;
                     };
                     sampled_mask[i] =
-                        (1.F - ty) * ((1.F - tx) * alpha(x0, y0) +
-                                      tx * alpha(x1, y0)) +
-                        ty * ((1.F - tx) * alpha(x0, y1) +
-                              tx * alpha(x1, y1));
+                        (1.F - ty) * ((1.F - tx) * alpha(x0, y0) + tx * alpha(x1, y0)) +
+                        ty * ((1.F - tx) * alpha(x0, y1) + tx * alpha(x1, y1));
                 }
-                auto mask = tinytensor::Tensor::from_vector(
-                    sampled_mask, {count}, device);
+                auto mask = tinytensor::Tensor::from_vector(sampled_mask, {count}, device);
                 possibly_foreground = view_result.inside.logical_and(
                     pivot_mask ? mask.gt(0.5F) : mask.ge(mask_background_threshold));
                 if (!pivot_mask)
-                    definitely_background = view_result.inside.logical_and(
-                        mask.lt(mask_background_threshold));
+                    definitely_background =
+                        view_result.inside.logical_and(mask.lt(mask_background_threshold));
             }
             if (device == tinytensor::Device::CUDA) {
                 auto occupancy = result.slice(0, begin, begin + count);
                 auto observed = all_observed.slice(0, begin, begin + count);
-                detail::pam_accumulate_occupancy_cuda(occupancy, observed, view_result.occupancy,
-                    possibly_foreground, definitely_background,
-                    pivot_mask ? possibly_foreground : view_result.inside);
+                detail::pam_accumulate_occupancy_cuda(
+                    occupancy, observed, view_result.occupancy, possibly_foreground,
+                    definitely_background, pivot_mask ? possibly_foreground : view_result.inside);
                 continue;
             }
             // Vulkan merges its view votes using device tensor operations.
@@ -363,60 +362,61 @@ tinytensor::Tensor evaluate_global_occupancy_device(
             if (!definitely_background.is_valid())
                 definitely_background = tinytensor::Tensor::zeros_like(view_result.inside);
             occupancy = tinytensor::Tensor::where(
-                possibly_foreground,
-                occupancy.minimum(view_result.occupancy),
+                possibly_foreground, occupancy.minimum(view_result.occupancy),
                 tinytensor::Tensor::where(
-                    definitely_background,
-                    tinytensor::Tensor::zeros_like(occupancy), occupancy));
+                    definitely_background, tinytensor::Tensor::zeros_like(occupancy), occupancy));
             observed = observed.logical_or(pivot_mask ? possibly_foreground : view_result.inside);
             result.slice(0, begin, begin + count).copy_(occupancy);
             all_observed.slice(0, begin, begin + count).copy_(observed);
         }
     }
-    return tinytensor::Tensor::where(
-        all_observed, result, tinytensor::Tensor::zeros_like(result));
+    return tinytensor::Tensor::where(all_observed, result, tinytensor::Tensor::zeros_like(result));
 }
 
 std::vector<float> evaluate_global_occupancy(
-    const GaussianModel& model, const mvs::MvsScene& scene,
+    const GaussianModel& model,
+    const mvs::MvsScene& scene,
     const std::vector<mvs::Vec3f>& points,
     const TrainingOptions& training_options,
-    const std::size_t chunk_size, const float mask_background_threshold,
-    OccupancyCache* cache, bool pivot_mask = false) {
+    const std::size_t chunk_size,
+    const float mask_background_threshold,
+    OccupancyCache* cache,
+    bool pivot_mask = false) {
     // Stage bounded batches so several dispatch chunks share each
     // view preparation. Four million queries need 48 MiB of point storage;
     // never upload all tens of millions of tetrahedral samples at once.
     std::vector<float> result(points.size());
-    const std::size_t capacity = std::max<std::size_t>(chunk_size,
-        std::size_t{4} * 1024 * 1024);
+    const std::size_t capacity = std::max<std::size_t>(chunk_size, std::size_t{4} * 1024 * 1024);
     const std::span<const mvs::Vec3f> all_points(points);
     for (std::size_t begin = 0; begin < points.size(); begin += capacity) {
         const std::size_t count = std::min(capacity, points.size() - begin);
-        const auto values = evaluate_global_occupancy_device(
-            model, scene, upload_points(all_points.subspan(begin, count),model.means.device()),
-            training_options, chunk_size, mask_background_threshold, cache, pivot_mask).to_vector();
+        const auto values =
+            evaluate_global_occupancy_device(
+                model, scene, upload_points(all_points.subspan(begin, count), model.means.device()),
+                training_options, chunk_size, mask_background_threshold, cache, pivot_mask)
+                .to_vector();
         std::copy(values.begin(), values.end(), result.begin() + begin);
     }
     return result;
 }
 
-bool in_camera_frustum(
-    const mvs::Vec3f& point, const mvs::MvsView& view) {
-    const Eigen::Vector3d camera = view.pose.transform_world_to_camera(
-        point.cast<double>());
-    if (!(camera.z() > 0.01 && camera.z() < 100.0)) return false;
-    const float x = view.fx * static_cast<float>(camera.x() / camera.z()) +
-                    view.cx;
-    const float y = view.fy * static_cast<float>(camera.y() / camera.z()) +
-                    view.cy;
+bool in_camera_frustum(const mvs::Vec3f& point, const mvs::MvsView& view) {
+    const Eigen::Vector3d camera = view.pose.transform_world_to_camera(point.cast<double>());
+    if (!(camera.z() > 0.01 && camera.z() < 100.0))
+        return false;
+    const float x = view.fx * static_cast<float>(camera.x() / camera.z()) + view.cx;
+    const float y = view.fy * static_cast<float>(camera.y() / camera.z()) + view.cy;
     return x >= 0.F && y >= 0.F && x <= static_cast<float>(view.width - 1) &&
            y <= static_cast<float>(view.height - 1);
 }
 
 mvs::Mesh crop_seed_mesh_to_scene(
-    const mvs::Mesh& mesh, const mvs::MvsScene& scene, float scaling) {
+    const mvs::Mesh& mesh,
+    const mvs::MvsScene& scene,
+    float scaling) {
     mvs::Vec3f camera_mean = mvs::Vec3f::Zero();
-    for (const auto& view : scene.views) camera_mean += view.pose.C.cast<float>();
+    for (const auto& view : scene.views)
+        camera_mean += view.pose.C.cast<float>();
     camera_mean /= static_cast<float>(scene.views.size());
     float radius = 0.F;
     for (const auto& view : scene.views)
@@ -430,7 +430,8 @@ mvs::Mesh crop_seed_mesh_to_scene(
         bool inside = true;
         for (int corner = 0; corner < 3; ++corner)
             inside &= (mesh.vertices[face[corner]].array().abs() <= radius).all();
-        if (!inside) continue;
+        if (!inside)
+            continue;
         Eigen::Vector3i mapped;
         for (int corner = 0; corner < 3; ++corner) {
             const auto index = static_cast<std::size_t>(face[corner]);
@@ -442,21 +443,25 @@ mvs::Mesh crop_seed_mesh_to_scene(
         }
         cropped.faces.push_back(mapped);
     }
-    core::Logger::instance().info("splat PAM scene crop: half_extent=", radius,
-        " faces_before=", mesh.faces.size(), " faces_after=", cropped.faces.size());
-    if (cropped.faces.empty()) throw std::runtime_error("PAM scene crop produced an empty seed mesh");
+    core::Logger::instance().info(
+        "splat PAM scene crop: half_extent=", radius, " faces_before=", mesh.faces.size(),
+        " faces_after=", cropped.faces.size());
+    if (cropped.faces.empty())
+        throw std::runtime_error("PAM scene crop produced an empty seed mesh");
     return cropped;
 }
 
 std::vector<mvs::Vec3f> sample_seed_mesh(
-    const mvs::Mesh& mesh, const mvs::MvsScene& scene,
-    const std::size_t count, std::mt19937& random,
+    const mvs::Mesh& mesh,
+    const mvs::MvsScene& scene,
+    const std::size_t count,
+    std::mt19937& random,
     std::vector<double>& weights) {
     if (weights.empty()) {
         weights.assign(mesh.faces.size(), 0.0);
         const auto face_count = static_cast<std::ptrdiff_t>(mesh.faces.size());
 #if defined(PHOTARA_HAS_OPENMP)
-#pragma omp parallel for schedule(static) if(face_count >= 1024)
+#pragma omp parallel for schedule(static) if (face_count >= 1024)
 #endif
         for (std::ptrdiff_t face_index = 0; face_index < face_count; ++face_index) {
             const Eigen::Vector3i face = mesh.faces[face_index];
@@ -465,36 +470,29 @@ std::vector<mvs::Vec3f> sample_seed_mesh(
             const mvs::Vec3f c = mesh.vertices[static_cast<std::size_t>(face.z())];
             const float area = 0.5F * (b - a).cross(c - a).norm();
             const mvs::Vec3f center = (a + b + c) / 3.F;
-        // GW retains an infinitesimal sampling weight for unseen faces by
-        // assigning a finite distance of 1e6, rather than discarding them.
-        float minimum_distance2 = 1e12F;
+            // GW retains an infinitesimal sampling weight for unseen faces by
+            // assigning a finite distance of 1e6, rather than discarding them.
+            float minimum_distance2 = 1e12F;
             for (const mvs::MvsView& view : scene.views)
                 if (in_camera_frustum(center, view))
                     minimum_distance2 = std::min(
-                        minimum_distance2,
-                        (center - view.pose.C.cast<float>()).squaredNorm());
+                        minimum_distance2, (center - view.pose.C.cast<float>()).squaredNorm());
             if (std::isfinite(minimum_distance2) && area > 0.F)
-                weights[face_index] =
-                    static_cast<double>(area) /
-                    std::max(static_cast<double>(minimum_distance2), 1e-12);
+                weights[face_index] = static_cast<double>(area) /
+                                      std::max(static_cast<double>(minimum_distance2), 1e-12);
         }
         if (std::accumulate(weights.begin(), weights.end(), 0.0) <= 0.0)
-            throw std::runtime_error(
-                "PAM seed mesh has no camera-visible surface area");
+            throw std::runtime_error("PAM seed mesh has no camera-visible surface area");
     }
-    std::discrete_distribution<std::size_t> select_face(
-        weights.begin(), weights.end());
+    std::discrete_distribution<std::size_t> select_face(weights.begin(), weights.end());
     std::uniform_real_distribution<float> uniform(0.F, 1.F);
     std::vector<mvs::Vec3f> points;
     points.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         const Eigen::Vector3i face = mesh.faces[select_face(random)];
-        const mvs::Vec3f& a =
-            mesh.vertices[static_cast<std::size_t>(face.x())];
-        const mvs::Vec3f& b =
-            mesh.vertices[static_cast<std::size_t>(face.y())];
-        const mvs::Vec3f& c =
-            mesh.vertices[static_cast<std::size_t>(face.z())];
+        const mvs::Vec3f& a = mesh.vertices[static_cast<std::size_t>(face.x())];
+        const mvs::Vec3f& b = mesh.vertices[static_cast<std::size_t>(face.y())];
+        const mvs::Vec3f& c = mesh.vertices[static_cast<std::size_t>(face.z())];
         // Same triangular parameterization used by GaussianWrapping.
         const float u = uniform(random);
         const float v = uniform(random) * (1.F - u);
@@ -504,7 +502,8 @@ std::vector<mvs::Vec3f> sample_seed_mesh(
 }
 
 std::vector<std::size_t> sample_gaussian_indices(
-    const HostGaussianField& field, const std::size_t requested,
+    const HostGaussianField& field,
+    const std::size_t requested,
     std::mt19937& random) {
     struct WeightedIndex {
         double key{};
@@ -512,31 +511,29 @@ std::vector<std::size_t> sample_gaussian_indices(
     };
     std::vector<WeightedIndex> weighted;
     weighted.reserve(field.means.size());
-    std::uniform_real_distribution<double> uniform(
-        std::numeric_limits<double>::min(), 1.0);
+    std::uniform_real_distribution<double> uniform(std::numeric_limits<double>::min(), 1.0);
     for (std::size_t index = 0; index < field.means.size(); ++index) {
         const float normal2 = field.normals[index].squaredNorm();
         const float opacity = field.opacities[index];
         const float minimum_scale = field.scales[index].minCoeff();
         const float maximum_scale = field.scales[index].maxCoeff();
-        if (!(normal2 > 1e-8F) || !(opacity > 0.01F) ||
-            !(minimum_scale > 0.F) || !std::isfinite(maximum_scale))
+        if (!(normal2 > 1e-8F) || !(opacity > 0.01F) || !(minimum_scale > 0.F) ||
+            !std::isfinite(maximum_scale))
             continue;
         // Weighted sampling without replacement.  Anisotropic Gaussians are
         // characteristic of wires/edges, while opacity prevents transparent
         // noise from consuming the detail budget.
-        const double anisotropy = std::clamp(
-            static_cast<double>(maximum_scale / minimum_scale), 1.0, 100.0);
-        const double weight =
-            std::max(1e-8, static_cast<double>(opacity) * std::sqrt(anisotropy));
+        const double anisotropy =
+            std::clamp(static_cast<double>(maximum_scale / minimum_scale), 1.0, 100.0);
+        const double weight = std::max(1e-8, static_cast<double>(opacity) * std::sqrt(anisotropy));
         weighted.push_back({std::log(uniform(random)) / weight, index});
     }
     const std::size_t count = std::min(requested, weighted.size());
-    if (count == 0) return {};
+    if (count == 0)
+        return {};
     if (count < weighted.size()) {
         std::nth_element(
-            weighted.begin(), weighted.begin() +
-                static_cast<std::ptrdiff_t>(count), weighted.end(),
+            weighted.begin(), weighted.begin() + static_cast<std::ptrdiff_t>(count), weighted.end(),
             [](const WeightedIndex& left, const WeightedIndex& right) {
                 return left.key > right.key;
             });
@@ -551,29 +548,27 @@ std::vector<std::size_t> sample_gaussian_indices(
 }
 
 [[nodiscard]] float gaussian_normal_sigma(
-    const HostGaussianField& field, const std::size_t index,
+    const HostGaussianField& field,
+    const std::size_t index,
     const mvs::Vec3f& normal) {
-    const mvs::Vec3f local_normal =
-        field.rotations[index].transpose() * normal;
+    const mvs::Vec3f local_normal = field.rotations[index].transpose() * normal;
     const float sigma2 =
-        (local_normal.array().square() *
-         field.scales[index].array().square()).sum();
-    return sigma2 > 0.F && std::isfinite(sigma2)
-        ? std::sqrt(sigma2)
-        : 0.F;
+        (local_normal.array().square() * field.scales[index].array().square()).sum();
+    return sigma2 > 0.F && std::isfinite(sigma2) ? std::sqrt(sigma2) : 0.F;
 }
 
 std::vector<mvs::Vec3f> sample_gaussian_detail_seeds(
-    const HostGaussianField& field, const std::size_t requested,
+    const HostGaussianField& field,
+    const std::size_t requested,
     std::mt19937& random) {
-    const std::vector<std::size_t> selected = sample_gaussian_indices(
-        field, requested, random);
+    const std::vector<std::size_t> selected = sample_gaussian_indices(field, requested, random);
     std::vector<mvs::Vec3f> seeds;
     seeds.reserve(selected.size());
     for (const std::size_t index : selected) {
         const mvs::Vec3f normal = field.normals[index].normalized();
         const float sigma = gaussian_normal_sigma(field, index, normal);
-        if (!(sigma > 0.F)) continue;
+        if (!(sigma > 0.F))
+            continue;
         // Start on the learned outward side of the Gaussian.  Half a standard
         // deviation is close enough for the occupancy/vector-field projection
         // but avoids the zero gradient exactly at the Gaussian mean.
@@ -585,17 +580,17 @@ std::vector<mvs::Vec3f> sample_gaussian_detail_seeds(
 void compute_vertex_normals(mvs::Mesh& mesh) {
     mesh.normals.assign(mesh.vertices.size(), mvs::Vec3f::Zero());
     for (const Eigen::Vector3i& face : mesh.faces) {
-        const mvs::Vec3f cross =
-            (mesh.vertices[static_cast<std::size_t>(face.y())] -
-             mesh.vertices[static_cast<std::size_t>(face.x())])
-                .cross(
-                    mesh.vertices[static_cast<std::size_t>(face.z())] -
-                    mesh.vertices[static_cast<std::size_t>(face.x())]);
+        const mvs::Vec3f cross = (mesh.vertices[static_cast<std::size_t>(face.y())] -
+                                  mesh.vertices[static_cast<std::size_t>(face.x())])
+                                     .cross(
+                                         mesh.vertices[static_cast<std::size_t>(face.z())] -
+                                         mesh.vertices[static_cast<std::size_t>(face.x())]);
         for (int corner = 0; corner < 3; ++corner)
             mesh.normals[static_cast<std::size_t>(face(corner))] += cross;
     }
     for (mvs::Vec3f& normal : mesh.normals)
-        if (normal.squaredNorm() > 1e-20F) normal.normalize();
+        if (normal.squaredNorm() > 1e-20F)
+            normal.normalize();
 }
 
 #if defined(PHOTARA_HAS_CGAL)
@@ -609,15 +604,19 @@ struct PivotEdge {
 struct PivotEdgeHash {
     [[nodiscard]] std::size_t operator()(const PivotEdge& edge) const noexcept {
         const std::size_t seed = std::hash<std::size_t>{}(edge.a);
-        return seed ^ (std::hash<std::size_t>{}(edge.b) +
-            0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
+        return seed ^ (std::hash<std::size_t>{}(edge.b) + 0x9e3779b97f4a7c15ULL + (seed << 6U) +
+                       (seed >> 2U));
     }
 };
 
 mvs::Mesh build_gaussian_pivot_seed_mesh(
-    const GaussianModel& model, const mvs::MvsScene& scene,
-    const TrainingOptions& training_options, const HostGaussianField& field,
-    const PamMeshOptions& options, std::mt19937& random, OccupancyCache* cache) {
+    const GaussianModel& model,
+    const mvs::MvsScene& scene,
+    const TrainingOptions& training_options,
+    const HostGaussianField& field,
+    const PamMeshOptions& options,
+    std::mt19937& random,
+    OccupancyCache* cache) {
     std::vector<std::size_t> selected;
     if (options.pivot_max_points == 0) {
         selected.resize(field.means.size());
@@ -636,11 +635,10 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
     pivots.reserve(2 * selected.size());
     pivot_scales.reserve(2 * selected.size());
     for (const std::size_t index : selected) {
-        const mvs::Vec3f normal = field.normals[index] /
-            std::max(field.normals[index].norm(), 1e-12F);
+        const mvs::Vec3f normal =
+            field.normals[index] / std::max(field.normals[index].norm(), 1e-12F);
         const float sigma = gaussian_normal_sigma(field, index, normal);
-        const mvs::Vec3f offset = field.means[index] +
-            options.pivot_std_factor * sigma * normal;
+        const mvs::Vec3f offset = field.means[index] + options.pivot_std_factor * sigma * normal;
         const float edge_scale = 3.F * field.scales[index].maxCoeff();
         pivots.push_back(offset);
         pivot_scales.push_back(edge_scale);
@@ -648,110 +646,103 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
         pivot_scales.push_back(edge_scale);
     }
     if (pivots.size() < 4)
-        throw std::runtime_error(
-            "Gaussian pivot generation produced fewer than four vertices");
+        throw std::runtime_error("Gaussian pivot generation produced fewer than four vertices");
     core::Logger::instance().info(
         "splat pivot tetra_triangulation: selected_gaussians=", selected.size(),
-        " pivots=", pivots.size(),
-        " std_factor=", options.pivot_std_factor);
+        " pivots=", pivots.size(), " std_factor=", options.pivot_std_factor);
 
     const std::vector<float> occupancy = evaluate_global_occupancy(
-        model, scene, pivots, training_options,
-        options.occupancy_chunk_size, options.mask_background_threshold, cache, true);
+        model, scene, pivots, training_options, options.occupancy_chunk_size,
+        options.mask_background_threshold, cache, true);
 
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
-    using VertexBase =
-        CGAL::Triangulation_vertex_base_with_info_3<std::size_t, Kernel>;
-    using CellBase = CGAL::Triangulation_cell_base_with_info_3<
-        unsigned char, Kernel>;
-    using DataStructure =
-        CGAL::Triangulation_data_structure_3<VertexBase, CellBase>;
-    using Delaunay =
-        CGAL::Delaunay_triangulation_3<Kernel, DataStructure>;
+    using VertexBase = CGAL::Triangulation_vertex_base_with_info_3<std::size_t, Kernel>;
+    using CellBase = CGAL::Triangulation_cell_base_with_info_3<unsigned char, Kernel>;
+    using DataStructure = CGAL::Triangulation_data_structure_3<VertexBase, CellBase>;
+    using Delaunay = CGAL::Delaunay_triangulation_3<Kernel, DataStructure>;
     using Point = Kernel::Point_3;
     std::vector<std::pair<Point, std::size_t>> insertion;
     insertion.reserve(pivots.size());
     for (std::size_t index = 0; index < pivots.size(); ++index)
         insertion.emplace_back(
-            Point(pivots[index].x(), pivots[index].y(), pivots[index].z()),
-            index);
+            Point(pivots[index].x(), pivots[index].y(), pivots[index].z()), index);
     Delaunay triangulation(insertion.begin(), insertion.end());
     if (!triangulation.is_valid() || triangulation.dimension() != 3)
-        throw std::runtime_error(
-            "Gaussian pivot tetra_triangulation failed");
+        throw std::runtime_error("Gaussian pivot tetra_triangulation failed");
 
-    constexpr std::array<std::array<int, 7>, 16> triangle_edges{{
-        {{-1,-1,-1,-1,-1,-1,-1}}, {{0,3,2,-1,-1,-1,-1}},
-        {{0,1,4,-1,-1,-1,-1}}, {{1,4,2,2,4,3,-1}},
-        {{1,2,5,-1,-1,-1,-1}}, {{0,3,5,0,5,1,-1}},
-        {{0,2,5,0,5,4,-1}}, {{5,4,3,-1,-1,-1,-1}},
-        {{3,4,5,-1,-1,-1,-1}}, {{4,5,0,5,2,0,-1}},
-        {{1,5,0,5,3,0,-1}}, {{5,2,1,-1,-1,-1,-1}},
-        {{3,4,2,2,4,1,-1}}, {{4,1,0,-1,-1,-1,-1}},
-        {{2,3,0,-1,-1,-1,-1}}, {{-1,-1,-1,-1,-1,-1,-1}}
-    }};
-    constexpr std::array<std::array<int, 2>, 6> edge_corners{{
-        {{0,1}}, {{1,2}}, {{2,0}}, {{0,3}}, {{1,3}}, {{2,3}}
-    }};
+    constexpr std::array<std::array<int, 7>, 16> triangle_edges{
+        {{{-1, -1, -1, -1, -1, -1, -1}},
+         {{0, 3, 2, -1, -1, -1, -1}},
+         {{0, 1, 4, -1, -1, -1, -1}},
+         {{1, 4, 2, 2, 4, 3, -1}},
+         {{1, 2, 5, -1, -1, -1, -1}},
+         {{0, 3, 5, 0, 5, 1, -1}},
+         {{0, 2, 5, 0, 5, 4, -1}},
+         {{5, 4, 3, -1, -1, -1, -1}},
+         {{3, 4, 5, -1, -1, -1, -1}},
+         {{4, 5, 0, 5, 2, 0, -1}},
+         {{1, 5, 0, 5, 3, 0, -1}},
+         {{5, 2, 1, -1, -1, -1, -1}},
+         {{3, 4, 2, 2, 4, 1, -1}},
+         {{4, 1, 0, -1, -1, -1, -1}},
+         {{2, 3, 0, -1, -1, -1, -1}},
+         {{-1, -1, -1, -1, -1, -1, -1}}}};
+    constexpr std::array<std::array<int, 2>, 6> edge_corners{
+        {{{0, 1}}, {{1, 2}}, {{2, 0}}, {{0, 3}}, {{1, 3}}, {{2, 3}}}};
     mvs::Mesh mesh;
     std::vector<PivotEdge> intersections;
     std::unordered_map<PivotEdge, int, PivotEdgeHash> edge_vertices;
     edge_vertices.reserve(triangulation.number_of_finite_cells());
     std::size_t rejected_large_edges = 0;
-    for (auto cell = triangulation.finite_cells_begin();
-         cell != triangulation.finite_cells_end(); ++cell) {
+    for (auto cell = triangulation.finite_cells_begin(); cell != triangulation.finite_cells_end();
+         ++cell) {
         std::array<std::size_t, 4> source{};
         unsigned configuration = 0;
         for (int corner = 0; corner < 4; ++corner) {
-            source[static_cast<std::size_t>(corner)] =
-                cell->vertex(corner)->info();
-            if (occupancy[source[static_cast<std::size_t>(corner)]] >
-                options.occupancy_iso_value)
+            source[static_cast<std::size_t>(corner)] = cell->vertex(corner)->info();
+            if (occupancy[source[static_cast<std::size_t>(corner)]] > options.occupancy_iso_value)
                 configuration |= 1U << static_cast<unsigned>(corner);
         }
         const auto& edges = triangle_edges[configuration];
-        for (int triangle = 0; triangle < 6 && edges[triangle] >= 0;
-             triangle += 3) {
+        for (int triangle = 0; triangle < 6 && edges[triangle] >= 0; triangle += 3) {
             Eigen::Vector3i face;
             bool valid = true;
             for (int vertex = 0; vertex < 3; ++vertex) {
-                const auto corners = edge_corners[
-                    static_cast<std::size_t>(edges[triangle + vertex])];
+                const auto corners =
+                    edge_corners[static_cast<std::size_t>(edges[triangle + vertex])];
                 std::size_t a = source[static_cast<std::size_t>(corners[0])];
                 std::size_t b = source[static_cast<std::size_t>(corners[1])];
-                if (a > b) std::swap(a, b);
+                if (a > b)
+                    std::swap(a, b);
                 const PivotEdge key{a, b};
                 auto found = edge_vertices.find(key);
                 if (found == edge_vertices.end()) {
-                    if (options.pivot_filter_large_edges && (pivots[a] - pivots[b]).norm() >
-                        pivot_scales[a] + pivot_scales[b]) {
+                    if (options.pivot_filter_large_edges &&
+                        (pivots[a] - pivots[b]).norm() > pivot_scales[a] + pivot_scales[b]) {
                         ++rejected_large_edges;
                         valid = false;
                         break;
                     }
                     const float denominator = occupancy[b] - occupancy[a];
-                    const float t = std::abs(denominator) > 1e-8F
-                        ? std::clamp(
-                            (options.occupancy_iso_value - occupancy[a]) /
-                                denominator,
-                            0.F, 1.F)
-                        : 0.5F;
+                    const float t =
+                        std::abs(denominator) > 1e-8F
+                            ? std::clamp(
+                                  (options.occupancy_iso_value - occupancy[a]) / denominator, 0.F,
+                                  1.F)
+                            : 0.5F;
                     const int index = static_cast<int>(mesh.vertices.size());
-                    mesh.vertices.push_back(
-                        (1.F - t) * pivots[a] + t * pivots[b]);
+                    mesh.vertices.push_back((1.F - t) * pivots[a] + t * pivots[b]);
                     intersections.push_back(key);
                     found = edge_vertices.emplace(key, index).first;
                 }
                 face(vertex) = found->second;
             }
-            if (valid && face.x() != face.y() && face.y() != face.z() &&
-                face.z() != face.x())
+            if (valid && face.x() != face.y() && face.y() != face.z() && face.z() != face.x())
                 mesh.faces.push_back(face);
         }
     }
     if (mesh.faces.empty())
-        throw std::runtime_error(
-            "Gaussian pivot marching tetrahedra produced no surface");
+        throw std::runtime_error("Gaussian pivot marching tetrahedra produced no surface");
     if (options.pivot_binary_steps > 0) {
         std::vector<mvs::Vec3f> left, right;
         std::vector<float> left_values;
@@ -764,13 +755,13 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
             left_values.push_back(occupancy[edge.a] - options.occupancy_iso_value);
         }
         for (unsigned step = 0; step < options.pivot_binary_steps; ++step) {
-            core::Logger::instance().info("splat pivot binary search: step=",
-                step + 1, '/', options.pivot_binary_steps);
+            core::Logger::instance().info(
+                "splat pivot binary search: step=", step + 1, '/', options.pivot_binary_steps);
             for (std::size_t i = 0; i < intersections.size(); ++i)
                 mesh.vertices[i] = 0.5F * (left[i] + right[i]);
             const auto values = evaluate_global_occupancy(
-                model, scene, mesh.vertices, training_options,
-                options.occupancy_chunk_size, options.mask_background_threshold, cache, true);
+                model, scene, mesh.vertices, training_options, options.occupancy_chunk_size,
+                options.mask_background_threshold, cache, true);
             for (std::size_t i = 0; i < intersections.size(); ++i) {
                 const float value = values[i] - options.occupancy_iso_value;
                 // Strict sign comparison also matches GW at an exact zero.
@@ -787,23 +778,22 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
     }
     compute_vertex_normals(mesh);
     core::Logger::instance().info(
-        "splat pivot mesh: tetrahedra=",
-        triangulation.number_of_finite_cells(),
-        " vertices=", mesh.vertices.size(),
-        " faces=", mesh.faces.size(),
+        "splat pivot mesh: tetrahedra=", triangulation.number_of_finite_cells(),
+        " vertices=", mesh.vertices.size(), " faces=", mesh.faces.size(),
         " rejected_large_edges=", rejected_large_edges);
     return mesh;
 }
 #endif
 
-}  // namespace
+} // namespace
 
 detail::PamGpuField detail::make_pam_gpu_field(const GaussianModel& model) {
     return HostGaussianField(model).upload(model.means.device());
 }
 
 PamMeshResult extract_pam_mesh(
-    const GaussianModel& model, const mvs::MvsScene& source_scene,
+    const GaussianModel& model,
+    const mvs::MvsScene& source_scene,
     const mvs::Mesh& seed_mesh,
     const TrainingOptions& training_options,
     const PamMeshOptions& options) {
@@ -815,8 +805,7 @@ PamMeshResult extract_pam_mesh(
     (void)seed_mesh;
     (void)training_options;
     (void)options;
-    throw std::runtime_error(
-        "PAM requires a CGAL-enabled Photara build");
+    throw std::runtime_error("PAM requires a CGAL-enabled Photara build");
 #else
     mvs::MvsScene training_scene;
     if (training_options.evaluation_split_every > 0) {
@@ -824,44 +813,37 @@ PamMeshResult extract_pam_mesh(
             if (i % training_options.evaluation_split_every != 0)
                 training_scene.views.push_back(source_scene.views[i]);
     }
-    const auto& scene = training_options.evaluation_split_every > 0
-        ? training_scene : source_scene;
+    const auto& scene = training_options.evaluation_split_every > 0 ? training_scene : source_scene;
     if (model.size() == 0 || !model.normal_features.is_valid())
-        throw std::invalid_argument(
-            "PAM requires Gaussians with normal-field features");
-    if (model.normal_features.shape() !=
-        tinytensor::TensorShape{model.size(), std::size_t{4}})
-        throw std::invalid_argument(
-            "PAM normal-field features must have shape [N, 4]");
+        throw std::invalid_argument("PAM requires Gaussians with normal-field features");
+    if (model.normal_features.shape() != tinytensor::TensorShape{model.size(), std::size_t{4}})
+        throw std::invalid_argument("PAM normal-field features must have shape [N, 4]");
     if (scene.views.empty())
         throw std::invalid_argument("PAM requires registered cameras");
     if ((seed_mesh.vertices.empty()) != (seed_mesh.faces.empty()))
-        throw std::invalid_argument(
-            "PAM seed mesh must be complete or entirely omitted");
+        throw std::invalid_argument("PAM seed mesh must be complete or entirely omitted");
     if (options.max_points < 4 || (options.pivot_max_points != 0 && options.pivot_max_points < 4) ||
         options.vector_field_neighbors == 0 ||
         options.vector_field_neighbors > detail::pam_gpu_max_neighbors ||
-        options.points_per_tetrahedron == 0 ||
-        !std::isfinite(options.pivot_std_factor) ||
-        !(options.pivot_std_factor > 0.F) ||
-        !std::isfinite(options.bounding_box_scaling) || !(options.bounding_box_scaling > 0.F) ||
-        !std::isfinite(options.gaussian_seed_fraction) ||
-        options.gaussian_seed_fraction < 0.F ||
-        options.gaussian_seed_fraction > 1.F ||
-        !(options.occupancy_iso_value > 0.F &&
-          options.occupancy_iso_value < 1.F) ||
+        options.points_per_tetrahedron == 0 || !std::isfinite(options.pivot_std_factor) ||
+        !(options.pivot_std_factor > 0.F) || !std::isfinite(options.bounding_box_scaling) ||
+        !(options.bounding_box_scaling > 0.F) || !std::isfinite(options.gaussian_seed_fraction) ||
+        options.gaussian_seed_fraction < 0.F || options.gaussian_seed_fraction > 1.F ||
+        !(options.occupancy_iso_value > 0.F && options.occupancy_iso_value < 1.F) ||
         options.vacancy_threshold < 0.F)
         throw std::invalid_argument("Invalid PAM extraction options");
 
     core::StageScope stage("splat.pam");
-    core::Logger::instance().info("splat PAM cameras: training=", scene.views.size(),
+    core::Logger::instance().info(
+        "splat PAM cameras: training=", scene.views.size(),
         " held_out=", source_scene.views.size() - scene.views.size());
     HostGaussianField field(model);
-    const auto device=model.means.device();
-    const bool vulkan=device==tinytensor::Device::Vulkan;
+    const auto device = model.means.device();
+    const bool vulkan = device == tinytensor::Device::Vulkan;
     const detail::PamGpuField gpu_field = field.upload(device);
-    core::Logger::instance().info("splat PAM field backend=", vulkan ? "vulkan" : "cuda",
-        " occupancy_backend=", vulkan?"vulkan":"cuda");
+    core::Logger::instance().info(
+        "splat PAM field backend=", vulkan ? "vulkan" : "cuda",
+        " occupancy_backend=", vulkan ? "vulkan" : "cuda");
     std::vector<Camera> occupancy_cameras;
     occupancy_cameras.reserve(scene.views.size());
     for (const auto& view : scene.views)
@@ -871,15 +853,17 @@ PamMeshResult extract_pam_mesh(
     occupancy_options.scale_modifier = training_options.scale_modifier;
     // CUDA caches per-view projections; Vulkan keeps one bounded raster
     // workspace reused across views/chunks rather than retaining N*V buffers.
-    const std::size_t host_cache_budget = vulkan ? 0 :
-        (options.occupancy_cache_host_budget ? options.occupancy_cache_host_budget
-                                            : pam_host_cache_budget());
-    auto occupancy_cache = vulkan ? OccupancyCache{} : Rasterizer().prepare_occupancy_cache(
-        model, occupancy_cameras, occupancy_options, 0,
-        host_cache_budget);
+    const std::size_t host_cache_budget =
+        vulkan ? 0
+               : (options.occupancy_cache_host_budget ? options.occupancy_cache_host_budget
+                                                      : pam_host_cache_budget());
+    auto occupancy_cache =
+        vulkan ? OccupancyCache{}
+               : Rasterizer().prepare_occupancy_cache(
+                     model, occupancy_cameras, occupancy_options, 0, host_cache_budget);
     if (!vulkan)
-        core::Logger::instance().info("splat PAM CUDA occupancy host cache: budget_bytes=",
-            host_cache_budget);
+        core::Logger::instance().info(
+            "splat PAM CUDA occupancy host cache: budget_bytes=", host_cache_budget);
     std::mt19937 random(options.seed);
     mvs::Mesh generated_seed_mesh;
     const mvs::Mesh* active_seed_mesh = &seed_mesh;
@@ -890,46 +874,47 @@ PamMeshResult extract_pam_mesh(
     }
     mvs::Mesh cropped_seed_mesh;
     if (options.scene_crop) {
-        cropped_seed_mesh = crop_seed_mesh_to_scene(
-            *active_seed_mesh, scene, options.bounding_box_scaling);
+        cropped_seed_mesh =
+            crop_seed_mesh_to_scene(*active_seed_mesh, scene, options.bounding_box_scaling);
         active_seed_mesh = &cropped_seed_mesh;
     }
     std::vector<mvs::Vec3f> candidates;
     candidates.reserve(options.max_points);
-    const auto refine_and_append =
-        [&](std::vector<mvs::Vec3f> sampled) {
-            if (sampled.empty()) return;
-            core::StageScope refinement_stage("splat.pam.refinement");
-            auto points = upload_points(sampled,device);
-            for (unsigned step = 0; step < options.refinement_steps; ++step) {
-                core::Logger::instance().info(
-                    "splat PAM refinement: step=", step + 1, '/', options.refinement_steps,
-                    " samples=", sampled.size(), " backend=", vulkan?"vulkan":"cuda");
-                const auto occupancy = evaluate_global_occupancy_device(
-                    model, scene, points, training_options, options.occupancy_chunk_size,
-                    options.mask_background_threshold, &occupancy_cache);
-                detail::pam_refine_points(gpu_field, points, occupancy,
-                    options.vector_field_neighbors, options.occupancy_iso_value,
-                    options.minimum_gradient_norm_squared, options.refinement_step);
-            }
+    const auto refine_and_append = [&](std::vector<mvs::Vec3f> sampled) {
+        if (sampled.empty())
+            return;
+        core::StageScope refinement_stage("splat.pam.refinement");
+        auto points = upload_points(sampled, device);
+        for (unsigned step = 0; step < options.refinement_steps; ++step) {
+            core::Logger::instance().info(
+                "splat PAM refinement: step=", step + 1, '/', options.refinement_steps,
+                " samples=", sampled.size(), " backend=", vulkan ? "vulkan" : "cuda");
             const auto occupancy = evaluate_global_occupancy_device(
                 model, scene, points, training_options, options.occupancy_chunk_size,
-                options.mask_background_threshold, &occupancy_cache).to_vector();
-            const auto host_points = points.to_vector();
-            for (std::size_t i = 0; i < sampled.size() && candidates.size() < options.max_points; ++i)
-                if (std::abs(occupancy[i] - options.occupancy_iso_value) <= options.vacancy_threshold)
-                    candidates.emplace_back(host_points[3*i], host_points[3*i+1], host_points[3*i+2]);
-            return;
-        };
+                options.mask_background_threshold, &occupancy_cache);
+            detail::pam_refine_points(
+                gpu_field, points, occupancy, options.vector_field_neighbors,
+                options.occupancy_iso_value, options.minimum_gradient_norm_squared,
+                options.refinement_step);
+        }
+        const auto occupancy =
+            evaluate_global_occupancy_device(
+                model, scene, points, training_options, options.occupancy_chunk_size,
+                options.mask_background_threshold, &occupancy_cache)
+                .to_vector();
+        const auto host_points = points.to_vector();
+        for (std::size_t i = 0; i < sampled.size() && candidates.size() < options.max_points; ++i)
+            if (std::abs(occupancy[i] - options.occupancy_iso_value) <= options.vacancy_threshold)
+                candidates.emplace_back(
+                    host_points[3 * i], host_points[3 * i + 1], host_points[3 * i + 2]);
+        return;
+    };
 
-    const std::size_t gaussian_seed_count =
-        (std::min)(
-            model.size(),
-            static_cast<std::size_t>(std::llround(
-                static_cast<double>(options.max_points) *
-                options.gaussian_seed_fraction)));
-    refine_and_append(sample_gaussian_detail_seeds(
-        field, gaussian_seed_count, random));
+    const std::size_t gaussian_seed_count = (std::min)(
+        model.size(),
+        static_cast<std::size_t>(std::llround(
+            static_cast<double>(options.max_points) * options.gaussian_seed_fraction)));
+    refine_and_append(sample_gaussian_detail_seeds(field, gaussian_seed_count, random));
     const std::size_t gaussian_candidates = candidates.size();
     const unsigned rounds = options.max_resample_rounds;
     unsigned stalled_rounds = 0;
@@ -938,48 +923,38 @@ PamMeshResult extract_pam_mesh(
          (rounds == 0 || round < rounds) && candidates.size() < options.max_points; ++round) {
         core::Logger::instance().info(
             "splat PAM sampling: round=", round + 1, " round_limit=", rounds,
-            " candidate_cap=", options.max_points,
-            " accepted=", candidates.size());
+            " candidate_cap=", options.max_points, " accepted=", candidates.size());
         const std::size_t missing = options.max_points - candidates.size();
         const auto accepted_before = candidates.size();
-        if (missing > (std::numeric_limits<std::size_t>::max)() /
-                std::max(options.oversampling_factor, 1U))
+        if (missing >
+            (std::numeric_limits<std::size_t>::max)() / std::max(options.oversampling_factor, 1U))
             throw std::overflow_error("PAM sampling count overflow");
-        const std::size_t sample_count = missing *
-            std::max(options.oversampling_factor, 1U);
-        refine_and_append(sample_seed_mesh(
-            *active_seed_mesh, scene, sample_count, random, sampling_weights));
+        const std::size_t sample_count = missing * std::max(options.oversampling_factor, 1U);
+        refine_and_append(
+            sample_seed_mesh(*active_seed_mesh, scene, sample_count, random, sampling_weights));
         stalled_rounds = candidates.size() == accepted_before ? stalled_rounds + 1 : 0;
         if (rounds == 0 && stalled_rounds >= 3)
-            throw std::runtime_error(
-                "PAM could not fill the candidate budget: three sampling rounds accepted no points");
+            throw std::runtime_error("PAM could not fill the candidate budget: three sampling "
+                                     "rounds accepted no points");
     }
     core::Logger::instance().info(
         "splat PAM seeds: gaussian_requested=", gaussian_seed_count,
         " gaussian_accepted=", gaussian_candidates,
         " mesh_accepted=", candidates.size() - gaussian_candidates);
     if (candidates.size() < 4)
-        throw std::runtime_error(
-            "PAM occupancy refinement produced fewer than four candidates");
+        throw std::runtime_error("PAM occupancy refinement produced fewer than four candidates");
 
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
-    using VertexBase =
-        CGAL::Triangulation_vertex_base_with_info_3<std::size_t, Kernel>;
-    using CellBase =
-        CGAL::Triangulation_cell_base_with_info_3<unsigned char, Kernel>;
-    using DataStructure =
-        CGAL::Triangulation_data_structure_3<VertexBase, CellBase>;
-    using Delaunay =
-        CGAL::Delaunay_triangulation_3<Kernel, DataStructure>;
+    using VertexBase = CGAL::Triangulation_vertex_base_with_info_3<std::size_t, Kernel>;
+    using CellBase = CGAL::Triangulation_cell_base_with_info_3<unsigned char, Kernel>;
+    using DataStructure = CGAL::Triangulation_data_structure_3<VertexBase, CellBase>;
+    using Delaunay = CGAL::Delaunay_triangulation_3<Kernel, DataStructure>;
     using Point = Kernel::Point_3;
     std::vector<std::pair<Point, std::size_t>> insertion;
     insertion.reserve(candidates.size());
     for (std::size_t index = 0; index < candidates.size(); ++index)
         insertion.emplace_back(
-            Point(
-                candidates[index].x(), candidates[index].y(),
-                candidates[index].z()),
-            index);
+            Point(candidates[index].x(), candidates[index].y(), candidates[index].z()), index);
     Delaunay triangulation;
     {
         core::StageScope triangulation_stage("splat.pam.delaunay");
@@ -991,11 +966,10 @@ PamMeshResult extract_pam_mesh(
     std::vector<Delaunay::Cell_handle> cells;
     cells.reserve(triangulation.number_of_finite_cells());
     std::uniform_real_distribution<float> uniform(0.F, 1.F);
-    const std::size_t query_batch = std::max<std::size_t>(options.occupancy_chunk_size,
-        std::size_t{4} * 1024 * 1024);
-    const std::size_t cell_chunk = std::max<std::size_t>(
-        1, query_batch /
-               options.points_per_tetrahedron);
+    const std::size_t query_batch =
+        std::max<std::size_t>(options.occupancy_chunk_size, std::size_t{4} * 1024 * 1024);
+    const std::size_t cell_chunk =
+        std::max<std::size_t>(1, query_batch / options.points_per_tetrahedron);
     std::size_t occupied_count = 0;
     {
         core::StageScope occupancy_stage("splat.pam.cell_occupancy");
@@ -1004,8 +978,7 @@ PamMeshResult extract_pam_mesh(
             cells.clear();
             std::vector<mvs::Vec3f> queries;
             queries.reserve(cell_chunk * options.points_per_tetrahedron);
-            for (; begin != triangulation.finite_cells_end() &&
-                   cells.size() < cell_chunk;
+            for (; begin != triangulation.finite_cells_end() && cells.size() < cell_chunk;
                  ++begin) {
                 Delaunay::Cell_handle cell = begin;
                 cells.push_back(cell);
@@ -1013,40 +986,31 @@ PamMeshResult extract_pam_mesh(
                 for (int corner = 0; corner < 4; ++corner)
                     vertices[static_cast<std::size_t>(corner)] =
                         candidates[cell->vertex(corner)->info()];
-                for (unsigned sample = 0;
-                     sample < options.points_per_tetrahedron; ++sample) {
+                for (unsigned sample = 0; sample < options.points_per_tetrahedron; ++sample) {
                     if (options.points_per_tetrahedron == 1) {
                         queries.push_back(
-                            0.25F * (vertices[0] + vertices[1] + vertices[2] +
-                                     vertices[3]));
+                            0.25F * (vertices[0] + vertices[1] + vertices[2] + vertices[3]));
                     } else {
                         std::array<float, 4> weights{
-                            uniform(random), uniform(random), uniform(random),
-                            uniform(random)};
-                        const float sum = std::accumulate(
-                            weights.begin(), weights.end(), 0.F);
+                            uniform(random), uniform(random), uniform(random), uniform(random)};
+                        const float sum = std::accumulate(weights.begin(), weights.end(), 0.F);
                         mvs::Vec3f query = mvs::Vec3f::Zero();
                         for (int corner = 0; corner < 4; ++corner)
-                            query += weights[static_cast<std::size_t>(corner)] /
-                                     sum * vertices[static_cast<std::size_t>(corner)];
+                            query += weights[static_cast<std::size_t>(corner)] / sum *
+                                     vertices[static_cast<std::size_t>(corner)];
                         queries.push_back(query);
                     }
                 }
             }
             const std::vector<float> occupancy = evaluate_global_occupancy(
-                model, scene, queries, training_options,
-                options.occupancy_chunk_size,
+                model, scene, queries, training_options, options.occupancy_chunk_size,
                 options.mask_background_threshold, &occupancy_cache);
-            for (std::size_t cell_index = 0; cell_index < cells.size();
-                 ++cell_index) {
+            for (std::size_t cell_index = 0; cell_index < cells.size(); ++cell_index) {
                 float mean = 0.F;
-                for (unsigned sample = 0;
-                     sample < options.points_per_tetrahedron; ++sample)
-                    mean += occupancy[
-                        cell_index * options.points_per_tetrahedron + sample];
+                for (unsigned sample = 0; sample < options.points_per_tetrahedron; ++sample)
+                    mean += occupancy[cell_index * options.points_per_tetrahedron + sample];
                 mean /= static_cast<float>(options.points_per_tetrahedron);
-                cells[cell_index]->info() =
-                    mean > options.occupancy_iso_value ? 1U : 0U;
+                cells[cell_index]->info() = mean > options.occupancy_iso_value ? 1U : 0U;
                 occupied_count += cells[cell_index]->info() != 0U;
             }
         }
@@ -1065,28 +1029,24 @@ PamMeshResult extract_pam_mesh(
         }
         return mapped;
     };
-    for (auto cell = triangulation.finite_cells_begin();
-         cell != triangulation.finite_cells_end(); ++cell) {
-        if (cell->info() == 0U) continue;
+    for (auto cell = triangulation.finite_cells_begin(); cell != triangulation.finite_cells_end();
+         ++cell) {
+        if (cell->info() == 0U)
+            continue;
         for (int opposite = 0; opposite < 4; ++opposite) {
             const auto neighbor = cell->neighbor(opposite);
-            if (!triangulation.is_infinite(neighbor) &&
-                neighbor->info() != 0U)
+            if (!triangulation.is_infinite(neighbor) && neighbor->info() != 0U)
                 continue;
             std::array<int, 3> corners{};
             int cursor = 0;
             for (int corner = 0; corner < 4; ++corner)
-                if (corner != opposite) corners[cursor++] = corner;
-            const mvs::Vec3f interior =
-                candidates[cell->vertex(opposite)->info()];
-            const mvs::Vec3f a =
-                candidates[cell->vertex(corners[0])->info()];
-            const mvs::Vec3f b =
-                candidates[cell->vertex(corners[1])->info()];
-            const mvs::Vec3f c =
-                candidates[cell->vertex(corners[2])->info()];
-            if ((b - a).cross(c - a).dot(interior - (a + b + c) / 3.F) >
-                0.F)
+                if (corner != opposite)
+                    corners[cursor++] = corner;
+            const mvs::Vec3f interior = candidates[cell->vertex(opposite)->info()];
+            const mvs::Vec3f a = candidates[cell->vertex(corners[0])->info()];
+            const mvs::Vec3f b = candidates[cell->vertex(corners[1])->info()];
+            const mvs::Vec3f c = candidates[cell->vertex(corners[2])->info()];
+            if ((b - a).cross(c - a).dot(interior - (a + b + c) / 3.F) > 0.F)
                 std::swap(corners[1], corners[2]);
             result.mesh.faces.emplace_back(
                 map_vertex(cell->vertex(corners[0])->info()),
@@ -1111,13 +1071,11 @@ PamMeshResult extract_pam_mesh(
         std::vector<std::vector<std::size_t>> soup_faces;
         soup_faces.reserve(result.mesh.faces.size());
         for (const Eigen::Vector3i& face : result.mesh.faces)
-            soup_faces.push_back({
-                static_cast<std::size_t>(face.x()),
-                static_cast<std::size_t>(face.y()),
-                static_cast<std::size_t>(face.z())});
+            soup_faces.push_back(
+                {static_cast<std::size_t>(face.x()), static_cast<std::size_t>(face.y()),
+                 static_cast<std::size_t>(face.z())});
         const std::size_t vertices_before_orientation = soup_points.size();
-        CGAL::Polygon_mesh_processing::orient_polygon_soup(
-            soup_points, soup_faces);
+        CGAL::Polygon_mesh_processing::orient_polygon_soup(soup_points, soup_faces);
         result.mesh.vertices.clear();
         result.mesh.vertices.reserve(soup_points.size());
         for (const Point& point : soup_points)
@@ -1129,32 +1087,31 @@ PamMeshResult extract_pam_mesh(
         result.mesh.faces.reserve(soup_faces.size());
         for (const std::vector<std::size_t>& face : soup_faces)
             result.mesh.faces.emplace_back(
-                static_cast<int>(face[0]), static_cast<int>(face[1]),
-                static_cast<int>(face[2]));
-        topology_duplicated_vertices =
-            soup_points.size() - vertices_before_orientation;
+                static_cast<int>(face[0]), static_cast<int>(face[1]), static_cast<int>(face[2]));
+        topology_duplicated_vertices = soup_points.size() - vertices_before_orientation;
     }
     compute_vertex_normals(result.mesh);
-    const auto candidate_gradients = detail::pam_field_gradients(
-        gpu_field, upload_points(candidates,device), options.vector_field_neighbors).to_vector();
+    const auto candidate_gradients =
+        detail::pam_field_gradients(
+            gpu_field, upload_points(candidates, device), options.vector_field_neighbors)
+            .to_vector();
     result.candidate_cloud.points.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& point = candidates[i];
         mvs::DensePoint dense;
         dense.position = point;
-        const mvs::Vec3f gradient(candidate_gradients[3*i], candidate_gradients[3*i+1],
-                                  candidate_gradients[3*i+2]);
+        const mvs::Vec3f gradient(
+            candidate_gradients[3 * i], candidate_gradients[3 * i + 1],
+            candidate_gradients[3 * i + 2]);
         if (gradient.squaredNorm() > 1e-20F)
             dense.normal = gradient.normalized();
         dense.weight = 1.F;
         result.candidate_cloud.points.push_back(std::move(dense));
     }
     core::Logger::instance().info(
-        "splat PAM: candidates=", candidates.size(),
-        " tetrahedra=", result.tetrahedron_count,
+        "splat PAM: candidates=", candidates.size(), " tetrahedra=", result.tetrahedron_count,
         " occupied_tetrahedra=", result.occupied_tetrahedron_count,
-        " vertices=", result.mesh.vertices.size(),
-        " faces=", result.mesh.faces.size(),
+        " vertices=", result.mesh.vertices.size(), " faces=", result.mesh.faces.size(),
         " topology_duplicated_vertices=", topology_duplicated_vertices);
     if (vulkan) {
         // Vulkan state owns a raster workspace, not a CUDA OccupancyCacheImpl.
@@ -1165,8 +1122,7 @@ PamMeshResult extract_pam_mesh(
         const auto cache_stats = Rasterizer().occupancy_cache_stats(occupancy_cache);
         core::Logger::instance().info(
             "splat PAM occupancy cache: prepared_views=", cache_stats.prepared_views,
-            " queries=", cache_stats.queries,
-            " device_bytes=", cache_stats.device_bytes,
+            " queries=", cache_stats.queries, " device_bytes=", cache_stats.device_bytes,
             " host_bytes=", cache_stats.host_bytes);
         core::Logger::instance().info(
             "splat PAM occupancy preparations=", cache_stats.preparations);
@@ -1179,4 +1135,4 @@ PamMeshResult extract_pam_mesh(
 #endif
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

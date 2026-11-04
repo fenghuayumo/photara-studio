@@ -151,41 +151,43 @@ struct PamMeshResult {
 };
 
 using ProgressCallback = std::function<bool(const TrainingProgress&)>;
-using EvaluationCallback =
-    std::function<void(unsigned iteration, const GaussianModel& model)>;
+using EvaluationCallback = std::function<void(unsigned iteration, const GaussianModel& model)>;
 using PreviewCallback = std::function<void(TrainingPreview)>;
 // Called while the raster color tensor is still resident on the training
 // device. The tensor is planar float RGB [3,H,W] and is valid only for the
 // duration of the call. CUDA training fills the editor image through CUDA
 // interop; Vulkan training copies this tensor into the same image.
 using DevicePreviewCallback = std::function<void(
-    unsigned iteration, std::size_t view_index, const Camera& camera,
+    unsigned iteration,
+    std::size_t view_index,
+    const Camera& camera,
     const tinytensor::Tensor& color)>;
 
 Camera camera_from_mvs_view(const mvs::MvsView& view);
 
 GaussianModel initialize_from_dense_cloud(
-    const mvs::MvsScene& scene, const TrainingOptions& options = {},
+    const mvs::MvsScene& scene,
+    const TrainingOptions& options = {},
     const mvs::OrientedBoundingBox* focus_override = nullptr);
 
-TrainingView make_training_view(
-    const mvs::MvsView& view, const TrainingOptions& options = {});
+TrainingView make_training_view(const mvs::MvsView& view, const TrainingOptions& options = {});
 
 class Trainer {
-public:
+  public:
     explicit Trainer(TrainingOptions options = {});
 
     GaussianModel train(
-        const mvs::MvsScene& scene, ProgressCallback progress = {},
-        EvaluationCallback evaluate = {}, PreviewCallback preview = {},
+        const mvs::MvsScene& scene,
+        ProgressCallback progress = {},
+        EvaluationCallback evaluate = {},
+        PreviewCallback preview = {},
         DevicePreviewCallback device_preview = {}) const;
 
-private:
+  private:
     TrainingOptions options_;
 };
 
-void save_gaussians_ply(
-    const GaussianModel& model, const std::filesystem::path& path);
+void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path& path);
 GaussianModel load_gaussians_ply(
     const std::filesystem::path& path,
     tinytensor::Device device = tinytensor::Device::CUDA);
@@ -206,7 +208,8 @@ void run_orbit_preview(
     const std::filesystem::path& vis_file = {});
 
 RenderMetrics render_evaluation_png(
-    const GaussianModel& model, const mvs::MvsView& view,
+    const GaussianModel& model,
+    const mvs::MvsView& view,
     const std::filesystem::path& path,
     const TrainingOptions& options = {});
 
@@ -214,7 +217,8 @@ RenderMetrics render_evaluation_png(
 // cameras, then run the selected surface backend and topology cleanup. The
 // geometry losses follow GGGS ideas, but this is Photara's splat API.
 SplatMeshResult extract_splat_mesh(
-    const GaussianModel& model, const mvs::MvsScene& scene,
+    const GaussianModel& model,
+    const mvs::MvsScene& scene,
     const TrainingOptions& training_options = {},
     const SplatMeshOptions& mesh_options = {});
 
@@ -224,9 +228,10 @@ SplatMeshResult extract_splat_mesh(
 // mesh, projects candidates onto the occupancy isosurface, tetrahedralizes
 // again, and returns the occupied/free-space boundary.
 PamMeshResult extract_pam_mesh(
-    const GaussianModel& model, const mvs::MvsScene& scene,
+    const GaussianModel& model,
+    const mvs::MvsScene& scene,
     const mvs::Mesh& seed_mesh,
     const TrainingOptions& training_options = {},
     const PamMeshOptions& pam_options = {});
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -26,6 +26,7 @@ struct SimplifyOptions {
 };
 
 [[nodiscard]] GaussianModel simplify_gaussians(
-    const GaussianModel& model, const SimplifyOptions& options = {});
+    const GaussianModel& model,
+    const SimplifyOptions& options = {});
 
-}  // namespace photara::splat
+} // namespace photara::splat

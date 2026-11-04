@@ -31,4 +31,4 @@ float fused_ssim_metric(
     std::uint32_t width,
     std::uint32_t height);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

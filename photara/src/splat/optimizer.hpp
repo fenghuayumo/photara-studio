@@ -18,9 +18,13 @@ struct AdamState {
 AdamState make_adam_state(const tinytensor::Tensor& parameter);
 
 void adam_step(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t group_stride = 0,
+    tinytensor::Tensor& parameter,
+    const tinytensor::Tensor& gradient,
+    AdamState& state,
+    float learning_rate,
+    unsigned step,
+    const TrainingOptions& options,
+    std::size_t group_stride = 0,
     float secondary_learning_rate = 0.F,
     float clamp_min = -std::numeric_limits<float>::infinity(),
     float clamp_max = std::numeric_limits<float>::infinity(),
@@ -28,18 +32,30 @@ void adam_step(
 
 // CUDA fuses the four structure groups into one kernel. Vulkan dispatches the
 // same operation through device Adam while preserving the identical public API.
-void adam_step_structure(GaussianModel& model, const ModelGradients& gradient,
-    AdamState& means, AdamState& scales, AdamState& rotations, AdamState& opacity,
-    float means_lr, unsigned step, const TrainingOptions& options,
-    float minimum_log_scale, float maximum_log_scale);
+void adam_step_structure(
+    GaussianModel& model,
+    const ModelGradients& gradient,
+    AdamState& means,
+    AdamState& scales,
+    AdamState& rotations,
+    AdamState& opacity,
+    float means_lr,
+    unsigned step,
+    const TrainingOptions& options,
+    float minimum_log_scale,
+    float maximum_log_scale);
 
 // Leave inactive higher-order SH coefficients and both moments untouched.
 void adam_step_active_prefix(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t full_row_stride,
-    std::size_t active_row_stride, float secondary_learning_rate,
+    tinytensor::Tensor& parameter,
+    const tinytensor::Tensor& gradient,
+    AdamState& state,
+    float learning_rate,
+    unsigned step,
+    const TrainingOptions& options,
+    std::size_t full_row_stride,
+    std::size_t active_row_stride,
+    float secondary_learning_rate,
     float grouped_rest_regularization = 0.F);
 
-
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

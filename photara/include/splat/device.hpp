@@ -5,11 +5,9 @@
 
 namespace photara::splat {
 
-[[nodiscard]] constexpr tinytensor::Device training_device(
-    const TrainingBackend backend) noexcept {
-    return backend == TrainingBackend::vulkan
-        ? tinytensor::Device::Vulkan
-        : tinytensor::Device::CUDA;
+[[nodiscard]] constexpr tinytensor::Device training_device(const TrainingBackend backend) noexcept {
+    return backend == TrainingBackend::vulkan ? tinytensor::Device::Vulkan
+                                              : tinytensor::Device::CUDA;
 }
 
 [[nodiscard]] constexpr tinytensor::Device training_device(
@@ -17,4 +15,4 @@ namespace photara::splat {
     return training_device(options.backend);
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -20,41 +20,60 @@ constexpr float k_near = 1e-4F;
 __device__ constexpr float k_sh0 = 0.28209479177387814F;
 __device__ constexpr float k_sh1 = 0.4886025119029199F;
 __device__ constexpr float k_sh2[] = {
-    1.0925484305920792F, -1.0925484305920792F, 0.31539156525252005F,
-    -1.0925484305920792F, 0.5462742152960396F};
+    1.0925484305920792F, -1.0925484305920792F, 0.31539156525252005F, -1.0925484305920792F,
+    0.5462742152960396F};
 __device__ constexpr float k_sh3[] = {
-    -0.5900435899266435F, 2.890611442640554F, -0.4570457994644658F,
-    0.3731763325901154F, -0.4570457994644658F, 1.445305721320277F,
-    -0.5900435899266435F};
+    -0.5900435899266435F, 2.890611442640554F, -0.4570457994644658F, 0.3731763325901154F,
+    -0.4570457994644658F, 1.445305721320277F, -0.5900435899266435F};
 constexpr int k_ring_segments = 32;
 
 void check_cuda(const cudaError_t error, const char* operation) {
-    if (error == cudaSuccess) return;
+    if (error == cudaSuccess)
+        return;
     throw std::runtime_error(
-        std::string("Splat visualize ") + operation +
-        " failed: " + cudaGetErrorString(error));
+        std::string("Splat visualize ") + operation + " failed: " + cudaGetErrorString(error));
 }
 
 __device__ void camera_point(
-    const float* w2c, const float X, const float Y, const float Z, float& x,
-    float& y, float& z) {
+    const float* w2c,
+    const float X,
+    const float Y,
+    const float Z,
+    float& x,
+    float& y,
+    float& z) {
     x = w2c[0] * X + w2c[4] * Y + w2c[8] * Z + w2c[12];
     y = w2c[1] * X + w2c[5] * Y + w2c[9] * Z + w2c[13];
     z = w2c[2] * X + w2c[6] * Y + w2c[10] * Z + w2c[14];
 }
 
 __device__ void camera_vector(
-    const float* w2c, const float X, const float Y, const float Z, float& x,
-    float& y, float& z) {
+    const float* w2c,
+    const float X,
+    const float Y,
+    const float Z,
+    float& x,
+    float& y,
+    float& z) {
     x = w2c[0] * X + w2c[4] * Y + w2c[8] * Z;
     y = w2c[1] * X + w2c[5] * Y + w2c[9] * Z;
     z = w2c[2] * X + w2c[6] * Y + w2c[10] * Z;
 }
 
 __device__ void eval_sh_color(
-    const float* sh, const int index, const int bases, const int degree,
-    const float mx, const float my, const float mz, const float camx,
-    const float camy, const float camz, float& r, float& g, float& b) {
+    const float* sh,
+    const int index,
+    const int bases,
+    const int degree,
+    const float mx,
+    const float my,
+    const float mz,
+    const float camx,
+    const float camy,
+    const float camz,
+    float& r,
+    float& g,
+    float& b) {
     const float* coeff = sh + static_cast<std::size_t>(index) * bases * 3;
     r = k_sh0 * coeff[0];
     g = k_sh0 * coeff[1];
@@ -78,12 +97,9 @@ __device__ void eval_sh_color(
             const float b6 = k_sh2[2] * (2.F * zz - xx - yy);
             const float b7 = k_sh2[3] * xz;
             const float b8 = k_sh2[4] * (xx - yy);
-            r += b4 * coeff[12] + b5 * coeff[15] + b6 * coeff[18] +
-                 b7 * coeff[21] + b8 * coeff[24];
-            g += b4 * coeff[13] + b5 * coeff[16] + b6 * coeff[19] +
-                 b7 * coeff[22] + b8 * coeff[25];
-            b += b4 * coeff[14] + b5 * coeff[17] + b6 * coeff[20] +
-                 b7 * coeff[23] + b8 * coeff[26];
+            r += b4 * coeff[12] + b5 * coeff[15] + b6 * coeff[18] + b7 * coeff[21] + b8 * coeff[24];
+            g += b4 * coeff[13] + b5 * coeff[16] + b6 * coeff[19] + b7 * coeff[22] + b8 * coeff[25];
+            b += b4 * coeff[14] + b5 * coeff[17] + b6 * coeff[20] + b7 * coeff[23] + b8 * coeff[26];
             if (degree > 2 && bases >= 16) {
                 const float c9 = k_sh3[0] * dy * (3.F * xx - yy);
                 const float c10 = k_sh3[1] * xy * dz;
@@ -92,15 +108,12 @@ __device__ void eval_sh_color(
                 const float c13 = k_sh3[4] * dx * (4.F * zz - xx - yy);
                 const float c14 = k_sh3[5] * dz * (xx - yy);
                 const float c15 = k_sh3[6] * dx * (xx - 3.F * yy);
-                r += c9 * coeff[27] + c10 * coeff[30] + c11 * coeff[33] +
-                     c12 * coeff[36] + c13 * coeff[39] + c14 * coeff[42] +
-                     c15 * coeff[45];
-                g += c9 * coeff[28] + c10 * coeff[31] + c11 * coeff[34] +
-                     c12 * coeff[37] + c13 * coeff[40] + c14 * coeff[43] +
-                     c15 * coeff[46];
-                b += c9 * coeff[29] + c10 * coeff[32] + c11 * coeff[35] +
-                     c12 * coeff[38] + c13 * coeff[41] + c14 * coeff[44] +
-                     c15 * coeff[47];
+                r += c9 * coeff[27] + c10 * coeff[30] + c11 * coeff[33] + c12 * coeff[36] +
+                     c13 * coeff[39] + c14 * coeff[42] + c15 * coeff[45];
+                g += c9 * coeff[28] + c10 * coeff[31] + c11 * coeff[34] + c12 * coeff[37] +
+                     c13 * coeff[40] + c14 * coeff[43] + c15 * coeff[46];
+                b += c9 * coeff[29] + c10 * coeff[32] + c11 * coeff[35] + c12 * coeff[38] +
+                     c13 * coeff[41] + c14 * coeff[44] + c15 * coeff[47];
             }
         }
     }
@@ -110,27 +123,41 @@ __device__ void eval_sh_color(
 }
 
 __device__ bool project_overlay_pixel(
-    const float x, const float y, const float z, const int width,
-    const int height, const float fx, const float fy, const float cx,
-    const float cy, const int model, const float k1, const float k2,
-    const float k3, const float k4, const float near_clip, float& u, float& v) {
+    const float x,
+    const float y,
+    const float z,
+    const int width,
+    const int height,
+    const float fx,
+    const float fy,
+    const float cx,
+    const float cy,
+    const int model,
+    const float k1,
+    const float k2,
+    const float k3,
+    const float k4,
+    const float near_clip,
+    float& u,
+    float& v) {
     if (model == static_cast<int>(photara::CameraModel::equirectangular)) {
-        const auto pixel = project_equirectangular_camera(
-            x, y, z, width, height);
-        if (!pixel.valid) return false;
+        const auto pixel = project_equirectangular_camera(x, y, z, width, height);
+        if (!pixel.valid)
+            return false;
         u = static_cast<float>(pixel.u);
         v = static_cast<float>(pixel.v);
         return true;
     }
     if (model == static_cast<int>(photara::CameraModel::opencv_fisheye)) {
-        const auto pixel = project_fisheye_camera(
-            x, y, z, fx, fy, cx, cy, k1, k2, k3, k4);
-        if (!pixel.valid) return false;
+        const auto pixel = project_fisheye_camera(x, y, z, fx, fy, cx, cy, k1, k2, k3, k4);
+        if (!pixel.valid)
+            return false;
         u = static_cast<float>(pixel.u);
         v = static_cast<float>(pixel.v);
         return true;
     }
-    if (z <= near_clip) return false;
+    if (z <= near_clip)
+        return false;
     if (model == 4) {
         u = fx * x + cx;
         v = fy * y + cy;
@@ -142,9 +169,16 @@ __device__ bool project_overlay_pixel(
 }
 
 __device__ void blend_pixel(
-    float* color, float* alpha, const int pixel, const int pixels,
-    const float r, const float g, const float b, const float a) {
-    if (pixel < 0 || pixel >= pixels || a <= 0.F) return;
+    float* color,
+    float* alpha,
+    const int pixel,
+    const int pixels,
+    const float r,
+    const float g,
+    const float b,
+    const float a) {
+    if (pixel < 0 || pixel >= pixels || a <= 0.F)
+        return;
     atomicAdd(color + pixel, r * a);
     atomicAdd(color + pixels + pixel, g * a);
     atomicAdd(color + 2 * pixels + pixel, b * a);
@@ -152,8 +186,12 @@ __device__ void blend_pixel(
 }
 
 __device__ void quat_scaled_axes(
-    const float* quaternion, const float* scale, const float modifier,
-    float ax[3], float ay[3], float az[3]) {
+    const float* quaternion,
+    const float* scale,
+    const float modifier,
+    float ax[3],
+    float ay[3],
+    float az[3]) {
     const float qw = quaternion[0];
     const float qx = quaternion[1];
     const float qy = quaternion[2];
@@ -182,14 +220,33 @@ __device__ void quat_scaled_axes(
 }
 
 __global__ void visualize_points_kernel(
-    const float* means, const float* sh, const float* w2c, float* color,
-    float* alpha, const int count, const int width, const int height,
-    const int bases, const int sh_degree, const float fx, const float fy,
-    const float cx, const float cy, const int model, const float k1,
-    const float k2, const float k3, const float k4, const float camx,
-    const float camy, const float camz, const float point_size, const float near_clip) {
+    const float* means,
+    const float* sh,
+    const float* w2c,
+    float* color,
+    float* alpha,
+    const int count,
+    const int width,
+    const int height,
+    const int bases,
+    const int sh_degree,
+    const float fx,
+    const float fy,
+    const float cx,
+    const float cy,
+    const int model,
+    const float k1,
+    const float k2,
+    const float k3,
+    const float k4,
+    const float camx,
+    const float camy,
+    const float camz,
+    const float point_size,
+    const float near_clip) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count) return;
+    if (index >= count)
+        return;
     const float mx = means[3 * index];
     const float my = means[3 * index + 1];
     const float mz = means[3 * index + 2];
@@ -197,49 +254,71 @@ __global__ void visualize_points_kernel(
     camera_point(w2c, mx, my, mz, x, y, z);
     float u = 0.F, v = 0.F;
     if (!project_overlay_pixel(
-            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u,
-            v))
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u, v))
         return;
     const int radius = max(1, static_cast<int>(ceilf(point_size)));
     const int pixels = width * height;
     float r, g, b;
-    eval_sh_color(
-        sh, index, bases, sh_degree, mx, my, mz, camx, camy, camz, r, g, b);
+    eval_sh_color(sh, index, bases, sh_degree, mx, my, mz, camx, camy, camz, r, g, b);
     const float radius_sq = point_size * point_size;
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
-            if (static_cast<float>(dx * dx + dy * dy) > radius_sq) continue;
+            if (static_cast<float>(dx * dx + dy * dy) > radius_sq)
+                continue;
             const int px = static_cast<int>(floorf(u)) + dx;
             const int py = static_cast<int>(floorf(v)) + dy;
-            if (px < 0 || py < 0 || px >= width || py >= height) continue;
+            if (px < 0 || py < 0 || px >= width || py >= height)
+                continue;
             blend_pixel(color, alpha, py * width + px, pixels, r, g, b, 1.F);
         }
     }
 }
 
 __device__ float ring_shade(const float r2, const float opacity) {
-    if (r2 > 1.F) return 0.F;
+    if (r2 > 1.F)
+        return 0.F;
     constexpr float k_exp4 = 0.01831563889F;
-    float shade = fmaxf(
-        0.05F, (expf(-4.F * r2) - k_exp4) / (1.F - k_exp4) * opacity);
-    if (r2 >= 0.96F) shade = 0.6F;
+    float shade = fmaxf(0.05F, (expf(-4.F * r2) - k_exp4) / (1.F - k_exp4) * opacity);
+    if (r2 >= 0.96F)
+        shade = 0.6F;
     return shade;
 }
 
 __global__ void visualize_rings_kernel(
-    const float* means, const float* scales, const float* quaternions,
-    const float* opacities, const float* sh, const float* w2c, float* color,
+    const float* means,
+    const float* scales,
+    const float* quaternions,
+    const float* opacities,
+    const float* sh,
+    const float* w2c,
+    float* color,
     float* alpha,
-    const int count, const int width, const int height, const int bases,
-    const int sh_degree, const float fx, const float fy, const float cx,
-    const float cy, const int model, const float k1, const float k2,
-    const float k3, const float k4, const float camx, const float camy,
-    const float camz, const float scale_modifier, const float ring_scale,
+    const int count,
+    const int width,
+    const int height,
+    const int bases,
+    const int sh_degree,
+    const float fx,
+    const float fy,
+    const float cx,
+    const float cy,
+    const int model,
+    const float k1,
+    const float k2,
+    const float k3,
+    const float k4,
+    const float camx,
+    const float camy,
+    const float camz,
+    const float scale_modifier,
+    const float ring_scale,
     const float near_clip) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count) return;
+    if (index >= count)
+        return;
     const float opacity = opacities[index];
-    if (opacity <= 1.F / 255.F) return;
+    if (opacity <= 1.F / 255.F)
+        return;
     const float mx = means[3 * index];
     const float my = means[3 * index + 1];
     const float mz = means[3 * index + 2];
@@ -247,15 +326,13 @@ __global__ void visualize_rings_kernel(
     camera_point(w2c, mx, my, mz, x, y, z);
     float u = 0.F, v = 0.F;
     if (!project_overlay_pixel(
-            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u,
-            v))
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, near_clip, u, v))
         return;
-    if (z <= k_near) z = k_near;
+    if (z <= k_near)
+        z = k_near;
 
     float ax[3], ay[3], az[3];
-    quat_scaled_axes(
-        quaternions + 4 * index, scales + 3 * index, scale_modifier, ax, ay,
-        az);
+    quat_scaled_axes(quaternions + 4 * index, scales + 3 * index, scale_modifier, ax, ay, az);
     float cax[3], cay[3], caz[3];
     camera_vector(w2c, ax[0], ax[1], ax[2], cax[0], cax[1], cax[2]);
     camera_vector(w2c, ay[0], ay[1], ay[2], cay[0], cay[1], cay[2]);
@@ -278,29 +355,26 @@ __global__ void visualize_rings_kernel(
     float b = p0x * p0y + p1x * p1y + p2x * p2y;
     float c = p0y * p0y + p1y * p1y + p2y * p2y + 0.3F;
     const float mid = 0.5F * (a + c);
-    const float ext =
-        0.5F * sqrtf(fmaxf(0.F, (a - c) * (a - c) + 4.F * b * b));
+    const float ext = 0.5F * sqrtf(fmaxf(0.F, (a - c) * (a - c) + 4.F * b * b));
     const float lambda1 = fmaxf(0.F, mid + ext);
     const float lambda2 = fmaxf(0.1F, mid - ext);
     float rx = ring_scale * sqrtf(lambda1);
     float ry = ring_scale * sqrtf(lambda2);
-    const float cap = fminf(
-        1024.F, fminf(static_cast<float>(width), static_cast<float>(height)));
+    const float cap = fminf(1024.F, fminf(static_cast<float>(width), static_cast<float>(height)));
     const float major = fmaxf(rx, ry);
     if (major > cap) {
         const float fit = cap / major;
         rx *= fit;
         ry *= fit;
     }
-    if (rx < 0.75F && ry < 0.75F) return;
+    if (rx < 0.75F && ry < 0.75F)
+        return;
     const float rotation = 0.5F * atan2f(2.F * b, a - c);
     const float cos_r = cosf(rotation);
     const float sin_r = sinf(rotation);
     const int pixels = width * height;
     float red, green, blue;
-    eval_sh_color(
-        sh, index, bases, sh_degree, mx, my, mz, camx, camy, camz, red,
-        green, blue);
+    eval_sh_color(sh, index, bases, sh_degree, mx, my, mz, camx, camy, camz, red, green, blue);
 
     // Small footprints fill like SuperSplat. Larger ones keep a solid rim so
     // the preview does not rasterize every pixel of a screen-sized ellipse.
@@ -319,24 +393,21 @@ __global__ void visualize_rings_kernel(
                 const float ly = -sin_r * dx + cos_r * dy;
                 const float r2 = lx * lx * inv_rx * inv_rx + ly * ly * inv_ry * inv_ry;
                 const float shade = ring_shade(r2, opacity);
-                if (shade <= 0.F) continue;
-                blend_pixel(
-                    color, alpha, iy * width + ix, pixels, red, green, blue,
-                    shade);
+                if (shade <= 0.F)
+                    continue;
+                blend_pixel(color, alpha, iy * width + ix, pixels, red, green, blue, shade);
             }
         }
         return;
     }
 
     const float circumference = 6.2831853F * 0.5F * (rx + ry);
-    const int segments = min(
-        96, max(k_ring_segments, static_cast<int>(ceilf(circumference / 3.F))));
+    const int segments =
+        min(96, max(k_ring_segments, static_cast<int>(ceilf(circumference / 3.F))));
     float prev_x = 0.F;
     float prev_y = 0.F;
     for (int segment = 0; segment <= segments; ++segment) {
-        const float theta =
-            6.2831853F * static_cast<float>(segment) /
-            static_cast<float>(segments);
+        const float theta = 6.2831853F * static_cast<float>(segment) / static_cast<float>(segments);
         const float local_x = rx * cosf(theta);
         const float local_y = ry * sinf(theta);
         const float px = u + local_x * cos_r - local_y * sin_r;
@@ -355,7 +426,8 @@ __global__ void visualize_rings_kernel(
                 for (int side = -1; side <= 1; ++side) {
                     const int ix = static_cast<int>(floorf(sx + nx * static_cast<float>(side)));
                     const int iy = static_cast<int>(floorf(sy + ny * static_cast<float>(side)));
-                    if (ix < 0 || iy < 0 || ix >= width || iy >= height) continue;
+                    if (ix < 0 || iy < 0 || ix >= width || iy >= height)
+                        continue;
                     blend_pixel(
                         color, alpha, iy * width + ix, pixels, red, green, blue,
                         side == 0 ? 0.6F : 0.35F);
@@ -368,67 +440,66 @@ __global__ void visualize_rings_kernel(
 }
 
 __global__ void composite_background_kernel(
-    float* color, const float* alpha, const float br, const float bg,
-    const float bb, const int pixels) {
+    float* color,
+    const float* alpha,
+    const float br,
+    const float bg,
+    const float bb,
+    const int pixels) {
     const int pixel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pixel >= pixels) return;
+    if (pixel >= pixels)
+        return;
     const float weight = fmaxf(alpha[pixel], 0.F);
     const float coverage = fminf(weight, 1.F);
     const float inv = weight > 1e-6F ? coverage / weight : 0.F;
     color[pixel] = fminf(color[pixel] * inv + br * (1.F - coverage), 1.F);
-    color[pixels + pixel] =
-        fminf(color[pixels + pixel] * inv + bg * (1.F - coverage), 1.F);
-    color[2 * pixels + pixel] =
-        fminf(color[2 * pixels + pixel] * inv + bb * (1.F - coverage), 1.F);
+    color[pixels + pixel] = fminf(color[pixels + pixel] * inv + bg * (1.F - coverage), 1.F);
+    color[2 * pixels + pixel] = fminf(color[2 * pixels + pixel] * inv + bb * (1.F - coverage), 1.F);
 }
 
 tinytensor::Tensor render_debug_overlay(
-    const GaussianModel& model, const Camera& camera,
+    const GaussianModel& model,
+    const Camera& camera,
     const VisualizeOptions& options) {
     const int width = static_cast<int>(camera.width);
     const int height = static_cast<int>(camera.height);
     const int count = static_cast<int>(model.size());
     const int pixels = width * height;
-    auto color = tinytensor::Tensor::zeros(
-        {3, camera.height, camera.width}, tinytensor::Device::CUDA);
-    auto alpha = tinytensor::Tensor::zeros(
-        {camera.height, camera.width}, tinytensor::Device::CUDA);
-    if (count == 0 || pixels == 0) return color;
+    auto color =
+        tinytensor::Tensor::zeros({3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    auto alpha = tinytensor::Tensor::zeros({camera.height, camera.width}, tinytensor::Device::CUDA);
+    if (count == 0 || pixels == 0)
+        return color;
 
     const auto activated = detail::activate_parameters(model);
     const auto view = tinytensor::Tensor::from_vector(
-        std::vector<float>(
-            camera.world_to_camera.begin(), camera.world_to_camera.end()),
-        {4, 4}, tinytensor::Device::CUDA);
+        std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()), {4, 4},
+        tinytensor::Device::CUDA);
     const int bases = static_cast<int>(model.sh.shape()[1]);
-    const int sh_degree = static_cast<int>(std::min(
-        options.active_sh_degree, model.sh_degree));
+    const int sh_degree = static_cast<int>(std::min(options.active_sh_degree, model.sh_degree));
     const int blocks = (count + k_threads - 1) / k_threads;
     if (options.mode == VisualizationMode::points) {
         visualize_points_kernel<<<blocks, k_threads>>>(
-            model.means.ptr<float>(), model.sh.ptr<float>(),
-            view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
-            width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
-            camera.k3, camera.k4, camera.position[0], camera.position[1],
+            model.means.ptr<float>(), model.sh.ptr<float>(), view.ptr<float>(), color.ptr<float>(),
+            alpha.ptr<float>(), count, width, height, bases, sh_degree, camera.fx, camera.fy,
+            camera.cx, camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model),
+            camera.k1, camera.k2, camera.k3, camera.k4, camera.position[0], camera.position[1],
             camera.position[2], options.point_size_px, options.rasterization.near_plane);
     } else {
         visualize_rings_kernel<<<blocks, k_threads>>>(
             model.means.ptr<float>(), activated.scales.ptr<float>(),
             activated.quaternions.ptr<float>(), activated.opacities.ptr<float>(),
-            model.sh.ptr<float>(),
-            view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
-            width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
-            camera.k3, camera.k4, camera.position[0], camera.position[1],
-            camera.position[2], options.scale_modifier, options.ring_scale,
-            options.rasterization.near_plane);
+            model.sh.ptr<float>(), view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
+            width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx, camera.cy,
+            camera.orthographic ? 4 : static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.k3, camera.k4, camera.position[0], camera.position[1], camera.position[2],
+            options.scale_modifier, options.ring_scale, options.rasterization.near_plane);
     }
     check_cuda(cudaGetLastError(), "launch overlay kernel");
     const int composite_blocks = (pixels + k_threads - 1) / k_threads;
     composite_background_kernel<<<composite_blocks, k_threads>>>(
-        color.ptr<float>(), alpha.ptr<float>(), options.background[0],
-        options.background[1], options.background[2], pixels);
+        color.ptr<float>(), alpha.ptr<float>(), options.background[0], options.background[1],
+        options.background[2], pixels);
     check_cuda(cudaGetLastError(), "launch composite kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize overlay");
     return color;
@@ -437,8 +508,13 @@ tinytensor::Tensor render_debug_overlay(
 } // namespace
 
 namespace {
-__global__ void diagnostic_kernel(const float *depth, const float *alpha, const float *normal,
-                                  float *color, unsigned *stats, detail::DiagnosticPush pc) {
+__global__ void diagnostic_kernel(
+    const float* depth,
+    const float* alpha,
+    const float* normal,
+    float* color,
+    unsigned* stats,
+    detail::DiagnosticPush pc) {
     const unsigned p = blockIdx.x * blockDim.x + threadIdx.x;
     if (pc.stage == 3) {
         if (p != 0)
@@ -495,12 +571,14 @@ __global__ void diagnostic_kernel(const float *depth, const float *alpha, const 
     if (valid) {
         if (pc.channel == 1) {
             const float t = fminf(
-                1.F, fmaxf(0.F, (d - __uint_as_float(stats[2])) /
-                                    fmaxf(__uint_as_float(stats[3]) - __uint_as_float(stats[2]),
-                                          1e-8F)));
+                1.F,
+                fmaxf(
+                    0.F, (d - __uint_as_float(stats[2])) /
+                             fmaxf(__uint_as_float(stats[3]) - __uint_as_float(stats[2]), 1e-8F)));
             for (int c = 0; c < 3; ++c)
-                rgb[c] = pc.grayscale ? 1 - t
-                         : fminf(1.F,fmaxf(0.F,1.5F-fabsf(4.F*(1.F-t)-(3.F-c))));
+                rgb[c] = pc.grayscale
+                             ? 1 - t
+                             : fminf(1.F, fmaxf(0.F, 1.5F - fabsf(4.F * (1.F - t) - (3.F - c))));
         } else {
             float n[3] = {normal[p], normal[pc.pixels + p], normal[2 * pc.pixels + p]};
             if (pc.world) {
@@ -521,8 +599,10 @@ __global__ void diagnostic_kernel(const float *depth, const float *alpha, const 
         color[c * pc.pixels + p] = rgb[c];
 }
 
-tinytensor::Tensor diagnostic_color(const RenderResult &rendered, const Camera &camera,
-                                    const VisualizeOptions &options) {
+tinytensor::Tensor diagnostic_color(
+    const RenderResult& rendered,
+    const Camera& camera,
+    const VisualizeOptions& options) {
 #if defined(TINYTENSOR_HAS_VULKAN)
     if (rendered.color.device() == tinytensor::Device::Vulkan)
         return detail::visualize_diagnostics_vulkan(rendered, camera, options);
@@ -545,17 +625,19 @@ tinytensor::Tensor diagnostic_color(const RenderResult &rendered, const Camera &
         }
     }
     pc.stage = 4;
-    diagnostic_kernel<<<groups, 256>>>(rendered.median_depth.ptr<float>(),
-                                       rendered.alpha.ptr<float>(), rendered.normal.ptr<float>(),
-                                       color.ptr<float>(), stats.ptr<unsigned>(), pc);
+    diagnostic_kernel<<<groups, 256>>>(
+        rendered.median_depth.ptr<float>(), rendered.alpha.ptr<float>(),
+        rendered.normal.ptr<float>(), color.ptr<float>(), stats.ptr<unsigned>(), pc);
     check_cuda(cudaGetLastError(), "launch diagnostic preview");
     check_cuda(cudaDeviceSynchronize(), "synchronize diagnostic preview");
     return color;
 }
 } // namespace
 
-tinytensor::Tensor visualize(const GaussianModel &model, const Camera &camera,
-                             const VisualizeOptions &options) {
+tinytensor::Tensor visualize(
+    const GaussianModel& model,
+    const Camera& camera,
+    const VisualizeOptions& options) {
     const bool diagnostics =
         options.mode == VisualizationMode::splat && options.channel != VisualizationChannel::color;
     if (options.mode == VisualizationMode::splat ||

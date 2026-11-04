@@ -21,7 +21,7 @@ struct CudaVulkanPreviewOptions {
 };
 
 class CudaVulkanPreview {
-public:
+  public:
     explicit CudaVulkanPreview(const CudaVulkanPreviewOptions& options);
     ~CudaVulkanPreview();
     CudaVulkanPreview(CudaVulkanPreview&&) noexcept;
@@ -32,14 +32,15 @@ public:
     // Scales the CUDA planar RGB tensor into the shared RGBA8 Vulkan image,
     // then signals timeline value 2*N-1. Before frame N it waits for Vulkan
     // to signal 2*(N-1), so the image is never overwritten while sampled.
-    void submit(const tinytensor::Tensor& planar_rgb,
-                std::uint32_t source_width,
-                std::uint32_t source_height);
+    void submit(
+        const tinytensor::Tensor& planar_rgb,
+        std::uint32_t source_width,
+        std::uint32_t source_height);
     [[nodiscard]] std::uint64_t frame_count() const noexcept;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace photara::splat
+} // namespace photara::splat

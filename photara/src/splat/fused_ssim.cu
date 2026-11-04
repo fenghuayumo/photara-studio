@@ -18,17 +18,9 @@ namespace photara::splat::detail {
 namespace {
 
 __constant__ float c_gauss[11] = {
-    0.001028380123898387F,
-    0.0075987582094967365F,
-    0.036000773310661316F,
-    0.10936068743467331F,
-    0.21300552785396576F,
-    0.26601171493530273F,
-    0.21300552785396576F,
-    0.10936068743467331F,
-    0.036000773310661316F,
-    0.0075987582094967365F,
-    0.001028380123898387F};
+    0.001028380123898387F, 0.0075987582094967365F, 0.036000773310661316F, 0.10936068743467331F,
+    0.21300552785396576F,  0.26601171493530273F,   0.21300552785396576F,  0.10936068743467331F,
+    0.036000773310661316F, 0.0075987582094967365F, 0.001028380123898387F};
 
 constexpr int k_block_x = 16;
 constexpr int k_block_y = 16;
@@ -41,8 +33,7 @@ constexpr int k_conv_y = k_shared_y;
 
 void check_cuda(const cudaError_t error, const char* operation) {
     if (error != cudaSuccess)
-        throw std::runtime_error(
-            std::string(operation) + ": " + cudaGetErrorString(error));
+        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(error));
 }
 
 // Experimental opt-in: capture this allocation-free four-kernel suffix and
@@ -51,10 +42,16 @@ void check_cuda(const cudaError_t error, const char* operation) {
 struct SsimGraph {
     cudaStream_t capture_stream{};
     cudaGraphExec_t executable{};
-    SsimGraph() { check_cuda(cudaStreamCreateWithFlags(&capture_stream, cudaStreamNonBlocking), "create SSIM capture stream"); }
+    SsimGraph() {
+        check_cuda(
+            cudaStreamCreateWithFlags(&capture_stream, cudaStreamNonBlocking),
+            "create SSIM capture stream");
+    }
     ~SsimGraph() {
-        if (executable) cudaGraphExecDestroy(executable);
-        if (capture_stream) cudaStreamDestroy(capture_stream);
+        if (executable)
+            cudaGraphExecDestroy(executable);
+        if (capture_stream)
+            cudaStreamDestroy(capture_stream);
     }
     void launch() {
         cudaGraph_t graph{};
@@ -75,29 +72,41 @@ struct SsimGraph {
             const auto status = cudaGraphInstantiate(&executable, graph, 0);
             cudaGraphDestroy(graph);
             check_cuda(status, "instantiate SSIM graph");
-        } else cudaGraphDestroy(graph);
+        } else
+            cudaGraphDestroy(graph);
         check_cuda(cudaGraphLaunch(executable, nullptr), "launch SSIM graph");
     }
 };
 
 __device__ __forceinline__ float get_pixel(
-    const float* image, const int batch, const int channel,
-    const int y, const int x, const int channels, const int height,
+    const float* image,
+    const int batch,
+    const int channel,
+    const int y,
+    const int x,
+    const int channels,
+    const int height,
     const int width) {
-    if (x < 0 || x >= width || y < 0 || y >= height) return 0.F;
-    return image[batch * channels * height * width +
-                 channel * height * width + y * width + x];
+    if (x < 0 || x >= width || y < 0 || y >= height)
+        return 0.F;
+    return image[batch * channels * height * width + channel * height * width + y * width + x];
 }
 
 __global__ void apply_mask_kernel(
-    const float* prediction, const float* target, const float* mask,
-    float* masked_prediction, float* masked_target,
-    const int channels, const int height, const int width,
+    const float* prediction,
+    const float* target,
+    const float* mask,
+    float* masked_prediction,
+    float* masked_target,
+    const int channels,
+    const int height,
+    const int width,
     const bool mask_enabled) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     const std::size_t pixels = static_cast<std::size_t>(height) * width;
     const std::size_t count = static_cast<std::size_t>(channels) * pixels;
-    if (index >= count) return;
+    if (index >= count)
+        return;
     const float valid = mask_enabled ? mask[index % pixels] : 1.F;
     masked_prediction[index] = prediction[index] * valid;
     masked_target[index] = target[index] * valid;
@@ -108,8 +117,12 @@ __global__ void apply_mask_kernel(
 // the partial derivatives required by the backward kernel.
 template <bool StoreDerivatives, bool AccumulateMetric>
 __global__ void fused_l1_ssim_forward_kernel(
-    const float ssim_weight, const int height, const int width,
-    const int channels, const float c1, const float c2,
+    const float ssim_weight,
+    const int height,
+    const int width,
+    const int channels,
+    const float c1,
+    const float c2,
     const float* __restrict__ image1,
     const float* __restrict__ image2,
     float* __restrict__ dm_dmu1,
@@ -148,19 +161,17 @@ __global__ void fused_l1_ssim_forward_kernel(
                 const int local_x = id % k_shared_x;
                 const int y = tile_start_y + local_y - k_halo;
                 const int x = tile_start_x + local_x - k_halo;
-                tile[local_y][local_x][0] = get_pixel(
-                    image1, batch, channel, y, x, channels, height, width);
-                tile[local_y][local_x][1] = get_pixel(
-                    image2, batch, channel, y, x, channels, height, width);
+                tile[local_y][local_x][0] =
+                    get_pixel(image1, batch, channel, y, x, channels, height, width);
+                tile[local_y][local_x][1] =
+                    get_pixel(image2, batch, channel, y, x, channels, height, width);
             }
         }
         block.sync();
 
         const float l1 = fabsf(
-            tile[block.thread_index().y + k_halo]
-                [block.thread_index().x + k_halo][0] -
-            tile[block.thread_index().y + k_halo]
-                [block.thread_index().x + k_halo][1]);
+            tile[block.thread_index().y + k_halo][block.thread_index().x + k_halo][0] -
+            tile[block.thread_index().y + k_halo][block.thread_index().x + k_halo][1]);
 
         {
             const int local_y = threadIdx.y;
@@ -235,31 +246,26 @@ __global__ void fused_l1_ssim_forward_kernel(
                 const float d = 2.F * sigma12 + c2;
                 const float ssim = c * d / (a * b);
                 const int index = batch * channels * pixels + channel * pixels + pixel_id;
-                const bool valid_window = pixel_x >= k_halo &&
-                    pixel_x < width - k_halo && pixel_y >= k_halo &&
-                    pixel_y < height - k_halo;
+                const bool valid_window = pixel_x >= k_halo && pixel_x < width - k_halo &&
+                                          pixel_y >= k_halo && pixel_y < height - k_halo;
                 // The scalar loss is accumulated while its SSIM statistics are
                 // still in registers. The full loss map used to be written here,
                 // but neither training backward nor the caller consumed it.
                 if (scalar_terms != nullptr && valid_window) {
-                    const float loss_value =
-                        ssim_weight * (1.F - ssim) + (1.F - ssim_weight) * l1;
+                    const float loss_value = ssim_weight * (1.F - ssim) + (1.F - ssim_weight) * l1;
                     local_loss += normalization * loss_value;
                 }
                 if constexpr (AccumulateMetric) {
                     const int mask_index = pixel_y * width + pixel_x;
-                    if (valid_window && (!metric_mask_enabled ||
-                                         metric_mask[mask_index] > 0.F)) {
+                    if (valid_window && (!metric_mask_enabled || metric_mask[mask_index] > 0.F)) {
                         local_metric_sum += ssim;
                         local_metric_count += 1.F;
                     }
                 }
                 if constexpr (StoreDerivatives) {
-                    dm_dmu1[index] =
-                        (2.F * mu2 * d) / (a * b) -
-                        (2.F * mu2 * c) / (a * b) -
-                        (2.F * mu1 * c * d) / (a * a * b) +
-                        (2.F * mu1 * c * d) / (a * b * b);
+                    dm_dmu1[index] = (2.F * mu2 * d) / (a * b) - (2.F * mu2 * c) / (a * b) -
+                                     (2.F * mu1 * c * d) / (a * a * b) +
+                                     (2.F * mu1 * c * d) / (a * b * b);
                     dm_dsigma1_sq[index] = -c * d / (a * b * b);
                     dm_dsigma12[index] = 2.F * c / (a * b);
                 }
@@ -306,7 +312,9 @@ __global__ void fused_l1_ssim_forward_kernel(
 }
 
 __global__ void reduce_loss_blocks_kernel(
-    const float* blocks, const std::size_t count, float* result) {
+    const float* blocks,
+    const std::size_t count,
+    float* result) {
     __shared__ double partials[256];
     double sum = 0.0;
     for (std::size_t i = threadIdx.x; i < count; i += blockDim.x)
@@ -318,14 +326,17 @@ __global__ void reduce_loss_blocks_kernel(
             partials[threadIdx.x] += partials[threadIdx.x + stride];
         __syncthreads();
     }
-    if (threadIdx.x == 0) *result += static_cast<float>(partials[0]);
+    if (threadIdx.x == 0)
+        *result += static_cast<float>(partials[0]);
 }
 
 // A fixed reduction avoids the rounding bias from millions of unordered
 // additions to one FP32 accumulator. Only the small array of block sums
 // requires FP64 arithmetic; SSIM statistics and training stay unchanged.
 __global__ void reduce_ssim_metric_kernel(
-    const float* sums, const float* counts, const std::size_t size,
+    const float* sums,
+    const float* counts,
+    const std::size_t size,
     float* result) {
     __shared__ double partials[2][256];
     double sum = 0.0, count = 0.0;
@@ -344,16 +355,19 @@ __global__ void reduce_ssim_metric_kernel(
         __syncthreads();
     }
     if (threadIdx.x == 0)
-        result[0] = partials[1][0] > 0.0
-            ? static_cast<float>(partials[0][0] / partials[1][0]) : 0.F;
+        result[0] =
+            partials[1][0] > 0.0 ? static_cast<float>(partials[0][0] / partials[1][0]) : 0.F;
 }
 
 // This is fusedl1ssim_loss_backwardCUDA from fused-ssim. The valid-window
 // reduction is represented by a zero dL/dmap halo, exactly like the Python
 // autograd wrapper's padding="valid" path.
 __global__ void fused_l1_ssim_backward_kernel(
-    const float ssim_weight, const int height, const int width,
-    const int channels, const float* __restrict__ image1,
+    const float ssim_weight,
+    const int height,
+    const int width,
+    const int channels,
+    const float* __restrict__ image1,
     const float* __restrict__ image2,
     const float normalization,
     float* __restrict__ dl_dimage1,
@@ -375,12 +389,8 @@ __global__ void fused_l1_ssim_backward_kernel(
     for (int channel = 0; channel < channels; ++channel) {
         float pixel1 = 0.F, pixel2 = 0.F;
         if (pixel_x < width && pixel_y < height) {
-            pixel1 = get_pixel(
-                image1, batch, channel, pixel_y, pixel_x,
-                channels, height, width);
-            pixel2 = get_pixel(
-                image2, batch, channel, pixel_y, pixel_x,
-                channels, height, width);
+            pixel1 = get_pixel(image1, batch, channel, pixel_y, pixel_x, channels, height, width);
+            pixel2 = get_pixel(image2, batch, channel, pixel_y, pixel_x, channels, height, width);
         }
         const int start_y = block.group_index().y * k_block_y;
         const int start_x = block.group_index().x * k_block_x;
@@ -392,16 +402,19 @@ __global__ void fused_l1_ssim_backward_kernel(
             const int y = start_y + row - k_halo;
             for (int column = lane; column < k_shared_x; column += 32) {
                 const int x = start_x + column - k_halo;
-                const float chain = x >= k_halo && x < width - k_halo &&
-                    y >= k_halo && y < height - k_halo ? normalization : 0.F;
-                data[row][column][0] = -ssim_weight * get_pixel(
-                    dm_dmu1, batch, channel, y, x, channels, height, width) * chain;
-                data[row][column][1] = -ssim_weight * get_pixel(
-                    dm_dsigma1_sq, batch, channel, y, x,
-                    channels, height, width) * chain;
-                data[row][column][2] = -ssim_weight * get_pixel(
-                    dm_dsigma12, batch, channel, y, x,
-                    channels, height, width) * chain;
+                const float chain =
+                    x >= k_halo && x < width - k_halo && y >= k_halo && y < height - k_halo
+                        ? normalization
+                        : 0.F;
+                data[row][column][0] =
+                    -ssim_weight *
+                    get_pixel(dm_dmu1, batch, channel, y, x, channels, height, width) * chain;
+                data[row][column][1] =
+                    -ssim_weight *
+                    get_pixel(dm_dsigma1_sq, batch, channel, y, x, channels, height, width) * chain;
+                data[row][column][2] =
+                    -ssim_weight *
+                    get_pixel(dm_dsigma12, batch, channel, y, x, channels, height, width) * chain;
             }
         }
         block.sync();
@@ -439,23 +452,22 @@ __global__ void fused_l1_ssim_backward_kernel(
             }
             const int index = batch * channels * pixels + channel * pixels + pixel_id;
             const float chain = pixel_x >= k_halo && pixel_x < width - k_halo &&
-                pixel_y >= k_halo && pixel_y < height - k_halo ? normalization : 0.F;
-            const float sign = pixel1 == pixel2
-                ? 0.F
-                : copysignf(1.F, pixel1 - pixel2);
+                                        pixel_y >= k_halo && pixel_y < height - k_halo
+                                    ? normalization
+                                    : 0.F;
+            const float sign = pixel1 == pixel2 ? 0.F : copysignf(1.F, pixel1 - pixel2);
             // Outside the window the filtered terms are already zero, so the
             // mask multiply is the only thing the chained pass used to add.
             const float valid = mask_enabled ? mask[pixel_id] : 1.F;
             dl_dimage1[index] +=
-                (sum0 + 2.F * pixel1 * sum1 + pixel2 * sum2 +
-                 (1.F - ssim_weight) * sign * chain) *
+                (sum0 + 2.F * pixel1 * sum1 + pixel2 * sum2 + (1.F - ssim_weight) * sign * chain) *
                 valid;
         }
         block.sync();
     }
 }
 
-}  // namespace
+} // namespace
 
 void fused_l1_ssim_loss(
     const tinytensor::Tensor& prediction,
@@ -477,12 +489,10 @@ void fused_l1_ssim_loss(
     auto dm_dsigma1_sq = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     auto dm_dsigma12 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     const std::size_t loss_block_count =
-        ((width + k_block_x - 1) / k_block_x) *
-        ((height + k_block_y - 1) / k_block_y);
+        ((width + k_block_x - 1) / k_block_x) * ((height + k_block_y - 1) / k_block_y);
     tinytensor::Tensor loss_blocks;
     if (scalar_terms != nullptr)
-        loss_blocks = tinytensor::Tensor::empty(
-            {loss_block_count}, tinytensor::Device::CUDA);
+        loss_blocks = tinytensor::Tensor::empty({loss_block_count}, tinytensor::Device::CUDA);
     tinytensor::Tensor masked_prediction;
     tinytensor::Tensor masked_target;
     if (mask_enabled) {
@@ -498,7 +508,8 @@ void fused_l1_ssim_loss(
         static thread_local SsimGraph state;
         graph = &state;
         stream = state.capture_stream;
-        check_cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin SSIM capture");
+        check_cuda(
+            cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin SSIM capture");
     }
 
     // Without a mask the two image buffers would only ever hold a copy of the
@@ -509,26 +520,23 @@ void fused_l1_ssim_loss(
     if (mask_enabled) {
         apply_mask_kernel<<<(count + threads - 1) / threads, threads, 0, stream>>>(
             prediction.ptr<float>(), target.ptr<float>(), mask.ptr<float>(),
-            masked_prediction.ptr<float>(), masked_target.ptr<float>(),
-            channels, static_cast<int>(height), static_cast<int>(width), true);
+            masked_prediction.ptr<float>(), masked_target.ptr<float>(), channels,
+            static_cast<int>(height), static_cast<int>(width), true);
         image1 = masked_prediction.ptr<float>();
         image2 = masked_target.ptr<float>();
     }
 
     const dim3 block(k_block_x, k_block_y);
-    const dim3 grid(
-        (width + k_block_x - 1) / k_block_x,
-        (height + k_block_y - 1) / k_block_y, 1);
+    const dim3 grid((width + k_block_x - 1) / k_block_x, (height + k_block_y - 1) / k_block_y, 1);
     constexpr float c1 = 0.01F * 0.01F;
     constexpr float c2 = 0.03F * 0.03F;
-    const float normalization = photometric_weight /
-        static_cast<float>(channels * (width - k_halo2) * (height - k_halo2));
+    const float normalization =
+        photometric_weight / static_cast<float>(channels * (width - k_halo2) * (height - k_halo2));
     fused_l1_ssim_forward_kernel<true, false><<<grid, block, 0, stream>>>(
-        ssim_weight, static_cast<int>(height), static_cast<int>(width),
-        channels, c1, c2, image1, image2, dm_dmu1.ptr<float>(),
-        dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>(),
-        scalar_terms != nullptr ? loss_blocks.ptr<float>() : nullptr,
-        normalization, nullptr, false, nullptr, nullptr);
+        ssim_weight, static_cast<int>(height), static_cast<int>(width), channels, c1, c2, image1,
+        image2, dm_dmu1.ptr<float>(), dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>(),
+        scalar_terms != nullptr ? loss_blocks.ptr<float>() : nullptr, normalization, nullptr, false,
+        nullptr, nullptr);
     if (scalar_terms != nullptr)
         reduce_loss_blocks_kernel<<<1, 256, 0, stream>>>(
             loss_blocks.ptr<float>(), loss_block_count, scalar_terms);
@@ -537,12 +545,12 @@ void fused_l1_ssim_loss(
     // the mask multiply folds into the same pass: the backward writes the
     // gradient the photometric loss consumes directly.
     fused_l1_ssim_backward_kernel<<<grid, block, 0, stream>>>(
-        ssim_weight, static_cast<int>(height), static_cast<int>(width), channels,
-        image1, image2, normalization, gradient.ptr<float>(),
-        dm_dmu1.ptr<float>(), dm_dsigma1_sq.ptr<float>(),
+        ssim_weight, static_cast<int>(height), static_cast<int>(width), channels, image1, image2,
+        normalization, gradient.ptr<float>(), dm_dmu1.ptr<float>(), dm_dsigma1_sq.ptr<float>(),
         dm_dsigma12.ptr<float>(), mask.ptr<float>(), mask_enabled);
     check_cuda(cudaGetLastError(), "run fused L1+SSIM CUDA kernels");
-    if (graph) graph->launch();
+    if (graph)
+        graph->launch();
 }
 
 float fused_ssim_metric(
@@ -552,7 +560,8 @@ float fused_ssim_metric(
     const bool mask_enabled,
     const std::uint32_t width,
     const std::uint32_t height) {
-    if (width <= k_halo2 || height <= k_halo2) return 0.F;
+    if (width <= k_halo2 || height <= k_halo2)
+        return 0.F;
     constexpr int channels = 3;
     const std::size_t count = static_cast<std::size_t>(channels) * width * height;
     const auto shape = prediction.shape();
@@ -564,8 +573,7 @@ float fused_ssim_metric(
         masked_target = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     }
     const std::size_t blocks =
-        ((width + k_block_x - 1) / k_block_x) *
-        ((height + k_block_y - 1) / k_block_y);
+        ((width + k_block_x - 1) / k_block_x) * ((height + k_block_y - 1) / k_block_y);
     auto sum = tinytensor::Tensor::empty({blocks}, tinytensor::Device::CUDA);
     auto count_t = tinytensor::Tensor::empty({blocks}, tinytensor::Device::CUDA);
     auto result = tinytensor::Tensor::empty({1}, tinytensor::Device::CUDA);
@@ -583,15 +591,12 @@ float fused_ssim_metric(
     }
 
     const dim3 block(k_block_x, k_block_y);
-    const dim3 grid(
-        (width + k_block_x - 1) / k_block_x,
-        (height + k_block_y - 1) / k_block_y, 1);
+    const dim3 grid((width + k_block_x - 1) / k_block_x, (height + k_block_y - 1) / k_block_y, 1);
     constexpr float c1 = 0.01F * 0.01F;
     constexpr float c2 = 0.03F * 0.03F;
     fused_l1_ssim_forward_kernel<false, true><<<grid, block>>>(
-        1.F, static_cast<int>(height), static_cast<int>(width),
-        channels, c1, c2, image1, image2, nullptr, nullptr, nullptr,
-        nullptr, 0.F, use_mask ? mask.ptr<float>() : nullptr, use_mask,
+        1.F, static_cast<int>(height), static_cast<int>(width), channels, c1, c2, image1, image2,
+        nullptr, nullptr, nullptr, nullptr, 0.F, use_mask ? mask.ptr<float>() : nullptr, use_mask,
         sum.ptr<float>(), count_t.ptr<float>());
     check_cuda(cudaGetLastError(), "run fused SSIM metric");
     reduce_ssim_metric_kernel<<<1, 256>>>(
@@ -600,4 +605,4 @@ float fused_ssim_metric(
     return result.to_vector()[0];
 }
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

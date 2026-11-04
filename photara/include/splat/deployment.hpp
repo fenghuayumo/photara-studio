@@ -20,8 +20,10 @@ struct LodOptions : ProcessingControl {
 };
 // Writes PlayCanvas Streamed SOG v1 (unbundled SOG chunks).
 // Destination must be new; publishing happens only after successful processing.
-void export_streamed_sog(const GaussianModel &, const std::filesystem::path &,
-                         const LodOptions & = {});
+void export_streamed_sog(
+    const GaussianModel&,
+    const std::filesystem::path&,
+    const LodOptions& = {});
 
 struct CollisionOptions : ProcessingControl {
     float voxel_size{0.05F};
@@ -40,11 +42,13 @@ struct CollisionGrid {
     bool playcanvas_coordinates{};
     std::vector<std::uint8_t> solid; // x + nx * (y + ny * z)
 };
-CollisionGrid voxelize_gaussians(const GaussianModel &, const CollisionOptions & = {});
+CollisionGrid voxelize_gaussians(const GaussianModel&, const CollisionOptions& = {});
 // Legacy voxel-face mesh helper.
-mvs::Mesh collision_mesh(const CollisionGrid &);
+mvs::Mesh collision_mesh(const CollisionGrid&);
 // Marching-cubes smooth mesh (the default export mode) or exact voxel faces.
-mvs::Mesh collision_mesh(const CollisionGrid &, CollisionOptions::MeshShape);
-void export_collision(const GaussianModel &, const std::filesystem::path &,
-                      const CollisionOptions & = {});
+mvs::Mesh collision_mesh(const CollisionGrid&, CollisionOptions::MeshShape);
+void export_collision(
+    const GaussianModel&,
+    const std::filesystem::path&,
+    const CollisionOptions& = {});
 } // namespace photara::splat

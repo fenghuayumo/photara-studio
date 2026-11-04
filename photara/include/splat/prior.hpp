@@ -14,11 +14,17 @@ struct TrainingPrior {
     void validate() const;
 };
 [[nodiscard]] std::filesystem::path training_prior_path(
-    const std::filesystem::path& directory, std::uint32_t view_id);
-void save_training_prior(const std::filesystem::path& path,
-    const std::filesystem::path& source_image, const TrainingPrior& prior);
-[[nodiscard]] TrainingPrior load_training_prior(const std::filesystem::path& path,
-    const std::filesystem::path& source_image, const Camera& full_camera,
-    bool require_depth = true, bool require_normals = true);
+    const std::filesystem::path& directory,
+    std::uint32_t view_id);
+void save_training_prior(
+    const std::filesystem::path& path,
+    const std::filesystem::path& source_image,
+    const TrainingPrior& prior);
+[[nodiscard]] TrainingPrior load_training_prior(
+    const std::filesystem::path& path,
+    const std::filesystem::path& source_image,
+    const Camera& full_camera,
+    bool require_depth = true,
+    bool require_normals = true);
 [[nodiscard]] TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& camera);
 } // namespace photara::splat

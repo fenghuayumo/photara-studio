@@ -1,7 +1,11 @@
 RWStructuredBuffer<float> means : register(u0);
 StructuredBuffer<float> opacity_logits : register(t1);
 StructuredBuffer<float> visibility : register(t2);
-struct Push { uint size, seed; float standard_deviation, maximum_noise; uint o0, o1, o2; };
+struct Push {
+    uint size, seed;
+    float standard_deviation, maximum_noise;
+    uint o0, o1, o2;
+};
 [[vk::push_constant]] Push pc;
 
 // Preserve TinyTensor's existing PCG/Box-Muller sequence for each flattened
@@ -22,13 +26,15 @@ float normal_sample(uint index) {
 [numthreads(256, 1, 1)]
 void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     uint i = (group.y * 65535u + group.x) * 256u + lane;
-    if (i >= pc.size || !(visibility[pc.o2+i] > 0.0f)) return;
-    float opacity = 1.0f / (1.0f + exp(-opacity_logits[pc.o1+i]));
+    if (i >= pc.size || !(visibility[pc.o2 + i] > 0.0f))
+        return;
+    float opacity = 1.0f / (1.0f + exp(-opacity_logits[pc.o1 + i]));
     float weight = pow(1.0f - opacity, 150.0f) * pc.standard_deviation;
-    if (weight == 0.0f || pc.maximum_noise == 0.0f) return;
+    if (weight == 0.0f || pc.maximum_noise == 0.0f)
+        return;
     [unroll] for (uint axis = 0; axis < 3; ++axis) {
         uint index = 3u * i + axis;
-        means[pc.o0+index] += clamp(normal_sample(index) * weight,
-            -pc.maximum_noise, pc.maximum_noise);
+        means[pc.o0 + index] +=
+            clamp(normal_sample(index) * weight, -pc.maximum_noise, pc.maximum_noise);
     }
 }

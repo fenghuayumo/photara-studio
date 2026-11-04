@@ -37,63 +37,86 @@ struct AdamStates {
     detail::ShAdamQuant* sh_quant{};
 
     AdamStates() = default;
-    AdamStates(detail::AdamState* means, detail::AdamState* scales,
-        detail::AdamState* rotations, detail::AdamState* opacity,
-        detail::AdamState* sh, detail::AdamState* normals,
+    AdamStates(
+        detail::AdamState* means,
+        detail::AdamState* scales,
+        detail::AdamState* rotations,
+        detail::AdamState* opacity,
+        detail::AdamState* sh,
+        detail::AdamState* normals,
         detail::ShAdamQuant* quant = nullptr)
-        : values{means, scales, rotations, opacity, sh, normals},
-          sh_quant(quant) {}
+        : values{means, scales, rotations, opacity, sh, normals}, sh_quant(quant) {
+    }
 
-    auto begin() { return values.begin(); }
-    auto end() { return values.end(); }
-    auto begin() const { return values.begin(); }
-    auto end() const { return values.end(); }
-    std::size_t size() const { return values.size(); }
-    detail::AdamState*& operator[](std::size_t index) { return values[index]; }
+    auto begin() {
+        return values.begin();
+    }
+    auto end() {
+        return values.end();
+    }
+    auto begin() const {
+        return values.begin();
+    }
+    auto end() const {
+        return values.end();
+    }
+    std::size_t size() const {
+        return values.size();
+    }
+    detail::AdamState*& operator[](std::size_t index) {
+        return values[index];
+    }
     detail::AdamState* const& operator[](std::size_t index) const {
         return values[index];
     }
 };
 
-[[nodiscard]] SceneGeometry training_scene_geometry(
-    const mvs::MvsScene& scene, bool dense_input);
+[[nodiscard]] SceneGeometry training_scene_geometry(const mvs::MvsScene& scene, bool dense_input);
 
 // Brush derives its optimizer/refinement bounds from the middle 80% of the
 // current Gaussian means. scale is BoundingBox::median_size(), while
 // maximum_extent is the largest half-extent used by its out-of-bounds prune.
 [[nodiscard]] SceneGeometry splat_scene_geometry(
-    const std::vector<float>& xyz, float percentile = 0.8F);
+    const std::vector<float>& xyz,
+    float percentile = 0.8F);
 [[nodiscard]] SceneGeometry splat_scene_geometry_device(
-    const tinytensor::Tensor& means, float percentile = 0.8F);
+    const tinytensor::Tensor& means,
+    float percentile = 0.8F);
 
-[[nodiscard]] StrategySchedule strategy_schedule(
-    const TrainingOptions& options);
+[[nodiscard]] StrategySchedule strategy_schedule(const TrainingOptions& options);
 
 [[nodiscard]] bool is_enabled(const TrainingOptions& options);
 
-[[nodiscard]] bool is_refinement_iteration(
-    unsigned iteration, const TrainingOptions& options);
+[[nodiscard]] bool is_refinement_iteration(unsigned iteration, const TrainingOptions& options);
 
 // Shared by panorama ADC strategies; the hard model cap is unchanged.
 [[nodiscard]] std::size_t panorama_progressive_growth_cap(
-    std::size_t initial_count, unsigned iteration,
+    std::size_t initial_count,
+    unsigned iteration,
     const TrainingOptions& options);
 
 [[nodiscard]] GaussianModel clone_model(const GaussianModel& model);
 
 RefinementCounts refine_gaussians(
-    GaussianModel& model, detail::DensificationStats& stats,
-    unsigned iteration, float scene_extent,
-    const mvs::Vec3f& scene_center, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states);
+    GaussianModel& model,
+    detail::DensificationStats& stats,
+    unsigned iteration,
+    float scene_extent,
+    const mvs::Vec3f& scene_center,
+    const TrainingOptions& options,
+    std::mt19937& random,
+    const AdamStates& states);
 
 // EMC (error-map MCMC) refinement: recycle dead rows in place through a
 // long-axis split at error-sampled parents, then grow by a fixed multiplier
 // of the live count, also error-sampled, with a reserved oversize share.
 // Exposed for unit tests.
 RefinementCounts refine_emc(
-    GaussianModel& model, detail::DensificationStats& stats,
-    unsigned iteration, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states);
+    GaussianModel& model,
+    detail::DensificationStats& stats,
+    unsigned iteration,
+    const TrainingOptions& options,
+    std::mt19937& random,
+    const AdamStates& states);
 
-}  // namespace photara::splat::densification
+} // namespace photara::splat::densification

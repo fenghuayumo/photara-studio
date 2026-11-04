@@ -14,33 +14,38 @@ namespace photara::splat::detail {
 #ifdef PHOTARA_HAS_USDC
 namespace {
 namespace usd = lightusd::next;
-constexpr const char *sh_name = "radiance:sphericalHarmonicsCoefficients";
-constexpr const char *degree_name = "radiance:sphericalHarmonicsDegree";
-constexpr const char *antialias_name = "photara:antialias";
-constexpr const char *legacy_comment = "Photara native C++ 3D Gaussian export";
-constexpr const char *y_up_comment = "Photara native C++ 3D Gaussian export; coordinates=RUB-v1";
-void finite(const std::vector<float> &values) {
+constexpr const char* sh_name = "radiance:sphericalHarmonicsCoefficients";
+constexpr const char* degree_name = "radiance:sphericalHarmonicsDegree";
+constexpr const char* antialias_name = "photara:antialias";
+constexpr const char* legacy_comment = "Photara native C++ 3D Gaussian export";
+constexpr const char* y_up_comment = "Photara native C++ 3D Gaussian export; coordinates=RUB-v1";
+void finite(const std::vector<float>& values) {
     for (float value : values)
         if (!std::isfinite(value))
             throw std::runtime_error("USDC refuses non-finite Gaussian values");
 }
-void attribute(usd::PrimSpec &prim, const std::string &name, const std::string &type,
-               usd::Value value, bool vertex = false, int elements = 1) {
-    prim.add_property(name, std::move(value),
-                      name == degree_name ? usd::PropSlot::kFlagUniform : 0);
+void attribute(
+    usd::PrimSpec& prim,
+    const std::string& name,
+    const std::string& type,
+    usd::Value value,
+    bool vertex = false,
+    int elements = 1) {
+    prim.add_property(
+        name, std::move(value), name == degree_name ? usd::PropSlot::kFlagUniform : 0);
     prim.set_property_type_name(name, type);
     if (vertex) {
-        auto &meta = prim.ensure_property_meta(name);
+        auto& meta = prim.ensure_property_meta(name);
         meta.interpolation = "vertex";
         meta.elementSize = elements;
         meta.authored |= usd::PropMeta::kInterpolation | usd::PropMeta::kElementSize;
     }
 }
-std::vector<float> array(const usd::PrimSpec &p, const char *name, std::size_t components) {
-    const auto *value = p.property_value(name);
+std::vector<float> array(const usd::PrimSpec& p, const char* name, std::size_t components) {
+    const auto* value = p.property_value(name);
     if (!value || !value->is_array())
         throw std::runtime_error(std::string("USDC missing ") + name);
-    const auto *data = value->as_float_array();
+    const auto* data = value->as_float_array();
     if (!data || data->empty() || data->size() % components)
         throw std::runtime_error(std::string("Invalid USDC array ") + name);
     finite(*data);
@@ -49,7 +54,7 @@ std::vector<float> array(const usd::PrimSpec &p, const char *name, std::size_t c
 } // namespace
 #endif
 
-std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
+std::vector<std::uint8_t> save_usdc(const GaussianModel& model) {
 #ifdef PHOTARA_HAS_USDC
     const auto n = model.size();
     const auto degree = model.sh_degree;
@@ -62,7 +67,7 @@ std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
     if (positions.size() != n * 3 || scales.size() != n * 3 || quats.size() != n * 4 ||
         opacity.size() != n || sh.size() != n * bases * 3)
         throw std::runtime_error("Invalid USDC Gaussian model shape");
-    for (const auto *values : {&positions, &scales, &quats, &opacity, &sh})
+    for (const auto* values : {&positions, &scales, &quats, &opacity, &sh})
         finite(*values);
     convert_rdf_rub(positions, quats, sh, bases);
     Eigen::Vector3f low = Eigen::Vector3f::Constant(std::numeric_limits<float>::infinity());
@@ -102,27 +107,33 @@ std::vector<std::uint8_t> save_usdc(const GaussianModel &model) {
         throw std::runtime_error("USDC scene bounds overflow");
     usd::Layer layer;
     auto id = layer.define_prim_at_path("/Gaussians", "ParticleField3DGaussianSplat");
-    auto *p = layer.prim_mutable(id);
+    auto* p = layer.prim_mutable(id);
     if (!p)
         throw std::runtime_error("Cannot create USD Gaussian prim");
     if (model.filter_mode == SplatFilterMode::mip_2d) {
-        p->add_property(antialias_name, usd::Value(true),
-                        usd::PropSlot::kFlagCustom | usd::PropSlot::kFlagUniform);
+        p->add_property(
+            antialias_name, usd::Value(true),
+            usd::PropSlot::kFlagCustom | usd::PropSlot::kFlagUniform);
         p->set_property_type_name(antialias_name, "bool");
     }
-    attribute(*p, "positions", "point3f[]",
-              usd::Value::MakeFloatCompArray(std::move(positions), usd::TypeId::Point3f, 3));
+    attribute(
+        *p, "positions", "point3f[]",
+        usd::Value::MakeFloatCompArray(std::move(positions), usd::TypeId::Point3f, 3));
     attribute(*p, "scales", "float3[]", usd::Value::MakeFloat3Array(std::move(scales)));
-    attribute(*p, "orientations", "quatf[]",
-              usd::Value::MakeFloatCompArray(std::move(normalized_quats), usd::TypeId::Quatf, 4));
+    attribute(
+        *p, "orientations", "quatf[]",
+        usd::Value::MakeFloatCompArray(std::move(normalized_quats), usd::TypeId::Quatf, 4));
     attribute(*p, "opacities", "float[]", usd::Value::MakeFloatArray(opacity));
     attribute(*p, degree_name, "int", usd::Value(static_cast<std::int32_t>(degree)));
-    attribute(*p, sh_name, "float3[]", usd::Value::MakeFloat3Array(std::move(sh)), true,
-              static_cast<int>(bases));
-    attribute(*p, "primvars:displayColor", "color3f[]",
-              usd::Value::MakeFloatCompArray(std::move(color), usd::TypeId::Color3f, 3), true);
-    attribute(*p, "primvars:displayOpacity", "float[]",
-              usd::Value::MakeFloatArray(std::move(opacity)), true);
+    attribute(
+        *p, sh_name, "float3[]", usd::Value::MakeFloat3Array(std::move(sh)), true,
+        static_cast<int>(bases));
+    attribute(
+        *p, "primvars:displayColor", "color3f[]",
+        usd::Value::MakeFloatCompArray(std::move(color), usd::TypeId::Color3f, 3), true);
+    attribute(
+        *p, "primvars:displayOpacity", "float[]", usd::Value::MakeFloatArray(std::move(opacity)),
+        true);
     attribute(
         *p, "extent", "float3[]",
         usd::Value::MakeFloat3Array({low.x(), low.y(), low.z(), high.x(), high.y(), high.z()}));
@@ -154,8 +165,8 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
     std::string warn, error;
     if (!usd::LoadUSDFromMemory(bytes.data(), bytes.size(), &stage, &warn, &error))
         throw std::runtime_error("Cannot read USDC: " + error);
-    const auto *layer = stage.GetRootLayer();
-    const auto *p = layer ? layer->prim_at_path("/Gaussians") : nullptr;
+    const auto* layer = stage.GetRootLayer();
+    const auto* p = layer ? layer->prim_at_path("/Gaussians") : nullptr;
     if (!p || p->type_name() != "ParticleField3DGaussianSplat" || layer->prim_count() != 1 ||
         p->property("xformOpOrder"))
         throw std::runtime_error("USDC import supports a single untransformed /Gaussians prim");
@@ -168,15 +179,15 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
     auto positions = array(*p, "positions", 3), scales = array(*p, "scales", 3),
          q = array(*p, "orientations", 4), op = array(*p, "opacities", 1),
          sh = array(*p, sh_name, 3);
-    const auto *d = p->property_value(degree_name);
-    const auto *degree = d ? d->as_int() : nullptr;
+    const auto* d = p->property_value(degree_name);
+    const auto* degree = d ? d->as_int() : nullptr;
     if (!degree || *degree < 0 || *degree > 3)
         throw std::runtime_error("Invalid USDC SH degree");
     const auto n = positions.size() / 3;
     std::size_t bases = (*degree + 1) * (*degree + 1);
     if (scales.size() != n * 3 || q.size() != n * 4 || op.size() != n || sh.size() != n * bases * 3)
         throw std::runtime_error("USDC Gaussian array counts disagree");
-    for (float &s : scales) {
+    for (float& s : scales) {
         if (s <= 0)
             throw std::runtime_error("USDC scale must be positive");
         s = std::log(s);
@@ -192,7 +203,7 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
         wxyz[i * 4 + 2] = rotation.y();
         wxyz[i * 4 + 3] = rotation.z();
     }
-    for (float &o : op) {
+    for (float& o : op) {
         if (o < 0 || o > 1)
             throw std::runtime_error("USDC opacity must be in [0,1]");
         o = std::clamp(o, 1e-7F, 1.F - 1e-7F);
@@ -202,10 +213,12 @@ GaussianModel load_usdc(std::span<const std::uint8_t> bytes, tinytensor::Device 
         convert_rdf_rub(positions, wxyz, sh, bases);
     GaussianModel m;
     m.sh_degree = static_cast<unsigned>(*degree);
-    if (const auto *value = p->property_value(antialias_name)) {
-        const auto *antialias = value->as_bool();
-        if (!antialias) throw std::runtime_error("Invalid USDC photara:antialias attribute");
-        if (*antialias) m.filter_mode = SplatFilterMode::mip_2d;
+    if (const auto* value = p->property_value(antialias_name)) {
+        const auto* antialias = value->as_bool();
+        if (!antialias)
+            throw std::runtime_error("Invalid USDC photara:antialias attribute");
+        if (*antialias)
+            m.filter_mode = SplatFilterMode::mip_2d;
     }
     m.means = tinytensor::Tensor::from_vector(positions, {n, 3}, device);
     m.log_scales = tinytensor::Tensor::from_vector(scales, {n, 3}, device);

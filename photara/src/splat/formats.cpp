@@ -52,11 +52,9 @@ constexpr float k_spz_sqrt_half = 0.7071067811865475244F;
 using detail::k_rdf_to_rub_sh_signs;
 
 [[nodiscard]] std::string lower(std::string value) {
-    std::transform(
-        value.begin(), value.end(), value.begin(),
-        [](const unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
     return value;
 }
 
@@ -64,9 +62,9 @@ using detail::k_rdf_to_rub_sh_signs;
     if (offset > bytes.size() || bytes.size() - offset < 4)
         throw std::runtime_error("Truncated splat format header");
     return static_cast<std::uint32_t>(bytes[offset]) |
-        (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
-        (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U) |
-        (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
 }
 
 [[nodiscard]] std::uint64_t read_u64(const Bytes& bytes, const std::size_t offset) {
@@ -103,8 +101,8 @@ void append_u64(Bytes& bytes, const std::uint64_t value) {
     Bytes bytes(static_cast<std::size_t>(end));
     input.seekg(0, std::ios::beg);
     if (!bytes.empty())
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
+        input.read(
+            reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!input)
         throw std::runtime_error("Failed to read splat file: " + path.string());
     return bytes;
@@ -116,28 +114,29 @@ void write_file(const std::filesystem::path& path, const Bytes& bytes) {
         std::filesystem::create_directories(path.parent_path(), error);
         if (error)
             throw std::runtime_error(
-                "Failed to create splat output directory: " +
-                path.parent_path().string());
+                "Failed to create splat output directory: " + path.parent_path().string());
     }
     std::ofstream output(path, std::ios::binary);
     if (!output)
         throw std::runtime_error("Failed to create splat file: " + path.string());
     if (!bytes.empty())
-        output.write(reinterpret_cast<const char*>(bytes.data()),
-                     static_cast<std::streamsize>(bytes.size()));
+        output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
     if (!output)
         throw std::runtime_error("Failed to write splat file: " + path.string());
 }
 
-[[nodiscard]] std::size_t checked_size(
-    const std::uint64_t value, const char* label) {
+[[nodiscard]] std::size_t checked_size(const std::uint64_t value, const char* label) {
     if (value > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
         throw std::runtime_error(std::string("Splat ") + label + " is too large");
     return static_cast<std::size_t>(value);
 }
 
 [[nodiscard]] std::size_t checked_product(
-    const std::size_t a, const std::size_t b, const char* label) {
+    const std::size_t a,
+    const std::size_t b,
+    const char* label) {
     if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a)
         throw std::runtime_error(std::string("Splat ") + label + " is too large");
     return a * b;
@@ -149,18 +148,15 @@ struct WebpImage {
     Bytes rgba;
 };
 
-[[nodiscard]] WebpImage decode_webp(
-    const Bytes& bytes, const std::string& asset_name) {
+[[nodiscard]] WebpImage decode_webp(const Bytes& bytes, const std::string& asset_name) {
     int width = 0;
     int height = 0;
-    if (bytes.empty() || !WebPGetInfo(bytes.data(), bytes.size(), &width, &height) ||
-        width <= 0 || height <= 0)
+    if (bytes.empty() || !WebPGetInfo(bytes.data(), bytes.size(), &width, &height) || width <= 0 ||
+        height <= 0)
         throw std::runtime_error("Invalid SOG WebP asset: " + asset_name);
     const auto pixel_count = checked_product(
-        static_cast<std::size_t>(width), static_cast<std::size_t>(height),
-        "WebP dimensions");
-    const auto byte_count = checked_product(pixel_count, std::size_t{4},
-                                             "WebP pixels");
+        static_cast<std::size_t>(width), static_cast<std::size_t>(height), "WebP dimensions");
+    const auto byte_count = checked_product(pixel_count, std::size_t{4}, "WebP pixels");
     std::unique_ptr<std::uint8_t, decltype(&WebPFree)> decoded(
         WebPDecodeRGBA(bytes.data(), bytes.size(), &width, &height), &WebPFree);
     if (!decoded)
@@ -173,17 +169,17 @@ struct WebpImage {
 }
 
 [[nodiscard]] Bytes encode_webp(
-    const std::uint8_t* pixels, const int width, const int height,
-    const int channels, const std::string& asset_name) {
-    if (pixels == nullptr || width <= 0 || height <= 0 ||
-        (channels != 3 && channels != 4))
+    const std::uint8_t* pixels,
+    const int width,
+    const int height,
+    const int channels,
+    const std::string& asset_name) {
+    if (pixels == nullptr || width <= 0 || height <= 0 || (channels != 3 && channels != 4))
         throw std::invalid_argument("Invalid SOG WebP input: " + asset_name);
     std::uint8_t* encoded = nullptr;
-    const std::size_t encoded_size = channels == 4
-        ? WebPEncodeLosslessRGBA(
-              pixels, width, height, width * channels, &encoded)
-        : WebPEncodeLosslessRGB(
-              pixels, width, height, width * channels, &encoded);
+    const std::size_t encoded_size =
+        channels == 4 ? WebPEncodeLosslessRGBA(pixels, width, height, width * channels, &encoded)
+                      : WebPEncodeLosslessRGB(pixels, width, height, width * channels, &encoded);
     if (encoded_size == 0 || encoded == nullptr)
         throw std::runtime_error("Failed to encode SOG WebP asset: " + asset_name);
     Bytes result(encoded, encoded + encoded_size);
@@ -200,12 +196,12 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
     if (entry.name.size() > std::numeric_limits<std::uint16_t>::max() ||
         entry.data.size() > std::numeric_limits<std::uint32_t>::max())
         throw std::runtime_error("SOG ZIP entry is too large: " + entry.name);
-    const auto crc = static_cast<std::uint32_t>(crc32(
-        0, entry.data.data(), static_cast<uInt>(entry.data.size())));
+    const auto crc = static_cast<std::uint32_t>(
+        crc32(0, entry.data.data(), static_cast<uInt>(entry.data.size())));
     append_u32(output, 0x04034b50U);
     append_u16(output, 20);
     append_u16(output, 0);
-    append_u16(output, 0);  // Stored: WebP assets are already compressed.
+    append_u16(output, 0); // Stored: WebP assets are already compressed.
     append_u16(output, 0);
     append_u16(output, 0);
     append_u32(output, crc);
@@ -230,12 +226,11 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
     for (const auto& entry : entries) {
         const auto offset = output.size();
         append_zip_entry(output, entry);
-        central.push_back({
-            entry.name, static_cast<std::uint32_t>(crc32(
-                             0, entry.data.data(),
-                             static_cast<uInt>(entry.data.size()))),
-            static_cast<std::uint32_t>(entry.data.size()),
-            static_cast<std::uint32_t>(offset)});
+        central.push_back(
+            {entry.name,
+             static_cast<std::uint32_t>(
+                 crc32(0, entry.data.data(), static_cast<uInt>(entry.data.size()))),
+             static_cast<std::uint32_t>(entry.data.size()), static_cast<std::uint32_t>(offset)});
     }
     const auto central_offset = output.size();
     for (const auto& entry : central) {
@@ -275,7 +270,8 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
 }
 
 [[nodiscard]] Bytes inflate_zip_entry(
-    const std::uint8_t* compressed, const std::size_t compressed_size,
+    const std::uint8_t* compressed,
+    const std::size_t compressed_size,
     const std::size_t uncompressed_size) {
     Bytes result(uncompressed_size);
     z_stream stream{};
@@ -288,31 +284,30 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
     const int status = inflate(&stream, Z_FINISH);
     const bool ok = status == Z_STREAM_END && stream.total_out == uncompressed_size;
     inflateEnd(&stream);
-    if (!ok) throw std::runtime_error("Invalid compressed SOG ZIP entry");
+    if (!ok)
+        throw std::runtime_error("Invalid compressed SOG ZIP entry");
     return result;
 }
 
 [[nodiscard]] std::map<std::string, Bytes> read_sog_zip(const Bytes& bytes) {
     if (bytes.size() < 22)
         throw std::runtime_error("SOG ZIP archive is truncated");
-    const std::size_t search_begin = bytes.size() > 0xffffU + 22U
-        ? bytes.size() - (0xffffU + 22U)
-        : 0;
+    const std::size_t search_begin =
+        bytes.size() > 0xffffU + 22U ? bytes.size() - (0xffffU + 22U) : 0;
     std::size_t eocd = std::numeric_limits<std::size_t>::max();
     for (std::size_t offset = bytes.size() - 22U;; --offset) {
         if (read_u32(bytes, offset) == 0x06054b50U) {
             eocd = offset;
             break;
         }
-        if (offset == search_begin) break;
+        if (offset == search_begin)
+            break;
     }
     if (eocd == std::numeric_limits<std::size_t>::max())
         throw std::runtime_error("SOG is not a ZIP archive");
     const auto entries = read_u32(bytes, eocd + 10) & 0xffffU;
-    const auto central_size = checked_size(read_u32(bytes, eocd + 12),
-                                           "ZIP central directory");
-    const auto central_offset = checked_size(read_u32(bytes, eocd + 16),
-                                             "ZIP central directory");
+    const auto central_size = checked_size(read_u32(bytes, eocd + 12), "ZIP central directory");
+    const auto central_offset = checked_size(read_u32(bytes, eocd + 16), "ZIP central directory");
     if (central_offset > bytes.size() || central_size > bytes.size() - central_offset)
         throw std::runtime_error("SOG ZIP central directory is truncated");
     std::map<std::string, Bytes> result;
@@ -323,15 +318,12 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
             throw std::runtime_error("Invalid SOG ZIP central directory");
         const auto flags = read_u32(bytes, cursor + 8) & 0xffffU;
         const auto method = read_u32(bytes, cursor + 10) & 0xffffU;
-        const auto compressed_size = checked_size(read_u32(bytes, cursor + 20),
-                                                  "ZIP entry");
-        const auto uncompressed_size = checked_size(read_u32(bytes, cursor + 24),
-                                                    "ZIP entry");
+        const auto compressed_size = checked_size(read_u32(bytes, cursor + 20), "ZIP entry");
+        const auto uncompressed_size = checked_size(read_u32(bytes, cursor + 24), "ZIP entry");
         const auto name_size = static_cast<std::size_t>(read_u32(bytes, cursor + 28) & 0xffffU);
         const auto extra_size = static_cast<std::size_t>(read_u32(bytes, cursor + 30) & 0xffffU);
         const auto comment_size = static_cast<std::size_t>(read_u32(bytes, cursor + 32) & 0xffffU);
-        const auto local_offset = checked_size(read_u32(bytes, cursor + 42),
-                                               "ZIP entry offset");
+        const auto local_offset = checked_size(read_u32(bytes, cursor + 42), "ZIP entry offset");
         if ((flags & 1U) != 0 || name_size == 0 ||
             46U + name_size + extra_size + comment_size > bytes.size() - cursor)
             throw std::runtime_error("Unsupported or invalid SOG ZIP entry");
@@ -340,20 +332,21 @@ void append_zip_entry(Bytes& output, const ZipEntry& entry) {
         if (local_offset > bytes.size() || bytes.size() - local_offset < 30 ||
             read_u32(bytes, local_offset) != 0x04034b50U)
             throw std::runtime_error("Invalid SOG ZIP local header");
-        const auto local_name_size = static_cast<std::size_t>(
-            read_u32(bytes, local_offset + 26) & 0xffffU);
-        const auto local_extra_size = static_cast<std::size_t>(
-            read_u32(bytes, local_offset + 28) & 0xffffU);
+        const auto local_name_size =
+            static_cast<std::size_t>(read_u32(bytes, local_offset + 26) & 0xffffU);
+        const auto local_extra_size =
+            static_cast<std::size_t>(read_u32(bytes, local_offset + 28) & 0xffffU);
         const auto data_offset = local_offset + 30U + local_name_size + local_extra_size;
         if (data_offset > bytes.size() || compressed_size > bytes.size() - data_offset)
             throw std::runtime_error("SOG ZIP entry payload is truncated");
         Bytes payload;
         if (method == 0)
-            payload.assign(bytes.begin() + static_cast<std::ptrdiff_t>(data_offset),
-                           bytes.begin() + static_cast<std::ptrdiff_t>(data_offset + compressed_size));
+            payload.assign(
+                bytes.begin() + static_cast<std::ptrdiff_t>(data_offset),
+                bytes.begin() + static_cast<std::ptrdiff_t>(data_offset + compressed_size));
         else if (method == 8)
-            payload = inflate_zip_entry(
-                bytes.data() + data_offset, compressed_size, uncompressed_size);
+            payload =
+                inflate_zip_entry(bytes.data() + data_offset, compressed_size, uncompressed_size);
         else
             throw std::runtime_error("Unsupported SOG ZIP compression method");
         if (payload.size() != uncompressed_size ||
@@ -381,21 +374,20 @@ struct SogAssets {
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
             if (!entry.is_regular_file() || entry.path().filename() == "meta.json")
                 continue;
-            result.files.emplace(entry.path().filename().generic_string(),
-                                 read_file(entry.path()));
+            result.files.emplace(entry.path().filename().generic_string(), read_file(entry.path()));
         }
         return result;
     }
     const auto files = read_sog_zip(read_file(path));
     const auto meta = files.find("meta.json");
-    if (meta == files.end()) throw std::runtime_error("SOG archive has no meta.json");
+    if (meta == files.end())
+        throw std::runtime_error("SOG archive has no meta.json");
     result.meta.assign(meta->second.begin(), meta->second.end());
     result.files = files;
     return result;
 }
 
-[[nodiscard]] const Bytes& sog_file(
-    const SogAssets& assets, const std::string& name) {
+[[nodiscard]] const Bytes& sog_file(const SogAssets& assets, const std::string& name) {
     const auto found = assets.files.find(name);
     if (found == assets.files.end())
         throw std::runtime_error("SOG asset is missing: " + name);
@@ -404,56 +396,60 @@ struct SogAssets {
 
 [[nodiscard]] std::vector<std::string> string_array(const ptree& node) {
     std::vector<std::string> result;
-    for (const auto& child : node) result.push_back(child.second.get_value<std::string>());
+    for (const auto& child : node)
+        result.push_back(child.second.get_value<std::string>());
     return result;
 }
 
 [[nodiscard]] std::vector<float> float_array(
-    const ptree& node, const std::size_t expected, const char* label) {
+    const ptree& node,
+    const std::size_t expected,
+    const char* label) {
     std::vector<float> result;
     result.reserve(expected);
     for (const auto& child : node)
         result.push_back(child.second.get_value<float>());
     if (result.size() != expected)
-        throw std::runtime_error(std::string("SOG ") + label + " must contain " +
-                                 std::to_string(expected) + " values");
+        throw std::runtime_error(
+            std::string("SOG ") + label + " must contain " + std::to_string(expected) + " values");
     return result;
 }
 
-[[nodiscard]] std::vector<float> sog_codebook(
-    const ptree& node, const char* label) {
+[[nodiscard]] std::vector<float> sog_codebook(const ptree& node, const char* label) {
     return float_array(node.get_child("codebook"), 256, label);
 }
 
 [[nodiscard]] std::array<std::size_t, 2> sog_dimensions(
-    const WebpImage& lower_image, const WebpImage& upper_image,
-    const WebpImage& scales, const WebpImage& quats, const WebpImage& sh0,
+    const WebpImage& lower_image,
+    const WebpImage& upper_image,
+    const WebpImage& scales,
+    const WebpImage& quats,
+    const WebpImage& sh0,
     const std::size_t count) {
-    const std::array<const WebpImage*, 5> images{
-        &lower_image, &upper_image, &scales, &quats, &sh0};
+    const std::array<const WebpImage*, 5> images{&lower_image, &upper_image, &scales, &quats, &sh0};
     for (const WebpImage* image : images)
         if (image->width != lower_image.width || image->height != lower_image.height)
             throw std::runtime_error("SOG per-Gaussian images have different dimensions");
     const auto pixels = checked_product(
-        static_cast<std::size_t>(lower_image.width),
-        static_cast<std::size_t>(lower_image.height), "SOG image dimensions");
+        static_cast<std::size_t>(lower_image.width), static_cast<std::size_t>(lower_image.height),
+        "SOG image dimensions");
     if (count == 0 || count > pixels)
         throw std::runtime_error("SOG count exceeds its image capacity");
-    return {static_cast<std::size_t>(lower_image.width),
-            static_cast<std::size_t>(lower_image.height)};
+    return {
+        static_cast<std::size_t>(lower_image.width), static_cast<std::size_t>(lower_image.height)};
 }
 
 [[nodiscard]] float unlog_position(const float value) {
     return std::copysign(std::expm1(std::abs(value)), value);
 }
 
-[[nodiscard]] std::uint8_t nearest_codebook(
-    const std::vector<float>& codebook, const float value) {
+[[nodiscard]] std::uint8_t nearest_codebook(const std::vector<float>& codebook, const float value) {
     return detail::sog_nearest_codebook(codebook, value);
 }
 
 [[nodiscard]] std::vector<float> make_codebook(
-    const std::vector<float>& values, const char* label) {
+    const std::vector<float>& values,
+    const char* label) {
     return detail::sog_codebook(values, label);
 }
 
@@ -463,21 +459,25 @@ struct SogAssets {
     return output.str();
 }
 
-void append_json_float_array(
-    std::ostringstream& output, const std::vector<float>& values) {
+void append_json_float_array(std::ostringstream& output, const std::vector<float>& values) {
     output << '[';
     for (std::size_t i = 0; i < values.size(); ++i) {
-        if (i != 0) output << ',';
+        if (i != 0)
+            output << ',';
         output << json_float(values[i]);
     }
     output << ']';
 }
 
 [[nodiscard]] GaussianModel make_model(
-    const std::size_t count, const unsigned degree,
-    const std::vector<float>& means, const std::vector<float>& scales,
-    const std::vector<float>& rotations, const std::vector<float>& opacities,
-    const std::vector<float>& sh, const tinytensor::Device device) {
+    const std::size_t count,
+    const unsigned degree,
+    const std::vector<float>& means,
+    const std::vector<float>& scales,
+    const std::vector<float>& rotations,
+    const std::vector<float>& opacities,
+    const std::vector<float>& sh,
+    const tinytensor::Device device) {
     if (count == 0 || degree > 3)
         throw std::runtime_error("Splat model has an unsupported point count or SH degree");
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
@@ -486,78 +486,66 @@ void append_json_float_array(
         sh.size() != count * bases * 3U)
         throw std::runtime_error("Decoded splat model has inconsistent attribute sizes");
     const auto finite = [](const std::vector<float>& values) {
-        return std::all_of(values.begin(), values.end(),
-                           [](const float value) { return std::isfinite(value); });
+        return std::all_of(
+            values.begin(), values.end(), [](const float value) { return std::isfinite(value); });
     };
-    if (!finite(means) || !finite(scales) || !finite(rotations) ||
-        !finite(opacities) || !finite(sh))
+    if (!finite(means) || !finite(scales) || !finite(rotations) || !finite(opacities) ||
+        !finite(sh))
         throw std::runtime_error("Decoded splat model contains non-finite values");
 
     GaussianModel model;
-    model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, device);
-    model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, device);
-    model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, device);
-    model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, device);
-    model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, device);
+    model.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3U}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, 4U}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(opacities, {count, 1U}, device);
+    model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, device);
     model.sh_degree = degree;
     // SOG/SPZ do not carry Photara's optional normal field. Seed it from the
     // thinnest Gaussian axis so a subsequently extracted surface remains usable.
     std::vector<float> normal_features(count * 4U, 0.F);
     for (std::size_t index = 0; index < count; ++index) {
         const auto scale = scales.begin() + static_cast<std::ptrdiff_t>(3U * index);
-        const int axis = static_cast<int>(std::distance(
-            scale, std::min_element(scale, scale + 3)));
+        const int axis = static_cast<int>(std::distance(scale, std::min_element(scale, scale + 3)));
         float w = rotations[4U * index];
         float x = rotations[4U * index + 1U];
         float y = rotations[4U * index + 2U];
         float z = rotations[4U * index + 3U];
-        const float inverse = 1.F / std::max(
-            std::sqrt(w * w + x * x + y * y + z * z), 1e-12F);
+        const float inverse = 1.F / std::max(std::sqrt(w * w + x * x + y * y + z * z), 1e-12F);
         w *= inverse;
         x *= inverse;
         y *= inverse;
         z *= inverse;
-        const std::array<std::array<float, 3>, 3> columns{{
-            {{1.F - 2.F * (y * y + z * z), 2.F * (x * y + w * z),
-              2.F * (x * z - w * y)}},
-            {{2.F * (x * y - w * z), 1.F - 2.F * (x * x + z * z),
-              2.F * (y * z + w * x)}},
-            {{2.F * (x * z + w * y), 2.F * (y * z - w * x),
-              1.F - 2.F * (x * x + y * y)}}}};
+        const std::array<std::array<float, 3>, 3> columns{
+            {{{1.F - 2.F * (y * y + z * z), 2.F * (x * y + w * z), 2.F * (x * z - w * y)}},
+             {{2.F * (x * y - w * z), 1.F - 2.F * (x * x + z * z), 2.F * (y * z + w * x)}},
+             {{2.F * (x * z + w * y), 2.F * (y * z - w * x), 1.F - 2.F * (x * x + y * y)}}}};
         for (int component = 0; component < 3; ++component)
             normal_features[4U * index + static_cast<std::size_t>(component)] =
-                columns[static_cast<std::size_t>(axis)]
-                       [static_cast<std::size_t>(component)];
+                columns[static_cast<std::size_t>(axis)][static_cast<std::size_t>(component)];
         normal_features[4U * index + 3U] = 1.F;
     }
-    model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4U}, device);
+    model.normal_features = tinytensor::Tensor::from_vector(normal_features, {count, 4U}, device);
     return model;
 }
 
-void validate_model_shape(
-    const GaussianModel& model, std::size_t& count, std::size_t& bases) {
+void validate_model_shape(const GaussianModel& model, std::size_t& count, std::size_t& bases) {
     count = model.size();
     if (count == 0 || !model.sh.is_valid() || model.sh.shape().rank() != 3)
         throw std::runtime_error("Cannot write an empty or invalid Gaussian model");
     bases = model.sh.shape()[1];
-    const auto expected_bases = static_cast<std::size_t>(model.sh_degree + 1U) *
-        (model.sh_degree + 1U);
-    if (model.sh_degree > 3 || bases != expected_bases ||
-        model.means.shape().rank() != 2 || model.means.shape()[1] != 3 ||
-        model.log_scales.shape().rank() != 2 || model.log_scales.shape()[1] != 3 ||
-        model.quaternions.shape().rank() != 2 || model.quaternions.shape()[1] != 4 ||
-        model.opacity_logits.shape().rank() != 2 || model.opacity_logits.shape()[1] != 1)
+    const auto expected_bases =
+        static_cast<std::size_t>(model.sh_degree + 1U) * (model.sh_degree + 1U);
+    if (model.sh_degree > 3 || bases != expected_bases || model.means.shape().rank() != 2 ||
+        model.means.shape()[1] != 3 || model.log_scales.shape().rank() != 2 ||
+        model.log_scales.shape()[1] != 3 || model.quaternions.shape().rank() != 2 ||
+        model.quaternions.shape()[1] != 4 || model.opacity_logits.shape().rank() != 2 ||
+        model.opacity_logits.shape()[1] != 1)
         throw std::runtime_error("Gaussian model has unsupported tensor shapes");
 }
 
 [[nodiscard]] GaussianModel load_sog(
-    const std::filesystem::path& path, const tinytensor::Device device) {
+    const std::filesystem::path& path,
+    const tinytensor::Device device) {
     const SogAssets assets = read_sog_assets(path);
     std::istringstream json(assets.meta);
     ptree meta;
@@ -604,8 +592,7 @@ void validate_model_shape(
         const auto shn_files = string_array(shn->get_child("files"));
         if (shn_files.size() != 2)
             throw std::runtime_error("SOG shN.files must contain two assets");
-        shn_centroids = decode_webp(
-            sog_file(assets, shn_files[0]), shn_files[0]);
+        shn_centroids = decode_webp(sog_file(assets, shn_files[0]), shn_files[0]);
         shn_labels = decode_webp(sog_file(assets, shn_files[1]), shn_files[1]);
         if (shn_labels.width != static_cast<int>(dimensions[0]) ||
             shn_labels.height != static_cast<int>(dimensions[1]) ||
@@ -630,8 +617,9 @@ void validate_model_shape(
                 means_l.rgba[pixel + static_cast<std::size_t>(axis)]);
             const float normalized = static_cast<float>(quantized) / 65535.F;
             const float encoded = means_mins[static_cast<std::size_t>(axis)] +
-                (means_maxs[static_cast<std::size_t>(axis)] -
-                 means_mins[static_cast<std::size_t>(axis)]) * normalized;
+                                  (means_maxs[static_cast<std::size_t>(axis)] -
+                                   means_mins[static_cast<std::size_t>(axis)]) *
+                                      normalized;
             const float rub_position = unlog_position(encoded);
             means[3U * index + static_cast<std::size_t>(axis)] =
                 axis == 0 ? rub_position : -rub_position;
@@ -639,12 +627,12 @@ void validate_model_shape(
                 scale_codebook[scales.rgba[pixel + static_cast<std::size_t>(axis)]];
         }
         // SOG stores quaternions in scalar-first (w,x,y,z) order.
-        const float q0 = (static_cast<float>(quats.rgba[pixel + 0U]) / 255.F - 0.5F) *
-            2.F / std::sqrt(2.F);
-        const float q1 = (static_cast<float>(quats.rgba[pixel + 1U]) / 255.F - 0.5F) *
-            2.F / std::sqrt(2.F);
-        const float q2 = (static_cast<float>(quats.rgba[pixel + 2U]) / 255.F - 0.5F) *
-            2.F / std::sqrt(2.F);
+        const float q0 =
+            (static_cast<float>(quats.rgba[pixel + 0U]) / 255.F - 0.5F) * 2.F / std::sqrt(2.F);
+        const float q1 =
+            (static_cast<float>(quats.rgba[pixel + 1U]) / 255.F - 0.5F) * 2.F / std::sqrt(2.F);
+        const float q2 =
+            (static_cast<float>(quats.rgba[pixel + 2U]) / 255.F - 0.5F) * 2.F / std::sqrt(2.F);
         const auto mode = quats.rgba[pixel + 3U];
         if (mode < 252U || mode > 255U)
             throw std::runtime_error("SOG contains an invalid quaternion mode");
@@ -663,8 +651,7 @@ void validate_model_shape(
         rotations[4U * index + 1U] = stored[1];
         rotations[4U * index + 2U] = -stored[2];
         rotations[4U * index + 3U] = -stored[3];
-        opacities[index] = logit(
-            static_cast<float>(sh0.rgba[pixel + 3U]) / 255.F);
+        opacities[index] = logit(static_cast<float>(sh0.rgba[pixel + 3U]) / 255.F);
     }
 
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
@@ -685,23 +672,22 @@ void validate_model_shape(
             const auto centroid_pixel =
                 (y * static_cast<std::size_t>(shn_centroids.width) + x) * 4U;
             for (int channel = 0; channel < 3; ++channel) {
-                const auto target = (index * bases + coefficient + 1U) * 3U +
-                    static_cast<std::size_t>(channel);
-                sh[target] = shn_codebook[
-                    shn_centroids.rgba[centroid_pixel + static_cast<std::size_t>(channel)]] *
+                const auto target =
+                    (index * bases + coefficient + 1U) * 3U + static_cast<std::size_t>(channel);
+                sh[target] =
+                    shn_codebook[shn_centroids
+                                     .rgba[centroid_pixel + static_cast<std::size_t>(channel)]] *
                     k_rdf_to_rub_sh_signs[coefficient];
             }
         }
     }
     auto model = make_model(count, degree, means, log_scales, rotations, opacities, sh, device);
-    if (meta.get<std::string>("model", "") == "antialiased" ||
-        meta.get<bool>("antialias", false))
+    if (meta.get<std::string>("model", "") == "antialiased" || meta.get<bool>("antialias", false))
         model.filter_mode = SplatFilterMode::mip_2d;
     return model;
 }
 
-[[nodiscard]] std::uint8_t spz_quantize_sh(
-    const float value, const int bucket_size) {
+[[nodiscard]] std::uint8_t spz_quantize_sh(const float value, const int bucket_size) {
     int quantized = static_cast<int>(std::lround(value * 128.F + 128.F));
     quantized = ((quantized + bucket_size / 2) / bucket_size) * bucket_size;
     return static_cast<std::uint8_t>(std::clamp(quantized, 0, 255));
@@ -720,15 +706,16 @@ void validate_model_shape(
     if (exponent == 0xffU)
         return static_cast<std::uint16_t>(sign | 0x7c00U | (mantissa != 0));
     const int adjusted = static_cast<int>(exponent) - 127 + 15;
-    if (adjusted >= 31) return static_cast<std::uint16_t>(sign | 0x7c00U);
+    if (adjusted >= 31)
+        return static_cast<std::uint16_t>(sign | 0x7c00U);
     if (adjusted <= 0) {
-        if (adjusted < -10) return static_cast<std::uint16_t>(sign);
+        if (adjusted < -10)
+            return static_cast<std::uint16_t>(sign);
         const std::uint32_t shifted = (mantissa | 0x800000U) >> (1 - adjusted);
         return static_cast<std::uint16_t>(sign | ((shifted + 0x1000U) >> 13U));
     }
     return static_cast<std::uint16_t>(
-        sign | (static_cast<std::uint32_t>(adjusted) << 10U) |
-        ((mantissa + 0x1000U) >> 13U));
+        sign | (static_cast<std::uint32_t>(adjusted) << 10U) | ((mantissa + 0x1000U) >> 13U));
 }
 
 [[nodiscard]] float half_to_float(const std::uint16_t value) {
@@ -746,8 +733,7 @@ void validate_model_shape(
                 ++shift;
             }
             mantissa &= 0x3ffU;
-            bits = sign | (static_cast<std::uint32_t>(127 - 15 - shift) << 23U) |
-                (mantissa << 13U);
+            bits = sign | (static_cast<std::uint32_t>(127 - 15 - shift) << 23U) | (mantissa << 13U);
         }
     } else if (exponent == 0x1fU) {
         bits = sign | 0x7f800000U | (mantissa << 13U);
@@ -759,29 +745,31 @@ void validate_model_shape(
     return result;
 }
 
-void pack_spz_quaternion(
-    std::uint8_t output[4], const float* current_rotation) {
+void pack_spz_quaternion(std::uint8_t output[4], const float* current_rotation) {
     // SPZ's GaussianCloud uses xyzw; convert Photara's wxyz and RDF axes.
     std::array<float, 4> q{
-        current_rotation[1], -current_rotation[2],
-        -current_rotation[3], current_rotation[0]};
+        current_rotation[1], -current_rotation[2], -current_rotation[3], current_rotation[0]};
     float norm = 0.F;
-    for (const float value : q) norm += value * value;
+    for (const float value : q)
+        norm += value * value;
     norm = 1.F / std::max(std::sqrt(norm), 1e-12F);
-    for (float& value : q) value *= norm;
+    for (float& value : q)
+        value *= norm;
     std::size_t largest = 0;
     for (std::size_t i = 1; i < 4; ++i)
-        if (std::abs(q[i]) > std::abs(q[largest])) largest = i;
+        if (std::abs(q[i]) > std::abs(q[largest]))
+            largest = i;
     if (q[largest] < 0.F)
-        for (float& value : q) value = -value;
+        for (float& value : q)
+            value = -value;
     std::uint32_t packed = static_cast<std::uint32_t>(largest);
     for (std::size_t i = 0; i < 4; ++i) {
-        if (i == largest) continue;
+        if (i == largest)
+            continue;
         const std::uint32_t negative = q[i] < 0.F ? 1U : 0U;
-        const auto magnitude = static_cast<std::uint32_t>(std::lround(
-            511.F * std::abs(q[i]) / k_spz_sqrt_half));
-        packed = (packed << 10U) | (negative << 9U) |
-            std::min<std::uint32_t>(magnitude, 511U);
+        const auto magnitude =
+            static_cast<std::uint32_t>(std::lround(511.F * std::abs(q[i]) / k_spz_sqrt_half));
+        packed = (packed << 10U) | (negative << 9U) | std::min<std::uint32_t>(magnitude, 511U);
     }
     for (unsigned byte = 0; byte < 4; ++byte)
         output[byte] = static_cast<std::uint8_t>(packed >> (8U * byte));
@@ -789,19 +777,20 @@ void pack_spz_quaternion(
 
 [[nodiscard]] std::array<float, 4> unpack_spz_quaternion(const std::uint8_t input[4]) {
     std::uint32_t packed = static_cast<std::uint32_t>(input[0]) |
-        (static_cast<std::uint32_t>(input[1]) << 8U) |
-        (static_cast<std::uint32_t>(input[2]) << 16U) |
-        (static_cast<std::uint32_t>(input[3]) << 24U);
+                           (static_cast<std::uint32_t>(input[1]) << 8U) |
+                           (static_cast<std::uint32_t>(input[2]) << 16U) |
+                           (static_cast<std::uint32_t>(input[3]) << 24U);
     const std::size_t largest = packed >> 30U;
     std::array<float, 4> q{};
     float sum = 0.F;
     for (int i = 3; i >= 0; --i) {
-        if (static_cast<std::size_t>(i) == largest) continue;
+        if (static_cast<std::size_t>(i) == largest)
+            continue;
         const auto magnitude = packed & 511U;
         const bool negative = ((packed >> 9U) & 1U) != 0;
-        q[static_cast<std::size_t>(i)] = k_spz_sqrt_half *
-            static_cast<float>(magnitude) / 511.F;
-        if (negative) q[static_cast<std::size_t>(i)] = -q[static_cast<std::size_t>(i)];
+        q[static_cast<std::size_t>(i)] = k_spz_sqrt_half * static_cast<float>(magnitude) / 511.F;
+        if (negative)
+            q[static_cast<std::size_t>(i)] = -q[static_cast<std::size_t>(i)];
         sum += q[static_cast<std::size_t>(i)] * q[static_cast<std::size_t>(i)];
         packed >>= 10U;
     }
@@ -816,8 +805,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 
 [[nodiscard]] Bytes zstd_compress(const Bytes& source) {
     Bytes compressed(ZSTD_compressBound(source.size()));
-    const auto size = ZSTD_compress(
-        compressed.data(), compressed.size(), source.data(), source.size(), 12);
+    const auto size =
+        ZSTD_compress(compressed.data(), compressed.size(), source.data(), source.size(), 12);
     if (ZSTD_isError(size))
         throw std::runtime_error(
             std::string("SPZ Zstd compression failed: ") + ZSTD_getErrorName(size));
@@ -826,11 +815,11 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 }
 
 [[nodiscard]] Bytes zstd_decompress(
-    const std::uint8_t* source, const std::size_t source_size,
+    const std::uint8_t* source,
+    const std::size_t source_size,
     const std::size_t destination_size) {
     Bytes destination(destination_size);
-    const auto size = ZSTD_decompress(
-        destination.data(), destination.size(), source, source_size);
+    const auto size = ZSTD_decompress(destination.data(), destination.size(), source, source_size);
     if (ZSTD_isError(size) || size != destination_size)
         throw std::runtime_error("Invalid SPZ Zstd attribute stream");
     return destination;
@@ -850,8 +839,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         stream.avail_out = static_cast<uInt>(buffer.size());
         status = inflate(&stream, Z_NO_FLUSH);
         const auto produced = buffer.size() - stream.avail_out;
-        output.insert(output.end(), buffer.begin(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(produced));
+        output.insert(
+            output.end(), buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(produced));
     }
     inflateEnd(&stream);
     if (status != Z_STREAM_END)
@@ -862,8 +851,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 [[nodiscard]] Bytes gzip_compress(const Bytes& source) {
     z_stream stream{};
     if (deflateInit2(
-            &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS,
-            9, Z_DEFAULT_STRATEGY) != Z_OK)
+            &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 9, Z_DEFAULT_STRATEGY) !=
+        Z_OK)
         throw std::runtime_error("Failed to initialize SPZ gzip compressor");
     Bytes output;
     std::array<std::uint8_t, 64U * 1024U> buffer{};
@@ -875,9 +864,10 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         stream.avail_out = static_cast<uInt>(buffer.size());
         status = deflate(&stream, Z_FINISH);
         const auto produced = buffer.size() - stream.avail_out;
-        output.insert(output.end(), buffer.begin(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(produced));
-        if (status != Z_OK && status != Z_STREAM_END) break;
+        output.insert(
+            output.end(), buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(produced));
+        if (status != Z_OK && status != Z_STREAM_END)
+            break;
     }
     deflateEnd(&stream);
     if (status != Z_STREAM_END)
@@ -897,25 +887,23 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     const auto opacities = model.opacity_logits.to_vector();
     const auto sh = model.sh.to_vector();
     const auto finite = [](const std::vector<float>& values) {
-        return std::all_of(values.begin(), values.end(),
-                           [](const float value) { return std::isfinite(value); });
+        return std::all_of(
+            values.begin(), values.end(), [](const float value) { return std::isfinite(value); });
     };
-    if (!finite(means) || !finite(scales) || !finite(rotations) ||
-        !finite(opacities) || !finite(sh))
+    if (!finite(means) || !finite(scales) || !finite(rotations) || !finite(opacities) ||
+        !finite(sh))
         throw std::runtime_error("Refusing to write non-finite SPZ values");
 
     Bytes positions;
     positions.reserve(count * 9U);
     for (std::size_t index = 0; index < count; ++index) {
         const std::array<float, 3> position{
-            means[3U * index], -means[3U * index + 1U],
-            -means[3U * index + 2U]};
+            means[3U * index], -means[3U * index + 1U], -means[3U * index + 2U]};
         for (const float value : position) {
             const auto fixed = static_cast<std::int64_t>(std::llround(value * 4096.F));
             if (fixed < -0x800000LL || fixed > 0x7fffffLL)
                 throw std::runtime_error("SPZ position exceeds 24-bit fixed-point range");
-            const auto encoded = static_cast<std::uint32_t>(
-                static_cast<std::int32_t>(fixed));
+            const auto encoded = static_cast<std::uint32_t>(static_cast<std::int32_t>(fixed));
             positions.push_back(static_cast<std::uint8_t>(encoded & 0xffU));
             positions.push_back(static_cast<std::uint8_t>((encoded >> 8U) & 0xffU));
             positions.push_back(static_cast<std::uint8_t>((encoded >> 16U) & 0xffU));
@@ -929,42 +917,42 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     packed_scales.reserve(count * 3U);
     for (std::size_t index = 0; index < count; ++index) {
         const float alpha = 1.F / (1.F + std::exp(-opacities[index]));
-        alphas.push_back(static_cast<std::uint8_t>(std::clamp(
-            std::lround(alpha * 255.F), 0L, 255L)));
+        alphas.push_back(
+            static_cast<std::uint8_t>(std::clamp(std::lround(alpha * 255.F), 0L, 255L)));
         for (int channel = 0; channel < 3; ++channel)
             colors.push_back(static_cast<std::uint8_t>(std::clamp(
-                std::lround(sh[(index * bases) * 3U + static_cast<std::size_t>(channel)] *
-                                k_spz_color_scale * 255.F + 127.5F),
+                std::lround(
+                    sh[(index * bases) * 3U + static_cast<std::size_t>(channel)] *
+                        k_spz_color_scale * 255.F +
+                    127.5F),
                 0L, 255L)));
         for (int axis = 0; axis < 3; ++axis)
             packed_scales.push_back(static_cast<std::uint8_t>(std::clamp(
-                std::lround((scales[3U * index + static_cast<std::size_t>(axis)] +
-                             10.F) * 16.F),
+                std::lround((scales[3U * index + static_cast<std::size_t>(axis)] + 10.F) * 16.F),
                 0L, 255L)));
     }
     Bytes packed_rotations(count * 4U);
     for (std::size_t index = 0; index < count; ++index)
-        pack_spz_quaternion(
-            packed_rotations.data() + 4U * index,
-            rotations.data() + 4U * index);
+        pack_spz_quaternion(packed_rotations.data() + 4U * index, rotations.data() + 4U * index);
     Bytes packed_sh;
     const std::size_t ac_count = bases - 1U;
     packed_sh.reserve(count * ac_count * 3U);
     for (std::size_t index = 0; index < count; ++index)
         for (std::size_t coefficient = 0; coefficient < ac_count; ++coefficient)
             for (int channel = 0; channel < 3; ++channel) {
-                const auto source = (index * bases + coefficient + 1U) * 3U +
-                    static_cast<std::size_t>(channel);
+                const auto source =
+                    (index * bases + coefficient + 1U) * 3U + static_cast<std::size_t>(channel);
                 const float converted = sh[source] * k_rdf_to_rub_sh_signs[coefficient];
                 const int bits = coefficient < 3U ? 5 : 4;
                 packed_sh.push_back(spz_quantize_sh(converted, 1 << (8 - bits)));
             }
 
-    const std::array<const Bytes*, 6> streams{
-        &positions, &alphas, &colors, &packed_scales, &packed_rotations, &packed_sh};
+    const std::array<const Bytes*, 6> streams{&positions,     &alphas,           &colors,
+                                              &packed_scales, &packed_rotations, &packed_sh};
     std::vector<Bytes> compressed;
     compressed.reserve(streams.size());
-    for (const Bytes* stream : streams) compressed.push_back(zstd_compress(*stream));
+    for (const Bytes* stream : streams)
+        compressed.push_back(zstd_compress(*stream));
     Bytes output;
     output.reserve(32U + streams.size() * 16U);
     // NgspFileHeader, version 4, no extensions, six streams.
@@ -987,10 +975,16 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 }
 
 [[nodiscard]] GaussianModel decode_spz_packed(
-    const std::uint32_t version, const std::uint32_t count,
-    const unsigned degree, const unsigned fractional_bits,
-    const Bytes& positions, const Bytes& alphas, const Bytes& colors,
-    const Bytes& scales, const Bytes& rotations, const Bytes& sh,
+    const std::uint32_t version,
+    const std::uint32_t count,
+    const unsigned degree,
+    const unsigned fractional_bits,
+    const Bytes& positions,
+    const Bytes& alphas,
+    const Bytes& colors,
+    const Bytes& scales,
+    const Bytes& rotations,
+    const Bytes& sh,
     const tinytensor::Device device) {
     if (count == 0 || degree > 3 || fractional_bits > 23)
         throw std::runtime_error("Unsupported SPZ point count, degree, or precision");
@@ -1001,8 +995,7 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     const auto expected_rotations = count * (version >= 3 ? 4U : 3U);
     if (positions.size() != expected_positions || alphas.size() != count ||
         colors.size() != count * 3U || scales.size() != count * 3U ||
-        rotations.size() != expected_rotations ||
-        sh.size() != count * ac_count * 3U)
+        rotations.size() != expected_rotations || sh.size() != count * ac_count * 3U)
         throw std::runtime_error("SPZ attribute stream sizes do not match its header");
     std::vector<float> means(count * 3U);
     std::vector<float> log_scales(count * 3U);
@@ -1019,12 +1012,14 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
                     (static_cast<std::uint16_t>(positions[position_cursor + 1U]) << 8U)));
                 position_cursor += 2U;
             } else {
-                std::int32_t fixed = positions[position_cursor] |
+                std::int32_t fixed =
+                    positions[position_cursor] |
                     (static_cast<std::int32_t>(positions[position_cursor + 1U]) << 8U) |
                     (static_cast<std::int32_t>(positions[position_cursor + 2U]) << 16U);
-                if ((fixed & 0x800000) != 0) fixed |= ~0xffffff;
+                if ((fixed & 0x800000) != 0)
+                    fixed |= ~0xffffff;
                 value = static_cast<float>(fixed) /
-                    static_cast<float>(std::uint32_t{1} << fractional_bits);
+                        static_cast<float>(std::uint32_t{1} << fractional_bits);
                 position_cursor += 3U;
             }
             const std::size_t target = 3U * index + static_cast<std::size_t>(axis);
@@ -1032,61 +1027,63 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         }
         opacities[index] = std::log(
             std::clamp(static_cast<float>(alphas[index]) / 255.F, 1e-5F, 1.F - 1e-5F) /
-            (1.F - std::clamp(static_cast<float>(alphas[index]) / 255.F,
-                              1e-5F, 1.F - 1e-5F)));
+            (1.F - std::clamp(static_cast<float>(alphas[index]) / 255.F, 1e-5F, 1.F - 1e-5F)));
         for (int axis = 0; axis < 3; ++axis)
             log_scales[3U * index + static_cast<std::size_t>(axis)] =
-                static_cast<float>(scales[3U * index + static_cast<std::size_t>(axis)]) /
-                    16.F - 10.F;
-        const auto quaternion = version >= 3
-            ? unpack_spz_quaternion(rotations.data() + 4U * index)
-            : std::array<float, 4>{};
+                static_cast<float>(scales[3U * index + static_cast<std::size_t>(axis)]) / 16.F -
+                10.F;
+        const auto quaternion = version >= 3 ? unpack_spz_quaternion(rotations.data() + 4U * index)
+                                             : std::array<float, 4>{};
         if (version < 3) {
             std::array<float, 3> xyz{};
             for (int component = 0; component < 3; ++component)
                 xyz[static_cast<std::size_t>(component)] =
-                    static_cast<float>(rotations[3U * index + static_cast<std::size_t>(component)]) /
-                        127.5F - 1.F;
-            const float w = std::sqrt(std::max(
-                0.F, 1.F - xyz[0] * xyz[0] - xyz[1] * xyz[1] - xyz[2] * xyz[2]));
+                    static_cast<float>(
+                        rotations[3U * index + static_cast<std::size_t>(component)]) /
+                        127.5F -
+                    1.F;
+            const float w =
+                std::sqrt(std::max(0.F, 1.F - xyz[0] * xyz[0] - xyz[1] * xyz[1] - xyz[2] * xyz[2]));
             // Legacy SPZ stores xyz in its xyzw/RUB convention.
             model_rotations[4U * index] = w;
             model_rotations[4U * index + 1U] = xyz[0];
             model_rotations[4U * index + 2U] = -xyz[1];
             model_rotations[4U * index + 3U] = -xyz[2];
         } else {
-            std::copy(quaternion.begin(), quaternion.end(),
-                      model_rotations.begin() + static_cast<std::ptrdiff_t>(4U * index));
+            std::copy(
+                quaternion.begin(), quaternion.end(),
+                model_rotations.begin() + static_cast<std::ptrdiff_t>(4U * index));
         }
         model_sh[(index * bases) * 3U + 0U] =
-            (static_cast<float>(colors[3U * index]) / 255.F - 0.5F) /
-            k_spz_color_scale;
+            (static_cast<float>(colors[3U * index]) / 255.F - 0.5F) / k_spz_color_scale;
         model_sh[(index * bases) * 3U + 1U] =
-            (static_cast<float>(colors[3U * index + 1U]) / 255.F - 0.5F) /
-            k_spz_color_scale;
+            (static_cast<float>(colors[3U * index + 1U]) / 255.F - 0.5F) / k_spz_color_scale;
         model_sh[(index * bases) * 3U + 2U] =
-            (static_cast<float>(colors[3U * index + 2U]) / 255.F - 0.5F) /
-            k_spz_color_scale;
+            (static_cast<float>(colors[3U * index + 2U]) / 255.F - 0.5F) / k_spz_color_scale;
         for (std::size_t coefficient = 0; coefficient < ac_count; ++coefficient)
             for (int channel = 0; channel < 3; ++channel) {
-                const auto source = (index * ac_count + coefficient) * 3U +
-                    static_cast<std::size_t>(channel);
-                const auto target = (index * bases + coefficient + 1U) * 3U +
-                    static_cast<std::size_t>(channel);
-                model_sh[target] = spz_unquantize_sh(sh[source]) *
-                    k_rdf_to_rub_sh_signs[coefficient];
+                const auto source =
+                    (index * ac_count + coefficient) * 3U + static_cast<std::size_t>(channel);
+                const auto target =
+                    (index * bases + coefficient + 1U) * 3U + static_cast<std::size_t>(channel);
+                model_sh[target] =
+                    spz_unquantize_sh(sh[source]) * k_rdf_to_rub_sh_signs[coefficient];
             }
     }
-    return make_model(count, degree, means, log_scales, model_rotations, opacities, model_sh, device);
+    return make_model(
+        count, degree, means, log_scales, model_rotations, opacities, model_sh, device);
 }
 
 [[nodiscard]] GaussianModel load_spz(
-    const std::filesystem::path& path, const tinytensor::Device device) {
+    const std::filesystem::path& path,
+    const tinytensor::Device device) {
     const Bytes file = read_file(path);
-    if (file.size() < 2) throw std::runtime_error("SPZ file is truncated");
+    if (file.size() < 2)
+        throw std::runtime_error("SPZ file is truncated");
     const std::uint32_t magic = file.size() >= 4 ? read_u32(file, 0) : 0;
     if (magic == 0x5053474eU) {
-        if (file.size() < 32) throw std::runtime_error("SPZ v4 header is truncated");
+        if (file.size() < 32)
+            throw std::runtime_error("SPZ v4 header is truncated");
         const auto version = read_u32(file, 4);
         if (version < 4 || version > 4)
             throw std::runtime_error("Unsupported SPZ NGSP version");
@@ -1098,13 +1095,10 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         if (degree > 3)
             throw std::runtime_error("SPZ SH degree exceeds Photara support");
         if ((flags & 0x2U) != 0)
-            throw std::runtime_error(
-                "SPZ vendor extensions are not supported by this loader");
+            throw std::runtime_error("SPZ vendor extensions are not supported by this loader");
         const auto toc_offset = checked_size(read_u32(file, 16), "SPZ TOC");
-        if (stream_count != 6 || toc_offset < 32 ||
-            toc_offset > file.size() ||
-            static_cast<std::size_t>(stream_count) >
-                (file.size() - toc_offset) / 16U)
+        if (stream_count != 6 || toc_offset < 32 || toc_offset > file.size() ||
+            static_cast<std::size_t>(stream_count) > (file.size() - toc_offset) / 16U)
             throw std::runtime_error("Invalid SPZ v4 stream table");
         const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
         const std::array<std::size_t, 6> expected{
@@ -1117,12 +1111,11 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         std::array<Bytes, 6> streams;
         std::size_t compressed_offset = toc_offset + 6U * 16U;
         for (std::size_t index = 0; index < streams.size(); ++index) {
-            const auto compressed_size = checked_size(
-                read_u64(file, toc_offset + index * 16U), "SPZ stream");
-            const auto uncompressed_size = checked_size(
-                read_u64(file, toc_offset + index * 16U + 8U), "SPZ stream");
-            if (uncompressed_size != expected[index] ||
-                compressed_offset > file.size() ||
+            const auto compressed_size =
+                checked_size(read_u64(file, toc_offset + index * 16U), "SPZ stream");
+            const auto uncompressed_size =
+                checked_size(read_u64(file, toc_offset + index * 16U + 8U), "SPZ stream");
+            if (uncompressed_size != expected[index] || compressed_offset > file.size() ||
                 compressed_size > file.size() - compressed_offset)
                 throw std::runtime_error("Invalid SPZ v4 stream size");
             streams[index] = zstd_decompress(
@@ -1132,10 +1125,10 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         if (compressed_offset != file.size())
             throw std::runtime_error("SPZ v4 has trailing bytes");
         auto model = decode_spz_packed(
-            version, count, degree, fractional_bits,
-            streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
-            device);
-        if ((flags & 0x1U) != 0) model.filter_mode = SplatFilterMode::mip_2d;
+            version, count, degree, fractional_bits, streams[0], streams[1], streams[2], streams[3],
+            streams[4], streams[5], device);
+        if ((flags & 0x1U) != 0)
+            model.filter_mode = SplatFilterMode::mip_2d;
         return model;
     }
     if (file[0] != 0x1fU || file[1] != 0x8bU)
@@ -1153,16 +1146,16 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     if (degree > 3)
         throw std::runtime_error("SPZ SH degree exceeds Photara support");
     if ((flags & 0x2U) != 0)
-        throw std::runtime_error(
-            "SPZ vendor extensions are not supported by this loader");
+        throw std::runtime_error("SPZ vendor extensions are not supported by this loader");
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
-    const auto positions_size = static_cast<std::size_t>(count) * 3U *
-        (version == 1 ? 2U : 3U);
-    const auto rotations_size = static_cast<std::size_t>(count) *
-        (version >= 3 ? 4U : 3U);
+    const auto positions_size = static_cast<std::size_t>(count) * 3U * (version == 1 ? 2U : 3U);
+    const auto rotations_size = static_cast<std::size_t>(count) * (version >= 3 ? 4U : 3U);
     const std::array<std::size_t, 6> sizes{
-        positions_size, count, static_cast<std::size_t>(count) * 3U,
-        static_cast<std::size_t>(count) * 3U, rotations_size,
+        positions_size,
+        count,
+        static_cast<std::size_t>(count) * 3U,
+        static_cast<std::size_t>(count) * 3U,
+        rotations_size,
         static_cast<std::size_t>(count) * (bases - 1U) * 3U};
     std::array<Bytes, 6> streams;
     std::size_t offset = 16;
@@ -1175,10 +1168,10 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         offset += sizes[index];
     }
     auto model = decode_spz_packed(
-        version, count, degree, fractional_bits,
-        streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
-        device);
-    if ((flags & 0x1U) != 0) model.filter_mode = SplatFilterMode::mip_2d;
+        version, count, degree, fractional_bits, streams[0], streams[1], streams[2], streams[3],
+        streams[4], streams[5], device);
+    if ((flags & 0x1U) != 0)
+        model.filter_mode = SplatFilterMode::mip_2d;
     return model;
 }
 
@@ -1192,15 +1185,15 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     const auto opacities = model.opacity_logits.to_vector();
     const auto sh = model.sh.to_vector();
     const auto finite = [](const std::vector<float>& values) {
-        return std::all_of(values.begin(), values.end(),
-                           [](const float value) { return std::isfinite(value); });
+        return std::all_of(
+            values.begin(), values.end(), [](const float value) { return std::isfinite(value); });
     };
-    if (!finite(means) || !finite(scales) || !finite(rotations) ||
-        !finite(opacities) || !finite(sh))
+    if (!finite(means) || !finite(scales) || !finite(rotations) || !finite(opacities) ||
+        !finite(sh))
         throw std::runtime_error("Refusing to write non-finite SOG values");
 
-    const std::size_t width = std::max<std::size_t>(1, static_cast<std::size_t>(
-        std::ceil(std::sqrt(static_cast<double>(count)))));
+    const std::size_t width = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::ceil(std::sqrt(static_cast<double>(count)))));
     const std::size_t height = (count + width - 1U) / width;
     const auto pixels = checked_product(width, height, "SOG image dimensions");
     if (width > WEBP_MAX_DIMENSION || height > WEBP_MAX_DIMENSION)
@@ -1213,15 +1206,14 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     std::vector<float> position_maxs(3, std::numeric_limits<float>::lowest());
     for (std::size_t index = 0; index < count; ++index) {
         const std::array<float, 3> position{
-            means[3U * index], -means[3U * index + 1U],
-            -means[3U * index + 2U]};
+            means[3U * index], -means[3U * index + 1U], -means[3U * index + 2U]};
         for (int axis = 0; axis < 3; ++axis) {
             const float value = to_log(position[static_cast<std::size_t>(axis)]);
             encoded_positions[3U * index + static_cast<std::size_t>(axis)] = value;
-            position_mins[static_cast<std::size_t>(axis)] = std::min(
-                position_mins[static_cast<std::size_t>(axis)], value);
-            position_maxs[static_cast<std::size_t>(axis)] = std::max(
-                position_maxs[static_cast<std::size_t>(axis)], value);
+            position_mins[static_cast<std::size_t>(axis)] =
+                std::min(position_mins[static_cast<std::size_t>(axis)], value);
+            position_maxs[static_cast<std::size_t>(axis)] =
+                std::max(position_maxs[static_cast<std::size_t>(axis)], value);
         }
     }
     const auto scale_codebook = make_codebook(scales, "scale codebook");
@@ -1234,51 +1226,53 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 
     // WebP's RGBA encoder premultiplies RGB by alpha. Position, scale, and
     // label images use alpha only as padding, so keep those pixels opaque.
-    Bytes means_l(pixels * 4U, 255), means_u(pixels * 4U, 255),
-        scale_image(pixels * 4U, 255), quat_image(pixels * 4U, 0),
-        sh0_image(pixels * 4U, 0);
+    Bytes means_l(pixels * 4U, 255), means_u(pixels * 4U, 255), scale_image(pixels * 4U, 255),
+        quat_image(pixels * 4U, 0), sh0_image(pixels * 4U, 0);
     for (std::size_t index = 0; index < count; ++index) {
         const auto pixel = index * 4U;
         for (int axis = 0; axis < 3; ++axis) {
             const auto a = static_cast<std::size_t>(axis);
             const float range = position_maxs[a] - position_mins[a];
             const auto quantized = static_cast<std::uint16_t>(std::clamp(
-                std::lround(range > 0.F
-                    ? (encoded_positions[3U * index + a] - position_mins[a]) /
-                          range * 65535.F
-                    : 0.F),
+                std::lround(
+                    range > 0.F
+                        ? (encoded_positions[3U * index + a] - position_mins[a]) / range * 65535.F
+                        : 0.F),
                 0L, 65535L));
             means_l[pixel + a] = static_cast<std::uint8_t>(quantized & 0xffU);
             means_u[pixel + a] = static_cast<std::uint8_t>(quantized >> 8U);
-            scale_image[pixel + a] = nearest_codebook(
-                scale_codebook, scales[3U * index + a]);
+            scale_image[pixel + a] = nearest_codebook(scale_codebook, scales[3U * index + a]);
         }
         std::array<float, 4> q{
-            rotations[4U * index], rotations[4U * index + 1U],
-            -rotations[4U * index + 2U], -rotations[4U * index + 3U]};
+            rotations[4U * index], rotations[4U * index + 1U], -rotations[4U * index + 2U],
+            -rotations[4U * index + 3U]};
         float norm = 0.F;
-        for (const float value : q) norm += value * value;
+        for (const float value : q)
+            norm += value * value;
         norm = 1.F / std::max(std::sqrt(norm), 1e-12F);
-        for (float& value : q) value *= norm;
+        for (float& value : q)
+            value *= norm;
         std::size_t largest = 0;
         for (std::size_t component = 1; component < 4; ++component)
-            if (std::abs(q[component]) > std::abs(q[largest])) largest = component;
+            if (std::abs(q[component]) > std::abs(q[largest]))
+                largest = component;
         if (q[largest] < 0.F)
-            for (float& value : q) value = -value;
+            for (float& value : q)
+                value = -value;
         std::size_t kept = 0;
         for (std::size_t component = 0; component < 4; ++component) {
-            if (component == largest) continue;
+            if (component == largest)
+                continue;
             quat_image[pixel + kept++] = static_cast<std::uint8_t>(std::clamp(
-                std::lround((q[component] / 2.F / std::sqrt(0.5F) + 0.5F) * 255.F),
-                0L, 255L));
+                std::lround((q[component] / 2.F / std::sqrt(0.5F) + 0.5F) * 255.F), 0L, 255L));
         }
         quat_image[pixel + 3U] = static_cast<std::uint8_t>(252U + largest);
         for (int channel = 0; channel < 3; ++channel)
             sh0_image[pixel + static_cast<std::size_t>(channel)] = nearest_codebook(
                 sh0_codebook, dc_values[3U * index + static_cast<std::size_t>(channel)]);
         const float alpha = 1.F / (1.F + std::exp(-opacities[index]));
-        sh0_image[pixel + 3U] = static_cast<std::uint8_t>(std::clamp(
-            std::lround(alpha * 255.F), 0L, 255L));
+        sh0_image[pixel + 3U] =
+            static_cast<std::uint8_t>(std::clamp(std::lround(alpha * 255.F), 0L, 255L));
     }
 
     const std::size_t ac_count = bases - 1U;
@@ -1292,11 +1286,12 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         for (std::size_t index = 0; index < count; ++index)
             for (std::size_t coefficient = 0; coefficient < ac_count; ++coefficient)
                 for (int channel = 0; channel < 3; ++channel) {
-                    const auto source = (index * bases + coefficient + 1U) * 3U +
-                        static_cast<std::size_t>(channel);
-                    encoded_ac[(index * ac_count + coefficient) * 3U +
-                               static_cast<std::size_t>(channel)] =
-                        sh[source] * k_rdf_to_rub_sh_signs[coefficient];
+                    const auto source =
+                        (index * bases + coefficient + 1U) * 3U + static_cast<std::size_t>(channel);
+                    encoded_ac
+                        [(index * ac_count + coefficient) * 3U +
+                         static_cast<std::size_t>(channel)] =
+                            sh[source] * k_rdf_to_rub_sh_signs[coefficient];
                 }
         detail::SogPalette palette;
         if (count <= 65536U) {
@@ -1309,8 +1304,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
 #if defined(TINYTENSOR_HAS_VULKAN)
             if (count > std::numeric_limits<unsigned>::max())
                 throw std::runtime_error("SOG Gaussian count exceeds Vulkan index range");
-            palette = detail::cluster_sog_vulkan(encoded_ac, static_cast<unsigned>(count),
-                                                  static_cast<unsigned>(ac_count * 3U));
+            palette = detail::cluster_sog_vulkan(
+                encoded_ac, static_cast<unsigned>(count), static_cast<unsigned>(ac_count * 3U));
 #else
             throw std::runtime_error("Large SOG SH palettes require Vulkan compute support");
 #endif
@@ -1331,13 +1326,14 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         for (std::size_t label = 0; label < palette_count; ++label) {
             for (std::size_t coefficient = 0; coefficient < ac_count; ++coefficient) {
                 const auto target =
-                    ((label / 64U) * (64U * ac_count) +
-                     (label % 64U) * ac_count + coefficient) * 3U;
+                    ((label / 64U) * (64U * ac_count) + (label % 64U) * ac_count + coefficient) *
+                    3U;
                 for (int channel = 0; channel < 3; ++channel)
                     shn_centroid_image[target + static_cast<std::size_t>(channel)] =
-                        nearest_codebook(shn_codebook, palette.centroids[
-                            (label * ac_count + coefficient) * 3U +
-                            static_cast<std::size_t>(channel)]);
+                        nearest_codebook(
+                            shn_codebook, palette.centroids
+                                              [(label * ac_count + coefficient) * 3U +
+                                               static_cast<std::size_t>(channel)]);
             }
         }
     }
@@ -1361,60 +1357,70 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     meta << "{\"version\":2,\"asset\":{\"generator\":\"Photara\"},"
          << "\"count\":" << count
          << (model.filter_mode == SplatFilterMode::mip_2d ? ",\"model\":\"antialiased\"" : "")
-         << ",\"means\":{\"mins\":["
-         << json_float(position_mins[0]) << ',' << json_float(position_mins[1]) << ','
-         << json_float(position_mins[2]) << "],\"maxs\":["
+         << ",\"means\":{\"mins\":[" << json_float(position_mins[0]) << ','
+         << json_float(position_mins[1]) << ',' << json_float(position_mins[2]) << "],\"maxs\":["
          << json_float(position_maxs[0]) << ',' << json_float(position_maxs[1]) << ','
-         << json_float(position_maxs[2]) << "],\"files\":[\"" << means_l_name
-         << "\",\"" << means_u_name << "\"]},\"scales\":{\"codebook\":";
+         << json_float(position_maxs[2]) << "],\"files\":[\"" << means_l_name << "\",\""
+         << means_u_name << "\"]},\"scales\":{\"codebook\":";
     append_json_float_array(meta, scale_codebook);
-    meta << ",\"files\":[\"" << scales_name << "\"]},\"quats\":{\"files\":[\""
-         << quats_name << "\"]},\"sh0\":{\"codebook\":";
+    meta << ",\"files\":[\"" << scales_name << "\"]},\"quats\":{\"files\":[\"" << quats_name
+         << "\"]},\"sh0\":{\"codebook\":";
     append_json_float_array(meta, sh0_codebook);
     meta << ",\"files\":[\"" << sh0_name << "\"]}";
     if (ac_count != 0) {
         const std::string centroid_name = "shN_centroids.webp";
         const std::string label_name = "shN_labels.webp";
-        meta << ",\"shN\":{\"count\":" << palette_count
-             << ",\"bands\":" << model.sh_degree << ",\"codebook\":";
+        meta << ",\"shN\":{\"count\":" << palette_count << ",\"bands\":" << model.sh_degree
+             << ",\"codebook\":";
         append_json_float_array(meta, shn_codebook);
-        meta << ",\"files\":[\"" << centroid_name << "\",\"" << label_name
-             << "\"]}";
+        meta << ",\"files\":[\"" << centroid_name << "\",\"" << label_name << "\"]}";
         const auto centroid_webp = encode_webp(
             shn_centroid_image.data(), static_cast<int>(64U * ac_count),
             static_cast<int>((palette_count + 63U) / 64U), 3, centroid_name);
         const auto label_webp = encode_webp(
-            shn_label_image.data(), static_cast<int>(width), static_cast<int>(height),
-            4, label_name);
+            shn_label_image.data(), static_cast<int>(width), static_cast<int>(height), 4,
+            label_name);
         meta << '}';
         const std::string meta_text = meta.str();
         const Bytes meta_bytes(meta_text.begin(), meta_text.end());
-        return make_sog_zip({
-            {"meta.json", meta_bytes},
-            {means_l_name, means_l_webp}, {means_u_name, means_u_webp},
-            {scales_name, scales_webp}, {quats_name, quats_webp},
-            {sh0_name, sh0_webp}, {centroid_name, centroid_webp},
-            {label_name, label_webp}});
+        return make_sog_zip(
+            {{"meta.json", meta_bytes},
+             {means_l_name, means_l_webp},
+             {means_u_name, means_u_webp},
+             {scales_name, scales_webp},
+             {quats_name, quats_webp},
+             {sh0_name, sh0_webp},
+             {centroid_name, centroid_webp},
+             {label_name, label_webp}});
     }
     meta << '}';
     const std::string meta_text = meta.str();
     const Bytes meta_bytes(meta_text.begin(), meta_text.end());
-    return make_sog_zip({
-        {"meta.json", meta_bytes}, {means_l_name, means_l_webp},
-        {means_u_name, means_u_webp}, {scales_name, scales_webp},
-        {quats_name, quats_webp}, {sh0_name, sh0_webp}});
+    return make_sog_zip(
+        {{"meta.json", meta_bytes},
+         {means_l_name, means_l_webp},
+         {means_u_name, means_u_webp},
+         {scales_name, scales_webp},
+         {quats_name, quats_webp},
+         {sh0_name, sh0_webp}});
 }
 
-}  // namespace
+} // namespace
 
 GaussianFormat parse_gaussian_format(const std::string_view value) {
     const std::string normalized = lower(std::string(value));
-    if (normalized.empty() || normalized == "auto") return GaussianFormat::auto_detect;
-    if (normalized == "ply") return GaussianFormat::ply;
-    if (normalized == "sog") return GaussianFormat::sog;
-    if (normalized == "spz") return GaussianFormat::spz;
-    if (normalized == "glb") return GaussianFormat::glb;
-    if (normalized == "usdc") return GaussianFormat::usdc;
+    if (normalized.empty() || normalized == "auto")
+        return GaussianFormat::auto_detect;
+    if (normalized == "ply")
+        return GaussianFormat::ply;
+    if (normalized == "sog")
+        return GaussianFormat::sog;
+    if (normalized == "spz")
+        return GaussianFormat::spz;
+    if (normalized == "glb")
+        return GaussianFormat::glb;
+    if (normalized == "usdc")
+        return GaussianFormat::usdc;
     throw std::invalid_argument(
         "Unknown splat output format '" + std::string(value) +
         "' (expected auto, ply, sog, spz, glb, or usdc)");
@@ -1422,39 +1428,56 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
 
 GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noexcept {
     const auto extension = lower(path.extension().string());
-    if (extension == ".sog") return GaussianFormat::sog;
-    if (extension == ".spz") return GaussianFormat::spz;
-    if (extension == ".glb") return GaussianFormat::glb;
-    if (extension == ".usdc") return GaussianFormat::usdc;
+    if (extension == ".sog")
+        return GaussianFormat::sog;
+    if (extension == ".spz")
+        return GaussianFormat::spz;
+    if (extension == ".glb")
+        return GaussianFormat::glb;
+    if (extension == ".usdc")
+        return GaussianFormat::usdc;
     return GaussianFormat::ply;
 }
 
 const char* gaussian_format_name(const GaussianFormat format) noexcept {
     switch (format) {
-        case GaussianFormat::auto_detect: return "auto";
-        case GaussianFormat::ply: return "ply";
-        case GaussianFormat::sog: return "sog";
-        case GaussianFormat::spz: return "spz";
-        case GaussianFormat::glb: return "glb";
-        case GaussianFormat::usdc: return "usdc";
+    case GaussianFormat::auto_detect:
+        return "auto";
+    case GaussianFormat::ply:
+        return "ply";
+    case GaussianFormat::sog:
+        return "sog";
+    case GaussianFormat::spz:
+        return "spz";
+    case GaussianFormat::glb:
+        return "glb";
+    case GaussianFormat::usdc:
+        return "usdc";
     }
     return "auto";
 }
 
 const char* gaussian_format_extension(const GaussianFormat format) noexcept {
     switch (format) {
-        case GaussianFormat::auto_detect: return "";
-        case GaussianFormat::ply: return "ply";
-        case GaussianFormat::sog: return "sog";
-        case GaussianFormat::spz: return "spz";
-        case GaussianFormat::glb: return "glb";
-        case GaussianFormat::usdc: return "usdc";
+    case GaussianFormat::auto_detect:
+        return "";
+    case GaussianFormat::ply:
+        return "ply";
+    case GaussianFormat::sog:
+        return "sog";
+    case GaussianFormat::spz:
+        return "spz";
+    case GaussianFormat::glb:
+        return "glb";
+    case GaussianFormat::usdc:
+        return "usdc";
     }
     return "";
 }
 
 void bake_gaussian_3d_filter(GaussianModel& model) {
-    if (model.filter_mode != SplatFilterMode::mip_3d && model.filter_mode != SplatFilterMode::mip) return;
+    if (model.filter_mode != SplatFilterMode::mip_3d && model.filter_mode != SplatFilterMode::mip)
+        return;
     if (model.filter_3d.is_valid()) {
         const auto n = model.size();
         auto scales = model.log_scales.to_vector();
@@ -1474,15 +1497,20 @@ void bake_gaussian_3d_filter(GaussianModel& model) {
                 log_scale = static_cast<float>(baked);
             }
             const double v = opacity[i];
-            const double alpha = (v >= 0 ? 1.0 / (1.0 + std::exp(-v)) : std::exp(v) / (1.0 + std::exp(v))) * std::exp(compensation);
+            const double alpha =
+                (v >= 0 ? 1.0 / (1.0 + std::exp(-v)) : std::exp(v) / (1.0 + std::exp(v))) *
+                std::exp(compensation);
             const double clamped = std::clamp(alpha, 1e-12, 1.0 - 1e-12);
             opacity[i] = static_cast<float>(std::log(clamped / (1.0 - clamped)));
         }
-        model.log_scales = tinytensor::Tensor::from_vector(scales, {n, 3}, model.log_scales.device());
-        model.opacity_logits = tinytensor::Tensor::from_vector(opacity, {n, 1}, model.opacity_logits.device());
+        model.log_scales =
+            tinytensor::Tensor::from_vector(scales, {n, 3}, model.log_scales.device());
+        model.opacity_logits =
+            tinytensor::Tensor::from_vector(opacity, {n, 1}, model.opacity_logits.device());
     }
     model.filter_3d = {};
-    model.filter_mode = model.filter_mode == SplatFilterMode::mip ? SplatFilterMode::mip_2d : SplatFilterMode::classic;
+    model.filter_mode = model.filter_mode == SplatFilterMode::mip ? SplatFilterMode::mip_2d
+                                                                  : SplatFilterMode::classic;
 }
 
 void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path& directory) {
@@ -1491,7 +1519,8 @@ void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path&
         throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
     const auto files = read_sog_zip(save_sog(model));
     std::filesystem::create_directories(directory);
-    for (const auto& [name, bytes] : files) write_file(directory / name, bytes);
+    for (const auto& [name, bytes] : files)
+        write_file(directory / name, bytes);
 }
 
 void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
@@ -1499,7 +1528,8 @@ void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
         throw std::runtime_error("SH degree must be between 0 and 3");
     if (!model.sh.is_valid() || model.sh.shape().rank() != 3)
         throw std::runtime_error("Gaussian model has no spherical harmonics");
-    if (degree >= model.sh_degree) return;
+    if (degree >= model.sh_degree)
+        return;
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
     model.sh = model.sh.slice(1, 0, bases);
     model.sh_degree = degree;
@@ -1510,50 +1540,62 @@ void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
 namespace {
 // Real SH basis used by the renderer (degree 0..3), including its signs.
 std::array<double, 16> placement_sh_basis(const Eigen::Vector3d& d) {
-    const double x=d.x(), y=d.y(), z=d.z();
-    const double xx=x*x, yy=y*y, zz=z*z;
-    return {0.28209479177387814, -0.4886025119029199*y, 0.4886025119029199*z, -0.4886025119029199*x,
-        1.0925484305920792*x*y, -1.0925484305920792*y*z, 0.31539156525252005*(2*zz-xx-yy),
-        -1.0925484305920792*x*z, 0.5462742152960396*(xx-yy),
-        -0.5900435899266435*y*(3*xx-yy), 2.890611442640554*x*y*z,
-        -0.4570457994644658*y*(4*zz-xx-yy), 0.3731763325901154*z*(2*zz-3*xx-3*yy),
-        -0.4570457994644658*x*(4*zz-xx-yy), 1.445305721320277*z*(xx-yy),
-        -0.5900435899266435*x*(xx-3*yy)};
+    const double x = d.x(), y = d.y(), z = d.z();
+    const double xx = x * x, yy = y * y, zz = z * z;
+    return {
+        0.28209479177387814,
+        -0.4886025119029199 * y,
+        0.4886025119029199 * z,
+        -0.4886025119029199 * x,
+        1.0925484305920792 * x * y,
+        -1.0925484305920792 * y * z,
+        0.31539156525252005 * (2 * zz - xx - yy),
+        -1.0925484305920792 * x * z,
+        0.5462742152960396 * (xx - yy),
+        -0.5900435899266435 * y * (3 * xx - yy),
+        2.890611442640554 * x * y * z,
+        -0.4570457994644658 * y * (4 * zz - xx - yy),
+        0.3731763325901154 * z * (2 * zz - 3 * xx - 3 * yy),
+        -0.4570457994644658 * x * (4 * zz - xx - yy),
+        1.445305721320277 * z * (xx - yy),
+        -0.5900435899266435 * x * (xx - 3 * yy)};
 }
 
 // Integrate products of two degree <=3 SH bases. Four Gauss-Legendre
 // latitudes and 16 azimuths integrate the degree-six product exactly.
-std::array<std::array<float,16>,16> placement_sh_rotation(const Eigen::Matrix3d& rotation) {
-    constexpr double z[] = {-0.8611363115940526, -0.3399810435848563,
-                             0.3399810435848563, 0.8611363115940526};
-    constexpr double w[] = {0.3478548451374539, 0.6521451548625461,
-                             0.6521451548625461, 0.3478548451374539};
-    std::array<std::array<double,16>,16> sum{};
-    for (int lat=0; lat<4; ++lat) for (int lon=0; lon<16; ++lon) {
-        const double phi=2.0*std::numbers::pi*lon/16.0;
-        const double radial=std::sqrt(1.0-z[lat]*z[lat]);
-        const Eigen::Vector3d d(radial*std::cos(phi), radial*std::sin(phi), z[lat]);
-        const auto world=placement_sh_basis(d);
-        const auto local=placement_sh_basis(rotation.transpose()*d);
-        const double weight=w[lat]*2.0*std::numbers::pi/16.0;
-        for (int band=1; band<=3; ++band)
-            for (int i=band*band; i<(band+1)*(band+1); ++i)
-                for (int j=band*band; j<(band+1)*(band+1); ++j)
-                    sum[i][j]+=weight*world[i]*local[j];
-    }
-    std::array<std::array<float,16>,16> result{};
-    result[0][0]=1.F;
-    for (int i=1; i<16; ++i) for (int j=1; j<16; ++j)
-        result[i][j]=static_cast<float>(sum[i][j]);
+std::array<std::array<float, 16>, 16> placement_sh_rotation(const Eigen::Matrix3d& rotation) {
+    constexpr double z[] = {
+        -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526};
+    constexpr double w[] = {
+        0.3478548451374539, 0.6521451548625461, 0.6521451548625461, 0.3478548451374539};
+    std::array<std::array<double, 16>, 16> sum{};
+    for (int lat = 0; lat < 4; ++lat)
+        for (int lon = 0; lon < 16; ++lon) {
+            const double phi = 2.0 * std::numbers::pi * lon / 16.0;
+            const double radial = std::sqrt(1.0 - z[lat] * z[lat]);
+            const Eigen::Vector3d d(radial * std::cos(phi), radial * std::sin(phi), z[lat]);
+            const auto world = placement_sh_basis(d);
+            const auto local = placement_sh_basis(rotation.transpose() * d);
+            const double weight = w[lat] * 2.0 * std::numbers::pi / 16.0;
+            for (int band = 1; band <= 3; ++band)
+                for (int i = band * band; i < (band + 1) * (band + 1); ++i)
+                    for (int j = band * band; j < (band + 1) * (band + 1); ++j)
+                        sum[i][j] += weight * world[i] * local[j];
+        }
+    std::array<std::array<float, 16>, 16> result{};
+    result[0][0] = 1.F;
+    for (int i = 1; i < 16; ++i)
+        for (int j = 1; j < 16; ++j)
+            result[i][j] = static_cast<float>(sum[i][j]);
     return result;
 }
 } // namespace
 
-GaussianModel transform_gaussians(
-    const GaussianModel& model, const GaussianTransform& transform) {
+GaussianModel transform_gaussians(const GaussianModel& model, const GaussianTransform& transform) {
     if (!(transform.scale > 0.F) || !std::isfinite(transform.scale))
         throw std::runtime_error("Gaussian transform scale must be positive");
-    if (model.size() == 0 || transform.identity()) return model;
+    if (model.size() == 0 || transform.identity())
+        return model;
     const auto count = model.size();
     const auto device = model.means.device();
     auto means = model.means.to_vector();
@@ -1561,23 +1603,29 @@ GaussianModel transform_gaussians(
     if (means.size() != count * 3U || scales.size() != count * 3U)
         throw std::runtime_error("Gaussian model has an unexpected layout");
     for (const float value : transform.translation)
-        if (!std::isfinite(value)) throw std::runtime_error("Invalid Gaussian translation");
+        if (!std::isfinite(value))
+            throw std::runtime_error("Invalid Gaussian translation");
     for (const float value : transform.rotation_degrees)
-        if (!std::isfinite(value)) throw std::runtime_error("Invalid Gaussian rotation");
-    const bool rotated = transform.rotation_degrees != std::array<float,3>{};
+        if (!std::isfinite(value))
+            throw std::runtime_error("Invalid Gaussian rotation");
+    const bool rotated = transform.rotation_degrees != std::array<float, 3>{};
     constexpr float radians = std::numbers::pi_v<float> / 180.F;
-    const Eigen::Quaternionf rotation = Eigen::AngleAxisf(transform.rotation_degrees[2]*radians, Eigen::Vector3f::UnitZ()) *
-        Eigen::AngleAxisf(transform.rotation_degrees[1]*radians, Eigen::Vector3f::UnitY()) *
-        Eigen::AngleAxisf(transform.rotation_degrees[0]*radians, Eigen::Vector3f::UnitX());
+    const Eigen::Quaternionf rotation =
+        Eigen::AngleAxisf(transform.rotation_degrees[2] * radians, Eigen::Vector3f::UnitZ()) *
+        Eigen::AngleAxisf(transform.rotation_degrees[1] * radians, Eigen::Vector3f::UnitY()) *
+        Eigen::AngleAxisf(transform.rotation_degrees[0] * radians, Eigen::Vector3f::UnitX());
     const Eigen::Matrix3f matrix = rotation.toRotationMatrix();
-    const Eigen::Vector3f translation(transform.translation[0], transform.translation[1], transform.translation[2]);
+    const Eigen::Vector3f translation(
+        transform.translation[0], transform.translation[1], transform.translation[2]);
     const float log_scale = std::log(transform.scale);
     for (std::size_t index = 0; index < count; ++index) {
-        const Eigen::Vector3f p(means[3*index], means[3*index+1], means[3*index+2]);
+        const Eigen::Vector3f p(means[3 * index], means[3 * index + 1], means[3 * index + 2]);
         const Eigen::Vector3f result = matrix * (transform.scale * p) + translation;
-        for (int axis=0; axis<3; ++axis) means[3*index+axis]=result[axis];
+        for (int axis = 0; axis < 3; ++axis)
+            means[3 * index + axis] = result[axis];
     }
-    for (float& value : scales) value += log_scale;
+    for (float& value : scales)
+        value += log_scale;
 
     GaussianModel placed;
     placed.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
@@ -1585,44 +1633,57 @@ GaussianModel transform_gaussians(
     placed.quaternions = model.quaternions;
     if (rotated) {
         auto quaternions = model.quaternions.to_vector();
-        if (quaternions.size() != count * 4U) throw std::runtime_error("Invalid Gaussian quaternion layout");
-        for (std::size_t i=0; i<count; ++i) {
-            const Eigen::Quaternionf q(quaternions[4*i],quaternions[4*i+1],quaternions[4*i+2],quaternions[4*i+3]);
+        if (quaternions.size() != count * 4U)
+            throw std::runtime_error("Invalid Gaussian quaternion layout");
+        for (std::size_t i = 0; i < count; ++i) {
+            const Eigen::Quaternionf q(
+                quaternions[4 * i], quaternions[4 * i + 1], quaternions[4 * i + 2],
+                quaternions[4 * i + 3]);
             const Eigen::Quaternionf r = rotation * q;
-            quaternions[4*i]=r.w(); quaternions[4*i+1]=r.x(); quaternions[4*i+2]=r.y(); quaternions[4*i+3]=r.z();
+            quaternions[4 * i] = r.w();
+            quaternions[4 * i + 1] = r.x();
+            quaternions[4 * i + 2] = r.y();
+            quaternions[4 * i + 3] = r.z();
         }
-        placed.quaternions = tinytensor::Tensor::from_vector(quaternions, {count,4U}, device);
+        placed.quaternions = tinytensor::Tensor::from_vector(quaternions, {count, 4U}, device);
     }
     placed.opacity_logits = model.opacity_logits;
     placed.sh = model.sh;
     placed.normal_features = model.normal_features;
     if (rotated && model.sh.is_valid()) {
-        if (model.sh.shape().rank() != 3 || model.sh.shape()[0] != count || model.sh.shape()[2] != 3 || model.sh.shape()[1] > 16)
+        if (model.sh.shape().rank() != 3 || model.sh.shape()[0] != count ||
+            model.sh.shape()[2] != 3 || model.sh.shape()[1] > 16)
             throw std::runtime_error("Invalid Gaussian spherical harmonics layout");
-        const std::size_t bases=model.sh.shape()[1];
-        const auto source=model.sh.to_vector();
-        auto sh=source;
-        const auto rot=placement_sh_rotation(matrix.cast<double>());
-        for (std::size_t n=0; n<count; ++n) for (std::size_t i=1; i<bases; ++i) {
-            const std::size_t band=static_cast<std::size_t>(std::sqrt(static_cast<double>(i)));
-            const std::size_t first=band*band, last=std::min(bases,(band+1)*(band+1));
-            for (std::size_t c=0; c<3; ++c) {
-                float value=0.F;
-                for (std::size_t j=first; j<last; ++j) value+=rot[i][j]*source[(n*bases+j)*3+c];
-                sh[(n*bases+i)*3+c]=value;
+        const std::size_t bases = model.sh.shape()[1];
+        const auto source = model.sh.to_vector();
+        auto sh = source;
+        const auto rot = placement_sh_rotation(matrix.cast<double>());
+        for (std::size_t n = 0; n < count; ++n)
+            for (std::size_t i = 1; i < bases; ++i) {
+                const std::size_t band =
+                    static_cast<std::size_t>(std::sqrt(static_cast<double>(i)));
+                const std::size_t first = band * band,
+                                  last = std::min(bases, (band + 1) * (band + 1));
+                for (std::size_t c = 0; c < 3; ++c) {
+                    float value = 0.F;
+                    for (std::size_t j = first; j < last; ++j)
+                        value += rot[i][j] * source[(n * bases + j) * 3 + c];
+                    sh[(n * bases + i) * 3 + c] = value;
+                }
             }
-        }
-        placed.sh=tinytensor::Tensor::from_vector(sh, {count,bases,3U}, device);
+        placed.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, device);
     }
     if (rotated && model.normal_features.is_valid()) {
-        auto normals=model.normal_features.to_vector();
-        if (normals.size()!=count*4U) throw std::runtime_error("Invalid Gaussian normal layout");
-        for (std::size_t i=0; i<count; ++i) {
-            const Eigen::Vector3f n(normals[4*i],normals[4*i+1],normals[4*i+2]);
-            const Eigen::Vector3f result=matrix*n;
-            for (int axis=0; axis<3; ++axis) normals[4*i+axis]=result[axis];
+        auto normals = model.normal_features.to_vector();
+        if (normals.size() != count * 4U)
+            throw std::runtime_error("Invalid Gaussian normal layout");
+        for (std::size_t i = 0; i < count; ++i) {
+            const Eigen::Vector3f n(normals[4 * i], normals[4 * i + 1], normals[4 * i + 2]);
+            const Eigen::Vector3f result = matrix * n;
+            for (int axis = 0; axis < 3; ++axis)
+                normals[4 * i + axis] = result[axis];
         }
-        placed.normal_features=tinytensor::Tensor::from_vector(normals, {count,4U}, device);
+        placed.normal_features = tinytensor::Tensor::from_vector(normals, {count, 4U}, device);
     }
     placed.sh_degree = model.sh_degree;
     placed.render_method = model.render_method;
@@ -1631,9 +1692,9 @@ GaussianModel transform_gaussians(
     // uniform scale like every other spatial quantity.
     if (model.filter_3d.is_valid() && model.filter_3d.numel() == count) {
         auto filter = model.filter_3d.to_vector();
-        for (float& value : filter) value *= transform.scale;
-        placed.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {count, 1U}, device);
+        for (float& value : filter)
+            value *= transform.scale;
+        placed.filter_3d = tinytensor::Tensor::from_vector(filter, {count, 1U}, device);
     }
     return placed;
 }
@@ -1654,10 +1715,8 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         const auto count = model.size();
         if (count == 0)
             throw std::runtime_error("Cannot merge an empty Gaussian model");
-        if (model.means.numel() != count * 3U ||
-            model.log_scales.numel() != count * 3U ||
-            model.quaternions.numel() != count * 4U ||
-            model.opacity_logits.numel() != count)
+        if (model.means.numel() != count * 3U || model.log_scales.numel() != count * 3U ||
+            model.quaternions.numel() != count * 4U || model.opacity_logits.numel() != count)
             throw std::runtime_error("Gaussian model has an unexpected layout");
         total += count;
         if (model.sh.is_valid() && model.sh.shape().rank() == 3)
@@ -1665,11 +1724,11 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         degree = std::max(degree, model.sh_degree);
         all_normals = all_normals && model.normal_features.is_valid() &&
                       model.normal_features.numel() == count * 4U;
-        all_filter = all_filter && model.filter_3d.is_valid() &&
-                     model.filter_3d.numel() == count;
+        all_filter = all_filter && model.filter_3d.is_valid() && model.filter_3d.numel() == count;
     }
     // A padded band count can exceed the stored degree of every input.
-    while (degree < 3U && (degree + 1U) * (degree + 1U) < max_bases) ++degree;
+    while (degree < 3U && (degree + 1U) * (degree + 1U) < max_bases)
+        ++degree;
 
     const auto device = models.front().means.device();
     std::vector<float> means, scales, rotations, opacities, sh, normals, filter;
@@ -1681,8 +1740,7 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         if (model.render_method != models.front().render_method)
             throw std::invalid_argument("Cannot merge 3DGS and 3DGUT models");
         const auto count = model.size();
-        const auto append = [](std::vector<float>& target,
-                               const std::vector<float>& values) {
+        const auto append = [](std::vector<float>& target, const std::vector<float>& values) {
             target.insert(target.end(), values.begin(), values.end());
         };
         append(means, model.means.to_vector());
@@ -1691,7 +1749,8 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         append(opacities, model.opacity_logits.to_vector());
         if (all_normals)
             append(normals, model.normal_features.to_vector());
-        if (all_filter) append(filter, model.filter_3d.to_vector());
+        if (all_filter)
+            append(filter, model.filter_3d.to_vector());
 
         // Zero-pad SH along the band axis so mixed-degree inputs keep their
         // colour while sharing one layout.
@@ -1709,11 +1768,9 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
         sh.resize(block + count * target_stride, 0.F);
         for (std::size_t index = 0; index < count; ++index)
             std::copy_n(
-                coefficients.begin() +
-                    static_cast<std::ptrdiff_t>(index * source_stride),
+                coefficients.begin() + static_cast<std::ptrdiff_t>(index * source_stride),
                 source_stride,
-                sh.begin() + static_cast<std::ptrdiff_t>(
-                    block + index * target_stride));
+                sh.begin() + static_cast<std::ptrdiff_t>(block + index * target_stride));
     }
     if (means.size() != total * 3U || scales.size() != total * 3U ||
         rotations.size() != total * 4U || opacities.size() != total ||
@@ -1722,28 +1779,23 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
 
     GaussianModel merged;
     merged.means = tinytensor::Tensor::from_vector(means, {total, 3U}, device);
-    merged.log_scales =
-        tinytensor::Tensor::from_vector(scales, {total, 3U}, device);
-    merged.quaternions =
-        tinytensor::Tensor::from_vector(rotations, {total, 4U}, device);
-    merged.opacity_logits =
-        tinytensor::Tensor::from_vector(opacities, {total, 1U}, device);
-    merged.sh = tinytensor::Tensor::from_vector(
-        sh, {total, max_bases, 3U}, device);
+    merged.log_scales = tinytensor::Tensor::from_vector(scales, {total, 3U}, device);
+    merged.quaternions = tinytensor::Tensor::from_vector(rotations, {total, 4U}, device);
+    merged.opacity_logits = tinytensor::Tensor::from_vector(opacities, {total, 1U}, device);
+    merged.sh = tinytensor::Tensor::from_vector(sh, {total, max_bases, 3U}, device);
     merged.sh_degree = degree;
     merged.render_method = models.front().render_method;
     merged.filter_mode = models.front().filter_mode;
     if (all_normals)
-        merged.normal_features = tinytensor::Tensor::from_vector(
-            normals, {total, 4U}, device);
+        merged.normal_features = tinytensor::Tensor::from_vector(normals, {total, 4U}, device);
     if (all_filter)
-        merged.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {total, 1U}, device);
+        merged.filter_3d = tinytensor::Tensor::from_vector(filter, {total, 1U}, device);
     return merged;
 }
 
 void save_gaussians(
-    const GaussianModel& model, const std::filesystem::path& path,
+    const GaussianModel& model,
+    const std::filesystem::path& path,
     GaussianFormat format) {
     if (format == GaussianFormat::auto_detect)
         format = gaussian_format_from_path(path);
@@ -1751,52 +1803,58 @@ void save_gaussians(
         model.filter_mode != SplatFilterMode::mip_2d)
         throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
     switch (format) {
-        case GaussianFormat::ply:
-            save_gaussians_ply(model, path);
-            return;
-        case GaussianFormat::sog:
-            write_file(path, save_sog(model));
-            return;
-        case GaussianFormat::spz:
-            write_file(path, save_spz_v4(model));
-            return;
-        case GaussianFormat::glb:
-            write_file(path, detail::save_glb(model));
-            return;
-        case GaussianFormat::usdc:
-            write_file(path, detail::save_usdc(model));
-            return;
-        case GaussianFormat::auto_detect:
-            break;
+    case GaussianFormat::ply:
+        save_gaussians_ply(model, path);
+        return;
+    case GaussianFormat::sog:
+        write_file(path, save_sog(model));
+        return;
+    case GaussianFormat::spz:
+        write_file(path, save_spz_v4(model));
+        return;
+    case GaussianFormat::glb:
+        write_file(path, detail::save_glb(model));
+        return;
+    case GaussianFormat::usdc:
+        write_file(path, detail::save_usdc(model));
+        return;
+    case GaussianFormat::auto_detect:
+        break;
     }
     throw std::runtime_error("Invalid Gaussian output format");
 }
 
 GaussianModel load_gaussians(
-    const std::filesystem::path& path, GaussianFormat format,
+    const std::filesystem::path& path,
+    GaussianFormat format,
     const tinytensor::Device device) {
     if (format == GaussianFormat::auto_detect) {
         format = (std::filesystem::is_directory(path) || path.filename() == "meta.json")
-            ? GaussianFormat::sog
-            : gaussian_format_from_path(path);
+                     ? GaussianFormat::sog
+                     : gaussian_format_from_path(path);
     }
     switch (format) {
-        case GaussianFormat::ply: return load_gaussians_ply(path, device);
-        case GaussianFormat::sog: return load_sog(path, device);
-        case GaussianFormat::spz: return load_spz(path, device);
-        case GaussianFormat::glb: {
-            auto decoded = detail::load_glb(path);
-            auto model = make_model(
-                decoded.count, decoded.degree, decoded.means,
-                decoded.log_scales, decoded.rotations,
-                decoded.opacity_logits, decoded.sh, device);
-            if (decoded.antialiased) model.filter_mode = SplatFilterMode::mip_2d;
-            return model;
-        }
-        case GaussianFormat::usdc: return detail::load_usdc(read_file(path), device);
-        case GaussianFormat::auto_detect: break;
+    case GaussianFormat::ply:
+        return load_gaussians_ply(path, device);
+    case GaussianFormat::sog:
+        return load_sog(path, device);
+    case GaussianFormat::spz:
+        return load_spz(path, device);
+    case GaussianFormat::glb: {
+        auto decoded = detail::load_glb(path);
+        auto model = make_model(
+            decoded.count, decoded.degree, decoded.means, decoded.log_scales, decoded.rotations,
+            decoded.opacity_logits, decoded.sh, device);
+        if (decoded.antialiased)
+            model.filter_mode = SplatFilterMode::mip_2d;
+        return model;
+    }
+    case GaussianFormat::usdc:
+        return detail::load_usdc(read_file(path), device);
+    case GaussianFormat::auto_detect:
+        break;
     }
     throw std::runtime_error("Invalid Gaussian input format");
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

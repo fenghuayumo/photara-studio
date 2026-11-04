@@ -22,18 +22,18 @@
 namespace photara::splat {
 namespace {
 using V = Eigen::Vector3f;
-void check(const ProcessingControl &c) {
+void check(const ProcessingControl& c) {
     if (c.cancelled && c.cancelled())
         throw std::runtime_error("Splat processing cancelled");
 }
-void report(const ProcessingControl &c, float p) {
+void report(const ProcessingControl& c, float p) {
     check(c);
     if (c.progress)
         c.progress(p);
 }
 struct Staging {
     std::filesystem::path dest, work;
-    explicit Staging(const std::filesystem::path &path) {
+    explicit Staging(const std::filesystem::path& path) {
         if (path.empty())
             throw std::invalid_argument("Output folder is empty");
         dest = std::filesystem::absolute(path);
@@ -64,8 +64,9 @@ struct Host {
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
     SplatFilterMode filter_mode{SplatFilterMode::classic};
     std::size_t n{}, bases{};
-    explicit Host(const GaussianModel &m)
-        : degree(m.sh_degree), render_method(m.render_method), filter_mode(m.filter_mode), n(m.size()), bases((degree + 1) * (degree + 1)) {
+    explicit Host(const GaussianModel& m)
+        : degree(m.sh_degree), render_method(m.render_method), filter_mode(m.filter_mode),
+          n(m.size()), bases((degree + 1) * (degree + 1)) {
         means = m.means.to_vector();
         logs = m.log_scales.to_vector();
         quats = m.quaternions.to_vector();
@@ -74,13 +75,13 @@ struct Host {
         if (!n || degree > 3 || means.size() != 3 * n || logs.size() != 3 * n ||
             quats.size() != 4 * n || opacity.size() != n || sh.size() != n * bases * 3)
             throw std::invalid_argument("Invalid Gaussian model shape");
-        for (const auto *values : {&means, &logs, &quats, &opacity, &sh})
+        for (const auto* values : {&means, &logs, &quats, &opacity, &sh})
             for (float value : *values)
                 if (!std::isfinite(value))
                     throw std::invalid_argument("Model contains non-finite values");
         for (std::size_t i = 0; i < n; ++i) {
-            Eigen::Quaternionf q(quats[4 * i], quats[4 * i + 1], quats[4 * i + 2],
-                                 quats[4 * i + 3]);
+            Eigen::Quaternionf q(
+                quats[4 * i], quats[4 * i + 1], quats[4 * i + 2], quats[4 * i + 3]);
             if (q.norm() < 1e-12F)
                 throw std::invalid_argument("Zero-norm Gaussian quaternion");
             for (unsigned k = 0; k < 3; ++k) {
@@ -90,18 +91,20 @@ struct Host {
             }
         }
     }
-    V mean(std::size_t i) const { return V(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]); }
+    V mean(std::size_t i) const {
+        return V(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]);
+    }
     Eigen::Matrix3f rotation(std::size_t i) const {
-        return Eigen::Quaternionf(quats[i * 4], quats[i * 4 + 1], quats[i * 4 + 2],
-                                  quats[i * 4 + 3])
+        return Eigen::Quaternionf(
+                   quats[i * 4], quats[i * 4 + 1], quats[i * 4 + 2], quats[i * 4 + 3])
             .normalized()
             .toRotationMatrix();
     }
     V scales(std::size_t i) const {
         return V(std::exp(logs[i * 3]), std::exp(logs[i * 3 + 1]), std::exp(logs[i * 3 + 2]));
     }
-    GaussianModel gather(const std::vector<unsigned> &ids) const {
-        auto tensor = [&](const std::vector<float> &src, std::size_t stride,
+    GaussianModel gather(const std::vector<unsigned>& ids) const {
+        auto tensor = [&](const std::vector<float>& src, std::size_t stride,
                           tinytensor::TensorShape shape) {
             std::vector<float> out(ids.size() * stride);
             for (std::size_t j = 0; j < ids.size(); ++j)
@@ -127,12 +130,12 @@ struct Bounds {
         low = low.cwiseMin(p - extent);
         high = high.cwiseMax(p + extent);
     }
-    void unite(const Bounds &b) {
+    void unite(const Bounds& b) {
         low = low.cwiseMin(b.low);
         high = high.cwiseMax(b.high);
     }
 };
-Bounds bounds(const Host &h, const std::vector<unsigned> &ids) {
+Bounds bounds(const Host& h, const std::vector<unsigned>& ids) {
     Bounds b;
     for (auto i : ids) {
         // sqrt(diag(R diag(s^2) R^T)) gives tight rotated 3-sigma AABB.
@@ -144,17 +147,17 @@ Bounds bounds(const Host &h, const std::vector<unsigned> &ids) {
     }
     return b;
 }
-void vector_json(std::ostream &out, const V &v) {
+void vector_json(std::ostream& out, const V& v) {
     out << '[' << v.x() << ',' << v.y() << ',' << v.z() << ']';
 }
-void bound_json(std::ostream &out, const Bounds &b) {
+void bound_json(std::ostream& out, const Bounds& b) {
     out << "{\"min\":";
     vector_json(out, b.low);
     out << ",\"max\":";
     vector_json(out, b.high);
     out << '}';
 }
-unsigned morton(V p, const Bounds &b) {
+unsigned morton(V p, const Bounds& b) {
     V relative = (p - b.low).cwiseQuotient((b.high - b.low).cwiseMax(1e-8F));
     unsigned key = 0;
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -170,16 +173,16 @@ struct LodNode {
     std::vector<unsigned> ids;
     std::vector<std::pair<unsigned, unsigned>> lods;
 };
-std::size_t grid_index(const CollisionGrid &g, unsigned x, unsigned y, unsigned z) {
+std::size_t grid_index(const CollisionGrid& g, unsigned x, unsigned y, unsigned z) {
     return x + std::size_t(g.dimensions[0]) * (y + std::size_t(g.dimensions[1]) * z);
 }
-bool occupied(const CollisionGrid &g, int x, int y, int z) {
+bool occupied(const CollisionGrid& g, int x, int y, int z) {
     return x >= 0 && y >= 0 && z >= 0 && unsigned(x) < g.dimensions[0] &&
            unsigned(y) < g.dimensions[1] && unsigned(z) < g.dimensions[2] &&
            g.solid[grid_index(g, x, y, z)];
 }
 
-void fill_grid(CollisionGrid &g, const CollisionOptions &o) {
+void fill_grid(CollisionGrid& g, const CollisionOptions& o) {
     auto nx = g.dimensions[0], ny = g.dimensions[1], nz = g.dimensions[2];
     if (o.fill == CollisionOptions::Fill::ground) {
         for (unsigned z = 0; z < nz; ++z) {
@@ -241,7 +244,7 @@ void fill_grid(CollisionGrid &g, const CollisionOptions &o) {
                 g.solid[i] = 1;
     }
 }
-void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
+void save_octree(const CollisionGrid& g, const std::filesystem::path& folder) {
     using BlockMap = std::map<std::array<unsigned, 3>, std::uint64_t>;
     BlockMap blocks;
     for (unsigned z = 0; z < g.dimensions[2]; ++z)
@@ -311,7 +314,7 @@ void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
     if (nodes.size() >= 0x1000000u || leaves.size() / 2 >= 0x1000000u)
         throw std::runtime_error("Voxel octree exceeds format limit");
     std::ofstream bin(folder / "scene.voxel.bin", std::ios::binary);
-    for (const auto *words : {&nodes, &leaves})
+    for (const auto* words : {&nodes, &leaves})
         for (auto word : *words) {
             char bytes[4];
             for (unsigned b = 0; b < 4; ++b)
@@ -343,8 +346,10 @@ void save_octree(const CollisionGrid &g, const std::filesystem::path &folder) {
 }
 } // namespace
 
-void export_streamed_sog(const GaussianModel &model, const std::filesystem::path &folder,
-                         const LodOptions &o) {
+void export_streamed_sog(
+    const GaussianModel& model,
+    const std::filesystem::path& folder,
+    const LodOptions& o) {
     if (o.levels < 2 || o.levels > 8 || !std::isfinite(o.keep_ratio) || o.keep_ratio <= 0 ||
         o.keep_ratio >= 1 || o.chunk_count < 1 || !std::isfinite(o.chunk_extent) ||
         o.chunk_extent <= 0)
@@ -360,7 +365,7 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
     for (std::size_t n = 0; n < tree.size(); ++n) {
         check(o);
         tree[n].bound = bounds(h, tree[n].ids);
-        auto &node = tree[n];
+        auto& node = tree[n];
         Eigen::Index axis;
         float extent = (node.bound.high - node.bound.low).maxCoeff(&axis);
         if (node.ids.size() > 1 && (node.ids.size() > o.chunk_count ||
@@ -382,12 +387,12 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
     std::vector<std::string> filenames;
     std::vector<std::size_t> counts(o.levels, 0);
     std::size_t leaf_count = 0, done = 0;
-    for (const auto &node : tree)
+    for (const auto& node : tree)
         if (node.left < 0)
             ++leaf_count;
-    const std::size_t total_units = std::max<std::size_t>(
-        1, leaf_count * static_cast<std::size_t>(o.levels));
-    for (auto &node : tree)
+    const std::size_t total_units =
+        std::max<std::size_t>(1, leaf_count * static_cast<std::size_t>(o.levels));
+    for (auto& node : tree)
         if (node.left < 0) {
             auto chunk = h.gather(node.ids);
             const auto original = chunk.size();
@@ -401,9 +406,11 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
                     options.cancelled = o.cancelled;
                     const std::size_t work_unit = done * o.levels + level;
                     options.progress = [&](float p) {
-                        report(o, 0.05F + 0.9F *
-                            (static_cast<float>(work_unit) + std::clamp(p, 0.F, 1.F)) /
-                            static_cast<float>(total_units));
+                        report(
+                            o,
+                            0.05F + 0.9F *
+                                        (static_cast<float>(work_unit) + std::clamp(p, 0.F, 1.F)) /
+                                        static_cast<float>(total_units));
                     };
                     chunk = simplify_gaussians(chunk, options);
                 }
@@ -420,13 +427,14 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
                 });
                 auto ordered = current.gather(ids);
                 const auto name = std::to_string(level) + "_" + std::to_string(done);
-                node.lods.emplace_back(static_cast<unsigned>(filenames.size()),
-                                       static_cast<unsigned>(ordered.size()));
+                node.lods.emplace_back(
+                    static_cast<unsigned>(filenames.size()), static_cast<unsigned>(ordered.size()));
                 counts[level] += ordered.size();
                 filenames.push_back(name + "/meta.json");
                 save_sog_unbundled(ordered, staging.work / name);
-                report(o, 0.05F + 0.9F * float(done * o.levels + level + 1) /
-                                      float(leaf_count * o.levels));
+                report(
+                    o, 0.05F + 0.9F * float(done * o.levels + level + 1) /
+                                   float(leaf_count * o.levels));
             }
             ++done;
             node.ids.clear();
@@ -455,7 +463,7 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
     }
     json << "],\"tree\":";
     std::function<void(int)> write_node = [&](int n) {
-        const auto &node = tree[n];
+        const auto& node = tree[n];
         json << "{\"bound\":";
         bound_json(json, node.bound);
         if (node.left >= 0) {
@@ -487,7 +495,7 @@ void export_streamed_sog(const GaussianModel &model, const std::filesystem::path
         o.progress(1);
 }
 
-CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOptions &o) {
+CollisionGrid voxelize_gaussians(const GaussianModel& model, const CollisionOptions& o) {
     if (!std::isfinite(o.voxel_size) || o.voxel_size <= 0 || !std::isfinite(o.opacity) ||
         o.opacity <= 0 || o.opacity > 1 || o.max_voxels < 64)
         throw std::invalid_argument("Invalid collision settings");
@@ -539,7 +547,7 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
         V p = transform * h.mean(i);
         Eigen::Matrix3f r = transform * h.rotation(i);
         V s = h.scales(i);
-        float *row = values.data() + i * 16;
+        float* row = values.data() + i * 16;
         for (unsigned k = 0; k < 3; ++k)
             row[k] = p[k];
         row[3] = 1.F / (1.F + std::exp(-std::clamp(h.opacity[i], -80.F, 80.F)));
@@ -554,12 +562,12 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
         unsigned low[3], high[3];
         const unsigned bd[] = {bx, by, bz};
         for (unsigned k = 0; k < 3; ++k) {
-            low[k] = static_cast<unsigned>(
-                std::clamp(std::floor((p[k] - extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
-                           float(bd[k] - 1)));
-            high[k] = static_cast<unsigned>(
-                std::clamp(std::floor((p[k] + extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
-                           float(bd[k] - 1)));
+            low[k] = static_cast<unsigned>(std::clamp(
+                std::floor((p[k] - extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
+                float(bd[k] - 1)));
+            high[k] = static_cast<unsigned>(std::clamp(
+                std::floor((p[k] + extent[k] - g.origin[k]) / (8.F * o.voxel_size)), 0.F,
+                float(bd[k] - 1)));
         }
         for (unsigned z = low[2]; z <= high[2]; ++z)
             for (unsigned y = low[1]; y <= high[1]; ++y)
@@ -572,7 +580,7 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
     }
     std::vector<std::int32_t> offsets{0}, indices;
     indices.reserve(references);
-    for (const auto &bin : bins) {
+    for (const auto& bin : bins) {
         indices.insert(indices.end(), bin.begin(), bin.end());
         offsets.push_back(static_cast<std::int32_t>(indices.size()));
     }
@@ -582,8 +590,8 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
     std::function<std::vector<float>(unsigned, unsigned)> gpu_query;
     if (o.vulkan) {
 #if defined(TINYTENSOR_HAS_VULKAN)
-        gpu_query = detail::prepare_voxel_field_vulkan(values, offsets, indices, g.dimensions,
-                                                       g.origin, o.voxel_size, o.opacity);
+        gpu_query = detail::prepare_voxel_field_vulkan(
+            values, offsets, indices, g.dimensions, g.origin, o.voxel_size, o.opacity);
 #else
         throw std::runtime_error("Vulkan collision processing was not compiled");
 #endif
@@ -605,10 +613,11 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
                     g.origin[2] + (z + .5F) * o.voxel_size);
                 float t = 1;
                 for (int ref = offsets[bin]; ref < offsets[bin + 1]; ++ref) {
-                    const float *row = values.data() + indices[ref] * 16;
+                    const float* row = values.data() + indices[ref] * 16;
                     V d = p - V(row[0], row[1], row[2]);
-                    V local(V(row[4], row[5], row[6]).dot(d), V(row[8], row[9], row[10]).dot(d),
-                            V(row[12], row[13], row[14]).dot(d));
+                    V local(
+                        V(row[4], row[5], row[6]).dot(d), V(row[8], row[9], row[10]).dot(d),
+                        V(row[12], row[13], row[14]).dot(d));
                     float q = local.squaredNorm();
                     if (q > 9)
                         continue;
@@ -632,7 +641,7 @@ CollisionGrid voxelize_gaussians(const GaussianModel &model, const CollisionOpti
 }
 
 namespace {
-mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
+mvs::Mesh collision_mesh_smooth(const CollisionGrid& g) {
     if (g.solid.size() != std::size_t(g.dimensions[0]) * g.dimensions[1] * g.dimensions[2] ||
         g.voxel_size <= 0)
         throw std::invalid_argument("Invalid collision grid");
@@ -644,10 +653,12 @@ mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
     const int ny = static_cast<int>(g.dimensions[1]);
     const int nz = static_cast<int>(g.dimensions[2]);
     const auto occupied = [&](const int x, const int y, const int z) {
-        if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return false;
-        return g.solid[static_cast<std::size_t>(x) +
-                       std::size_t(nx) * (static_cast<std::size_t>(y) +
-                       std::size_t(ny) * static_cast<std::size_t>(z))] != 0;
+        if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz)
+            return false;
+        return g.solid
+                   [static_cast<std::size_t>(x) +
+                    std::size_t(nx) * (static_cast<std::size_t>(y) +
+                                       std::size_t(ny) * static_cast<std::size_t>(z))] != 0;
     };
     mvs::Mesh mesh;
     std::unordered_map<std::uint64_t, int> edge_vertices;
@@ -656,7 +667,8 @@ mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
     auto vertex = [&](const int x, const int y, const int z, const int axis) {
         const std::uint64_t linear =
             (static_cast<std::uint64_t>(x + 1) * (static_cast<std::uint64_t>(ny) + 2U) +
-             static_cast<std::uint64_t>(y + 1)) * (static_cast<std::uint64_t>(nz) + 2U) +
+             static_cast<std::uint64_t>(y + 1)) *
+                (static_cast<std::uint64_t>(nz) + 2U) +
             static_cast<std::uint64_t>(z + 1);
         const std::uint64_t key = linear * 3U + static_cast<unsigned>(axis);
         if (const auto found = edge_vertices.find(key); found != edge_vertices.end())
@@ -682,14 +694,16 @@ mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
             for (int x = -1; x < nx; ++x) {
                 int cube = 0;
                 for (int corner = 0; corner < 8; ++corner)
-                    if (occupied(x + shift[corner].x(), y + shift[corner].y(),
-                                 z + shift[corner].z()))
+                    if (occupied(
+                            x + shift[corner].x(), y + shift[corner].y(), z + shift[corner].z()))
                         cube |= 1 << corner;
-                if (cube == 0 || cube == 255) continue;
+                if (cube == 0 || cube == 255)
+                    continue;
                 std::array<int, 12> edge_ids;
                 edge_ids.fill(-1);
                 for (int edge = 0; edge < 12; ++edge) {
-                    if ((edge_table[cube] & (1 << edge)) == 0) continue;
+                    if ((edge_table[cube] & (1 << edge)) == 0)
+                        continue;
                     edge_ids[static_cast<std::size_t>(edge)] = vertex(
                         x + edge_shift[edge].x(), y + edge_shift[edge].y(),
                         z + edge_shift[edge].z(), edge_shift[edge].w());
@@ -703,7 +717,7 @@ mvs::Mesh collision_mesh_smooth(const CollisionGrid &g) {
     return mesh;
 }
 
-mvs::Mesh collision_mesh_faces(const CollisionGrid &g) {
+mvs::Mesh collision_mesh_faces(const CollisionGrid& g) {
     if (g.solid.size() != std::size_t(g.dimensions[0]) * g.dimensions[1] * g.dimensions[2] ||
         g.voxel_size <= 0)
         throw std::invalid_argument("Invalid collision grid");
@@ -719,8 +733,9 @@ mvs::Mesh collision_mesh_faces(const CollisionGrid &g) {
             throw std::runtime_error("Collision mesh vertex budget exceeded");
         int id = static_cast<int>(mesh.vertices.size());
         corners.emplace(key, id);
-        mesh.vertices.emplace_back(g.origin[0] + x * g.voxel_size, g.origin[1] + y * g.voxel_size,
-                                   g.origin[2] + z * g.voxel_size);
+        mesh.vertices.emplace_back(
+            g.origin[0] + x * g.voxel_size, g.origin[1] + y * g.voxel_size,
+            g.origin[2] + z * g.voxel_size);
         return id;
     };
     // Faces along each axis; cyclic axes form a right-handed basis.
@@ -758,18 +773,19 @@ mvs::Mesh collision_mesh_faces(const CollisionGrid &g) {
 }
 } // namespace
 
-mvs::Mesh collision_mesh(const CollisionGrid &g) {
+mvs::Mesh collision_mesh(const CollisionGrid& g) {
     return collision_mesh_faces(g);
 }
 
-mvs::Mesh collision_mesh(const CollisionGrid &g, const CollisionOptions::MeshShape shape) {
-    return shape == CollisionOptions::MeshShape::smooth
-        ? collision_mesh_smooth(g)
-        : collision_mesh_faces(g);
+mvs::Mesh collision_mesh(const CollisionGrid& g, const CollisionOptions::MeshShape shape) {
+    return shape == CollisionOptions::MeshShape::smooth ? collision_mesh_smooth(g)
+                                                        : collision_mesh_faces(g);
 }
 
-void export_collision(const GaussianModel &model, const std::filesystem::path &folder,
-                      const CollisionOptions &o) {
+void export_collision(
+    const GaussianModel& model,
+    const std::filesystem::path& folder,
+    const CollisionOptions& o) {
     Staging staging(folder);
     auto grid = voxelize_gaussians(model, o);
     check(o);

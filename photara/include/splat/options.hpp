@@ -16,10 +16,14 @@ enum class SplatFilterMode { classic = 1, mip_2d, mip_3d, mip };
 
 inline constexpr const char* filter_mode_name(SplatFilterMode mode) noexcept {
     switch (mode) {
-    case SplatFilterMode::classic: return "classic";
-    case SplatFilterMode::mip_2d: return "mip2d";
-    case SplatFilterMode::mip_3d: return "mip3d";
-    case SplatFilterMode::mip: return "mip";
+    case SplatFilterMode::classic:
+        return "classic";
+    case SplatFilterMode::mip_2d:
+        return "mip2d";
+    case SplatFilterMode::mip_3d:
+        return "mip3d";
+    case SplatFilterMode::mip:
+        return "mip";
     }
     return "unknown";
 }
@@ -122,8 +126,7 @@ struct TrainingOptions {
     // MVS initialization only enables it for the explicit dense_adaptive mode.
     bool input_is_dense{true};
     bool enable_densification{true};
-    DensificationStrategy densification_strategy{
-        DensificationStrategy::adc_igs};
+    DensificationStrategy densification_strategy{DensificationStrategy::adc_igs};
     // Growth ceiling while densify is enabled. Initialization uses the full
     // source cloud unless initial_point_budget asks for a subset.
     std::size_t densification_cap{3'000'000};
@@ -132,8 +135,8 @@ struct TrainingOptions {
     // already sitting on it leaves IGS no room to refine anything: every later
     // step just swaps rows. 0 keeps every input point.
     std::size_t initial_point_budget{0};
-    unsigned refine_start_iter{0};  // 0 selects the strategy preset
-    unsigned refine_stop_iter{0};   // 0 selects the strategy preset
+    unsigned refine_start_iter{0}; // 0 selects the strategy preset
+    unsigned refine_stop_iter{0};  // 0 selects the strategy preset
     // IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter).
     unsigned refine_stop_num_iter{2'500};
     // Iteration after which densification stops adding parents and only
@@ -141,7 +144,7 @@ struct TrainingOptions {
     // 0 selects the Brush proportion (half of `iterations`, resolved by
     // apply_strategy_defaults); an explicit value always wins.
     unsigned grow_stop_iter{0};
-    unsigned refine_every{0};       // 0 selects the strategy preset
+    unsigned refine_every{0}; // 0 selects the strategy preset
     unsigned opacity_reset_every{3'000};
     // Shared split/growth controls. Strategies may differ in how they build
     // the candidate set, but should not expose duplicate threshold knobs.
@@ -206,10 +209,10 @@ struct TrainingOptions {
     // Freeze dense MVS structure after its warm-up and keep optimizing the
     // progressively enabled SH bands. dense_adaptive may still recycle/split
     // rows after this point, without applying further structure Adam steps.
-    unsigned dense_structure_freeze_iter{1'000};  // 0 disables the freeze
+    unsigned dense_structure_freeze_iter{1'000}; // 0 disables the freeze
     // Optional all-input diagnostic: stop means/scale/quaternion/opacity Adam
     // after this iteration while continuing SH optimization.
-    unsigned structure_freeze_iter{0};  // 0 disables the freeze
+    unsigned structure_freeze_iter{0}; // 0 disables the freeze
     float means_lr{1.6e-4F};
     float scales_lr{5e-3F};
     float opacities_lr{5e-2F};
@@ -380,8 +383,7 @@ struct TrainingOptions {
     bool progressive_resolution{false};
     unsigned progressive_resolution_interval{3'000};
     float progressive_initial_scale{0.25F};
-    std::size_t training_view_cache_bytes{
-        std::size_t{6} * 1024 * 1024 * 1024};
+    std::size_t training_view_cache_bytes{std::size_t{6} * 1024 * 1024 * 1024};
     // Expand the host budget when possible. The device budget is a hard upper
     // bound even in adaptive mode. Zero disables the host-side decoded-image
     // cache only;
@@ -461,19 +463,19 @@ void apply_strategy_defaults(TrainingOptions& options);
 // Growth cutoff: 0 selects the Brush proportion (half of `iterations`, which
 // is its 15000 of 30000); the dense MVS path predates that cadence and keeps
 // its historical absolute start. Callers that pin a value always win.
-[[nodiscard]] inline unsigned grow_stop_iteration(
-    const TrainingOptions& options) {
-    if (options.grow_stop_iter != 0) return options.grow_stop_iter;
-    return options.densification_strategy ==
-            DensificationStrategy::dense_adaptive
-        ? 15'000U
-        : std::max(1U, options.iterations / 2);
+[[nodiscard]] inline unsigned grow_stop_iteration(const TrainingOptions& options) {
+    if (options.grow_stop_iter != 0)
+        return options.grow_stop_iter;
+    return options.densification_strategy == DensificationStrategy::dense_adaptive
+               ? 15'000U
+               : std::max(1U, options.iterations / 2);
 }
 
 enum class SpeedyPruningPhase { none, soft, hard };
 
 [[nodiscard]] inline SpeedyPruningPhase speedy_pruning_phase(
-    const TrainingOptions& options, const unsigned iteration,
+    const TrainingOptions& options,
+    const unsigned iteration,
     const bool densification_enabled) {
     if (!options.speedy_pruning || iteration == 0 || iteration > options.iterations)
         return SpeedyPruningPhase::none;
@@ -483,8 +485,8 @@ enum class SpeedyPruningPhase { none, soft, hard };
             iteration >= options.speedy_stop ||
             (iteration - options.speedy_start) % options.speedy_every != 0)
             return SpeedyPruningPhase::none;
-        return densification_enabled && iteration < growth_end
-            ? SpeedyPruningPhase::soft : SpeedyPruningPhase::hard;
+        return densification_enabled && iteration < growth_end ? SpeedyPruningPhase::soft
+                                                               : SpeedyPruningPhase::hard;
     }
     // Use integer ratios and disjoint phase ranges so short runs never
     // duplicate an event or prune at the final training step.
@@ -492,8 +494,7 @@ enum class SpeedyPruningPhase { none, soft, hard };
         return static_cast<unsigned>(std::uint64_t{steps} * numerator / 5);
     };
     if (densification_enabled && iteration < growth_end &&
-        (iteration == fraction(growth_end, 3) ||
-         iteration == fraction(growth_end, 4)))
+        (iteration == fraction(growth_end, 3) || iteration == fraction(growth_end, 4)))
         return SpeedyPruningPhase::soft;
     const unsigned tail = options.iterations - growth_end;
     if (iteration > growth_end && iteration < options.iterations &&
@@ -507,13 +508,12 @@ enum class SpeedyPruningPhase { none, soft, hard };
 // (office, ADC-IGS: +2.2 dB at 1k with the full penalty but -0.2 dB at
 // 30k; the decayed form keeps the early gain, artifacts/office_igs_*).
 [[nodiscard]] inline float oversize_penalty_at(
-    const TrainingOptions& options, const unsigned iteration) {
-    if (options.oversize_penalty <= 0.F ||
-        options.oversize_screen_limit <= 0.F)
+    const TrainingOptions& options,
+    const unsigned iteration) {
+    if (options.oversize_penalty <= 0.F || options.oversize_screen_limit <= 0.F)
         return 0.F;
     const float progress = std::min(
-        static_cast<float>(iteration - 1) /
-            static_cast<float>(std::max(options.iterations, 1U)),
+        static_cast<float>(iteration - 1) / static_cast<float>(std::max(options.iterations, 1U)),
         1.F);
     return options.oversize_penalty * std::max(1.F - progress, 0.F);
 }
@@ -521,7 +521,8 @@ enum class SpeedyPruningPhase { none, soft, hard };
 // 3DGUT optimizes appearance. Surface supervision belongs to the 3DGS mesh
 // workflow; keep this policy shared by the CLI and direct Trainer callers.
 inline void enforce_render_method_constraints(TrainingOptions& options) {
-    if (options.render_method != RenderMethod::gaussian_3dgut) return;
+    if (options.render_method != RenderMethod::gaussian_3dgut)
+        return;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.use_depth_normal_loss = false;
@@ -534,4 +535,4 @@ inline void enforce_render_method_constraints(TrainingOptions& options) {
     options.lambda_n = 0.F;
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -8,7 +8,9 @@ RWStructuredBuffer<float> reduction : register(u1);
 
 groupshared float local_sum[256];
 
-float push_float(uint value) { return asfloat(value); }
+float push_float(uint value) {
+    return asfloat(value);
+}
 
 [numthreads(256, 1, 1)]
 void main(uint3 group_id : SV_GroupID, uint local_id : SV_GroupIndex) {
@@ -37,12 +39,14 @@ void main(uint3 group_id : SV_GroupID, uint local_id : SV_GroupIndex) {
     local_sum[local_id] = sum;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-        if (local_id < stride) local_sum[local_id] += local_sum[local_id + stride];
+        if (local_id < stride)
+            local_sum[local_id] += local_sum[local_id + stride];
         GroupMemoryBarrierWithGroupSync();
     }
     if (local_id == 0u) {
         float value = local_sum[0];
-        if (pass != 0u) value *= push_float(pc.u4);
+        if (pass != 0u)
+            value *= push_float(pc.u4);
         reduction[pass == 0u ? group_id.x : 0u] = value;
     }
 }

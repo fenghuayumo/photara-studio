@@ -113,15 +113,17 @@ struct OccupancyCacheStats {
 };
 
 class Rasterizer {
-public:
+  public:
     // Sum over pixels of (opacity * d(sum RGB)/d alpha)^2, as in
     // Faster-GS / Speedy-Splat. Evaluates canonical colours, independent of
     // training residuals, and does not update parameters or Adam moments.
     tinytensor::Tensor pruning_scores(
-        const GaussianModel& model, const Camera& camera,
+        const GaussianModel& model,
+        const Camera& camera,
         RasterizeOptions options = {}) const;
     RenderResult forward(
-        const GaussianModel& model, const Camera& camera,
+        const GaussianModel& model,
+        const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
     // Fused training objective primitive. The Vulkan implementation keeps the
@@ -131,12 +133,15 @@ public:
         const RenderResult& rendered,
         const tinytensor::Tensor& target,
         const tinytensor::Tensor& mask,
-        bool mask_enabled, float ssim_weight,
-        float photometric_weight, bool read_loss_value = true,
+        bool mask_enabled,
+        float ssim_weight,
+        float photometric_weight,
+        bool read_loss_value = true,
         tinytensor::Tensor* color_gradient = nullptr) const;
 
     ModelGradients backward(
-        const GaussianModel& model, const RenderResult& rendered,
+        const GaussianModel& model,
+        const RenderResult& rendered,
         const tinytensor::Tensor& grad_color,
         const tinytensor::Tensor& grad_alpha,
         const tinytensor::Tensor& grad_depth,
@@ -150,16 +155,19 @@ public:
     void materialize_visibility(RenderResult& rendered) const;
 
     DepthSampleResult sample_depth(
-        const GaussianModel& model, const tinytensor::Tensor& world_points,
+        const GaussianModel& model,
+        const tinytensor::Tensor& world_points,
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
     DepthSampleGradients sample_depth_backward(
-        const GaussianModel& model, const DepthSampleResult& sampled,
+        const GaussianModel& model,
+        const DepthSampleResult& sampled,
         const tinytensor::Tensor& grad_camera_points) const;
 
     OccupancyResult evaluate_occupancy(
-        const GaussianModel& model, const tinytensor::Tensor& world_points,
+        const GaussianModel& model,
+        const tinytensor::Tensor& world_points,
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
@@ -170,19 +178,22 @@ public:
     // Zero selects a budget from currently available VRAM; SIZE_MAX forces host
     // storage (useful for verifying the spill path).
     OccupancyCache prepare_occupancy_cache(
-        const GaussianModel& model, const std::vector<Camera>& cameras,
-        const RasterizeOptions& options = {}, std::size_t device_budget = 0,
+        const GaussianModel& model,
+        const std::vector<Camera>& cameras,
+        const RasterizeOptions& options = {},
+        std::size_t device_budget = 0,
         std::size_t host_budget = std::size_t{4} << 30) const;
     OccupancyResult evaluate_occupancy(
-        OccupancyCache& cache, std::size_t camera_index,
+        OccupancyCache& cache,
+        std::size_t camera_index,
         const tinytensor::Tensor& world_points) const;
     OccupancyCacheStats occupancy_cache_stats(const OccupancyCache& cache) const;
 
     // Packed [N,2] xy pixel centres from the last forward, or null.
     const float* projected_mean2d(const RenderResult& rendered) const;
 
-private:
+  private:
     mutable std::shared_ptr<void> backend_;
 };
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -9,3 +9,7 @@ AllowShortBlocksOnASingleLine: Never
 SortIncludes: Never
 PointerAlignment: Left
 BreakAfterAttributes: Never
+BinPackParameters: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AlignAfterOpenBracket: AlwaysBreak
+PenaltyReturnTypeOnItsOwnLine: 1000

@@ -16,12 +16,12 @@ namespace photara::splat::detail {
 // and an optional CRF. The transform is training-only: evaluation, preview and
 // exported renders keep the canonical Gaussian colour.
 struct PpispState {
-    tinytensor::Tensor parameters;  // [views, P]
-    tinytensor::Tensor gradient;    // [views, P]
+    tinytensor::Tensor parameters; // [views, P]
+    tinytensor::Tensor gradient;   // [views, P]
     AdamState adam;
-    tinytensor::Tensor output;      // [3, H, W]
-    tinytensor::Tensor input_grad;  // [3, H, W]
-    tinytensor::Tensor raw_sums;    // CUDA regularization / Vulkan reduction scratch
+    tinytensor::Tensor output;     // [3, H, W]
+    tinytensor::Tensor input_grad; // [3, H, W]
+    tinytensor::Tensor raw_sums;   // CUDA regularization / Vulkan reduction scratch
     // CUDA stores a [views, 9] colour pull-back. Vulkan stores the active
     // view's homography and 8x9 Jacobian here for its HLSL backward pass.
     tinytensor::Tensor colour_pullback;
@@ -34,35 +34,38 @@ struct PpispState {
     }
 };
 
-PpispState make_ppisp_state(
-    std::size_t views, const TrainingOptions& options);
-PpispState make_ppisp_state_vulkan(
-    std::size_t views, const TrainingOptions& options);
+PpispState make_ppisp_state(std::size_t views, const TrainingOptions& options);
+PpispState make_ppisp_state_vulkan(std::size_t views, const TrainingOptions& options);
 
 void apply_ppisp(
-    const tinytensor::Tensor& color, PpispState& state, const Camera& camera,
+    const tinytensor::Tensor& color,
+    PpispState& state,
+    const Camera& camera,
     std::size_t view);
 void apply_ppisp_vulkan(
-    const tinytensor::Tensor& color, PpispState& state, const Camera& camera,
+    const tinytensor::Tensor& color,
+    PpispState& state,
+    const Camera& camera,
     std::size_t view);
 
 void backward_ppisp(
-    PpispState& state, const tinytensor::Tensor& color,
-    const tinytensor::Tensor& output_gradient, const Camera& camera,
+    PpispState& state,
+    const tinytensor::Tensor& color,
+    const tinytensor::Tensor& output_gradient,
+    const Camera& camera,
     std::size_t view);
 void backward_ppisp_vulkan(
-    PpispState& state, const tinytensor::Tensor& color,
-    const tinytensor::Tensor& output_gradient, const Camera& camera,
+    PpispState& state,
+    const tinytensor::Tensor& color,
+    const tinytensor::Tensor& output_gradient,
+    const Camera& camera,
     std::size_t view);
 
-void step_ppisp(
-    PpispState& state, const TrainingOptions& options, unsigned iteration);
-void step_ppisp_vulkan(
-    PpispState& state, const TrainingOptions& options, unsigned iteration);
+void step_ppisp(PpispState& state, const TrainingOptions& options, unsigned iteration);
+void step_ppisp_vulkan(PpispState& state, const TrainingOptions& options, unsigned iteration);
 
 // Diagnostics for the training log: mean and maximum |2^exposure - 1|
 // over the per-view PPISP table.
-[[nodiscard]] std::array<float, 2> ppisp_identity_deviation(
-    const PpispState& state);
+[[nodiscard]] std::array<float, 2> ppisp_identity_deviation(const PpispState& state);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

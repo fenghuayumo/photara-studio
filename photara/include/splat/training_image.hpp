@@ -17,10 +17,12 @@ struct TrainingImage {
 };
 
 [[nodiscard]] Camera training_camera(
-    const mvs::MvsView& view, const TrainingOptions& options,
+    const mvs::MvsView& view,
+    const TrainingOptions& options,
     float resolution_scale = 1.F);
 
 [[nodiscard]] TrainingImage load_training_image(
-    const mvs::MvsView& view, const TrainingOptions& options);
+    const mvs::MvsView& view,
+    const TrainingOptions& options);
 
-}  // namespace photara::splat::training_data
+} // namespace photara::splat::training_data

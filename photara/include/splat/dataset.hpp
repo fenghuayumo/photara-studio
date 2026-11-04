@@ -50,18 +50,16 @@ struct DatasetLoadResult {
 // Format adapters are intentionally independent of the trainer. Additional
 // camera/dataset formats can be registered without changing GGGS code.
 class DatasetReader {
-public:
+  public:
     virtual ~DatasetReader() = default;
 
     [[nodiscard]] virtual DatasetFormat format() const noexcept = 0;
-    [[nodiscard]] virtual bool probe(
-        const DatasetLoadRequest& request) const = 0;
-    [[nodiscard]] virtual DatasetLoadResult load(
-        const DatasetLoadRequest& request) const = 0;
+    [[nodiscard]] virtual bool probe(const DatasetLoadRequest& request) const = 0;
+    [[nodiscard]] virtual DatasetLoadResult load(const DatasetLoadRequest& request) const = 0;
 };
 
 class DatasetLoader {
-public:
+  public:
     DatasetLoader() = default;
     DatasetLoader(DatasetLoader&&) noexcept = default;
     DatasetLoader& operator=(DatasetLoader&&) noexcept = default;
@@ -70,19 +68,17 @@ public:
     DatasetLoader& operator=(const DatasetLoader&) = delete;
 
     void register_reader(std::unique_ptr<DatasetReader> reader);
-    [[nodiscard]] DatasetLoadResult load(
-        const DatasetLoadRequest& request) const;
+    [[nodiscard]] DatasetLoadResult load(const DatasetLoadRequest& request) const;
 
-private:
+  private:
     std::vector<std::unique_ptr<DatasetReader>> readers_;
 };
 
 [[nodiscard]] DatasetLoader make_default_dataset_loader();
-[[nodiscard]] DatasetLoadResult load_splat_dataset(
-    const DatasetLoadRequest& request);
+[[nodiscard]] DatasetLoadResult load_splat_dataset(const DatasetLoadRequest& request);
 
 // Populate the trainer's initial cloud directly from SfM sparse landmarks.
 // This is the default product path and never marks the input as dense.
 void initialize_scene_from_sparse_points(mvs::MvsScene& scene);
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -30,14 +30,13 @@ constexpr std::uint32_t k_glb_magic = 0x46546c67U;
 constexpr std::uint32_t k_json_chunk = 0x4e4f534aU;
 constexpr std::uint32_t k_bin_chunk = 0x004e4942U;
 
-[[nodiscard]] std::uint32_t read_u32(
-    const Bytes& bytes, const std::size_t offset) {
+[[nodiscard]] std::uint32_t read_u32(const Bytes& bytes, const std::size_t offset) {
     if (offset > bytes.size() || bytes.size() - offset < 4U)
         throw std::runtime_error("Truncated GLB header");
     return static_cast<std::uint32_t>(bytes[offset]) |
-        (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
-        (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
-        (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+           (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
 }
 
 void append_u32(Bytes& bytes, const std::uint32_t value) {
@@ -55,26 +54,29 @@ void append_u32(Bytes& bytes, const std::uint32_t value) {
     Bytes bytes(static_cast<std::size_t>(end));
     input.seekg(0, std::ios::beg);
     if (!bytes.empty())
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
+        input.read(
+            reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!input)
         throw std::runtime_error("Failed to read GLB file: " + path.string());
     return bytes;
 }
 
 [[nodiscard]] const ptree& array_item(
-    const ptree& array, const std::size_t index, const char* label) {
+    const ptree& array,
+    const std::size_t index,
+    const char* label) {
     std::size_t current = 0;
     for (const auto& item : array) {
-        if (current++ == index) return item.second;
+        if (current++ == index)
+            return item.second;
     }
-    throw std::runtime_error(
-        std::string("GLB ") + label + " index is out of range");
+    throw std::runtime_error(std::string("GLB ") + label + " index is out of range");
 }
 
 [[nodiscard]] std::vector<float> number_array(const ptree& node) {
     std::vector<float> result;
-    for (const auto& item : node) result.push_back(item.second.get_value<float>());
+    for (const auto& item : node)
+        result.push_back(item.second.get_value<float>());
     return result;
 }
 
@@ -82,25 +84,28 @@ void append_u32(Bytes& bytes, const std::uint32_t value) {
     constexpr float tolerance = 1e-6F;
     if (const auto matrix = node.get_child_optional("matrix")) {
         const auto values = number_array(*matrix);
-        if (values.size() != 16U) return false;
+        if (values.size() != 16U)
+            return false;
         for (std::size_t i = 0; i < values.size(); ++i) {
             const float expected = i % 5U == 0U ? 1.F : 0.F;
-            if (std::abs(values[i] - expected) > tolerance) return false;
+            if (std::abs(values[i] - expected) > tolerance)
+                return false;
         }
     }
-    const auto check = [tolerance](
-                           const auto& value,
-                           const std::vector<float>& expected) {
-        if (!value) return true;
+    const auto check = [tolerance](const auto& value, const std::vector<float>& expected) {
+        if (!value)
+            return true;
         const auto actual = number_array(*value);
-        if (actual.size() != expected.size()) return false;
+        if (actual.size() != expected.size())
+            return false;
         for (std::size_t i = 0; i < actual.size(); ++i)
-            if (std::abs(actual[i] - expected[i]) > tolerance) return false;
+            if (std::abs(actual[i] - expected[i]) > tolerance)
+                return false;
         return true;
     };
     return check(node.get_child_optional("translation"), {0.F, 0.F, 0.F}) &&
-        check(node.get_child_optional("rotation"), {0.F, 0.F, 0.F, 1.F}) &&
-        check(node.get_child_optional("scale"), {1.F, 1.F, 1.F});
+           check(node.get_child_optional("rotation"), {0.F, 0.F, 0.F, 1.F}) &&
+           check(node.get_child_optional("scale"), {1.F, 1.F, 1.F});
 }
 
 struct AccessorData {
@@ -111,80 +116,87 @@ struct AccessorData {
 
 [[nodiscard]] std::size_t component_size(const unsigned type) {
     switch (type) {
-        case 5120:
-        case 5121: return 1U;
-        case 5122:
-        case 5123: return 2U;
-        case 5125:
-        case 5126: return 4U;
-        default: throw std::runtime_error("Unsupported GLB accessor component type");
+    case 5120:
+    case 5121:
+        return 1U;
+    case 5122:
+    case 5123:
+        return 2U;
+    case 5125:
+    case 5126:
+        return 4U;
+    default:
+        throw std::runtime_error("Unsupported GLB accessor component type");
     }
 }
 
 [[nodiscard]] std::size_t type_components(const std::string& type) {
-    if (type == "SCALAR") return 1U;
-    if (type == "VEC2") return 2U;
-    if (type == "VEC3") return 3U;
-    if (type == "VEC4") return 4U;
+    if (type == "SCALAR")
+        return 1U;
+    if (type == "VEC2")
+        return 2U;
+    if (type == "VEC3")
+        return 3U;
+    if (type == "VEC4")
+        return 4U;
     throw std::runtime_error("Unsupported GLB Gaussian accessor type: " + type);
 }
 
-template <typename T>
-[[nodiscard]] T load_scalar(const std::uint8_t* bytes) {
+template <typename T> [[nodiscard]] T load_scalar(const std::uint8_t* bytes) {
     T value{};
     std::memcpy(&value, bytes, sizeof(value));
     return value;
 }
 
 [[nodiscard]] float read_component(
-    const std::uint8_t* bytes, const unsigned type, const bool normalized) {
+    const std::uint8_t* bytes,
+    const unsigned type,
+    const bool normalized) {
     switch (type) {
-        case 5120: {
-            const auto value = load_scalar<std::int8_t>(bytes);
-            return normalized
-                ? std::max(-1.F, static_cast<float>(value) / 127.F)
-                : static_cast<float>(value);
-        }
-        case 5121: {
-            const auto value = load_scalar<std::uint8_t>(bytes);
-            return normalized ? static_cast<float>(value) / 255.F
-                              : static_cast<float>(value);
-        }
-        case 5122: {
-            const auto value = load_scalar<std::int16_t>(bytes);
-            return normalized
-                ? std::max(-1.F, static_cast<float>(value) / 32767.F)
-                : static_cast<float>(value);
-        }
-        case 5123: {
-            const auto value = load_scalar<std::uint16_t>(bytes);
-            return normalized ? static_cast<float>(value) / 65535.F
-                              : static_cast<float>(value);
-        }
-        case 5125: {
-            const auto value = load_scalar<std::uint32_t>(bytes);
-            return normalized
-                ? static_cast<float>(static_cast<double>(value) / 4294967295.0)
-                : static_cast<float>(value);
-        }
-        case 5126: return load_scalar<float>(bytes);
-        default: break;
+    case 5120: {
+        const auto value = load_scalar<std::int8_t>(bytes);
+        return normalized ? std::max(-1.F, static_cast<float>(value) / 127.F)
+                          : static_cast<float>(value);
+    }
+    case 5121: {
+        const auto value = load_scalar<std::uint8_t>(bytes);
+        return normalized ? static_cast<float>(value) / 255.F : static_cast<float>(value);
+    }
+    case 5122: {
+        const auto value = load_scalar<std::int16_t>(bytes);
+        return normalized ? std::max(-1.F, static_cast<float>(value) / 32767.F)
+                          : static_cast<float>(value);
+    }
+    case 5123: {
+        const auto value = load_scalar<std::uint16_t>(bytes);
+        return normalized ? static_cast<float>(value) / 65535.F : static_cast<float>(value);
+    }
+    case 5125: {
+        const auto value = load_scalar<std::uint32_t>(bytes);
+        return normalized ? static_cast<float>(static_cast<double>(value) / 4294967295.0)
+                          : static_cast<float>(value);
+    }
+    case 5126:
+        return load_scalar<float>(bytes);
+    default:
+        break;
     }
     throw std::runtime_error("Unsupported GLB accessor component type");
 }
 
 [[nodiscard]] AccessorData read_accessor(
-    const ptree& root, const Bytes& binary, const std::size_t index,
-    const std::string& expected_type, const char* label) {
+    const ptree& root,
+    const Bytes& binary,
+    const std::size_t index,
+    const std::string& expected_type,
+    const char* label) {
     const auto& accessor = array_item(root.get_child("accessors"), index, "accessor");
     if (accessor.get_child_optional("sparse"))
-        throw std::runtime_error(
-            std::string("Sparse GLB accessors are unsupported for ") + label);
+        throw std::runtime_error(std::string("Sparse GLB accessors are unsupported for ") + label);
     const auto view_index = accessor.get_optional<std::size_t>("bufferView");
     if (!view_index)
         throw std::runtime_error(std::string("GLB accessor has no bufferView: ") + label);
-    const auto& view = array_item(
-        root.get_child("bufferViews"), *view_index, "bufferView");
+    const auto& view = array_item(root.get_child("bufferViews"), *view_index, "bufferView");
     if (view.get<std::size_t>("buffer", 0U) != 0U)
         throw std::runtime_error("GLB Gaussian accessor references an external buffer");
     const std::string type = accessor.get<std::string>("type");
@@ -202,11 +214,9 @@ template <typename T>
     const auto accessor_offset = accessor.get<std::size_t>("byteOffset", 0U);
     const bool normalized = accessor.get<bool>("normalized", false);
     if (stride < element_size || view_offset > binary.size() ||
-        view_length > binary.size() - view_offset ||
-        accessor_offset > view_length ||
-        (count != 0U &&
-         ((count - 1U) > (view_length - accessor_offset) / stride ||
-          element_size > view_length - accessor_offset - (count - 1U) * stride)))
+        view_length > binary.size() - view_offset || accessor_offset > view_length ||
+        (count != 0U && ((count - 1U) > (view_length - accessor_offset) / stride ||
+                         element_size > view_length - accessor_offset - (count - 1U) * stride)))
         throw std::runtime_error(std::string("GLB accessor is truncated: ") + label);
     const auto offset = view_offset + accessor_offset;
     AccessorData result;
@@ -216,23 +226,23 @@ template <typename T>
     for (std::size_t row = 0; row < count; ++row)
         for (std::size_t component = 0; component < components; ++component)
             result.values[row * components + component] = read_component(
-                binary.data() + offset + row * stride + component * scalar_size,
-                component_type, normalized);
+                binary.data() + offset + row * stride + component * scalar_size, component_type,
+                normalized);
     return result;
 }
 
 [[nodiscard]] std::optional<std::size_t> attribute_index(
-    const ptree& attributes, const std::string& semantic) {
+    const ptree& attributes,
+    const std::string& semantic) {
     for (const auto& item : attributes)
         if (item.first == semantic)
             return item.second.get_value<std::size_t>();
     return std::nullopt;
 }
 
-[[nodiscard]] std::string sh_semantic(
-    const unsigned degree, const unsigned coefficient) {
-    return "KHR_gaussian_splatting:SH_DEGREE_" + std::to_string(degree) +
-        "_COEF_" + std::to_string(coefficient);
+[[nodiscard]] std::string sh_semantic(const unsigned degree, const unsigned coefficient) {
+    return "KHR_gaussian_splatting:SH_DEGREE_" + std::to_string(degree) + "_COEF_" +
+           std::to_string(coefficient);
 }
 
 void append_float(Bytes& bytes, const float value) {
@@ -252,12 +262,16 @@ struct OutputAccessor {
 };
 
 void append_output_accessor(
-    Bytes& binary, std::vector<OutputAccessor>& accessors,
-    std::string semantic, std::string type, const std::size_t components,
+    Bytes& binary,
+    std::vector<OutputAccessor>& accessors,
+    std::string semantic,
+    std::string type,
+    const std::size_t components,
     const std::vector<float>& values,
     std::optional<std::array<float, 3>> minimum = std::nullopt,
     std::optional<std::array<float, 3>> maximum = std::nullopt) {
-    while (binary.size() % 4U != 0U) binary.push_back(0U);
+    while (binary.size() % 4U != 0U)
+        binary.push_back(0U);
     OutputAccessor accessor;
     accessor.semantic = std::move(semantic);
     accessor.type = std::move(type);
@@ -266,22 +280,25 @@ void append_output_accessor(
     accessor.length = values.size() * sizeof(float);
     accessor.minimum = minimum;
     accessor.maximum = maximum;
-    for (const float value : values) append_float(binary, value);
+    for (const float value : values)
+        append_float(binary, value);
     accessors.push_back(std::move(accessor));
 }
 
 [[nodiscard]] std::string glb_json(
-    const std::size_t count, const Bytes& binary,
-    const std::vector<OutputAccessor>& accessors, const bool antialiased) {
+    const std::size_t count,
+    const Bytes& binary,
+    const std::vector<OutputAccessor>& accessors,
+    const bool antialiased) {
     std::ostringstream json;
-    json << std::setprecision(9)
-         << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Photara\"},"
+    json << std::setprecision(9) << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Photara\"},"
          << "\"extensionsUsed\":[\"KHR_gaussian_splatting\"],"
          << "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
          << "\"nodes\":[{\"mesh\":0}],\"meshes\":[{\"primitives\":[{"
          << "\"mode\":0,\"attributes\":{";
     for (std::size_t i = 0; i < accessors.size(); ++i) {
-        if (i != 0U) json << ',';
+        if (i != 0U)
+            json << ',';
         json << '\"' << accessors[i].semantic << "\":" << i;
     }
     json << "},\"extensions\":{\"KHR_gaussian_splatting\":{"
@@ -290,21 +307,21 @@ void append_output_accessor(
          << "}]}],\"buffers\":[{\"byteLength\":" << binary.size() << "}],"
          << "\"bufferViews\":[";
     for (std::size_t i = 0; i < accessors.size(); ++i) {
-        if (i != 0U) json << ',';
+        if (i != 0U)
+            json << ',';
         json << "{\"buffer\":0,\"byteOffset\":" << accessors[i].offset
-             << ",\"byteLength\":" << accessors[i].length
-             << ",\"target\":34962}";
+             << ",\"byteLength\":" << accessors[i].length << ",\"target\":34962}";
     }
     json << "],\"accessors\":[";
     for (std::size_t i = 0; i < accessors.size(); ++i) {
-        if (i != 0U) json << ',';
+        if (i != 0U)
+            json << ',';
         const auto& accessor = accessors[i];
         json << "{\"bufferView\":" << i << ",\"componentType\":5126,"
              << "\"count\":" << count << ",\"type\":\"" << accessor.type << '\"';
         if (accessor.minimum && accessor.maximum) {
-            json << ",\"min\":[" << (*accessor.minimum)[0] << ','
-                 << (*accessor.minimum)[1] << ',' << (*accessor.minimum)[2]
-                 << "],\"max\":[" << (*accessor.maximum)[0] << ','
+            json << ",\"min\":[" << (*accessor.minimum)[0] << ',' << (*accessor.minimum)[1] << ','
+                 << (*accessor.minimum)[2] << "],\"max\":[" << (*accessor.maximum)[0] << ','
                  << (*accessor.maximum)[1] << ',' << (*accessor.maximum)[2] << ']';
         }
         json << '}';
@@ -313,22 +330,21 @@ void append_output_accessor(
     return json.str();
 }
 
-}  // namespace
+} // namespace
 
 Bytes save_glb(const GaussianModel& model) {
     const std::size_t count = model.size();
     if (count == 0U || model.sh_degree > 3U || !model.sh.is_valid())
         throw std::runtime_error("Cannot write an empty or invalid GLB Gaussian model");
-    const std::size_t bases = static_cast<std::size_t>(model.sh_degree + 1U) *
-        (model.sh_degree + 1U);
+    const std::size_t bases =
+        static_cast<std::size_t>(model.sh_degree + 1U) * (model.sh_degree + 1U);
     const auto means = model.means.to_vector();
     const auto log_scales = model.log_scales.to_vector();
     const auto rotations = model.quaternions.to_vector();
     const auto logits = model.opacity_logits.to_vector();
     const auto sh = model.sh.to_vector();
     if (means.size() != count * 3U || log_scales.size() != count * 3U ||
-        rotations.size() != count * 4U || logits.size() != count ||
-        sh.size() != count * bases * 3U)
+        rotations.size() != count * 4U || logits.size() != count || sh.size() != count * bases * 3U)
         throw std::runtime_error("Gaussian model has inconsistent GLB attribute sizes");
 
     std::vector<float> positions(count * 3U);
@@ -344,8 +360,7 @@ Bytes save_glb(const GaussianModel& model) {
         std::numeric_limits<float>::lowest()};
     for (std::size_t index = 0; index < count; ++index) {
         for (std::size_t axis = 0; axis < 3U; ++axis) {
-            const float position = axis == 0U ? means[3U * index]
-                : -means[3U * index + axis];
+            const float position = axis == 0U ? means[3U * index] : -means[3U * index + axis];
             const float scale = std::exp(log_scales[3U * index + axis]);
             if (!std::isfinite(position) || !std::isfinite(scale) || scale <= 0.F)
                 throw std::runtime_error("GLB Gaussian position or scale is invalid");
@@ -368,49 +383,47 @@ Bytes save_glb(const GaussianModel& model) {
         const float logit = logits[index];
         if (!std::isfinite(logit))
             throw std::runtime_error("GLB Gaussian opacity is invalid");
-        opacities[index] = logit >= 0.F
-            ? 1.F / (1.F + std::exp(-logit))
-            : std::exp(logit) / (1.F + std::exp(logit));
+        opacities[index] = logit >= 0.F ? 1.F / (1.F + std::exp(-logit))
+                                        : std::exp(logit) / (1.F + std::exp(logit));
         for (std::size_t coefficient = 1U; coefficient < bases; ++coefficient)
             for (std::size_t channel = 0; channel < 3U; ++channel) {
                 const auto target = (index * bases + coefficient) * 3U + channel;
                 converted_sh[target] *= k_rdf_to_rub_sh_signs[coefficient - 1U];
             }
     }
-    if (!std::all_of(converted_sh.begin(), converted_sh.end(),
-                     [](const float value) { return std::isfinite(value); }))
+    if (!std::all_of(converted_sh.begin(), converted_sh.end(), [](const float value) {
+            return std::isfinite(value);
+        }))
         throw std::runtime_error("GLB Gaussian SH coefficients are invalid");
 
     Bytes binary;
     std::vector<OutputAccessor> accessors;
+    append_output_accessor(binary, accessors, "POSITION", "VEC3", 3U, positions, minimum, maximum);
     append_output_accessor(
-        binary, accessors, "POSITION", "VEC3", 3U, positions, minimum, maximum);
+        binary, accessors, "KHR_gaussian_splatting:ROTATION", "VEC4", 4U, gltf_rotations);
+    append_output_accessor(binary, accessors, "KHR_gaussian_splatting:SCALE", "VEC3", 3U, scales);
     append_output_accessor(
-        binary, accessors, "KHR_gaussian_splatting:ROTATION", "VEC4", 4U,
-        gltf_rotations);
-    append_output_accessor(
-        binary, accessors, "KHR_gaussian_splatting:SCALE", "VEC3", 3U, scales);
-    append_output_accessor(
-        binary, accessors, "KHR_gaussian_splatting:OPACITY", "SCALAR", 1U,
-        opacities);
+        binary, accessors, "KHR_gaussian_splatting:OPACITY", "SCALAR", 1U, opacities);
     for (unsigned degree = 0; degree <= model.sh_degree; ++degree)
         for (unsigned local = 0; local < 2U * degree + 1U; ++local) {
-            const std::size_t coefficient =
-                static_cast<std::size_t>(degree) * degree + local;
+            const std::size_t coefficient = static_cast<std::size_t>(degree) * degree + local;
             std::vector<float> values(count * 3U);
             for (std::size_t index = 0; index < count; ++index)
                 std::copy_n(
-                    converted_sh.begin() + static_cast<std::ptrdiff_t>(
-                        (index * bases + coefficient) * 3U),
+                    converted_sh.begin() +
+                        static_cast<std::ptrdiff_t>((index * bases + coefficient) * 3U),
                     3U, values.begin() + static_cast<std::ptrdiff_t>(index * 3U));
             append_output_accessor(
                 binary, accessors, sh_semantic(degree, local), "VEC3", 3U, values);
         }
     if (binary.size() > std::numeric_limits<std::uint32_t>::max())
         throw std::runtime_error("GLB Gaussian binary payload exceeds 4 GiB");
-    std::string json = glb_json(count, binary, accessors, model.filter_mode == SplatFilterMode::mip_2d);
-    while (json.size() % 4U != 0U) json.push_back(' ');
-    while (binary.size() % 4U != 0U) binary.push_back(0U);
+    std::string json =
+        glb_json(count, binary, accessors, model.filter_mode == SplatFilterMode::mip_2d);
+    while (json.size() % 4U != 0U)
+        json.push_back(' ');
+    while (binary.size() % 4U != 0U)
+        binary.push_back(0U);
     const std::uint64_t total = 12ULL + 8ULL + json.size() + 8ULL + binary.size();
     if (total > std::numeric_limits<std::uint32_t>::max())
         throw std::runtime_error("GLB Gaussian file exceeds 4 GiB");
@@ -430,8 +443,8 @@ Bytes save_glb(const GaussianModel& model) {
 
 DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
     const Bytes file = read_file(path);
-    if (file.size() < 20U || read_u32(file, 0U) != k_glb_magic ||
-        read_u32(file, 4U) != 2U || read_u32(file, 8U) != file.size())
+    if (file.size() < 20U || read_u32(file, 0U) != k_glb_magic || read_u32(file, 4U) != 2U ||
+        read_u32(file, 8U) != file.size())
         throw std::runtime_error("Invalid GLB 2.0 header: " + path.string());
     std::size_t cursor = 12U;
     std::string json_text;
@@ -445,8 +458,7 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
         if (length > file.size() - cursor)
             throw std::runtime_error("Truncated GLB chunk payload");
         if (type == k_json_chunk && json_text.empty())
-            json_text.assign(
-                reinterpret_cast<const char*>(file.data() + cursor), length);
+            json_text.assign(reinterpret_cast<const char*>(file.data() + cursor), length);
         else if (type == k_bin_chunk && binary.empty())
             binary.assign(
                 file.begin() + static_cast<std::ptrdiff_t>(cursor),
@@ -473,9 +485,10 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
     std::size_t mesh_index = 0U;
     for (const auto& mesh_item : root.get_child("meshes")) {
         for (const auto& primitive_item : mesh_item.second.get_child("primitives")) {
-            const auto candidate = primitive_item.second.get_child_optional(
-                "extensions.KHR_gaussian_splatting");
-            if (!candidate) continue;
+            const auto candidate =
+                primitive_item.second.get_child_optional("extensions.KHR_gaussian_splatting");
+            if (!candidate)
+                continue;
             if (primitive != nullptr)
                 throw std::runtime_error(
                     "GLB files with multiple Gaussian primitives are unsupported");
@@ -492,15 +505,15 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
     if (extension->get<std::string>("kernel", "") != "ellipse")
         throw std::runtime_error("Unsupported GLB Gaussian kernel");
     const auto color_space = extension->get<std::string>("colorSpace", "");
-    if (color_space != "srgb_rec709_display" &&
-        color_space != "lin_rec709_display")
+    if (color_space != "srgb_rec709_display" && color_space != "lin_rec709_display")
         throw std::runtime_error("Unsupported GLB Gaussian color space");
 
     std::size_t mesh_instances = 0U;
     if (const auto nodes = root.get_child_optional("nodes")) {
         std::vector<const ptree*> node_list;
         node_list.reserve(nodes->size());
-        for (const auto& node_item : *nodes) node_list.push_back(&node_item.second);
+        for (const auto& node_item : *nodes)
+            node_list.push_back(&node_item.second);
         const auto no_parent = std::numeric_limits<std::size_t>::max();
         std::vector<std::size_t> parents(node_list.size(), no_parent);
         for (std::size_t parent = 0; parent < node_list.size(); ++parent) {
@@ -513,8 +526,7 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
                 }
         }
         for (std::size_t index = 0; index < node_list.size(); ++index) {
-            if (node_list[index]->get<std::size_t>(
-                    "mesh", no_parent) != selected_mesh)
+            if (node_list[index]->get<std::size_t>("mesh", no_parent) != selected_mesh)
                 continue;
             ++mesh_instances;
             std::size_t current = index;
@@ -539,18 +551,15 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
             throw std::runtime_error("Missing GLB Gaussian attribute: " + semantic);
         return *index;
     };
-    const auto positions = read_accessor(
-        root, binary, required("POSITION"), "VEC3", "POSITION");
+    const auto positions = read_accessor(root, binary, required("POSITION"), "VEC3", "POSITION");
     const auto rotations = read_accessor(
-        root, binary, required("KHR_gaussian_splatting:ROTATION"), "VEC4",
-        "ROTATION");
-    const auto scales = read_accessor(
-        root, binary, required("KHR_gaussian_splatting:SCALE"), "VEC3", "SCALE");
+        root, binary, required("KHR_gaussian_splatting:ROTATION"), "VEC4", "ROTATION");
+    const auto scales =
+        read_accessor(root, binary, required("KHR_gaussian_splatting:SCALE"), "VEC3", "SCALE");
     const auto opacities = read_accessor(
-        root, binary, required("KHR_gaussian_splatting:OPACITY"), "SCALAR",
-        "OPACITY");
-    const auto sh0 = read_accessor(
-        root, binary, required(sh_semantic(0U, 0U)), "VEC3", "SH degree 0");
+        root, binary, required("KHR_gaussian_splatting:OPACITY"), "SCALAR", "OPACITY");
+    const auto sh0 =
+        read_accessor(root, binary, required(sh_semantic(0U, 0U)), "VEC3", "SH degree 0");
     const std::size_t count = positions.count;
     if (count == 0U || rotations.count != count || scales.count != count ||
         opacities.count != count || sh0.count != count)
@@ -568,12 +577,11 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
             const auto found = attribute_index(attributes, sh_semantic(candidate, local));
             any = any || found.has_value();
             all = all && found.has_value();
-            if (found) values.push_back(read_accessor(
-                root, binary, *found, "VEC3", "SH coefficient"));
+            if (found)
+                values.push_back(read_accessor(root, binary, *found, "VEC3", "SH coefficient"));
         }
         if (any && (!all || missing_degree))
-            throw std::runtime_error(
-                "GLB Gaussian SH degrees must be complete and contiguous");
+            throw std::runtime_error("GLB Gaussian SH degrees must be complete and contiguous");
         if (!all) {
             missing_degree = true;
             continue;
@@ -585,8 +593,7 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
         sh_degrees[candidate] = std::move(values);
     }
 
-    const std::size_t bases = static_cast<std::size_t>(degree + 1U) *
-        (degree + 1U);
+    const std::size_t bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
     DecodedGlbGaussians result;
     result.count = count;
     result.degree = degree;
@@ -626,8 +633,8 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
                 const std::size_t coefficient =
                     static_cast<std::size_t>(sh_degree) * sh_degree + local;
                 const auto& source = sh_degrees[sh_degree][local].values;
-                const float sign = coefficient == 0U
-                    ? 1.F : k_rdf_to_rub_sh_signs[coefficient - 1U];
+                const float sign =
+                    coefficient == 0U ? 1.F : k_rdf_to_rub_sh_signs[coefficient - 1U];
                 for (std::size_t channel = 0; channel < 3U; ++channel) {
                     const float value = source[index * 3U + channel] * sign;
                     if (!std::isfinite(value))
@@ -639,4 +646,4 @@ DecodedGlbGaussians load_glb(const std::filesystem::path& path) {
     return result;
 }
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

@@ -15,14 +15,12 @@ struct PreviewPush {
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= pc.dst_w || id.y >= pc.dst_h) return;
-    if (pc.src_w == 0 || pc.src_h == 0) return;
-    uint sx = min(
-        (uint)((float(id.x) + 0.5f) * float(pc.src_w) / float(pc.dst_w)),
-        pc.src_w - 1);
-    uint sy = min(
-        (uint)((float(id.y) + 0.5f) * float(pc.src_h) / float(pc.dst_h)),
-        pc.src_h - 1);
+    if (id.x >= pc.dst_w || id.y >= pc.dst_h)
+        return;
+    if (pc.src_w == 0 || pc.src_h == 0)
+        return;
+    uint sx = min((uint)((float(id.x) + 0.5f) * float(pc.src_w) / float(pc.dst_w)), pc.src_w - 1);
+    uint sy = min((uint)((float(id.y) + 0.5f) * float(pc.src_h) / float(pc.dst_h)), pc.src_h - 1);
     uint pixels = pc.src_w * pc.src_h;
     uint index = sy * pc.src_w + sx;
     uint r = (uint)(saturate(image[index]) * 255.0f + 0.5f);

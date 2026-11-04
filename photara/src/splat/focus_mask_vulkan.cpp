@@ -105,27 +105,23 @@ FocusMaskVulkan& backend() {
     return instance;
 }
 
-}  // namespace
+} // namespace
 
 tinytensor::Tensor focus_view_mask_vulkan(const FocusMaskFrame& frame) {
-    const std::size_t pixels =
-        static_cast<std::size_t>(frame.width) * frame.height;
-    auto mask = tinytensor::Tensor::empty(
-        {frame.height, frame.width}, tinytensor::Device::Vulkan);
-    if (pixels == 0) return mask;
+    const std::size_t pixels = static_cast<std::size_t>(frame.width) * frame.height;
+    auto mask = tinytensor::Tensor::empty({frame.height, frame.width}, tinytensor::Device::Vulkan);
+    if (pixels == 0)
+        return mask;
     tinytensor::vulkan::submit_async();
     auto& vulkan = backend();
     const auto view = tinytensor::vulkan::buffer_view(mask);
-    const photara::vk::BufferBinding binding{
-        view.buffer, view.offset, view.bytes};
+    const photara::vk::BufferBinding binding{view.buffer, view.offset, view.bytes};
     const FocusMaskPush push = make_push(frame);
-    const std::uint32_t groups = static_cast<std::uint32_t>(
-        (pixels + 255) / 256);
+    const std::uint32_t groups = static_cast<std::uint32_t>((pixels + 255) / 256);
     const std::array bindings{binding};
-    vulkan.encoder.dispatch(
-        vulkan.pipeline, bindings, &push, sizeof(push), groups);
+    vulkan.encoder.dispatch(vulkan.pipeline, bindings, &push, sizeof(push), groups);
     vulkan.encoder.submit();
     return mask;
 }
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

@@ -54,70 +54,71 @@ namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
 
-refine::SceneGeometry focus_scene_geometry(
-    const mvs::OrientedBoundingBox& bounds) {
+refine::SceneGeometry focus_scene_geometry(const mvs::OrientedBoundingBox& bounds) {
     return {
-        std::max(2.F * bounds.half_extent.norm(), 1e-6F),
-        bounds.center,
+        std::max(2.F * bounds.half_extent.norm(), 1e-6F), bounds.center,
         bounds.half_extent.maxCoeff()};
 }
 
 tinytensor::Tensor focus_keep_indices(
-    const GaussianModel& model, const mvs::OrientedBoundingBox& bounds) {
+    const GaussianModel& model,
+    const mvs::OrientedBoundingBox& bounds) {
     tinytensor::Tensor inside;
     for (int axis = 0; axis < 3; ++axis) {
         tinytensor::Tensor coordinate;
         for (int component = 0; component < 3; ++component) {
-            auto term = model.means.slice(
-                1, static_cast<std::size_t>(component),
-                static_cast<std::size_t>(component + 1))
-                .sub(bounds.center(component))
-                .mul(bounds.axes(component, axis));
+            auto term = model.means
+                            .slice(
+                                1, static_cast<std::size_t>(component),
+                                static_cast<std::size_t>(component + 1))
+                            .sub(bounds.center(component))
+                            .mul(bounds.axes(component, axis));
             coordinate = coordinate.is_valid() ? coordinate.add(term) : term;
         }
         auto axis_inside = coordinate.abs().le(bounds.half_extent(axis));
-        inside = inside.is_valid()
-            ? inside.logical_and(axis_inside) : axis_inside;
+        inside = inside.is_valid() ? inside.logical_and(axis_inside) : axis_inside;
     }
-    return inside.reshape({static_cast<int>(model.size())}).nonzero().squeeze(1)
+    return inside.reshape({static_cast<int>(model.size())})
+        .nonzero()
+        .squeeze(1)
         .to(tinytensor::DataType::Int32);
 }
-
-
 
 // Logging iterations also run densify / live preview / a full GPU sync, so a
 // single step's wall time is a poor ETA rate. Smooth the mean ms/iter over
 // each log interval instead.
 constexpr double k_step_time_ema = 0.85;
 
-std::size_t requested_preview_view(
-    const TrainingOptions& options, const std::size_t view_count) {
+std::size_t requested_preview_view(const TrainingOptions& options, const std::size_t view_count) {
     unsigned requested = options.preview_view_index;
     if (!options.preview_view_file.empty()) {
         std::ifstream input(options.preview_view_file);
         unsigned from_file{};
-        if (input >> from_file) requested = from_file;
+        if (input >> from_file)
+            requested = from_file;
     }
-    if (view_count == 0) return 0;
+    if (view_count == 0)
+        return 0;
     return std::min<std::size_t>(requested, view_count - 1);
 }
 
 bool load_preview_camera_file(
-    const std::filesystem::path& path, Camera& camera,
-    std::uint64_t& revision, VisualizeOptions* vis = nullptr) {
+    const std::filesystem::path& path,
+    Camera& camera,
+    std::uint64_t& revision,
+    VisualizeOptions* vis = nullptr) {
     return load_preview_camera_sidecar(path, camera, revision, vis);
 }
 
 bool preview_camera_equivalent(const Camera& left, const Camera& right) {
-    if (left.width != right.width || left.height != right.height ||
-        left.model != right.model || left.orthographic != right.orthographic)
+    if (left.width != right.width || left.height != right.height || left.model != right.model ||
+        left.orthographic != right.orthographic)
         return false;
     const auto close = [](const float a, const float b) {
-        return std::abs(a - b) <=
-            1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
+        return std::abs(a - b) <= 1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
     };
-    if (!close(left.fx, right.fx) || !close(left.fy, right.fy) ||
-        !close(left.cx, right.cx) || !close(left.cy, right.cy))
+    if (!close(left.fx, right.fx) || !close(left.fy, right.fy) || !close(left.cx, right.cx) ||
+        !close(left.cy, right.cy))
         return false;
     for (std::size_t i = 0; i < left.world_to_camera.size(); ++i)
         if (!close(left.world_to_camera[i], right.world_to_camera[i]))
@@ -139,14 +140,13 @@ constexpr float k_preview_interactive_budget = 5.F;
 // Cameras the reference cannot be projected into (non-pinhole models, pivots
 // behind the camera) report an infinite shift so the caller always redraws.
 [[nodiscard]] float preview_pose_shift_px(
-    const Camera& left, const Camera& right,
+    const Camera& left,
+    const Camera& right,
     const std::array<float, 3>& reference) {
-    if (left.orthographic || right.orthographic ||
-        left.model != CameraModel::pinhole ||
+    if (left.orthographic || right.orthographic || left.model != CameraModel::pinhole ||
         right.model != CameraModel::pinhole)
         return std::numeric_limits<float>::infinity();
-    const auto project = [&reference](
-                             const Camera& camera, float& u, float& v) {
+    const auto project = [&reference](const Camera& camera, float& u, float& v) {
         const float* matrix = camera.world_to_camera.data();
         const float x = matrix[0] * reference[0] + matrix[4] * reference[1] +
                         matrix[8] * reference[2] + matrix[12];
@@ -154,7 +154,8 @@ constexpr float k_preview_interactive_budget = 5.F;
                         matrix[9] * reference[2] + matrix[13];
         const float z = matrix[2] * reference[0] + matrix[6] * reference[1] +
                         matrix[10] * reference[2] + matrix[14];
-        if (!(z > 1e-4F)) return false;
+        if (!(z > 1e-4F))
+            return false;
         u = camera.fx * x / z + camera.cx;
         v = camera.fy * y / z + camera.cy;
         return true;
@@ -167,36 +168,40 @@ constexpr float k_preview_interactive_budget = 5.F;
 
 // Intrinsics changes (zoom, raster resize, camera model) always need a redraw;
 // only a pure pose change is subject to the pixel threshold.
-[[nodiscard]] bool preview_intrinsics_close(
-    const Camera& left, const Camera& right) {
-    if (left.width != right.width || left.height != right.height ||
-        left.model != right.model || left.orthographic != right.orthographic)
+[[nodiscard]] bool preview_intrinsics_close(const Camera& left, const Camera& right) {
+    if (left.width != right.width || left.height != right.height || left.model != right.model ||
+        left.orthographic != right.orthographic)
         return false;
     const auto close = [](const float a, const float b) {
-        return std::abs(a - b) <=
-            1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
+        return std::abs(a - b) <= 1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
     };
-    return close(left.fx, right.fx) && close(left.fy, right.fy) &&
-           close(left.cx, right.cx) && close(left.cy, right.cy);
+    return close(left.fx, right.fx) && close(left.fy, right.fy) && close(left.cx, right.cx) &&
+           close(left.cy, right.cy);
 }
 
 // The editor publishes how many preview frames it has copied out of the shared
 // image. Returns false when the sidecar is absent or unreadable, which keeps
 // the pre-acknowledgement behaviour of waiting on the shared image.
 [[nodiscard]] bool read_preview_ack_frames(
-    const std::filesystem::path& path, std::uint64_t& frames) {
-    if (path.empty()) return false;
+    const std::filesystem::path& path,
+    std::uint64_t& frames) {
+    if (path.empty())
+        return false;
     std::ifstream input(path);
     std::uint64_t parsed{};
-    if (!(input >> parsed)) return false;
+    if (!(input >> parsed))
+        return false;
     frames = parsed;
     return true;
 }
 
 tinytensor::Tensor render_preview_color(
-    const GaussianModel& model, const Camera& camera,
-    const TrainingOptions& options, const unsigned active_sh_degree,
-    VisualizeOptions vis, std::uint64_t& vis_revision) {
+    const GaussianModel& model,
+    const Camera& camera,
+    const TrainingOptions& options,
+    const unsigned active_sh_degree,
+    VisualizeOptions vis,
+    std::uint64_t& vis_revision) {
     vis.active_sh_degree = active_sh_degree;
     configure_rasterization(vis, options);
     vis.scale_modifier = options.scale_modifier;
@@ -232,18 +237,30 @@ constexpr std::size_t k_cuda_training_stage_count =
     static_cast<std::size_t>(CudaTrainingStage::count);
 
 // Stage names in enum order; used by the enable banner and the VRAM report.
-constexpr std::array<const char*, k_cuda_training_stage_count>
-    k_cuda_training_stage_names{
-        "data_load", "raster_forward", "preview", "colour_forward",
-        "training_loss", "multi_view_unproject", "multi_view_sample_forward",
-        "multi_view_loss", "multi_view_sample_backward", "colour_backward",
-        "raster_backward", "multi_view_gradient_merge", "densification_stats",
-        "optimizer", "adc_noise", "refinement", "filter_3d"};
+constexpr std::array<const char*, k_cuda_training_stage_count> k_cuda_training_stage_names{
+    "data_load",
+    "raster_forward",
+    "preview",
+    "colour_forward",
+    "training_loss",
+    "multi_view_unproject",
+    "multi_view_sample_forward",
+    "multi_view_loss",
+    "multi_view_sample_backward",
+    "colour_backward",
+    "raster_backward",
+    "multi_view_gradient_merge",
+    "densification_stats",
+    "optimizer",
+    "adc_noise",
+    "refinement",
+    "filter_3d"};
 
 std::string cuda_training_stage_list() {
     std::string joined;
     for (const char* name : k_cuda_training_stage_names) {
-        if (!joined.empty()) joined += ',';
+        if (!joined.empty())
+            joined += ',';
         joined += name;
     }
     return joined;
@@ -263,8 +280,8 @@ DeviceVramSample sample_device_vram(const bool vulkan_backend) {
     if (!vulkan_backend) {
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
-        if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess &&
-            total_bytes >= free_bytes && total_bytes > 0) {
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess && total_bytes >= free_bytes &&
+            total_bytes > 0) {
             sample.used = total_bytes - free_bytes;
             sample.total = total_bytes;
             return sample;
@@ -272,16 +289,17 @@ DeviceVramSample sample_device_vram(const bool vulkan_backend) {
         cudaGetLastError();
     }
 #ifdef TINYTENSOR_HAS_VULKAN
-    if (!tinytensor::vulkan::available()) return sample;
+    if (!tinytensor::vulkan::available())
+        return sample;
     const auto handles = tinytensor::vulkan::device_handles();
-    if (handles.physical_device == VK_NULL_HANDLE) return sample;
+    if (handles.physical_device == VK_NULL_HANDLE)
+        return sample;
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
     VkPhysicalDeviceMemoryProperties2 properties{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
     properties.pNext = &budget;
-    vkGetPhysicalDeviceMemoryProperties2(
-        handles.physical_device, &properties);
+    vkGetPhysicalDeviceMemoryProperties2(handles.physical_device, &properties);
     std::uint32_t best = UINT32_MAX;
     VkDeviceSize best_budget = 0;
     const VkPhysicalDeviceMemoryProperties& heaps = properties.memoryProperties;
@@ -293,10 +311,12 @@ DeviceVramSample sample_device_vram(const bool vulkan_backend) {
             best = i;
         }
     }
-    if (best == UINT32_MAX || best_budget == 0) return sample;
+    if (best == UINT32_MAX || best_budget == 0)
+        return sample;
     sample.used = budget.heapUsage[best];
     sample.total = best_budget;
-    if (sample.used > sample.total) sample.used = sample.total;
+    if (sample.used > sample.total)
+        sample.used = sample.total;
 #endif
     return sample;
 }
@@ -312,10 +332,10 @@ std::size_t query_vram_used_bytes() {
 }
 
 void check_profile_cuda(const cudaError_t error, const char* operation) {
-    if (error == cudaSuccess) return;
+    if (error == cudaSuccess)
+        return;
     throw std::runtime_error(
-        std::string{"Splat CUDA profiler "} + operation + " failed: " +
-        cudaGetErrorString(error));
+        std::string{"Splat CUDA profiler "} + operation + " failed: " + cudaGetErrorString(error));
 }
 
 struct CudaProfileSample {
@@ -323,41 +343,43 @@ struct CudaProfileSample {
 };
 
 class CudaTrainingProfiler {
-public:
+  public:
     explicit CudaTrainingProfiler(const TrainingOptions& options)
         : enabled_(options.profile_cuda),
           interval_(std::clamp(options.cuda_profile_interval, 1U, 1'000U)) {
-        if (!enabled_) return;
+        if (!enabled_)
+            return;
         samples_.resize(interval_);
         try {
             for (CudaProfileSample& sample : samples_)
                 for (cudaEvent_t& event : sample.boundaries)
                     check_profile_cuda(
-                        cudaEventCreateWithFlags(&event, cudaEventDefault),
-                        "event creation");
+                        cudaEventCreateWithFlags(&event, cudaEventDefault), "event creation");
         } catch (...) {
             destroy_events();
             throw;
         }
         core::Logger::instance().info(
             "splat_cuda_profile enabled=1 interval=", interval_,
-            " stages=", cuda_training_stage_list(),
-            " vram_probe=1");
+            " stages=", cuda_training_stage_list(), " vram_probe=1");
     }
 
     ~CudaTrainingProfiler() {
-        if (allocation_scope_) tinytensor::VramProfiler::instance().popScope();
+        if (allocation_scope_)
+            tinytensor::VramProfiler::instance().popScope();
         destroy_events();
     }
 
     CudaTrainingProfiler(const CudaTrainingProfiler&) = delete;
     CudaTrainingProfiler& operator=(const CudaTrainingProfiler&) = delete;
 
-    [[nodiscard]] bool enabled() const noexcept { return enabled_; }
+    [[nodiscard]] bool enabled() const noexcept {
+        return enabled_;
+    }
 
-    void begin_iteration(
-        const unsigned iteration, const std::size_t gaussian_count) {
-        if (!enabled_) return;
+    void begin_iteration(const unsigned iteration, const std::size_t gaussian_count) {
+        if (!enabled_)
+            return;
         if (sample_cursor_ >= samples_.size())
             throw std::logic_error("Splat CUDA profiler sample window overflow");
         if (sample_cursor_ == 0) {
@@ -379,20 +401,17 @@ public:
             vram_trace_valid_ = true;
         }
         check_profile_cuda(
-            cudaEventRecord(
-                samples_[sample_cursor_].boundaries.front(), nullptr),
-            "start record");
+            cudaEventRecord(samples_[sample_cursor_].boundaries.front(), nullptr), "start record");
     }
 
     void mark(const CudaTrainingStage stage) {
-        if (!enabled_) return;
+        if (!enabled_)
+            return;
         const std::size_t index = static_cast<std::size_t>(stage);
         if (index != active_stage_)
-            throw std::logic_error(
-                "Splat CUDA profiler stage order is inconsistent");
+            throw std::logic_error("Splat CUDA profiler stage order is inconsistent");
         check_profile_cuda(
-            cudaEventRecord(
-                samples_[sample_cursor_].boundaries[index + 1], nullptr),
+            cudaEventRecord(samples_[sample_cursor_].boundaries[index + 1], nullptr),
             "stage record");
         if (sample_cursor_ == 0) {
             vram_trace_[index + 1] = query_vram_used_bytes();
@@ -406,14 +425,17 @@ public:
     }
 
     void end_iteration(
-        const unsigned iteration, const std::size_t gaussian_count,
-        const std::size_t rendered_instances, const bool depth_normal_active,
-        const bool multi_view_active, const bool refined,
+        const unsigned iteration,
+        const std::size_t gaussian_count,
+        const std::size_t rendered_instances,
+        const bool depth_normal_active,
+        const bool multi_view_active,
+        const bool refined,
         const bool filter_refreshed) {
-        if (!enabled_) return;
+        if (!enabled_)
+            return;
         if (active_stage_ != k_cuda_training_stage_count)
-            throw std::logic_error(
-                "Splat CUDA profiler iteration ended before every stage");
+            throw std::logic_error("Splat CUDA profiler iteration ended before every stage");
         last_iteration_ = iteration;
         last_gaussians_ = gaussian_count;
         rendered_instances_sum_ += rendered_instances;
@@ -422,14 +444,16 @@ public:
         refinement_steps_ += refined;
         filter_refresh_steps_ += filter_refreshed;
         ++sample_cursor_;
-        if (sample_cursor_ == samples_.size()) report_and_reset();
+        if (sample_cursor_ == samples_.size())
+            report_and_reset();
     }
 
     void flush() {
-        if (enabled_ && sample_cursor_ != 0) report_and_reset();
+        if (enabled_ && sample_cursor_ != 0)
+            report_and_reset();
     }
 
-private:
+  private:
     bool allocation_scope_ = false;
     void report_and_reset() {
         auto& allocation_profiler = tinytensor::VramProfiler::instance();
@@ -438,9 +462,8 @@ private:
         const auto& p = memory.process;
         const auto [allocator_live, bucket_padding] =
             tinytensor::CudaMemoryPool::instance().live_requested_and_bucket_padding();
-        const bool pool_valid = p.cuda_pool_valid &&
-            p.cuda_pool_reserved <= p.cuda_total &&
-            p.cuda_pool_used <= p.cuda_pool_reserved;
+        const bool pool_valid = p.cuda_pool_valid && p.cuda_pool_reserved <= p.cuda_total &&
+                                p.cuda_pool_used <= p.cuda_pool_reserved;
         core::Logger::instance().info(
             "splat_vram_alloc iteration=", last_iteration_,
             " live_bytes=", memory.accounted_live_bytes,
@@ -448,52 +471,46 @@ private:
             " allocator_requested_live_bytes=", allocator_live,
             " bucket_padding_live_bytes=", bucket_padding,
             " bucket_cache_bytes=", p.cuda_pool_bucket_cache_bytes,
-            " slab_reserved_bytes=", p.cuda_slab_reserved_bytes,
-            " device_used_bytes=", p.cuda_used,
+            " slab_reserved_bytes=", p.cuda_slab_reserved_bytes, " device_used_bytes=", p.cuda_used,
             " cuda_pool_valid=", pool_valid,
             " cuda_pool_reserved_bytes=", pool_valid ? p.cuda_pool_reserved : 0,
             " cuda_pool_used_bytes=", pool_valid ? p.cuda_pool_used : 0,
             " note=device_used_includes_other_processes;pool_fields_overlap_live");
         for (const auto& row : memory.rows) {
-            if (row.peak_bytes == 0) continue;
-            core::Logger::instance().info("splat_vram_group scope=", row.scope,
-                " label=", row.label, " live_bytes=", row.live_bytes,
-                " peak_bytes=", row.peak_bytes,
-                " allocated_bytes=", row.allocated_bytes,
-                " freed_bytes=", row.freed_bytes);
+            if (row.peak_bytes == 0)
+                continue;
+            core::Logger::instance().info(
+                "splat_vram_group scope=", row.scope, " label=", row.label,
+                " live_bytes=", row.live_bytes, " peak_bytes=", row.peak_bytes,
+                " allocated_bytes=", row.allocated_bytes, " freed_bytes=", row.freed_bytes);
         }
         for (const auto& row : memory.tree) {
-            if (row.timer_call_count == 0) continue;
-            core::Logger::instance().info("splat_host_timing scope=", row.path,
-                " calls=", row.timer_call_count, " total_ms=", row.total_ms,
-                " mean_ms=", row.total_ms / row.timer_call_count,
+            if (row.timer_call_count == 0)
+                continue;
+            core::Logger::instance().info(
+                "splat_host_timing scope=", row.path, " calls=", row.timer_call_count,
+                " total_ms=", row.total_ms, " mean_ms=", row.total_ms / row.timer_call_count,
                 " p95_ms=", row.wall_p95_ms, " max_ms=", row.max_ms);
         }
         check_profile_cuda(
-            cudaEventSynchronize(
-                samples_[sample_cursor_ - 1].boundaries.back()),
+            cudaEventSynchronize(samples_[sample_cursor_ - 1].boundaries.back()),
             "window synchronization");
         std::array<double, k_cuda_training_stage_count> totals{};
-        for (std::size_t sample_index = 0;
-             sample_index < sample_cursor_; ++sample_index) {
+        for (std::size_t sample_index = 0; sample_index < sample_cursor_; ++sample_index) {
             const CudaProfileSample& sample = samples_[sample_index];
-            for (std::size_t stage = 0;
-                 stage < k_cuda_training_stage_count; ++stage) {
+            for (std::size_t stage = 0; stage < k_cuda_training_stage_count; ++stage) {
                 float elapsed_ms = 0.F;
                 check_profile_cuda(
                     cudaEventElapsedTime(
-                        &elapsed_ms, sample.boundaries[stage],
-                        sample.boundaries[stage + 1]),
+                        &elapsed_ms, sample.boundaries[stage], sample.boundaries[stage + 1]),
                     "elapsed-time query");
                 totals[stage] += elapsed_ms;
             }
         }
-        const double inverse_samples =
-            1.0 / static_cast<double>(sample_cursor_);
+        const double inverse_samples = 1.0 / static_cast<double>(sample_cursor_);
         std::array<double, k_cuda_training_stage_count> averages{};
         double cuda_timeline_average_ms = 0.0;
-        for (std::size_t stage = 0;
-             stage < k_cuda_training_stage_count; ++stage) {
+        for (std::size_t stage = 0; stage < k_cuda_training_stage_count; ++stage) {
             averages[stage] = totals[stage] * inverse_samples;
             cuda_timeline_average_ms += averages[stage];
         }
@@ -501,74 +518,54 @@ private:
             return averages[static_cast<std::size_t>(stage)];
         };
         const auto percent = [&](const CudaTrainingStage stage) {
-            return cuda_timeline_average_ms > 0.0
-                ? value(stage) * 100.0 / cuda_timeline_average_ms
-                : 0.0;
+            return cuda_timeline_average_ms > 0.0 ? value(stage) * 100.0 / cuda_timeline_average_ms
+                                                  : 0.0;
         };
-        const double multi_view_average_ms =
-            value(CudaTrainingStage::multi_view_unproject) +
-            value(CudaTrainingStage::multi_view_sample_forward) +
-            value(CudaTrainingStage::multi_view_loss) +
-            value(CudaTrainingStage::multi_view_sample_backward) +
-            value(CudaTrainingStage::multi_view_gradient_merge);
+        const double multi_view_average_ms = value(CudaTrainingStage::multi_view_unproject) +
+                                             value(CudaTrainingStage::multi_view_sample_forward) +
+                                             value(CudaTrainingStage::multi_view_loss) +
+                                             value(CudaTrainingStage::multi_view_sample_backward) +
+                                             value(CudaTrainingStage::multi_view_gradient_merge);
         const double multi_view_percent =
             cuda_timeline_average_ms > 0.0
-            ? multi_view_average_ms * 100.0 / cuda_timeline_average_ms
-            : 0.0;
+                ? multi_view_average_ms * 100.0 / cuda_timeline_average_ms
+                : 0.0;
         core::Logger::instance().info(
-            "splat_cuda_profile iterations=", first_iteration_, '-',
-            last_iteration_, " samples=", sample_cursor_,
-            " gaussians=[", first_gaussians_, ',', last_gaussians_, ']',
-            " avg_tile_instances=",
-            rendered_instances_sum_ * inverse_samples,
-            " depth_normal_steps=", depth_normal_steps_,
-            " multi_view_steps=", multi_view_steps_,
+            "splat_cuda_profile iterations=", first_iteration_, '-', last_iteration_,
+            " samples=", sample_cursor_, " gaussians=[", first_gaussians_, ',', last_gaussians_,
+            ']', " avg_tile_instances=", rendered_instances_sum_ * inverse_samples,
+            " depth_normal_steps=", depth_normal_steps_, " multi_view_steps=", multi_view_steps_,
             " refinement_steps=", refinement_steps_,
             " filter_refresh_steps=", filter_refresh_steps_,
             " cuda_timeline_avg_ms=", cuda_timeline_average_ms,
             " data_load_ms=", value(CudaTrainingStage::data_load),
             " preview_ms=", value(CudaTrainingStage::preview),
-            " raster_forward_ms=",
-            value(CudaTrainingStage::raster_forward),
-            " raster_forward_pct=",
-            percent(CudaTrainingStage::raster_forward),
+            " raster_forward_ms=", value(CudaTrainingStage::raster_forward),
+            " raster_forward_pct=", percent(CudaTrainingStage::raster_forward),
             " training_loss_ms=", value(CudaTrainingStage::training_loss),
-            " training_loss_pct=",
-            percent(CudaTrainingStage::training_loss),
-            " multi_view_ms=", multi_view_average_ms,
-            " multi_view_pct=", multi_view_percent,
-            " multi_view_unproject_ms=",
-            value(CudaTrainingStage::multi_view_unproject),
-            " multi_view_unproject_pct=",
-            percent(CudaTrainingStage::multi_view_unproject),
-            " multi_view_sample_forward_ms=",
-            value(CudaTrainingStage::multi_view_sample_forward),
+            " training_loss_pct=", percent(CudaTrainingStage::training_loss),
+            " multi_view_ms=", multi_view_average_ms, " multi_view_pct=", multi_view_percent,
+            " multi_view_unproject_ms=", value(CudaTrainingStage::multi_view_unproject),
+            " multi_view_unproject_pct=", percent(CudaTrainingStage::multi_view_unproject),
+            " multi_view_sample_forward_ms=", value(CudaTrainingStage::multi_view_sample_forward),
             " multi_view_sample_forward_pct=",
             percent(CudaTrainingStage::multi_view_sample_forward),
-            " multi_view_loss_ms=",
-            value(CudaTrainingStage::multi_view_loss),
-            " multi_view_loss_pct=",
-            percent(CudaTrainingStage::multi_view_loss),
-            " multi_view_sample_backward_ms=",
-            value(CudaTrainingStage::multi_view_sample_backward),
+            " multi_view_loss_ms=", value(CudaTrainingStage::multi_view_loss),
+            " multi_view_loss_pct=", percent(CudaTrainingStage::multi_view_loss),
+            " multi_view_sample_backward_ms=", value(CudaTrainingStage::multi_view_sample_backward),
             " multi_view_sample_backward_pct=",
             percent(CudaTrainingStage::multi_view_sample_backward),
             " colour_forward_ms=", value(CudaTrainingStage::colour_forward),
             " colour_forward_pct=", percent(CudaTrainingStage::colour_forward),
             " colour_backward_ms=", value(CudaTrainingStage::colour_backward),
             " colour_backward_pct=", percent(CudaTrainingStage::colour_backward),
-            " raster_backward_ms=",
-            value(CudaTrainingStage::raster_backward),
-            " raster_backward_pct=",
-            percent(CudaTrainingStage::raster_backward),
-            " multi_view_gradient_merge_ms=",
-            value(CudaTrainingStage::multi_view_gradient_merge),
+            " raster_backward_ms=", value(CudaTrainingStage::raster_backward),
+            " raster_backward_pct=", percent(CudaTrainingStage::raster_backward),
+            " multi_view_gradient_merge_ms=", value(CudaTrainingStage::multi_view_gradient_merge),
             " multi_view_gradient_merge_pct=",
             percent(CudaTrainingStage::multi_view_gradient_merge),
-            " densification_stats_ms=",
-            value(CudaTrainingStage::densification_stats),
-            " densification_stats_pct=",
-            percent(CudaTrainingStage::densification_stats),
+            " densification_stats_ms=", value(CudaTrainingStage::densification_stats),
+            " densification_stats_pct=", percent(CudaTrainingStage::densification_stats),
             " optimizer_ms=", value(CudaTrainingStage::optimizer),
             " optimizer_pct=", percent(CudaTrainingStage::optimizer),
             " adc_noise_ms=", value(CudaTrainingStage::adc_noise),
@@ -588,37 +585,34 @@ private:
             std::size_t peak = 0;
             std::size_t peak_stage = k_cuda_training_stage_count;
             std::string per_stage;
-            for (std::size_t boundary = 0;
-                 boundary <= k_cuda_training_stage_count; ++boundary) {
+            for (std::size_t boundary = 0; boundary <= k_cuda_training_stage_count; ++boundary) {
                 const std::size_t used = vram_trace_[boundary];
-                if (used == 0) continue;
+                if (used == 0)
+                    continue;
                 if (used > peak) {
                     peak = used;
                     peak_stage = boundary;
                 }
-                if (boundary == 0) continue;
+                if (boundary == 0)
+                    continue;
                 const long long delta = mib(boundary) - mib(0);
-                if (delta > -8 && delta < 16) continue;
-                if (!per_stage.empty()) per_stage += ',';
+                if (delta > -8 && delta < 16)
+                    continue;
+                if (!per_stage.empty())
+                    per_stage += ',';
                 per_stage += k_cuda_training_stage_names[boundary - 1];
                 per_stage += ':';
                 per_stage += std::to_string(delta);
             }
             core::Logger::instance().info(
-                "splat_cuda_vram iterations=", first_iteration_, '-',
-                last_iteration_, " sampled_iteration=", vram_trace_iteration_,
-                " vram_start_mib=", mib(0),
-                " vram_peak_mib=", peak >> 20,
-                " vram_peak_stage=",
-                peak_stage == 0
-                    ? std::string_view{"iteration_start"}
-                    : std::string_view{
-                          k_cuda_training_stage_names[peak_stage - 1]},
-                " vram_step_end_delta_mib=",
-                mib(k_cuda_training_stage_count) - mib(0),
+                "splat_cuda_vram iterations=", first_iteration_, '-', last_iteration_,
+                " sampled_iteration=", vram_trace_iteration_, " vram_start_mib=", mib(0),
+                " vram_peak_mib=", peak >> 20, " vram_peak_stage=",
+                peak_stage == 0 ? std::string_view{"iteration_start"}
+                                : std::string_view{k_cuda_training_stage_names[peak_stage - 1]},
+                " vram_step_end_delta_mib=", mib(k_cuda_training_stage_count) - mib(0),
                 " vram_stage_delta_mib=",
-                per_stage.empty() ? std::string_view{"-"}
-                                  : std::string_view{per_stage});
+                per_stage.empty() ? std::string_view{"-"} : std::string_view{per_stage});
             vram_trace_valid_ = false;
         }
         sample_cursor_ = 0;
@@ -632,7 +626,8 @@ private:
     void destroy_events() noexcept {
         for (CudaProfileSample& sample : samples_)
             for (cudaEvent_t& event : sample.boundaries) {
-                if (event != nullptr) cudaEventDestroy(event);
+                if (event != nullptr)
+                    cudaEventDestroy(event);
                 event = nullptr;
             }
     }
@@ -666,20 +661,21 @@ struct ModelMemoryBudget {
     std::size_t optimizer_bytes{};
 
     [[nodiscard]] double state_bytes_per_gaussian() const {
-        return gaussians == 0
-            ? 0.0
-            : static_cast<double>(parameter_bytes + optimizer_bytes) /
-                  static_cast<double>(gaussians);
+        return gaussians == 0 ? 0.0
+                              : static_cast<double>(parameter_bytes + optimizer_bytes) /
+                                    static_cast<double>(gaussians);
     }
 };
 
 ModelMemoryBudget model_memory_budget(
-    const GaussianModel& model, const refine::AdamStates& states,
+    const GaussianModel& model,
+    const refine::AdamStates& states,
     const detail::ShAdamQuant* sh_quant = nullptr) {
     ModelMemoryBudget budget;
     budget.gaussians = model.size();
     const auto add = [](std::size_t& total, const tinytensor::Tensor& tensor) {
-        if (tensor.is_valid()) total += tensor.numel() * sizeof(float);
+        if (tensor.is_valid())
+            total += tensor.numel() * sizeof(float);
     };
     add(budget.parameter_bytes, model.means);
     add(budget.parameter_bytes, model.log_scales);
@@ -689,7 +685,8 @@ ModelMemoryBudget model_memory_budget(
     add(budget.parameter_bytes, model.normal_features);
     add(budget.parameter_bytes, model.filter_3d);
     for (const detail::AdamState* state : states) {
-        if (state == nullptr) continue;
+        if (state == nullptr)
+            continue;
         add(budget.optimizer_bytes, state->first);
         add(budget.optimizer_bytes, state->second);
     }
@@ -702,7 +699,7 @@ ModelMemoryBudget model_memory_budget(
 }
 
 class KdTree {
-public:
+  public:
     explicit KdTree(const std::vector<mvs::Vec3f>& points)
         : points_(points), order_(points.size()) {
         std::iota(order_.begin(), order_.end(), std::size_t{0});
@@ -711,33 +708,28 @@ public:
     }
 
     [[nodiscard]] float three_neighbor_rms(const std::size_t query) const {
-        if (points_.size() < 4) return 0.F;
+        if (points_.size() < 4)
+            return 0.F;
         std::array<float, 4> best{
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity()};
+            std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
         search(root_, points_[query], best);
         std::sort(best.begin(), best.end());
         return std::sqrt(std::max((best[1] + best[2] + best[3]) / 3.F, 0.F));
     }
 
-    [[nodiscard]] float two_neighbor_half_average(
-        const std::size_t query) const {
-        if (points_.size() < 3) return 0.F;
+    [[nodiscard]] float two_neighbor_half_average(const std::size_t query) const {
+        if (points_.size() < 3)
+            return 0.F;
         std::array<float, 4> best{
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity()};
+            std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
         search(root_, points_[query], best);
         std::sort(best.begin(), best.end());
-        return 0.25F * (
-            std::sqrt(std::max(best[1], 0.F)) +
-            std::sqrt(std::max(best[2], 0.F)));
+        return 0.25F * (std::sqrt(std::max(best[1], 0.F)) + std::sqrt(std::max(best[2], 0.F)));
     }
 
-private:
+  private:
     struct Node {
         std::size_t point{};
         int left{-1};
@@ -746,7 +738,8 @@ private:
     };
 
     int build(const std::size_t begin, const std::size_t end) {
-        if (begin >= end) return -1;
+        if (begin >= end)
+            return -1;
         mvs::Vec3f minimum = points_[order_[begin]];
         mvs::Vec3f maximum = minimum;
         for (std::size_t i = begin + 1; i < end; ++i) {
@@ -772,15 +765,15 @@ private:
         return node;
     }
 
-    void search(
-        const int node_index, const mvs::Vec3f& query,
-        std::array<float, 4>& best) const {
-        if (node_index < 0) return;
+    void search(const int node_index, const mvs::Vec3f& query, std::array<float, 4>& best) const {
+        if (node_index < 0)
+            return;
         const Node& node = nodes_[static_cast<std::size_t>(node_index)];
         const mvs::Vec3f& point = points_[node.point];
         const float distance2 = (query - point).squaredNorm();
         const auto worst = std::max_element(best.begin(), best.end());
-        if (distance2 < *worst) *worst = distance2;
+        if (distance2 < *worst)
+            *worst = distance2;
 
         const float delta = query(node.axis) - point(node.axis);
         const int near = delta < 0.F ? node.left : node.right;
@@ -796,13 +789,15 @@ private:
     int root_{-1};
 };
 
-float percentile_median_size(
-    const std::vector<mvs::Vec3f>& points, const float percentile) {
-    if (points.empty()) return 1.F;
+float percentile_median_size(const std::vector<mvs::Vec3f>& points, const float percentile) {
+    if (points.empty())
+        return 1.F;
     std::array<std::vector<float>, 3> axes;
-    for (auto& axis : axes) axis.reserve(points.size());
+    for (auto& axis : axes)
+        axis.reserve(points.size());
     for (const auto& point : points) {
-        if (!point.allFinite()) continue;
+        if (!point.allFinite())
+            continue;
         for (int axis = 0; axis < 3; ++axis)
             axes[axis].push_back(point(axis));
     }
@@ -810,23 +805,21 @@ float percentile_median_size(
     const float p = std::clamp(percentile, 0.F, 1.F);
     for (int axis = 0; axis < 3; ++axis) {
         auto& values = axes[axis];
-        if (values.empty()) return 1.F;
+        if (values.empty())
+            return 1.F;
         std::sort(values.begin(), values.end());
         const std::size_t count = values.size();
-        const std::size_t low = std::min(
-            count - 1,
-            static_cast<std::size_t>((1.F - p) * 0.5F * count));
-        const std::size_t high = std::min(
-            count - 1,
-            static_cast<std::size_t>((1.F + p) * 0.5F * count));
+        const std::size_t low =
+            std::min(count - 1, static_cast<std::size_t>((1.F - p) * 0.5F * count));
+        const std::size_t high =
+            std::min(count - 1, static_cast<std::size_t>((1.F + p) * 0.5F * count));
         sizes[axis] = values[high] - values[low];
     }
     std::sort(sizes.begin(), sizes.end());
     return std::max(sizes[1], 0.01F);
 }
 
-template <typename T>
-std::vector<T> download(const tinytensor::Tensor& tensor) {
+template <typename T> std::vector<T> download(const tinytensor::Tensor& tensor) {
     if (tensor.device() == tinytensor::Device::CPU) {
         const auto contiguous = tensor.contiguous();
         std::vector<T> values(contiguous.numel());
@@ -835,26 +828,24 @@ std::vector<T> download(const tinytensor::Tensor& tensor) {
         return values;
     }
     if (tensor.device() == tinytensor::Device::Vulkan) {
-        static_assert(std::is_same_v<T, float>,
-                      "Vulkan splat serialization currently downloads float tensors only");
+        static_assert(
+            std::is_same_v<T, float>,
+            "Vulkan splat serialization currently downloads float tensors only");
         if (!tensor.is_contiguous())
             throw std::runtime_error(
                 "Vulkan splat serialization requires contiguous model tensors");
         std::vector<T> values(tensor.numel());
         if (!values.empty())
-            tinytensor::vulkan::download(
-                tensor, values.data(), values.size() * sizeof(T));
+            tinytensor::vulkan::download(tensor, values.data(), values.size() * sizeof(T));
         return values;
     }
     std::vector<T> values(tensor.numel());
     if (!values.empty()) {
         const cudaError_t error = cudaMemcpy(
-            values.data(), tensor.data_ptr(), values.size() * sizeof(T),
-            cudaMemcpyDeviceToHost);
+            values.data(), tensor.data_ptr(), values.size() * sizeof(T), cudaMemcpyDeviceToHost);
         if (error != cudaSuccess)
             throw std::runtime_error(
-                std::string("Failed to download tensor: ") +
-                cudaGetErrorString(error));
+                std::string("Failed to download tensor: ") + cudaGetErrorString(error));
     }
     return values;
 }
@@ -863,14 +854,12 @@ void write_float(std::ofstream& stream, const float value) {
     stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-tinytensor::Tensor normal_features_from_smallest_axis(
-    const GaussianModel& model) {
+tinytensor::Tensor normal_features_from_smallest_axis(const GaussianModel& model) {
 #ifdef TINYTENSOR_HAS_VULKAN
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::normal_features_from_smallest_axis_vulkan(model);
 #endif
-    const detail::ActivatedParameters activated =
-        detail::activate_parameters(model);
+    const detail::ActivatedParameters activated = detail::activate_parameters(model);
     const auto scales = activated.scales.to_vector();
     const auto quaternions = activated.quaternions.to_vector();
     std::vector<float> features(model.size() * 4, 0.F);
@@ -878,17 +867,14 @@ tinytensor::Tensor normal_features_from_smallest_axis(
         int minimum_axis = 0;
         if (scales[3 * index + 1] < scales[3 * index])
             minimum_axis = 1;
-        if (scales[3 * index + 2] <
-            scales[3 * index + static_cast<std::size_t>(minimum_axis)])
+        if (scales[3 * index + 2] < scales[3 * index + static_cast<std::size_t>(minimum_axis)])
             minimum_axis = 2;
         const Eigen::Quaternionf rotation(
-            quaternions[4 * index], quaternions[4 * index + 1],
-            quaternions[4 * index + 2], quaternions[4 * index + 3]);
-        const mvs::Vec3f direction =
-            rotation.toRotationMatrix().col(minimum_axis);
+            quaternions[4 * index], quaternions[4 * index + 1], quaternions[4 * index + 2],
+            quaternions[4 * index + 3]);
+        const mvs::Vec3f direction = rotation.toRotationMatrix().col(minimum_axis);
         for (int axis = 0; axis < 3; ++axis)
-            features[4 * index + static_cast<std::size_t>(axis)] =
-                direction(axis);
+            features[4 * index + static_cast<std::size_t>(axis)] = direction(axis);
         // GaussianWrapping resets the learnable orientation sign to zero.
         features[4 * index + 3] = 0.F;
     }
@@ -896,39 +882,35 @@ tinytensor::Tensor normal_features_from_smallest_axis(
         features, {model.size(), std::size_t{4}}, model.means.device());
 }
 
-
-
-}  // namespace
+} // namespace
 
 GaussianModel initialize_from_dense_cloud(
-    const mvs::MvsScene& scene, const TrainingOptions& options,
+    const mvs::MvsScene& scene,
+    const TrainingOptions& options,
     const mvs::OrientedBoundingBox* focus_override) {
     if (scene.dense_cloud.points.empty())
         throw std::invalid_argument("Splat initialization requires a non-empty dense cloud");
     if (options.sh_degree > 3)
         throw std::invalid_argument("The current splat CUDA backend supports SH degree <= 3");
     std::vector<std::size_t> selection;
-    const auto& initial_bounds = focus_override != nullptr
-        ? *focus_override : scene.subject_bounds;
+    const auto& initial_bounds = focus_override != nullptr ? *focus_override : scene.subject_bounds;
     if (initial_bounds.valid) {
         selection.reserve(scene.dense_cloud.points.size());
         for (std::size_t index = 0; index < scene.dense_cloud.points.size(); ++index)
-            if (initial_bounds.contains(
-                    scene.dense_cloud.points[index].position))
+            if (initial_bounds.contains(scene.dense_cloud.points[index].position))
                 selection.push_back(index);
         if (selection.empty())
             throw std::invalid_argument(
                 "Focus region contains no initialization points; enlarge the Box");
     }
-    const std::size_t source_count = selection.empty()
-        ? scene.dense_cloud.points.size() : selection.size();
+    const std::size_t source_count =
+        selection.empty() ? scene.dense_cloud.points.size() : selection.size();
     // Deterministic uniform subsample when the input cloud is larger than the
     // requested initialization budget. Selection has to happen before the
     // growth ceiling is reached, otherwise the first refinement step prunes
     // the cloud back to the cap and IGS never gets capacity again.
     const std::size_t count =
-        options.initial_point_budget != 0 &&
-                options.initial_point_budget < source_count
+        options.initial_point_budget != 0 && options.initial_point_budget < source_count
             ? options.initial_point_budget
             : source_count;
     if (count != source_count) {
@@ -945,8 +927,8 @@ GaussianModel initialize_from_dense_cloud(
     const auto source_index = [&selection](const std::size_t index) {
         return selection.empty() ? index : selection[index];
     };
-    const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
-                              (options.sh_degree + 1U);
+    const std::size_t bases =
+        static_cast<std::size_t>(options.sh_degree + 1U) * (options.sh_degree + 1U);
     const bool splat_adc_plus = options.densification_strategy == DensificationStrategy::adc_plus;
     std::vector<float> means(count * 3);
     std::vector<float> scales(count * 3);
@@ -957,8 +939,7 @@ GaussianModel initialize_from_dense_cloud(
 
     std::vector<mvs::Vec3f> selected_positions(count);
     for (std::size_t index = 0; index < count; ++index)
-        selected_positions[index] =
-            scene.dense_cloud.points[source_index(index)].position;
+        selected_positions[index] = scene.dense_cloud.points[source_index(index)].position;
     float initialization_extent{};
     if (options.input_is_dense) {
         mvs::Vec3f minimum = selected_positions.front();
@@ -967,53 +948,46 @@ GaussianModel initialize_from_dense_cloud(
             minimum = minimum.cwiseMin(position);
             maximum = maximum.cwiseMax(position);
         }
-        initialization_extent = std::max(
-            (maximum - minimum).norm(), 1e-6F);
+        initialization_extent = std::max((maximum - minimum).norm(), 1e-6F);
     } else {
         initialization_extent = initial_bounds.valid
-            ? focus_scene_geometry(initial_bounds).scale
-            : refine::training_scene_geometry(scene, false).scale;
+                                    ? focus_scene_geometry(initial_bounds).scale
+                                    : refine::training_scene_geometry(scene, false).scale;
     }
     const float fallback_scale = std::max(
-        initialization_extent /
-            std::sqrt(static_cast<float>(std::max<std::size_t>(count, 1))),
+        initialization_extent / std::sqrt(static_cast<float>(std::max<std::size_t>(count, 1))),
         1e-6F);
-    const float minimum_initial_scale = options.constrain_scale_range
-        ? initialization_extent *
-              std::max(options.minimum_scale_fraction, 1e-8F)
-        : 1e-7F;
-    const float maximum_initial_scale = options.constrain_scale_range
-        ? initialization_extent *
-              std::max(
-                  options.maximum_scale_fraction,
-                  options.minimum_scale_fraction)
-        : std::numeric_limits<float>::infinity();
+    const float minimum_initial_scale =
+        options.constrain_scale_range
+            ? initialization_extent * std::max(options.minimum_scale_fraction, 1e-8F)
+            : 1e-7F;
+    const float maximum_initial_scale =
+        options.constrain_scale_range
+            ? initialization_extent *
+                  std::max(options.maximum_scale_fraction, options.minimum_scale_fraction)
+            : std::numeric_limits<float>::infinity();
     const float opacity = std::clamp(
         // IGS starts sparse observations with the configured confidence,
         // allowing overlapping surfaces to receive gradients before opacity
         // converges. Preserve Brush's initialization for ADC+ itself.
-        options.densification_strategy == DensificationStrategy::adc_plus
-            ? 0.5F : options.initial_opacity,
+        options.densification_strategy == DensificationStrategy::adc_plus ? 0.5F
+                                                                          : options.initial_opacity,
         1e-6F, 1.F - 1e-6F);
     const float opacity_logit = std::log(opacity / (1.F - opacity));
     std::vector<float> knn_scales(count, 0.F);
-    if (options.initialize_scale_from_knn &&
-        count >= (splat_adc_plus ? 3U : 4U)) {
+    if (options.initialize_scale_from_knn && count >= (splat_adc_plus ? 3U : 4U)) {
         const KdTree tree(selected_positions);
-        const float maximum_scale = 0.1F *
-            percentile_median_size(selected_positions, 0.75F);
+        const float maximum_scale = 0.1F * percentile_median_size(selected_positions, 0.75F);
 #if defined(PHOTARA_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-        for (std::int64_t index = 0;
-             index < static_cast<std::int64_t>(count); ++index)
+        for (std::int64_t index = 0; index < static_cast<std::int64_t>(count); ++index)
             knn_scales[static_cast<std::size_t>(index)] =
                 splat_adc_plus
-                ? std::clamp(
-                      tree.two_neighbor_half_average(
-                          static_cast<std::size_t>(index)),
-                      1e-3F, maximum_scale)
-                : tree.three_neighbor_rms(static_cast<std::size_t>(index));
+                    ? std::clamp(
+                          tree.two_neighbor_half_average(static_cast<std::size_t>(index)), 1e-3F,
+                          maximum_scale)
+                    : tree.three_neighbor_rms(static_cast<std::size_t>(index));
     }
     std::mt19937 quaternion_random(options.seed);
     std::uniform_real_distribution<float> quaternion_uniform(0.F, 1.F);
@@ -1024,25 +998,23 @@ GaussianModel initialize_from_dense_cloud(
             means[3 * index + axis] = point.position(axis);
         float footprint = std::numeric_limits<float>::infinity();
         for (const auto view_id : point.views) {
-            if (view_id >= scene.views.size()) continue;
+            if (view_id >= scene.views.size())
+                continue;
             const auto& view = scene.views[view_id];
-            const auto camera_point = view.pose.transform_world_to_camera(
-                point.position.cast<double>());
+            const auto camera_point =
+                view.pose.transform_world_to_camera(point.position.cast<double>());
             if (camera_point.z() > 0.0)
                 footprint = std::min(
-                    footprint,
-                    static_cast<float>(camera_point.z()) /
-                        std::max(view.fx, view.fy));
+                    footprint, static_cast<float>(camera_point.z()) / std::max(view.fx, view.fy));
         }
-        const float initial_spacing =
-            options.initialize_scale_from_knn &&
-                    std::isfinite(knn_scales[index]) &&
-                    knn_scales[index] > 0.F
-                ? knn_scales[index]
-                : std::isfinite(footprint) ? footprint : fallback_scale;
+        const float initial_spacing = options.initialize_scale_from_knn &&
+                                              std::isfinite(knn_scales[index]) &&
+                                              knn_scales[index] > 0.F
+                                          ? knn_scales[index]
+                                      : std::isfinite(footprint) ? footprint
+                                                                 : fallback_scale;
         const float scale = std::clamp(
-            initial_spacing * options.initial_scale,
-            minimum_initial_scale, maximum_initial_scale);
+            initial_spacing * options.initial_scale, minimum_initial_scale, maximum_initial_scale);
         for (int axis = 0; axis < 3; ++axis)
             scales[3 * index + axis] = std::log(scale);
 
@@ -1050,16 +1022,15 @@ GaussianModel initialize_from_dense_cloud(
             // Sparse-SfM initialization: raw U[0,1) quaternion parameters.
             // The raster path normalizes them before use.
             for (int component = 0; component < 4; ++component)
-                quaternions[4 * index + component] = quaternion_uniform(
-                    quaternion_random);
+                quaternions[4 * index + component] = quaternion_uniform(quaternion_random);
         } else if (options.input_is_dense) {
             mvs::Vec3f normal = point.normal;
             if (!normal.allFinite() || normal.squaredNorm() < 1e-12F)
                 normal = mvs::Vec3f::UnitZ();
             else
                 normal.normalize();
-            Eigen::Quaternionf rotation = Eigen::Quaternionf::FromTwoVectors(
-                mvs::Vec3f::UnitZ(), normal).normalized();
+            Eigen::Quaternionf rotation =
+                Eigen::Quaternionf::FromTwoVectors(mvs::Vec3f::UnitZ(), normal).normalized();
             quaternions[4 * index + 0] = rotation.w();
             quaternions[4 * index + 1] = rotation.x();
             quaternions[4 * index + 2] = rotation.y();
@@ -1072,8 +1043,7 @@ GaussianModel initialize_from_dense_cloud(
         }
         opacities[index] = opacity_logit;
         mvs::Vec3f field_normal = point.normal;
-        if (!field_normal.allFinite() ||
-            field_normal.squaredNorm() < 1e-12F)
+        if (!field_normal.allFinite() || field_normal.squaredNorm() < 1e-12F)
             field_normal = mvs::Vec3f::UnitZ();
         else
             field_normal.normalize();
@@ -1091,59 +1061,60 @@ GaussianModel initialize_from_dense_cloud(
     GaussianModel model;
     model.render_method = options.render_method;
     model.filter_mode = options.filter_mode;
-    model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3}, device);
-    model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3}, device);
-    model.quaternions = tinytensor::Tensor::from_vector(
-        quaternions, {count, 4}, device);
-    model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1}, device);
-    model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3}, device);
-    model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4}, device);
+    model.means = tinytensor::Tensor::from_vector(means, {count, 3}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(quaternions, {count, 4}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(opacities, {count, 1}, device);
+    model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3}, device);
+    model.normal_features = tinytensor::Tensor::from_vector(normal_features, {count, 4}, device);
     model.sh_degree = options.sh_degree;
     return model;
 }
 
-
-Trainer::Trainer(TrainingOptions options)
-    : options_(std::move(options)) {
+Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {
     const auto& raster = options_.rasterization;
     if (!(std::isfinite(raster.alpha_clip) && raster.alpha_clip > 0.F && raster.alpha_clip < 1.F &&
           std::isfinite(raster.near_plane) && raster.near_plane > 0.F &&
-          std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F && raster.pixel_center_offset <= 0.5F))
+          std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F &&
+          raster.pixel_center_offset <= 0.5F))
         throw std::invalid_argument("Invalid rasterization policy");
     enforce_render_method_constraints(options_);
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.speedy_pruning)
         throw std::invalid_argument("3DGUT does not yet support Speedy pruning");
-    if (!std::isfinite(options_.scale_regularization_weight) || options_.scale_regularization_weight < 0.F ||
-        !std::isfinite(options_.shape_erank_reg) || options_.shape_erank_reg < 0.F ||
-        !std::isfinite(options_.shape_axis_ratio_reg) || options_.shape_axis_ratio_reg < 0.F ||
-        !std::isfinite(options_.shape_max_axis_ratio) || options_.shape_max_axis_ratio < 1.F)
-        throw std::invalid_argument("Shape regularizers require finite non-negative weights and axis-ratio threshold >= 1");
+    if (!std::isfinite(options_.scale_regularization_weight) ||
+        options_.scale_regularization_weight < 0.F || !std::isfinite(options_.shape_erank_reg) ||
+        options_.shape_erank_reg < 0.F || !std::isfinite(options_.shape_axis_ratio_reg) ||
+        options_.shape_axis_ratio_reg < 0.F || !std::isfinite(options_.shape_max_axis_ratio) ||
+        options_.shape_max_axis_ratio < 1.F)
+        throw std::invalid_argument(
+            "Shape regularizers require finite non-negative weights and axis-ratio threshold >= 1");
     if (options_.speedy_pruning) {
         if (options_.speedy_every == 0 ||
             (options_.speedy_start != 0 && options_.speedy_stop < options_.speedy_start) ||
             !std::isfinite(options_.speedy_soft_ratio) ||
-            !std::isfinite(options_.speedy_hard_ratio) ||
-            options_.speedy_soft_ratio < 0.F || options_.speedy_soft_ratio >= 1.F ||
-            options_.speedy_hard_ratio < 0.F || options_.speedy_hard_ratio >= 1.F)
-            throw std::invalid_argument("Invalid Speedy-Splat pruning schedule or ratios (require [0,1))");
+            !std::isfinite(options_.speedy_hard_ratio) || options_.speedy_soft_ratio < 0.F ||
+            options_.speedy_soft_ratio >= 1.F || options_.speedy_hard_ratio < 0.F ||
+            options_.speedy_hard_ratio >= 1.F)
+            throw std::invalid_argument(
+                "Invalid Speedy-Splat pruning schedule or ratios (require [0,1))");
     }
 }
 
 GaussianModel Trainer::train(
-    const mvs::MvsScene& scene, ProgressCallback progress,
-    EvaluationCallback evaluate, PreviewCallback preview,
+    const mvs::MvsScene& scene,
+    ProgressCallback progress,
+    EvaluationCallback evaluate,
+    PreviewCallback preview,
     DevicePreviewCallback device_preview) const {
     struct AllocationProfiling {
         bool previous = tinytensor::VramProfiler::instance().enabled();
         explicit AllocationProfiling(bool enable) {
-            if (enable) tinytensor::VramProfiler::instance().setEnabled(true);
+            if (enable)
+                tinytensor::VramProfiler::instance().setEnabled(true);
         }
-        ~AllocationProfiling() { tinytensor::VramProfiler::instance().setEnabled(previous); }
+        ~AllocationProfiling() {
+            tinytensor::VramProfiler::instance().setEnabled(previous);
+        }
     } allocation_profiling(options_.profile_cuda);
     tinytensor::VramScope training_scope("splat_training");
     if (scene.views.empty())
@@ -1153,10 +1124,14 @@ GaussianModel Trainer::train(
     if (!std::isfinite(options_.lambda_d) || options_.lambda_d < 0.F ||
         !std::isfinite(options_.lambda_n) || options_.lambda_n < 0.F)
         throw std::invalid_argument("lambda_d and lambda_n must be finite and nonnegative");
-    if (use_ai_prior && (options_.prior_directory.empty() || options_.use_mvs_depth || options_.use_mvs_normals))
-        throw std::invalid_argument("AI priors require a prior directory and cannot share targets with MVS supervision");
-    if (options_.lambda_d > 0.F && (!std::isfinite(options_.geometry_epsilon) || options_.geometry_epsilon <= 0.F))
-        throw std::invalid_argument("AI depth supervision requires a finite positive geometry epsilon");
+    if (use_ai_prior &&
+        (options_.prior_directory.empty() || options_.use_mvs_depth || options_.use_mvs_normals))
+        throw std::invalid_argument(
+            "AI priors require a prior directory and cannot share targets with MVS supervision");
+    if (options_.lambda_d > 0.F &&
+        (!std::isfinite(options_.geometry_epsilon) || options_.geometry_epsilon <= 0.F))
+        throw std::invalid_argument(
+            "AI depth supervision requires a finite positive geometry epsilon");
     if (vulkan_backend) {
         if (options_.enable_densification &&
             options_.densification_strategy != DensificationStrategy::adc_igs)
@@ -1164,36 +1139,36 @@ GaussianModel Trainer::train(
                 "Vulkan densification currently supports the shared ADC-IGS "
                 "strategy only");
         if (options_.densify_revised_noise)
-            throw std::invalid_argument(
-                "Vulkan ADC-IGS revised noise is not implemented yet");
+            throw std::invalid_argument("Vulkan ADC-IGS revised noise is not implemented yet");
         if (options_.use_mvs_depth || options_.use_mvs_normals)
-            throw std::invalid_argument(
-                "Vulkan training does not yet support external "
-                "MVS depth/normal targets");
-        core::Logger::instance().info(
-            "splat training backend=vulkan orchestration=shared");
+            throw std::invalid_argument("Vulkan training does not yet support external "
+                                        "MVS depth/normal targets");
+        core::Logger::instance().info("splat training backend=vulkan orchestration=shared");
     } else {
-        core::Logger::instance().info(
-            "splat training backend=cuda orchestration=shared");
+        core::Logger::instance().info("splat training backend=cuda orchestration=shared");
     }
     if (options_.resume_checkpoint && options_.checkpoint_path.empty())
         throw std::invalid_argument("Resume requires a training checkpoint path");
     detail::TrainingCheckpointLease checkpoint_lease(options_.checkpoint_path);
-    const std::uint64_t checkpoint_fingerprint = options_.checkpoint_path.empty()
-        ? 0 : detail::training_fingerprint(scene, options_);
+    const std::uint64_t checkpoint_fingerprint =
+        options_.checkpoint_path.empty() ? 0 : detail::training_fingerprint(scene, options_);
     std::optional<TrainingCheckpointInfo> warm_start;
     if (options_.resume_checkpoint) {
         const auto info = inspect_training_checkpoint(options_.checkpoint_path);
         if (info && !info->model_path.empty()) {
             if (info->fingerprint != checkpoint_fingerprint)
-                throw std::runtime_error("Training settings, cameras or input images changed. Start a new training run.");
+                throw std::runtime_error("Training settings, cameras or input images changed. "
+                                         "Start a new training run.");
             warm_start = info;
-        } else throw std::runtime_error("No supported PLY checkpoint found. Start a new training run.");
+        } else
+            throw std::runtime_error(
+                "No supported PLY checkpoint found. Start a new training run.");
     }
     GaussianModel model = [&] {
         if (warm_start) {
             auto loaded = load_gaussians(warm_start->model_path, training_device(options_));
-            if (loaded.size() != warm_start->gaussian_count || loaded.sh_degree != options_.sh_degree)
+            if (loaded.size() != warm_start->gaussian_count ||
+                loaded.sh_degree != options_.sh_degree)
                 throw std::runtime_error("Checkpoint PLY model does not match its metadata");
             return loaded;
         }
@@ -1207,22 +1182,18 @@ GaussianModel Trainer::train(
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
-        if (options_.evaluation_split_every == 0 ||
-            index % options_.evaluation_split_every != 0)
+        if (options_.evaluation_split_every == 0 || index % options_.evaluation_split_every != 0)
             view_indices.push_back(index);
     if (view_indices.empty())
-        throw std::invalid_argument(
-            "Splat evaluation split left no training views");
-    float active_resolution_scale =
-        data::progressive_resolution_scale(warm_start ? std::max(1U, warm_start->iteration) : 1, options_);
-    data::TrainingDataLoader view_cache(
-        scene.views, options_, active_resolution_scale);
+        throw std::invalid_argument("Splat evaluation split left no training views");
+    float active_resolution_scale = data::progressive_resolution_scale(
+        warm_start ? std::max(1U, warm_start->iteration) : 1, options_);
+    data::TrainingDataLoader view_cache(scene.views, options_, active_resolution_scale);
     if (options_.use_mask) {
         for (const std::size_t index : view_indices)
             if (!view_cache.has_mask(index))
-                throw std::invalid_argument(
-                    "Splat subject-only training requires a matching mask "
-                    "file or source alpha channel for every selected view");
+                throw std::invalid_argument("Splat subject-only training requires a matching mask "
+                                            "file or source alpha channel for every selected view");
     }
     std::mt19937 random(options_.seed);
     // Densification samples replacement and growth parents on the device, so
@@ -1232,30 +1203,28 @@ GaussianModel Trainer::train(
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;
     view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
-    const std::size_t initial_prefetch_end = std::min(
-        shuffled_views.size(),
-        shuffled_view_cursor + view_cache.prefetch_depth() + 1);
+    const std::size_t initial_prefetch_end =
+        std::min(shuffled_views.size(), shuffled_view_cursor + view_cache.prefetch_depth() + 1);
     // The current view is decoded by get(); only the views after it belong in
     // the lookahead, otherwise a slot is wasted on work that is awaited
     // immediately.
-    for (std::size_t cursor = shuffled_view_cursor + 1;
-         cursor < initial_prefetch_end; ++cursor)
+    for (std::size_t cursor = shuffled_view_cursor + 1; cursor < initial_prefetch_end; ++cursor)
         view_cache.prefetch(shuffled_views[cursor]);
 
     std::vector<Camera> all_cameras;
     all_cameras.reserve(scene.views.size());
     for (const mvs::MvsView& view : scene.views)
-        all_cameras.push_back(data::training_camera(
-            view, options_, active_resolution_scale));
-    const bool native_non_pinhole = std::any_of(
-        all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
+        all_cameras.push_back(data::training_camera(view, options_, active_resolution_scale));
+    const bool native_non_pinhole =
+        std::any_of(all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
             return uses_native_splat_projection(camera.model);
         });
     // Native projections disable the pinhole geometry losses below. Keep
     // their geometry-only Mip filter disabled as well: otherwise every
     // refresh scans all Gaussian/camera pairs without active supervision.
-    const bool use_3d_filter = !native_non_pinhole &&
-        (options_.filter_mode == SplatFilterMode::mip_3d || options_.filter_mode == SplatFilterMode::mip);
+    const bool use_3d_filter =
+        !native_non_pinhole && (options_.filter_mode == SplatFilterMode::mip_3d ||
+                                options_.filter_mode == SplatFilterMode::mip);
     std::vector<Camera> filter_cameras;
     std::vector<Camera> full_resolution_filter_cameras;
     if (use_3d_filter) {
@@ -1273,100 +1242,88 @@ GaussianModel Trainer::train(
     // topology changes; repeatedly baking it into scale/opacity causes a
     // cumulative opacity loss.
     if (use_3d_filter)
-        model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras, filter_3d_factor);
+        model.filter_3d = detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
     if (native_non_pinhole) {
         // Panorama and fisheye training rasterize the source projection
         // directly; state which models are in play so a run that silently fell
         // back to pinhole working cameras is obvious from the log.
         unsigned fisheye = 0, equirectangular = 0;
         for (const Camera& camera : all_cameras) {
-            if (camera.model == CameraModel::opencv_fisheye) ++fisheye;
+            if (camera.model == CameraModel::opencv_fisheye)
+                ++fisheye;
             if (camera.model == CameraModel::equirectangular)
                 ++equirectangular;
         }
         core::Logger::instance().info(
-            "splat native projection: equirectangular=", equirectangular,
-            " fisheye=", fisheye, " of ", all_cameras.size(),
+            "splat native projection: equirectangular=", equirectangular, " fisheye=", fisheye,
+            " of ", all_cameras.size(),
             " cameras (training on the source projection, no undistortion)");
     }
     if (native_non_pinhole &&
-        (options_.multi_view_geo_weight > 0.F ||
-         options_.multi_view_ncc_weight > 0.F ||
-         options_.use_depth_normal_loss || options_.use_normal_field ||
-         options_.use_mvs_depth || options_.use_mvs_normals)) {
+        (options_.multi_view_geo_weight > 0.F || options_.multi_view_ncc_weight > 0.F ||
+         options_.use_depth_normal_loss || options_.use_normal_field || options_.use_mvs_depth ||
+         options_.use_mvs_normals)) {
         core::Logger::instance().info(
             "Disabling pinhole-only depth-normal, normal-field and multi-view losses; "
             "native views do not reuse MVS depth/normal maps without reprojection. Cameras: "
             "fisheye/equirectangular splat cameras");
     }
     if (options_.render_method == RenderMethod::gaussian_3dgut)
-        core::Logger::instance().info("3DGUT: appearance-only training; depth, normal, multi-view and AI geometry losses are disabled");
+        core::Logger::instance().info("3DGUT: appearance-only training; depth, normal, multi-view "
+                                      "and AI geometry losses are disabled");
     const bool use_multi_view =
         options_.render_method != RenderMethod::gaussian_3dgut && !native_non_pinhole &&
-        (options_.multi_view_geo_weight > 0.F ||
-         options_.multi_view_ncc_weight > 0.F);
-    const unsigned multi_view_tail_interval =
-        std::max(1U, options_.multi_view_tail_interval);
-    const bool adaptive_multi_view =
-        use_multi_view &&
-        options_.multi_view_adaptive_frequency &&
-        options_.multi_view_adaptive_max_interval > 1;
+        (options_.multi_view_geo_weight > 0.F || options_.multi_view_ncc_weight > 0.F);
+    const unsigned multi_view_tail_interval = std::max(1U, options_.multi_view_tail_interval);
+    const bool adaptive_multi_view = use_multi_view && options_.multi_view_adaptive_frequency &&
+                                     options_.multi_view_adaptive_max_interval > 1;
     detail::MultiViewStabilityScheduler multi_view_scheduler(options_);
     TrainingOptions tail_multi_view_options = options_;
-    tail_multi_view_options.multi_view_geo_weight *=
-        static_cast<float>(multi_view_tail_interval);
-    tail_multi_view_options.multi_view_ncc_weight *=
-        static_cast<float>(multi_view_tail_interval);
+    tail_multi_view_options.multi_view_geo_weight *= static_cast<float>(multi_view_tail_interval);
+    tail_multi_view_options.multi_view_ncc_weight *= static_cast<float>(multi_view_tail_interval);
     TrainingOptions adaptive_multi_view_options = options_;
-    auto multi_view_stability_accumulator = adaptive_multi_view
-        ? tinytensor::Tensor::zeros(
-              {std::size_t{3}}, training_device(options_))
-        : tinytensor::Tensor{};
-    const auto multi_view_neighbours = use_multi_view
-        ? data::compute_multi_view_neighbours(
-              all_cameras, view_indices, options_)
-        : std::vector<std::vector<std::size_t>>(scene.views.size());
+    auto multi_view_stability_accumulator =
+        adaptive_multi_view ? tinytensor::Tensor::zeros({std::size_t{3}}, training_device(options_))
+                            : tinytensor::Tensor{};
+    const auto multi_view_neighbours =
+        use_multi_view ? data::compute_multi_view_neighbours(all_cameras, view_indices, options_)
+                       : std::vector<std::vector<std::size_t>>(scene.views.size());
     std::future<void> evaluation_future;
     const auto finish_evaluation = [&] {
-        if (evaluation_future.valid()) evaluation_future.get();
+        if (evaluation_future.valid())
+            evaluation_future.get();
     };
-    const auto launch_evaluation =
-        [&](const unsigned iteration, const GaussianModel& current) {
-            finish_evaluation();
-            // GUT draw lists can occupy several GiB on wide-angle views.
-            // Evaluate at the iteration boundary so evaluation and training
-            // do not retain separate raster workspaces concurrently.
-            if (current.render_method == RenderMethod::gaussian_3dgut) {
-                auto snapshot = current;
-                if (use_3d_filter)
-                    snapshot.filter_3d = detail::compute_3d_filter(
-                        snapshot.means, full_resolution_filter_cameras,
-                        filter_3d_factor);
-                evaluate(iteration, snapshot);
-                return;
-            }
-            GaussianModel snapshot = refine::clone_model(current);
+    const auto launch_evaluation = [&](const unsigned iteration, const GaussianModel& current) {
+        finish_evaluation();
+        // GUT draw lists can occupy several GiB on wide-angle views.
+        // Evaluate at the iteration boundary so evaluation and training
+        // do not retain separate raster workspaces concurrently.
+        if (current.render_method == RenderMethod::gaussian_3dgut) {
+            auto snapshot = current;
             if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
-                    snapshot.means, full_resolution_filter_cameras,
-                    filter_3d_factor);
-            // The Vulkan path shares one logical device/queue and has stateful
-            // process-wide tensor and raster runtime state. An evaluation
-            // thread can therefore race the next training submission even when
-            // individual tensor operations are serialized. CUDA evaluation
-            // stays overlapped; Vulkan evaluation runs on the training thread.
-            if (vulkan_backend) {
+                    snapshot.means, full_resolution_filter_cameras, filter_3d_factor);
+            evaluate(iteration, snapshot);
+            return;
+        }
+        GaussianModel snapshot = refine::clone_model(current);
+        if (use_3d_filter)
+            snapshot.filter_3d = detail::compute_3d_filter(
+                snapshot.means, full_resolution_filter_cameras, filter_3d_factor);
+        // The Vulkan path shares one logical device/queue and has stateful
+        // process-wide tensor and raster runtime state. An evaluation
+        // thread can therefore race the next training submission even when
+        // individual tensor operations are serialized. CUDA evaluation
+        // stays overlapped; Vulkan evaluation runs on the training thread.
+        if (vulkan_backend) {
+            evaluate(iteration, snapshot);
+            return;
+        }
+        evaluation_future = std::async(
+            std::launch::async, [evaluate, iteration, snapshot = std::move(snapshot)]() mutable {
                 evaluate(iteration, snapshot);
-                return;
-            }
-            evaluation_future = std::async(
-                std::launch::async,
-                [evaluate, iteration,
-                 snapshot = std::move(snapshot)]() mutable {
-                    evaluate(iteration, snapshot);
-                });
-        };
+            });
+    };
 
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
@@ -1374,35 +1331,35 @@ GaussianModel Trainer::train(
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
     // Both backends use the same SH optimizer codec; structural Adam stays FP32.
     const int sh_stride = static_cast<int>(model.sh.shape()[1] * 3);
-    detail::ShAdamQuant sh_quant = detail::make_sh_adam_quant(
-        model.size(), sh_stride, model.sh.device());
+    detail::ShAdamQuant sh_quant =
+        detail::make_sh_adam_quant(model.size(), sh_stride, model.sh.device());
     detail::AdamState sh_state;
     core::Logger::instance().info(
         "sh_adam=fp16_u_logq8_v backend=", vulkan_backend ? "vulkan" : "cuda",
         " block=per_gaussian stride=", sh_quant.stride,
         " groups=dc,rest bytes_per_gaussian=", sh_quant.stride * 3 + 16);
-    detail::AdamState normal_features_state =
-        detail::make_adam_state(model.normal_features);
+    detail::AdamState normal_features_state = detail::make_adam_state(model.normal_features);
     unsigned normal_features_updates = 0;
-    const refine::AdamStates adam_states{
-        &means_state, &scales_state, &rotations_state, &opacity_state,
-        &sh_state, &normal_features_state, &sh_quant};
+    const refine::AdamStates adam_states{&means_state,   &scales_state, &rotations_state,
+                                         &opacity_state, &sh_state,     &normal_features_state,
+                                         &sh_quant};
     // Per-view photometric compensation. State is indexed by the source view,
     // so it survives densification: rows change, cameras do not. PPISP owns
     // exposure and white-balance; the bilateral grid adds spatial variation.
     const bool ppisp_enabled = options_.use_ppisp;
     const bool bilagrid_enabled = options_.use_bilateral_grid;
     const bool ppisp_before_bilagrid = options_.ppisp_before_bilagrid;
-    detail::PpispState ppisp_state = ppisp_enabled
-        ? (vulkan_backend
-            ? detail::make_ppisp_state_vulkan(scene.views.size(), options_)
-            : detail::make_ppisp_state(scene.views.size(), options_))
-        : detail::PpispState{};
-    detail::BilateralGridState bilagrid_state = bilagrid_enabled
-        ? (vulkan_backend
-            ? detail::make_bilateral_grid_state_vulkan(scene.views.size(), options_)
-            : detail::make_bilateral_grid_state(scene.views.size(), options_))
-        : detail::BilateralGridState{};
+    detail::PpispState ppisp_state =
+        ppisp_enabled
+            ? (vulkan_backend ? detail::make_ppisp_state_vulkan(scene.views.size(), options_)
+                              : detail::make_ppisp_state(scene.views.size(), options_))
+            : detail::PpispState{};
+    detail::BilateralGridState bilagrid_state =
+        bilagrid_enabled
+            ? (vulkan_backend
+                   ? detail::make_bilateral_grid_state_vulkan(scene.views.size(), options_)
+                   : detail::make_bilateral_grid_state(scene.views.size(), options_))
+            : detail::BilateralGridState{};
     const bool densification_enabled = refine::is_enabled(options_);
     const bool panorama_adc =
         is_adc_strategy(options_.densification_strategy) &&
@@ -1411,13 +1368,12 @@ GaussianModel Trainer::train(
         });
     std::size_t initial_gaussian_count = model.size();
     if (panorama_adc)
-        core::Logger::instance().info("adc_panorama angular_threshold_degrees=30",
-            " growth_reserve=0.5 initial_growth_cap=",
-            refine::panorama_progressive_growth_cap(
-                initial_gaussian_count, 1, options_));
-    detail::DensificationStats densification_stats = densification_enabled
-        ? detail::make_densification_stats(model.size(), model.means.device())
-        : detail::DensificationStats{};
+        core::Logger::instance().info(
+            "adc_panorama angular_threshold_degrees=30", " growth_reserve=0.5 initial_growth_cap=",
+            refine::panorama_progressive_growth_cap(initial_gaussian_count, 1, options_));
+    detail::DensificationStats densification_stats =
+        densification_enabled ? detail::make_densification_stats(model.size(), model.means.device())
+                              : detail::DensificationStats{};
     mvs::OrientedBoundingBox focus_bounds = scene.subject_bounds;
     std::filesystem::file_time_type focus_file_stamp{};
     bool has_focus_file_stamp = false;
@@ -1426,26 +1382,27 @@ GaussianModel Trainer::train(
     constexpr std::size_t max_focus_mask_cache_bytes = 128ULL * 1024 * 1024;
     const auto prune_to_focus = [&](const mvs::OrientedBoundingBox& bounds,
                                     const unsigned iteration) {
-        if (!bounds.valid || model.size() == 0) return true;
+        if (!bounds.valid || model.size() == 0)
+            return true;
         const auto keep = focus_keep_indices(model, bounds);
         if (keep.numel() == 0) {
             core::Logger::instance().warning(
-                "splat focus region has no current Gaussians at iteration=",
-                iteration);
+                "splat focus region has no current Gaussians at iteration=", iteration);
             return false;
         }
-        if (keep.numel() == model.size()) return true;
+        if (keep.numel() == model.size())
+            return true;
         const std::size_t removed = model.size() - keep.numel();
         refine::gpu_detail::select_training_rows_gpu(model, keep, adam_states);
         if (use_3d_filter)
-            model.filter_3d = detail::compute_3d_filter(
-                model.means, filter_cameras, filter_3d_factor);
+            model.filter_3d =
+                detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
         if (densification_enabled)
-            densification_stats = detail::make_densification_stats(
-                model.size(), model.means.device());
+            densification_stats =
+                detail::make_densification_stats(model.size(), model.means.device());
         core::Logger::instance().info(
-            "splat focus region iteration=", iteration,
-            " removed=", removed, " gaussians=", model.size());
+            "splat focus region iteration=", iteration, " removed=", removed,
+            " gaussians=", model.size());
         return true;
     };
     const auto reseed_focus = [&](const mvs::OrientedBoundingBox& bounds,
@@ -1458,26 +1415,21 @@ GaussianModel Trainer::train(
             opacity_state = detail::make_adam_state(model.opacity_logits);
             sh_state = {};
             sh_quant = detail::make_sh_adam_quant(
-                model.size(), static_cast<int>(model.sh.shape()[1] * 3),
-                model.sh.device());
-            normal_features_state = detail::make_adam_state(
-                model.normal_features);
+                model.size(), static_cast<int>(model.sh.shape()[1] * 3), model.sh.device());
+            normal_features_state = detail::make_adam_state(model.normal_features);
             normal_features_updates = 0;
             if (use_3d_filter)
-                model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras,
-                    filter_3d_factor);
+                model.filter_3d =
+                    detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
             if (densification_enabled)
-                densification_stats = detail::make_densification_stats(
-                    model.size(), model.means.device());
+                densification_stats =
+                    detail::make_densification_stats(model.size(), model.means.device());
             initial_gaussian_count = model.size();
             core::Logger::instance().info(
-                "splat focus region reseeded iteration=", iteration,
-                " gaussians=", model.size());
+                "splat focus region reseeded iteration=", iteration, " gaussians=", model.size());
             return true;
         } catch (const std::invalid_argument& failure) {
-            core::Logger::instance().warning(
-                "splat focus region ignored: ", failure.what());
+            core::Logger::instance().warning("splat focus region ignored: ", failure.what());
             return false;
         }
     };
@@ -1485,13 +1437,11 @@ GaussianModel Trainer::train(
     Rasterizer rasterizer;
     CudaTrainingProfiler cuda_profiler(options_);
     std::size_t last_preview_view = std::numeric_limits<std::size_t>::max();
-    std::uint64_t last_preview_camera_revision =
-        std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t last_preview_vis_revision =
-        std::numeric_limits<std::uint64_t>::max();
-    refine::SceneGeometry scene_geometry = focus_bounds.valid
-        ? focus_scene_geometry(focus_bounds)
-        : refine::training_scene_geometry(scene, options_.input_is_dense);
+    std::uint64_t last_preview_camera_revision = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t last_preview_vis_revision = std::numeric_limits<std::uint64_t>::max();
+    refine::SceneGeometry scene_geometry =
+        focus_bounds.valid ? focus_scene_geometry(focus_bounds)
+                           : refine::training_scene_geometry(scene, options_.input_is_dense);
     float scene_extent = scene_geometry.scale;
     mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
@@ -1499,18 +1449,15 @@ GaussianModel Trainer::train(
     const bool splat_mean_lr_scale =
         options_.densification_strategy == DensificationStrategy::adc_plus ||
         options_.densification_strategy == DensificationStrategy::emc ||
-        (!options_.input_is_dense &&
-            is_adc_strategy(options_.densification_strategy));
+        (!options_.input_is_dense && is_adc_strategy(options_.densification_strategy));
     if (splat_mean_lr_scale) {
-        refinement_geometry =
-            refine::splat_scene_geometry_device(model.means);
+        refinement_geometry = refine::splat_scene_geometry_device(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
-    float minimum_log_scale = options_.constrain_scale_range
-        ? std::log(
-              scene_extent *
-              std::max(options_.minimum_scale_fraction, 1e-8F))
-        : -std::numeric_limits<float>::infinity();
+    float minimum_log_scale =
+        options_.constrain_scale_range
+            ? std::log(scene_extent * std::max(options_.minimum_scale_fraction, 1e-8F))
+            : -std::numeric_limits<float>::infinity();
     // Scales are not clamped to the 0.1*scene prune threshold between
     // refinements. Clamping exactly at that boundary and then comparing
     // exp(log_scale) > threshold is numerically unsafe: round-off caused tens
@@ -1520,48 +1467,52 @@ GaussianModel Trainer::train(
     const float fixed_maximum_scale_fraction =
         options_.structure_freeze_iter != 0
             ? 0.1F
-            : std::max(
-                  options_.maximum_scale_fraction,
-                  options_.minimum_scale_fraction);
+            : std::max(options_.maximum_scale_fraction, options_.minimum_scale_fraction);
     float maximum_log_scale =
         options_.constrain_scale_range && !densification_enabled
-            ? std::log(std::max(
-                  fixed_maximum_scale_fraction * scene_extent, 1e-6F))
+            ? std::log(std::max(fixed_maximum_scale_fraction * scene_extent, 1e-6F))
             : std::numeric_limits<float>::infinity();
 
     unsigned completed_iteration = 0;
     if (warm_start) {
         completed_iteration = warm_start->iteration;
-        core::Logger::instance().info("splat_model_resumed iteration=", completed_iteration,
+        core::Logger::instance().info(
+            "splat_model_resumed iteration=", completed_iteration,
             " optimizer=reinitialized source=", warm_start->model_path);
     }
     auto last_checkpoint_time = std::chrono::steady_clock::now();
     std::string last_control_request;
     auto next_control_poll = std::chrono::steady_clock::time_point::min();
     const auto checkpoint_step = [&](unsigned iteration, bool stopping) {
-        if (options_.checkpoint_path.empty()) return;
+        if (options_.checkpoint_path.empty())
+            return;
         const auto now = std::chrono::steady_clock::now();
         std::string request;
         if (!options_.checkpoint_control_file.empty() && now >= next_control_poll) {
             std::ifstream input(options_.checkpoint_control_file);
             std::getline(input, request);
-            if (request == last_control_request) request.clear();
+            if (request == last_control_request)
+                request.clear();
             next_control_poll = now + std::chrono::milliseconds(100);
         }
         const bool scheduled = iteration == options_.iterations || stopping ||
-            (options_.checkpoint_interval_iterations && iteration % options_.checkpoint_interval_iterations == 0) ||
-            (options_.checkpoint_interval_seconds && now - last_checkpoint_time >=
-                std::chrono::seconds(options_.checkpoint_interval_seconds));
-        if (request.empty() && !scheduled) return;
+                               (options_.checkpoint_interval_iterations &&
+                                iteration % options_.checkpoint_interval_iterations == 0) ||
+                               (options_.checkpoint_interval_seconds &&
+                                now - last_checkpoint_time >=
+                                    std::chrono::seconds(options_.checkpoint_interval_seconds));
+        if (request.empty() && !scheduled)
+            return;
         std::string response;
         try {
             core::Logger::instance().info("splat_checkpoint_saving iteration=", iteration);
-            const TrainingCheckpointInfo info{iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds};
+            const TrainingCheckpointInfo info{
+                iteration, options_.iterations, model.size(), checkpoint_fingerprint, focus_bounds};
             detail::save_model_checkpoint(options_.checkpoint_path, info, model);
             last_checkpoint_time = std::chrono::steady_clock::now();
             response = "saved " + std::to_string(iteration);
-            core::Logger::instance().info("splat_checkpoint_saved iteration=", iteration,
-                " path=", options_.checkpoint_path);
+            core::Logger::instance().info(
+                "splat_checkpoint_saved iteration=", iteration, " path=", options_.checkpoint_path);
         } catch (const std::exception& error) {
             response = std::string("error ") + error.what();
             core::Logger::instance().warning("Training checkpoint save failed: ", error.what());
@@ -1569,22 +1520,31 @@ GaussianModel Trainer::train(
         last_checkpoint_time = std::chrono::steady_clock::now();
         if (!request.empty()) {
             last_control_request = request;
-            auto reply = options_.checkpoint_control_file; reply += ".reply";
-            auto staged = reply; staged += ".tmp";
+            auto reply = options_.checkpoint_control_file;
+            reply += ".reply";
+            auto staged = reply;
+            staged += ".tmp";
             {
                 std::ofstream output(staged, std::ios::trunc);
-                output << request << '\n' << response << '\n'; output.close();
-                if (!output) throw std::runtime_error("Cannot acknowledge training checkpoint");
+                output << request << '\n' << response << '\n';
+                output.close();
+                if (!output)
+                    throw std::runtime_error("Cannot acknowledge training checkpoint");
             }
-            std::error_code error; std::filesystem::remove(reply, error);
+            std::error_code error;
+            std::filesystem::remove(reply, error);
             std::filesystem::rename(staged, reply);
             // A save request freezes at an iteration boundary until the editor
             // cancels it or terminates this process after saving the project.
             if (response.starts_with("saved ")) {
                 while (true) {
                     std::string current;
-                    { std::ifstream input(options_.checkpoint_control_file); std::getline(input, current); }
-                    if (current != request) break;
+                    {
+                        std::ifstream input(options_.checkpoint_control_file);
+                        std::getline(input, current);
+                    }
+                    if (current != request)
+                        break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
             }
@@ -1602,8 +1562,7 @@ GaussianModel Trainer::train(
     bool has_last_preview_camera = false;
     // Interactive previews are gated on the pivot's screen shift, so the pivot
     // is the scene centre the reconstruction is framed around.
-    std::array<float, 3> preview_pivot{
-        scene_center.x(), scene_center.y(), scene_center.z()};
+    std::array<float, 3> preview_pivot{scene_center.x(), scene_center.y(), scene_center.z()};
     auto next_pose_hold = std::chrono::steady_clock::time_point::min();
     // Preview frames handed to the device transport; the editor acknowledges
     // them through the ack sidecar.
@@ -1616,44 +1575,41 @@ GaussianModel Trainer::train(
     bool reported_preview_ack = false;
     auto next_preview_drop_log = std::chrono::steady_clock::time_point::min();
     const bool preview_has_sidecars = !options_.preview_camera_file.empty() ||
-        !options_.preview_view_file.empty() || !options_.preview_vis_file.empty();
+                                      !options_.preview_view_file.empty() ||
+                                      !options_.preview_vis_file.empty();
 
-    for (unsigned iteration = completed_iteration + 1; iteration <= options_.iterations; ++iteration) {
+    for (unsigned iteration = completed_iteration + 1; iteration <= options_.iterations;
+         ++iteration) {
         cuda_profiler.begin_iteration(iteration, model.size());
         if (!options_.live_subject_bounds_file.empty()) {
             std::error_code stamp_error;
-            const auto stamp = std::filesystem::last_write_time(
-                options_.live_subject_bounds_file, stamp_error);
-            if (!stamp_error &&
-                (!has_focus_file_stamp || stamp != focus_file_stamp)) {
+            const auto stamp =
+                std::filesystem::last_write_time(options_.live_subject_bounds_file, stamp_error);
+            if (!stamp_error && (!has_focus_file_stamp || stamp != focus_file_stamp)) {
                 mvs::OrientedBoundingBox updated;
-                if (mvs::load_subject_bounds(
-                        updated, options_.live_subject_bounds_file)) {
+                if (mvs::load_subject_bounds(updated, options_.live_subject_bounds_file)) {
                     has_focus_file_stamp = true;
                     focus_file_stamp = stamp;
-                    const bool accepted = prune_to_focus(updated, iteration) ||
-                        reseed_focus(updated, iteration);
+                    const bool accepted =
+                        prune_to_focus(updated, iteration) || reseed_focus(updated, iteration);
                     if (accepted) {
                         focus_bounds = updated;
                         scene_geometry = focus_scene_geometry(focus_bounds);
                         scene_extent = scene_geometry.scale;
                         scene_center = scene_geometry.center;
                         refinement_geometry = splat_mean_lr_scale
-                            ? refine::splat_scene_geometry_device(model.means)
-                            : scene_geometry;
-                        means_learning_rate_scale = splat_mean_lr_scale
-                            ? refinement_geometry.scale : scene_extent;
+                                                  ? refine::splat_scene_geometry_device(model.means)
+                                                  : scene_geometry;
+                        means_learning_rate_scale =
+                            splat_mean_lr_scale ? refinement_geometry.scale : scene_extent;
                         if (options_.constrain_scale_range) {
                             minimum_log_scale = std::log(
-                                scene_extent * std::max(
-                                    options_.minimum_scale_fraction, 1e-8F));
+                                scene_extent * std::max(options_.minimum_scale_fraction, 1e-8F));
                             if (!densification_enabled)
-                                maximum_log_scale = std::log(std::max(
-                                    fixed_maximum_scale_fraction * scene_extent,
-                                    1e-6F));
+                                maximum_log_scale = std::log(
+                                    std::max(fixed_maximum_scale_fraction * scene_extent, 1e-6F));
                         }
-                        preview_pivot = {
-                            scene_center.x(), scene_center.y(), scene_center.z()};
+                        preview_pivot = {scene_center.x(), scene_center.y(), scene_center.z()};
                         focus_view_masks.clear();
                         focus_mask_cache_bytes = 0;
                         core::Logger::instance().info(
@@ -1671,29 +1627,27 @@ GaussianModel Trainer::train(
         }
         const float requested_resolution_scale =
             data::progressive_resolution_scale(iteration, options_);
-        if (std::abs(
-                requested_resolution_scale -
-                active_resolution_scale) > 1e-6F) {
+        if (std::abs(requested_resolution_scale - active_resolution_scale) > 1e-6F) {
             active_resolution_scale = requested_resolution_scale;
             view_cache.set_resolution_scale(active_resolution_scale);
             focus_view_masks.clear();
             focus_mask_cache_bytes = 0;
             all_cameras.clear();
             for (const mvs::MvsView& view : scene.views)
-                all_cameras.push_back(data::training_camera(
-                    view, options_, active_resolution_scale));
+                all_cameras.push_back(
+                    data::training_camera(view, options_, active_resolution_scale));
             if (use_3d_filter) {
                 filter_cameras.clear();
                 for (const std::size_t index : view_indices)
                     filter_cameras.push_back(all_cameras[index]);
-                model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras, filter_3d_factor);
+                model.filter_3d =
+                    detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
             }
         }
-        const bool report_progress = progress &&
+        const bool report_progress =
+            progress &&
             (iteration == first_training_iteration || iteration == options_.iterations ||
-             (options_.log_interval != 0 &&
-              iteration % options_.log_interval == 0));
+             (options_.log_interval != 0 && iteration % options_.log_interval == 0));
         if (shuffled_view_cursor == shuffled_views.size()) {
             std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
             shuffled_view_cursor = 0;
@@ -1701,28 +1655,22 @@ GaussianModel Trainer::train(
         // Publish the order before any cache mutation: eviction keeps the views
         // that this epoch still needs and drops the ones that are an epoch away.
         view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
-        const std::size_t prefetch_end = std::min(
-            shuffled_views.size(),
-            shuffled_view_cursor + view_cache.prefetch_depth() + 1);
-        for (std::size_t cursor = shuffled_view_cursor + 1;
-             cursor < prefetch_end; ++cursor)
+        const std::size_t prefetch_end =
+            std::min(shuffled_views.size(), shuffled_view_cursor + view_cache.prefetch_depth() + 1);
+        for (std::size_t cursor = shuffled_view_cursor + 1; cursor < prefetch_end; ++cursor)
             view_cache.prefetch(shuffled_views[cursor]);
-        const std::size_t view_index =
-            shuffled_views[shuffled_view_cursor++];
+        const std::size_t view_index = shuffled_views[shuffled_view_cursor++];
         TrainingView target = view_cache.get(view_index);
         if (focus_bounds.valid) {
-            const bool focus_on_cuda =
-                model.means.device() == tinytensor::Device::CUDA;
+            const bool focus_on_cuda = model.means.device() == tinytensor::Device::CUDA;
 #if defined(TINYTENSOR_HAS_VULKAN)
-            const bool focus_on_vulkan =
-                model.means.device() == tinytensor::Device::Vulkan;
+            const bool focus_on_vulkan = model.means.device() == tinytensor::Device::Vulkan;
 #else
             const bool focus_on_vulkan = false;
 #endif
             const bool focus_on_device = focus_on_cuda || focus_on_vulkan;
             tinytensor::Tensor focus_mask;
-            const auto focus_frame =
-                detail::make_focus_mask_frame(target.camera, focus_bounds);
+            const auto focus_frame = detail::make_focus_mask_frame(target.camera, focus_bounds);
             if (focus_on_cuda) {
                 focus_mask = detail::focus_view_mask_cuda(focus_frame);
 #if defined(TINYTENSOR_HAS_VULKAN)
@@ -1732,25 +1680,20 @@ GaussianModel Trainer::train(
             } else {
                 auto found = focus_view_masks.find(view_index);
                 if (found == focus_view_masks.end()) {
-                    auto mask = detail::focus_view_mask_cpu(
-                        focus_frame, model.means.device());
+                    auto mask = detail::focus_view_mask_cpu(focus_frame, model.means.device());
                     const std::size_t bytes = mask.numel() * sizeof(float);
                     while (!focus_view_masks.empty() &&
-                           focus_mask_cache_bytes + bytes >
-                               max_focus_mask_cache_bytes) {
+                           focus_mask_cache_bytes + bytes > max_focus_mask_cache_bytes) {
                         auto evicted = focus_view_masks.begin();
-                        focus_mask_cache_bytes -=
-                            evicted->second.numel() * sizeof(float);
+                        focus_mask_cache_bytes -= evicted->second.numel() * sizeof(float);
                         focus_view_masks.erase(evicted);
                     }
                     focus_mask_cache_bytes += bytes;
-                    found = focus_view_masks.emplace(
-                        view_index, std::move(mask)).first;
+                    found = focus_view_masks.emplace(view_index, std::move(mask)).first;
                 }
                 focus_mask = found->second;
             }
-            if (target.has_mask &&
-                (options_.use_mask || target.mask_is_validity))
+            if (target.has_mask && (options_.use_mask || target.mask_is_validity))
                 target.mask = target.mask.mul(focus_mask);
             else if (focus_on_device)
                 target.mask = std::move(focus_mask);
@@ -1762,76 +1705,64 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::data_load);
         RasterizeOptions raster_options;
         const unsigned active_sh_degree = std::min(
-            options_.sh_degree,
-            options_.sh_degree_interval == 0
-                ? options_.sh_degree
-                : iteration / options_.sh_degree_interval);
+            options_.sh_degree, options_.sh_degree_interval == 0
+                                    ? options_.sh_degree
+                                    : iteration / options_.sh_degree_interval);
         raster_options.active_sh_degree = active_sh_degree;
         if (options_.background_noise_strength > 0.F) {
             std::uniform_real_distribution<float> background_noise(
-                -options_.background_noise_strength,
-                options_.background_noise_strength);
+                -options_.background_noise_strength, options_.background_noise_strength);
             for (float& channel : raster_options.background)
                 channel = std::clamp(background_noise(random), 0.F, 1.F);
         }
         configure_rasterization(raster_options, options_);
         raster_options.scale_modifier = options_.scale_modifier;
-        const auto point_query = detail::multi_view_depth_query_options(
-            options_, scene_extent);
+        const auto point_query = detail::multi_view_depth_query_options(options_, scene_extent);
         raster_options.point_depth_bracket = point_query.bracket;
         raster_options.point_depth_tolerance = point_query.tolerance;
-        const bool ai_prior_active = use_ai_prior &&
-            iteration >= options_.depth_normal_from_iter;
-        const bool depth_normal_active = !native_non_pinhole &&
-            options_.use_depth_normal_loss &&
-            options_.depth_normal_weight > 0.F &&
-            iteration >= options_.depth_normal_from_iter;
+        const bool ai_prior_active = use_ai_prior && iteration >= options_.depth_normal_from_iter;
+        const bool depth_normal_active = !native_non_pinhole && options_.use_depth_normal_loss &&
+                                         options_.depth_normal_weight > 0.F &&
+                                         iteration >= options_.depth_normal_from_iter;
         const bool normal_field_active = !native_non_pinhole && options_.use_normal_field &&
-            options_.normal_field_weight > 0.F &&
-            iteration >= options_.normal_field_from_iter;
+                                         options_.normal_field_weight > 0.F &&
+                                         iteration >= options_.normal_field_from_iter;
         const bool multi_view_eligible = use_multi_view &&
-            iteration >= options_.depth_normal_from_iter &&
-            !multi_view_neighbours[view_index].empty();
-        const bool multi_view_tail = !adaptive_multi_view &&
-            iteration > grow_stop_iteration(options_);
+                                         iteration >= options_.depth_normal_from_iter &&
+                                         !multi_view_neighbours[view_index].empty();
+        const bool multi_view_tail =
+            !adaptive_multi_view && iteration > grow_stop_iteration(options_);
         const unsigned active_multi_view_interval = adaptive_multi_view
-            ? multi_view_scheduler.interval()
-            : multi_view_tail ? multi_view_tail_interval : 1U;
+                                                        ? multi_view_scheduler.interval()
+                                                    : multi_view_tail ? multi_view_tail_interval
+                                                                      : 1U;
         const bool multi_view_scheduled =
             active_multi_view_interval == 1U ||
             (adaptive_multi_view
-                ? iteration % active_multi_view_interval == 0
-                : detail::tail_multi_view_scheduled(
-                    iteration, grow_stop_iteration(options_),
-                    active_multi_view_interval));
-        const bool multi_view_active =
-            multi_view_eligible && multi_view_scheduled;
+                 ? iteration % active_multi_view_interval == 0
+                 : detail::tail_multi_view_scheduled(
+                       iteration, grow_stop_iteration(options_), active_multi_view_interval));
+        const bool multi_view_active = multi_view_eligible && multi_view_scheduled;
         std::size_t multi_view_neighbour_index = 0;
         if (multi_view_eligible) {
             const auto& candidates = multi_view_neighbours[view_index];
-            std::uniform_int_distribution<std::size_t> select_neighbour(
-                0, candidates.size() - 1);
-            multi_view_neighbour_index =
-                candidates[select_neighbour(random)];
+            std::uniform_int_distribution<std::size_t> select_neighbour(0, candidates.size() - 1);
+            multi_view_neighbour_index = candidates[select_neighbour(random)];
         }
         // One flag drives the render channels and the matching loss-gradient
         // tensors: when it is false the depth/normal images, their gradients
         // and the rasterizer's per-Gaussian geometry scratch are all skipped.
         const bool need_geometry_channels = ai_prior_active || options_.use_mvs_depth ||
-                                            options_.use_mvs_normals ||
-                                            depth_normal_active ||
-                                            normal_field_active ||
-                                            multi_view_active;
+                                            options_.use_mvs_normals || depth_normal_active ||
+                                            normal_field_active || multi_view_active;
         raster_options.require_depth = need_geometry_channels;
         // Vulkan previews render their own requested camera below; they never
         // consume the current training view's copied RGB/alpha tensors. Keep
         // the fused-loss frame backend-resident even when live preview is on.
-        raster_options.copy_attachments =
-            !vulkan_backend || ppisp_enabled || bilagrid_enabled;
-        raster_options.copy_color_only =
-            vulkan_backend && (ppisp_enabled || bilagrid_enabled);
-        raster_options.copy_alpha = vulkan_backend && options_.use_mask &&
-            target.has_mask && !target.mask_is_validity &&
+        raster_options.copy_attachments = !vulkan_backend || ppisp_enabled || bilagrid_enabled;
+        raster_options.copy_color_only = vulkan_backend && (ppisp_enabled || bilagrid_enabled);
+        raster_options.copy_alpha =
+            vulkan_backend && options_.use_mask && target.has_mask && !target.mask_is_validity &&
             options_.alpha_mode == AlphaMode::transparent && options_.match_alpha_weight > 0.F;
         raster_options.defer_visibility = vulkan_backend;
         // Environment override for measurement (see
@@ -1839,45 +1770,37 @@ GaussianModel Trainer::train(
         // the older "always allocate the geometry gradient images" behavior so
         // the footprint change can be A/B'd inside one binary.
         static const bool force_geometry_channels = [] {
-            const char* value =
-                std::getenv("PHOTARA_SPLAT_FORCE_GEOMETRY_CHANNELS");
+            const char* value = std::getenv("PHOTARA_SPLAT_FORCE_GEOMETRY_CHANNELS");
             return value != nullptr && value[0] == '1';
         }();
-        const bool allocate_geometry_gradients =
-            force_geometry_channels || need_geometry_channels;
+        const bool allocate_geometry_gradients = force_geometry_channels || need_geometry_channels;
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         cuda_profiler.mark(CudaTrainingStage::raster_forward);
-        const bool preview_enabled = (preview || device_preview) &&
-            options_.preview_interval != 0;
-        const bool preview_scheduled = preview_enabled &&
-            (iteration == 1 || iteration == options_.iterations ||
-             iteration % options_.preview_interval == 0);
+        const bool preview_enabled = (preview || device_preview) && options_.preview_interval != 0;
+        const bool preview_scheduled =
+            preview_enabled && (iteration == 1 || iteration == options_.iterations ||
+                                iteration % options_.preview_interval == 0);
         // Sidecar polls are for interactive orbit/vis changes. They must not
         // launch a second full raster every optimizer step, so the pixel gate
         // and the interactive pacing below decide what is worth a raster: the
         // sidecars are tiny and only rewritten when the editor has news.
-        if (preview_enabled && (preview_scheduled ||
-                (preview_has_sidecars &&
-                 std::chrono::steady_clock::now() >= next_preview_poll))) {
+        if (preview_enabled &&
+            (preview_scheduled ||
+             (preview_has_sidecars && std::chrono::steady_clock::now() >= next_preview_poll))) {
             const auto preview_now = std::chrono::steady_clock::now();
-            next_preview_poll =
-                preview_now + std::chrono::milliseconds(k_preview_poll_ms);
+            next_preview_poll = preview_now + std::chrono::milliseconds(k_preview_poll_ms);
             Camera preview_camera;
             std::uint64_t camera_revision = 0;
             VisualizeOptions camera_vis;
             const bool custom_camera = load_preview_camera_file(
-                options_.preview_camera_file, preview_camera, camera_revision,
-                &camera_vis);
-            const std::size_t preview_index =
-                requested_preview_view(options_, scene.views.size());
+                options_.preview_camera_file, preview_camera, camera_revision, &camera_vis);
+            const std::size_t preview_index = requested_preview_view(options_, scene.views.size());
             std::uint64_t vis_revision = last_preview_vis_revision;
             VisualizeOptions vis_peek = camera_vis;
-            load_visualization_sidecar(
-                options_.preview_vis_file, vis_peek, vis_revision);
-            const bool any_pose_change = custom_camera &&
-                (!has_last_preview_camera ||
-                 !preview_camera_equivalent(
-                     preview_camera, last_preview_camera));
+            load_visualization_sidecar(options_.preview_vis_file, vis_peek, vis_revision);
+            const bool any_pose_change =
+                custom_camera && (!has_last_preview_camera ||
+                                  !preview_camera_equivalent(preview_camera, last_preview_camera));
             // A sub-pixel orbit update is not worth a raster, but it must not
             // stall the live view either: force one once the change has been
             // pending for k_preview_pose_hold_ms. The shift accumulates against
@@ -1885,26 +1808,19 @@ GaussianModel Trainer::train(
             // still reaches the pixel threshold on its own.
             bool pose_changed = any_pose_change;
             if (any_pose_change && has_last_preview_camera &&
-                preview_intrinsics_close(
-                    preview_camera, last_preview_camera)) {
-                const float shift = preview_pose_shift_px(
-                    last_preview_camera, preview_camera, preview_pivot);
-                pose_changed = shift >= k_preview_pose_min_px ||
-                    preview_now >= next_pose_hold;
+                preview_intrinsics_close(preview_camera, last_preview_camera)) {
+                const float shift =
+                    preview_pose_shift_px(last_preview_camera, preview_camera, preview_pivot);
+                pose_changed = shift >= k_preview_pose_min_px || preview_now >= next_pose_hold;
             }
             if (pose_changed)
-                next_pose_hold = preview_now +
-                    std::chrono::milliseconds(k_preview_pose_hold_ms);
-            const bool extra_preview_allowed =
-                preview_now >= next_extra_preview;
-            const bool due =
-                iteration == 1 ||
-                iteration == options_.iterations ||
-                iteration % options_.preview_interval == 0 ||
-                vis_revision != last_preview_vis_revision ||
-                (custom_camera
-                     ? pose_changed && extra_preview_allowed
-                     : preview_index != last_preview_view);
+                next_pose_hold = preview_now + std::chrono::milliseconds(k_preview_pose_hold_ms);
+            const bool extra_preview_allowed = preview_now >= next_extra_preview;
+            const bool due = iteration == 1 || iteration == options_.iterations ||
+                             iteration % options_.preview_interval == 0 ||
+                             vis_revision != last_preview_vis_revision ||
+                             (custom_camera ? pose_changed && extra_preview_allowed
+                                            : preview_index != last_preview_view);
             // The editor publishes how many preview frames it has copied out of
             // the shared image. While that sidecar is readable, drop this
             // preview instead of entering the handshake: the shared image still
@@ -1912,16 +1828,14 @@ GaussianModel Trainer::train(
             // inside submit() remains the real barrier, so a stale
             // acknowledgement can cost an update but can never tear the image.
             std::uint64_t ack_frames = 0;
-            if (device_preview &&
-                read_preview_ack_frames(
-                    options_.preview_ack_file, ack_frames)) {
+            if (device_preview && read_preview_ack_frames(options_.preview_ack_file, ack_frames)) {
                 has_preview_ack = true;
                 preview_ack_frames = ack_frames;
                 if (!reported_preview_ack) {
                     reported_preview_ack = true;
                     core::Logger::instance().info(
-                        "splat_preview_ack_frames=", ack_frames,
-                        " file=\"", options_.preview_ack_file, '"');
+                        "splat_preview_ack_frames=", ack_frames, " file=\"",
+                        options_.preview_ack_file, '"');
                 }
             }
             const bool shared_image_free =
@@ -1932,8 +1846,7 @@ GaussianModel Trainer::train(
                 next_preview_drop_log = preview_now + std::chrono::seconds(2);
                 core::Logger::instance().info(
                     "splat_preview_dropped iteration=", iteration,
-                    " editor_frames=", preview_ack_frames,
-                    " queued_frames=", preview_frames_queued,
+                    " editor_frames=", preview_ack_frames, " queued_frames=", preview_frames_queued,
                     " action=skip");
             }
             if (due && shared_image_free) {
@@ -1942,24 +1855,20 @@ GaussianModel Trainer::train(
                     preview_camera = all_cameras[preview_index];
                 }
                 const tinytensor::Tensor preview_color = render_preview_color(
-                    model, preview_camera, options_,
-                    raster_options.active_sh_degree, camera_vis, vis_revision);
+                    model, preview_camera, options_, raster_options.active_sh_degree, camera_vis,
+                    vis_revision);
                 last_preview_view = preview_index;
                 last_preview_camera_revision = camera_revision;
                 last_preview_vis_revision = vis_revision;
                 last_preview_camera = preview_camera;
                 has_last_preview_camera = true;
                 if (device_preview) {
-                    device_preview(
-                        iteration, preview_index, preview_camera,
-                        preview_color);
+                    device_preview(iteration, preview_index, preview_camera, preview_color);
                     ++preview_frames_queued;
                 } else {
-                    const std::vector<float> planar =
-                        download<float>(preview_color);
+                    const std::vector<float> planar = download<float>(preview_color);
                     const std::size_t pixels =
-                        static_cast<std::size_t>(preview_camera.width) *
-                        preview_camera.height;
+                        static_cast<std::size_t>(preview_camera.width) * preview_camera.height;
                     TrainingPreview frame;
                     frame.iteration = iteration;
                     frame.view_index = preview_index;
@@ -1968,11 +1877,10 @@ GaussianModel Trainer::train(
                     frame.rgb.resize(3 * pixels);
                     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
                         for (std::size_t channel = 0; channel < 3; ++channel) {
-                            const float value = std::clamp(
-                                planar[channel * pixels + pixel], 0.F, 1.F);
+                            const float value =
+                                std::clamp(planar[channel * pixels + pixel], 0.F, 1.F);
                             frame.rgb[3 * pixel + channel] =
-                                static_cast<std::uint8_t>(
-                                    std::lround(value * 255.F));
+                                static_cast<std::uint8_t>(std::lround(value * 255.F));
                         }
                     }
                     preview(std::move(frame));
@@ -1980,15 +1888,14 @@ GaussianModel Trainer::train(
                 if (pose_changed && !preview_scheduled) {
                     // Keep interactive previews inside a fixed share of the
                     // loop: never sooner than the render that just happened.
-                    const auto cost = std::chrono::duration_cast<
-                        std::chrono::milliseconds>(
+                    const auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - preview_started);
-                    next_extra_preview = preview_now + std::max(
-                        std::chrono::milliseconds(
-                            k_preview_interactive_min_ms),
-                        std::chrono::milliseconds(static_cast<long long>(
-                            static_cast<float>(cost.count()) *
-                            k_preview_interactive_budget)));
+                    next_extra_preview =
+                        preview_now +
+                        std::max(
+                            std::chrono::milliseconds(k_preview_interactive_min_ms),
+                            std::chrono::milliseconds(static_cast<long long>(
+                                static_cast<float>(cost.count()) * k_preview_interactive_budget)));
                 }
             }
         }
@@ -2007,35 +1914,28 @@ GaussianModel Trainer::train(
         if (ppisp_enabled && ppisp_before_bilagrid) {
             ppisp_input = photo_color;
             if (vulkan_backend)
-                detail::apply_ppisp_vulkan(
-                    *ppisp_input, ppisp_state, target.camera, view_index);
+                detail::apply_ppisp_vulkan(*ppisp_input, ppisp_state, target.camera, view_index);
             else
-                detail::apply_ppisp(
-                    *ppisp_input, ppisp_state, target.camera, view_index);
+                detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
             photo_color = &ppisp_state.output;
         }
         if (bilagrid_enabled) {
             bilagrid_input = photo_color;
-            const bool wrap_horizontal =
-                target.camera.model == CameraModel::equirectangular;
+            const bool wrap_horizontal = target.camera.model == CameraModel::equirectangular;
             if (vulkan_backend)
                 detail::apply_bilateral_grid_vulkan(
-                    *bilagrid_input, bilagrid_state, view_index,
-                    wrap_horizontal);
+                    *bilagrid_input, bilagrid_state, view_index, wrap_horizontal);
             else
                 detail::apply_bilateral_grid(
-                    *bilagrid_input, bilagrid_state, view_index,
-                    wrap_horizontal);
+                    *bilagrid_input, bilagrid_state, view_index, wrap_horizontal);
             photo_color = &bilagrid_state.output;
         }
         if (ppisp_enabled && !ppisp_before_bilagrid) {
             ppisp_input = photo_color;
             if (vulkan_backend)
-                detail::apply_ppisp_vulkan(
-                    *ppisp_input, ppisp_state, target.camera, view_index);
+                detail::apply_ppisp_vulkan(*ppisp_input, ppisp_state, target.camera, view_index);
             else
-                detail::apply_ppisp(
-                    *ppisp_input, ppisp_state, target.camera, view_index);
+                detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
             photo_color = &ppisp_state.output;
         }
         // The colour correction and the photometric loss it feeds are their
@@ -2044,12 +1944,11 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::colour_forward);
         loss_render.color = *photo_color;
         tinytensor::Tensor densify_map;
-        const bool needs_emc_map = densification_enabled &&
-            options_.densification_strategy == DensificationStrategy::emc;
-        if (vulkan_backend && (ppisp_enabled || bilagrid_enabled) &&
-            needs_emc_map) {
-            const bool mask_enabled = target.has_mask &&
-                (options_.use_mask || target.mask_is_validity);
+        const bool needs_emc_map =
+            densification_enabled && options_.densification_strategy == DensificationStrategy::emc;
+        if (vulkan_backend && (ppisp_enabled || bilagrid_enabled) && needs_emc_map) {
+            const bool mask_enabled =
+                target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
                 loss_render.color, target.rgb, target.mask, mask_enabled,
                 options_.densify_loss_map_power);
@@ -2058,37 +1957,33 @@ GaussianModel Trainer::train(
         geometry_target.camera = raster_sample_camera(target.camera, raster_options);
         detail::LossGradients loss;
         if (vulkan_backend) {
-            const bool mask_enabled = target.has_mask &&
-                (options_.use_mask || target.mask_is_validity);
+            const bool mask_enabled =
+                target.has_mask && (options_.use_mask || target.mask_is_validity);
             if (ppisp_enabled || bilagrid_enabled)
                 loss.color = *photo_color;
             loss.total = loss.rgb = rasterizer.photometric_loss(
-                loss_render, target.rgb, target.mask, mask_enabled,
-                options_.ssim_weight, options_.photometric_weight,
-                report_progress,
+                loss_render, target.rgb, target.mask, mask_enabled, options_.ssim_weight,
+                options_.photometric_weight, report_progress,
                 ppisp_enabled || bilagrid_enabled ? &loss.color : nullptr);
-            loss.alpha = rendered.alpha.is_valid()
-                ? tinytensor::Tensor::zeros_like(rendered.alpha)
-                : tinytensor::Tensor{};
-            detail::add_alpha_mask_loss_vulkan(
-                rendered, target, options_, loss, report_progress);
+            loss.alpha = rendered.alpha.is_valid() ? tinytensor::Tensor::zeros_like(rendered.alpha)
+                                                   : tinytensor::Tensor{};
+            detail::add_alpha_mask_loss_vulkan(rendered, target, options_, loss, report_progress);
             if (allocate_geometry_gradients)
-                detail::add_depth_normal_loss_vulkan(rendered, geometry_target.camera,
-                    depth_normal_active ? options_.depth_normal_weight : 0.F,
-                    loss, report_progress);
+                detail::add_depth_normal_loss_vulkan(
+                    rendered, geometry_target.camera,
+                    depth_normal_active ? options_.depth_normal_weight : 0.F, loss,
+                    report_progress);
             if (ai_prior_active)
                 detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
         } else {
             loss = detail::compute_training_loss(
-                loss_render, geometry_target, options_, report_progress,
-                depth_normal_active, allocate_geometry_gradients, ai_prior_active);
+                loss_render, geometry_target, options_, report_progress, depth_normal_active,
+                allocate_geometry_gradients, ai_prior_active);
         }
         if (options_.use_normal_field &&
             iteration == std::max(options_.normal_field_from_iter, 1U)) {
-            model.normal_features =
-                normal_features_from_smallest_axis(model);
-            normal_features_state =
-                detail::make_adam_state(model.normal_features);
+            model.normal_features = normal_features_from_smallest_axis(model);
+            normal_features_state = detail::make_adam_state(model.normal_features);
             normal_features_updates = 0;
         }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
@@ -2097,50 +1992,43 @@ GaussianModel Trainer::train(
         DepthSampleGradients multi_view_sample_gradients;
         bool has_multi_view_sample_gradients = false;
         if (multi_view_active) {
-            const TrainingView neighbour =
-                view_cache.get(multi_view_neighbour_index);
+            const TrainingView neighbour = view_cache.get(multi_view_neighbour_index);
             auto geometry_neighbour = neighbour;
             geometry_neighbour.camera = raster_sample_camera(neighbour.camera, raster_options);
-            const TrainingOptions& multi_view_options =
-                adaptive_multi_view
-                ? adaptive_multi_view_options
-                : multi_view_tail ? tail_multi_view_options : options_;
-            const auto world_points = detail::unproject_depth_to_world(
-                rendered.median_depth, geometry_target.camera);
+            const TrainingOptions& multi_view_options = adaptive_multi_view
+                                                            ? adaptive_multi_view_options
+                                                        : multi_view_tail ? tail_multi_view_options
+                                                                          : options_;
+            const auto world_points =
+                detail::unproject_depth_to_world(rendered.median_depth, geometry_target.camera);
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
-            const DepthSampleResult sampled = rasterizer.sample_depth(
-                model, world_points, neighbour.camera,
-                raster_options);
-            cuda_profiler.mark(
-                CudaTrainingStage::multi_view_sample_forward);
+            const DepthSampleResult sampled =
+                rasterizer.sample_depth(model, world_points, neighbour.camera, raster_options);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_sample_forward);
             tinytensor::Tensor grad_sampled_points;
             multi_view_loss = detail::add_multi_view_loss(
                 sampled.camera_points, sampled.inside, rendered, geometry_target,
-                geometry_neighbour, multi_view_options, loss,
-                grad_sampled_points, report_progress,
-                adaptive_multi_view
-                    ? &multi_view_stability_accumulator
-                    : nullptr);
+                geometry_neighbour, multi_view_options, loss, grad_sampled_points, report_progress,
+                adaptive_multi_view ? &multi_view_stability_accumulator : nullptr);
             cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
-            multi_view_sample_gradients = rasterizer.sample_depth_backward(
-                model, sampled, grad_sampled_points);
+            multi_view_sample_gradients =
+                rasterizer.sample_depth_backward(model, sampled, grad_sampled_points);
             detail::add_sample_depth_point_gradients(
                 geometry_target.camera, multi_view_sample_gradients.points, loss);
-            cuda_profiler.mark(
-                CudaTrainingStage::multi_view_sample_backward);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_sample_backward);
             has_multi_view_sample_gradients = true;
             if (report_progress) {
-                weighted_multi_view_geometry = multi_view_options.multi_view_geo_weight * multi_view_loss.geometry;
-                weighted_multi_view_ncc = multi_view_options.multi_view_ncc_weight * multi_view_loss.ncc;
+                weighted_multi_view_geometry =
+                    multi_view_options.multi_view_geo_weight * multi_view_loss.geometry;
+                weighted_multi_view_ncc =
+                    multi_view_options.multi_view_ncc_weight * multi_view_loss.ncc;
                 loss.total += weighted_multi_view_geometry + weighted_multi_view_ncc;
             }
         } else {
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
-            cuda_profiler.mark(
-                CudaTrainingStage::multi_view_sample_forward);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_sample_forward);
             cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
-            cuda_profiler.mark(
-                CudaTrainingStage::multi_view_sample_backward);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_sample_backward);
         }
         if (needs_emc_map && !densify_map.is_valid()) {
             const bool mask_enabled =
@@ -2153,45 +2041,37 @@ GaussianModel Trainer::train(
         if (ppisp_enabled && !ppisp_before_bilagrid) {
             if (vulkan_backend) {
                 detail::backward_ppisp_vulkan(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera,
-                    view_index);
+                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
                 detail::step_ppisp_vulkan(ppisp_state, options_, iteration);
             } else {
                 detail::backward_ppisp(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera,
-                    view_index);
+                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
                 detail::step_ppisp(ppisp_state, options_, iteration);
             }
             photo_grad = &ppisp_state.input_grad;
         }
         if (bilagrid_enabled) {
-            const bool wrap_horizontal =
-                target.camera.model == CameraModel::equirectangular;
+            const bool wrap_horizontal = target.camera.model == CameraModel::equirectangular;
             if (vulkan_backend) {
                 detail::backward_bilateral_grid_vulkan(
-                    bilagrid_state, *bilagrid_input, *photo_grad, view_index,
-                    wrap_horizontal);
+                    bilagrid_state, *bilagrid_input, *photo_grad, view_index, wrap_horizontal);
                 detail::step_bilateral_grid_vulkan(
                     bilagrid_state, options_, iteration, wrap_horizontal);
             } else {
                 detail::backward_bilateral_grid(
-                    bilagrid_state, *bilagrid_input, *photo_grad, view_index,
-                    wrap_horizontal);
-                detail::step_bilateral_grid(
-                    bilagrid_state, options_, iteration, wrap_horizontal);
+                    bilagrid_state, *bilagrid_input, *photo_grad, view_index, wrap_horizontal);
+                detail::step_bilateral_grid(bilagrid_state, options_, iteration, wrap_horizontal);
             }
             photo_grad = &bilagrid_state.input_grad;
         }
         if (ppisp_enabled && ppisp_before_bilagrid) {
             if (vulkan_backend) {
                 detail::backward_ppisp_vulkan(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera,
-                    view_index);
+                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
                 detail::step_ppisp_vulkan(ppisp_state, options_, iteration);
             } else {
                 detail::backward_ppisp(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera,
-                    view_index);
+                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
                 detail::step_ppisp(ppisp_state, options_, iteration);
             }
             photo_grad = &ppisp_state.input_grad;
@@ -2199,13 +2079,10 @@ GaussianModel Trainer::train(
         if (ppisp_enabled && report_progress && !vulkan_backend) {
             // How much exposure / white-balance drift the capture carried.
             // The layout decides which parameters are gains.
-            const std::array<float, 2> deviation =
-                detail::ppisp_identity_deviation(ppisp_state);
+            const std::array<float, 2> deviation = detail::ppisp_identity_deviation(ppisp_state);
             core::Logger::instance().info(
-                "splat_ppisp view=", view_index,
-                " layout=", static_cast<int>(ppisp_state.type),
-                " mean_gain_deviation=", deviation[0],
-                " maximum_gain_deviation=", deviation[1]);
+                "splat_ppisp view=", view_index, " layout=", static_cast<int>(ppisp_state.type),
+                " mean_gain_deviation=", deviation[0], " maximum_gain_deviation=", deviation[1]);
         }
         // Everything between this mark and the previous one is the colour
         // correction backward and its optimizer step; what follows the next
@@ -2215,26 +2092,20 @@ GaussianModel Trainer::train(
         // position LR across the full 10k run keeps large geometric updates
         // active for too long and destroys that initialization. Match the
         // stable short-run trajectory, then retain the 1% tail for refinement.
-        const unsigned means_decay_steps = options_.input_is_dense
-            ? std::min(options_.iterations, 1'500U)
-            : options_.iterations;
-        const float progress_fraction = std::min(
-            static_cast<float>(iteration - 1) /
-                std::max(1U, means_decay_steps),
-            1.F);
-        const float means_lr = options_.means_lr *
-                               means_learning_rate_scale *
-                               std::pow(0.01F, progress_fraction);
+        const unsigned means_decay_steps =
+            options_.input_is_dense ? std::min(options_.iterations, 1'500U) : options_.iterations;
+        const float progress_fraction =
+            std::min(static_cast<float>(iteration - 1) / std::max(1U, means_decay_steps), 1.F);
+        const float means_lr =
+            options_.means_lr * means_learning_rate_scale * std::pow(0.01F, progress_fraction);
         const bool global_structure_active =
-            options_.structure_freeze_iter == 0 ||
-            iteration <= options_.structure_freeze_iter;
+            options_.structure_freeze_iter == 0 || iteration <= options_.structure_freeze_iter;
         const bool dense_structure_active = !options_.input_is_dense ||
-            options_.dense_structure_freeze_iter == 0 ||
-            iteration <= options_.dense_structure_freeze_iter;
-        const bool update_structure = global_structure_active &&
-            dense_structure_active;
-        const float remaining = std::max(0.F, 1.F -
-            static_cast<float>(iteration) / std::max(1U, options_.iterations));
+                                            options_.dense_structure_freeze_iter == 0 ||
+                                            iteration <= options_.dense_structure_freeze_iter;
+        const bool update_structure = global_structure_active && dense_structure_active;
+        const float remaining =
+            std::max(0.F, 1.F - static_cast<float>(iteration) / std::max(1U, options_.iterations));
         const float inverse_count =
             1.F / static_cast<float>(std::max<std::size_t>(model.size(), 1));
         // Auxiliary normal-field / multi-view merges retain the resident
@@ -2242,52 +2113,58 @@ GaussianModel Trainer::train(
         // for zero-gradient decay.
         // Fuse whenever the current workload permits it; standalone SH Adam
         // is needed only for auxiliary gradient merges or empty renders.
-        const bool fused_sh = !normal_field_active &&
-            rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
-        const bool fused_structure = (!vulkan_backend ||
-            (fused_sh && options_.shape_erank_reg <= 0.F &&
-             options_.shape_erank_s3_reg <= 0.F && options_.shape_quat_norm_reg <= 0.F &&
-             options_.shape_axis_ratio_reg <= 0.F)) && !normal_field_active &&
-            !has_multi_view_sample_gradients && update_structure &&
+        const bool fused_sh =
+            !normal_field_active && rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
+        const bool fused_structure =
+            (!vulkan_backend ||
+             (fused_sh && options_.shape_erank_reg <= 0.F && options_.shape_erank_s3_reg <= 0.F &&
+              options_.shape_quat_norm_reg <= 0.F && options_.shape_axis_ratio_reg <= 0.F)) &&
+            !normal_field_active && !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
         sh_update.lr = options_.sh0_lr;
         sh_update.rest_lr = options_.sh_rest_lr;
         sh_update.beta1 = options_.beta1;
         sh_update.beta2 = options_.beta2;
-        sh_update.correction1 =
-            1.F - std::pow(options_.beta1, static_cast<float>(iteration));
-        sh_update.correction2 =
-            1.F - std::pow(options_.beta2, static_cast<float>(iteration));
+        sh_update.correction1 = 1.F - std::pow(options_.beta1, static_cast<float>(iteration));
+        sh_update.correction2 = 1.F - std::pow(options_.beta2, static_cast<float>(iteration));
         sh_update.epsilon = options_.adam_epsilon;
         sh_update.regularization_weight = options_.sh_regularization_weight;
         sh_update.first = sh_quant.first;
         sh_update.packed = sh_quant.packed;
         sh_update.bounds = sh_quant.bounds;
         StructureAdamUpdate structure_update{
-            means_state.first, means_state.second, scales_state.first,
-            scales_state.second, rotations_state.first, rotations_state.second,
-            opacity_state.first, opacity_state.second, means_lr,
-            options_.scales_lr, options_.quaternions_lr, options_.opacities_lr,
-            options_.beta1, options_.beta2,
+            means_state.first,
+            means_state.second,
+            scales_state.first,
+            scales_state.second,
+            rotations_state.first,
+            rotations_state.second,
+            opacity_state.first,
+            opacity_state.second,
+            means_lr,
+            options_.scales_lr,
+            options_.quaternions_lr,
+            options_.opacities_lr,
+            options_.beta1,
+            options_.beta2,
             1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
             1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
-            options_.adam_epsilon, minimum_log_scale, maximum_log_scale,
-            std::max(options_.opacity_regularization_weight * remaining, 0.F) *
-                inverse_count,
-            std::max(options_.scale_regularization_weight *
-                         std::pow(remaining, 0.4F),
-                0.F) *
+            options_.adam_epsilon,
+            minimum_log_scale,
+            maximum_log_scale,
+            std::max(options_.opacity_regularization_weight * remaining, 0.F) * inverse_count,
+            std::max(options_.scale_regularization_weight * std::pow(remaining, 0.4F), 0.F) *
                 inverse_count / 3.F,
             options_.shape_erank_reg * inverse_count,
             options_.shape_erank_s3_reg * inverse_count,
             options_.shape_quat_norm_reg * inverse_count,
             report_progress && !vulkan_backend,
-            options_.shape_axis_ratio_reg * inverse_count, options_.shape_max_axis_ratio};
+            options_.shape_axis_ratio_reg * inverse_count,
+            options_.shape_max_axis_ratio};
         ModelGradients gradients = rasterizer.backward(
-            model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
-            densify_map, fused_sh ? &sh_update : nullptr,
-            fused_structure ? &structure_update : nullptr);
+            model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal, densify_map,
+            fused_sh ? &sh_update : nullptr, fused_structure ? &structure_update : nullptr);
         // Backward has consumed CUDA projection/sort/snapshot state. Keep the
         // owned radii/visibility outputs for ADC, without retaining old model
         // storage during optimizer/refinement or an auxiliary render.
@@ -2309,24 +2186,21 @@ GaussianModel Trainer::train(
             // field loss needs the signed color and alpha of this render.
             normal_options.copy_attachments = true;
             normal_options.copy_color_only = false;
-            const RenderResult normal_field_render = rasterizer.forward(
-                model, target.camera, normal_options);
+            const RenderResult normal_field_render =
+                rasterizer.forward(model, target.camera, normal_options);
             const auto normal_field_loss = detail::compute_normal_field_loss(
                 normal_field_render, geometry_target.camera,
-                options_.normal_field_weight * options_.normal_field_depth_ratio,
-                report_progress);
+                options_.normal_field_weight * options_.normal_field_depth_ratio, report_progress);
             normal_field_gradients = rasterizer.backward(
-                model, normal_field_render, normal_field_loss.color,
-                normal_field_loss.alpha, normal_field_loss.depth,
-                normal_field_loss.normal);
+                model, normal_field_render, normal_field_loss.color, normal_field_loss.alpha,
+                normal_field_loss.depth, normal_field_loss.normal);
             normal_field_gradients.normal_features = detail::normal_features_backward(
                 model.normal_features, normal_field_gradients.colors_precomp);
             if (report_progress) {
                 loss.total += normal_field_loss.total;
                 loss.normal_value += normal_field_loss.normal_value;
             }
-            detail::add_model_gradients(
-                normal_field_gradients, gradients, false);
+            detail::add_model_gradients(normal_field_gradients, gradients, false);
             // Only the feature gradient is needed by the remaining optimizer.
             // Auxiliary render gradients have already been consumed.
             auto feature_gradient = std::move(normal_field_gradients.normal_features);
@@ -2335,8 +2209,7 @@ GaussianModel Trainer::train(
         }
         cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
-            detail::add_sample_depth_model_gradients(
-                multi_view_sample_gradients, gradients);
+            detail::add_sample_depth_model_gradients(multi_view_sample_gradients, gradients);
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled) {
             rasterizer.materialize_visibility(rendered);
@@ -2344,54 +2217,44 @@ GaussianModel Trainer::train(
             tinytensor::Tensor normalized_size;
             if (panorama_adc && target.camera.model == CameraModel::equirectangular) {
                 normalized_size = detail::panorama_densification_sizes(
-                    model, target.camera.position,
-                    options_.densify_screen_threshold, options_.scale_modifier);
+                    model, target.camera.position, options_.densify_screen_threshold,
+                    options_.scale_modifier);
             }
-            const bool emc =
-                options_.densification_strategy ==
-                DensificationStrategy::emc;
+            const bool emc = options_.densification_strategy == DensificationStrategy::emc;
             // EMC consumes the error map as its primary score; every other
             // strategy ranks growth by the refine weight alone.
             if (emc && gradients.densify_weight.is_valid())
                 image_error = detail::densify_avg_scores(
                     gradients.densify_weight, gradients.densify_weight_den);
             detail::accumulate_densification_stats(
-                gradients.refine_weight, rendered.visibility, rendered.radii,
-                densification_stats, target.camera.width,
-                target.camera.height,
-                true,
-                is_adc_strategy(options_.densification_strategy) || emc,
-                1.F,
-                (options_.densification_strategy ==
-                     DensificationStrategy::adc_igs ||
-                 emc)
-                    ? options_.densify_screen_threshold : 0.F,
-                gradients.refine_weight, static_cast<int>(view_index),
-                image_error, normalized_size);
+                gradients.refine_weight, rendered.visibility, rendered.radii, densification_stats,
+                target.camera.width, target.camera.height, true,
+                is_adc_strategy(options_.densification_strategy) || emc, 1.F,
+                (options_.densification_strategy == DensificationStrategy::adc_igs || emc)
+                    ? options_.densify_screen_threshold
+                    : 0.F,
+                gradients.refine_weight, static_cast<int>(view_index), image_error,
+                normalized_size);
         }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
         if (update_structure && !fused_structure) {
-            detail::add_geometry_regularization(model, gradients,
-                options_.opacity_regularization_weight * remaining,
-                options_.scale_regularization_weight *
-                    std::pow(remaining, 0.4F));
-            if (options_.shape_erank_reg > 0.F ||
-                options_.shape_erank_s3_reg > 0.F ||
+            detail::add_geometry_regularization(
+                model, gradients, options_.opacity_regularization_weight * remaining,
+                options_.scale_regularization_weight * std::pow(remaining, 0.4F));
+            if (options_.shape_erank_reg > 0.F || options_.shape_erank_s3_reg > 0.F ||
                 options_.shape_quat_norm_reg > 0.F || options_.shape_axis_ratio_reg > 0.F) {
                 detail::apply_shape_regularizers(
-                    model, gradients,
-                    options_.shape_erank_reg * inverse_count,
+                    model, gradients, options_.shape_erank_reg * inverse_count,
                     options_.shape_erank_s3_reg * inverse_count,
                     options_.shape_quat_norm_reg * inverse_count,
                     options_.shape_axis_ratio_reg * inverse_count, options_.shape_max_axis_ratio);
             }
-            detail::adam_step_structure(model, gradients, means_state, scales_state,
-                rotations_state, opacity_state, means_lr, iteration, options_,
-                minimum_log_scale, maximum_log_scale);
+            detail::adam_step_structure(
+                model, gradients, means_state, scales_state, rotations_state, opacity_state,
+                means_lr, iteration, options_, minimum_log_scale, maximum_log_scale);
         }
-        const float oversize_penalty =
-            oversize_penalty_at(options_, iteration);
+        const float oversize_penalty = oversize_penalty_at(options_, iteration);
         if (oversize_penalty > 0.F) {
             // Soft on-screen limit: each step spends a share of one scale
             // learning-rate step per octave above the limit. The hard clip
@@ -2399,30 +2262,24 @@ GaussianModel Trainer::train(
             detail::apply_oversize_penalty(
                 model, rendered.radii,
                 1.F / static_cast<float>(std::max<std::uint32_t>(
-                    1, std::min(target.camera.width, target.camera.height))),
-                options_.oversize_screen_limit,
-                oversize_penalty, options_.scales_lr);
+                          1, std::min(target.camera.width, target.camera.height))),
+                options_.oversize_screen_limit, oversize_penalty, options_.scales_lr);
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
         if (!fused_sh) {
             const float vulkan_sh_regularization =
-                vulkan_backend && full_sh_stride > 3 &&
-                        options_.sh_regularization_weight > 0.F
+                vulkan_backend && full_sh_stride > 3 && options_.sh_regularization_weight > 0.F
                     ? 2.F * options_.sh_regularization_weight /
-                          static_cast<float>(
-                              model.size() * (full_sh_stride - 3))
+                          static_cast<float>(model.size() * (full_sh_stride - 3))
                     : 0.F;
             if (!vulkan_backend)
                 detail::add_sh_regularization(
-                    model.sh, gradients.sh,
-                    options_.sh_regularization_weight);
+                    model.sh, gradients.sh, options_.sh_regularization_weight);
             const std::size_t active_sh_stride =
-                static_cast<std::size_t>(active_sh_degree + 1) *
-                (active_sh_degree + 1) * 3;
+                static_cast<std::size_t>(active_sh_degree + 1) * (active_sh_degree + 1) * 3;
             detail::sh_adam_quant_step(
-                model.sh, gradients.sh, sh_quant,
-                static_cast<int>(active_sh_stride), options_.sh0_lr,
-                options_.sh_rest_lr, options_.beta1, options_.beta2,
+                model.sh, gradients.sh, sh_quant, static_cast<int>(active_sh_stride),
+                options_.sh0_lr, options_.sh_rest_lr, options_.beta1, options_.beta2,
                 1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
                 1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
                 options_.adam_epsilon, vulkan_sh_regularization);
@@ -2432,15 +2289,13 @@ GaussianModel Trainer::train(
             // normal-feature updates rather than earlier RGB-only iterations.
             ++normal_features_updates;
             detail::adam_step(
-                model.normal_features,
-                normal_field_gradients.normal_features,
-                normal_features_state, options_.normal_features_lr,
-                normal_features_updates, options_);
+                model.normal_features, normal_field_gradients.normal_features,
+                normal_features_state, options_.normal_features_lr, normal_features_updates,
+                options_);
         }
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
-        if (densification_enabled &&
-            is_adc_strategy(options_.densification_strategy)) {
+        if (densification_enabled && is_adc_strategy(options_.densification_strategy)) {
             const unsigned noise_stop = refine::strategy_schedule(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
@@ -2448,24 +2303,20 @@ GaussianModel Trainer::train(
                     options_.densify_revised_noise
                         ? options_.mean_noise_weight * std::pow(0.01F, progress_fraction)
                         : means_lr * options_.mean_noise_weight,
-                    refinement_geometry.scale,
-                    options_.seed + iteration,
-                    rendered.radii,
+                    refinement_geometry.scale, options_.seed + iteration, rendered.radii,
                     options_.densify_revised_noise);
-        } else if (densification_enabled &&
-                   options_.densification_strategy ==
-                       DensificationStrategy::emc) {
+        } else if (
+            densification_enabled &&
+            options_.densification_strategy == DensificationStrategy::emc) {
             // EMC revised noise runs every training step with an
             // exponentially decaying magnitude (80 -> 0.8 over the run).
-            const float noise_progress =
-                (static_cast<float>(iteration) - 0.5F) /
-                std::max(1.F, static_cast<float>(options_.iterations));
+            const float noise_progress = (static_cast<float>(iteration) - 0.5F) /
+                                         std::max(1.F, static_cast<float>(options_.iterations));
             constexpr float k_noise_lr = 80.F;
             constexpr float k_noise_lr_final = 0.8F;
             detail::inject_emc_noise(
                 model, rendered.radii,
-                k_noise_lr * std::pow(
-                    k_noise_lr_final / k_noise_lr, noise_progress),
+                k_noise_lr * std::pow(k_noise_lr_final / k_noise_lr, noise_progress),
                 options_.seed + iteration);
         }
         cuda_profiler.mark(CudaTrainingStage::adc_noise);
@@ -2474,26 +2325,21 @@ GaussianModel Trainer::train(
         // match the pre-refinement model; a later download would not.
         detail::OpacityProgressStats opacity_stats{};
         if (report_progress && !vulkan_backend)
-            opacity_stats = detail::summarize_opacity_progress(
-                model.opacity_logits, gradients.opacity_logits);
+            opacity_stats =
+                detail::summarize_opacity_progress(model.opacity_logits, gradients.opacity_logits);
         latest_refinement = {};
         bool refinement_happened = false;
         if (densification_enabled) {
             const bool adc_plus =
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus;
+                options_.densification_strategy == DensificationStrategy::adc_plus;
             if (refine::is_refinement_iteration(iteration, options_)) {
-                const std::size_t remaining =
-                    options_.densification_cap > model.size()
-                        ? options_.densification_cap - model.size()
-                        : 0;
+                const std::size_t remaining = options_.densification_cap > model.size()
+                                                  ? options_.densification_cap - model.size()
+                                                  : 0;
                 const std::size_t expected_growth = std::min(
-                    remaining,
-                    std::max<std::size_t>(
-                        std::size_t{65'536}, model.size() / 4));
+                    remaining, std::max<std::size_t>(std::size_t{65'536}, model.size() / 4));
                 view_cache.ensure_device_headroom(
-                    std::size_t{512} * 1024 * 1024 +
-                    expected_growth * std::size_t{2} * 1024);
+                    std::size_t{512} * 1024 * 1024 + expected_growth * std::size_t{2} * 1024);
             }
             if (panorama_adc)
                 densification_stats.growth_cap = refine::panorama_progressive_growth_cap(
@@ -2501,29 +2347,24 @@ GaussianModel Trainer::train(
             latest_refinement = refine::refine_gaussians(
                 model, densification_stats, iteration,
                 adc_plus ? refinement_geometry.maximum_extent : scene_extent,
-                adc_plus ? refinement_geometry.center : scene_center,
-                options_, random, adam_states);
-            refinement_happened =
-                refine::is_refinement_iteration(iteration, options_);
+                adc_plus ? refinement_geometry.center : scene_center, options_, random,
+                adam_states);
+            refinement_happened = refine::is_refinement_iteration(iteration, options_);
             if (refinement_happened && focus_bounds.valid) {
                 if (!prune_to_focus(focus_bounds, iteration))
                     reseed_focus(focus_bounds, iteration);
             }
             if (refinement_happened && splat_mean_lr_scale) {
-                refinement_geometry =
-                    refine::splat_scene_geometry_device(model.means);
+                refinement_geometry = refine::splat_scene_geometry_device(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {
-                const ModelMemoryBudget budget = model_memory_budget(
-                    model, adam_states, &sh_quant);
+                const ModelMemoryBudget budget = model_memory_budget(model, adam_states, &sh_quant);
                 core::Logger::instance().info(
-                    "splat_memory iteration=", iteration,
-                    " gaussians=", budget.gaussians,
+                    "splat_memory iteration=", iteration, " gaussians=", budget.gaussians,
                     " parameter_mb=", budget.parameter_bytes >> 20,
                     " optimizer_mb=", budget.optimizer_bytes >> 20,
-                    " state_bytes_per_gaussian=",
-                    budget.state_bytes_per_gaussian());
+                    " state_bytes_per_gaussian=", budget.state_bytes_per_gaussian());
             }
         }
         // Progressive training changes the pixels used by the sensitivity
@@ -2536,74 +2377,82 @@ GaussianModel Trainer::train(
             const float ratio = soft ? options_.speedy_soft_ratio : options_.speedy_hard_ratio;
             if (ratio > 0.F && model.size() > 1) {
                 auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
-                const std::size_t views = options_.speedy_score_views == 0
-                    ? view_indices.size() : std::min(view_indices.size(), std::size_t(options_.speedy_score_views));
+                const std::size_t views =
+                    options_.speedy_score_views == 0
+                        ? view_indices.size()
+                        : std::min(view_indices.size(), std::size_t(options_.speedy_score_views));
                 auto score_options = raster_options;
                 score_options.background = {0.F, 0.F, 0.F};
                 for (std::size_t v = 0; v < views; ++v) {
                     // Evenly spaced deterministic training-only cameras. A
                     // view subset is an explicit approximation of full scores.
-                    const auto score_view = view_cache.get(view_indices[v * view_indices.size() / views]);
-                    scores = scores.add(rasterizer.pruning_scores(model, score_view.camera, score_options));
+                    const auto score_view =
+                        view_cache.get(view_indices[v * view_indices.size() / views]);
+                    scores = scores.add(
+                        rasterizer.pruning_scores(model, score_view.camera, score_options));
                 }
                 const auto values = scores.to_vector();
-                if (!std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x) && x >= 0.F; }))
+                if (!std::all_of(values.begin(), values.end(), [](float x) {
+                        return std::isfinite(x) && x >= 0.F;
+                    }))
                     throw std::runtime_error("Non-finite Speedy-Splat sensitivity scores");
                 std::vector<int> order(model.size());
                 std::iota(order.begin(), order.end(), 0);
-                const std::size_t remove = std::min(model.size() - 1,
+                const std::size_t remove = std::min(
+                    model.size() - 1,
                     static_cast<std::size_t>(ratio * static_cast<double>(model.size())));
                 // Fixed count and index tie-break prevent all-zero scores from
                 // deleting the entire model (reference threshold pruning can).
-                std::partial_sort(order.begin(), order.begin() + remove, order.end(),
-                    [&](int a, int b) { return values[a] != values[b] ? values[a] < values[b] : a < b; });
+                std::partial_sort(
+                    order.begin(), order.begin() + remove, order.end(), [&](int a, int b) {
+                        return values[a] != values[b] ? values[a] < values[b] : a < b;
+                    });
                 std::vector<bool> dropped(model.size(), false);
-                for (std::size_t k = 0; k < remove; ++k) dropped[order[k]] = true;
+                for (std::size_t k = 0; k < remove; ++k)
+                    dropped[order[k]] = true;
                 std::vector<int> keep;
-                for (std::size_t k = 0; k < model.size(); ++k) if (!dropped[k]) keep.push_back(int(k));
-                const auto keep_indices = tinytensor::Tensor::from_vector(
-                    keep, {keep.size()}, model.means.device());
+                for (std::size_t k = 0; k < model.size(); ++k)
+                    if (!dropped[k])
+                        keep.push_back(int(k));
+                const auto keep_indices =
+                    tinytensor::Tensor::from_vector(keep, {keep.size()}, model.means.device());
                 refine::gpu_detail::select_training_rows_gpu(model, keep_indices, adam_states);
                 if (densification_enabled) {
                     // Preserve the surviving rows' evidence when pruning falls
                     // between refinement steps. Clearing the whole window can
                     // suppress regrowth with a custom pruning interval.
-                    for (auto* stat : {&densification_stats.gradient,
-                                       &densification_stats.count,
-                                       &densification_stats.max_screen_radius,
-                                       &densification_stats.priority,
-                                       &densification_stats.geometry_gradient,
-                                       &densification_stats.first_view,
-                                       &densification_stats.view_support,
-                                       &densification_stats.image_error})
+                    for (auto* stat :
+                         {&densification_stats.gradient, &densification_stats.count,
+                          &densification_stats.max_screen_radius, &densification_stats.priority,
+                          &densification_stats.geometry_gradient, &densification_stats.first_view,
+                          &densification_stats.view_support, &densification_stats.image_error})
                         *stat = stat->index_select(0, keep_indices);
                 }
                 latest_refinement.pruned += remove;
                 refinement_happened = true;
-                core::Logger::instance().info("Speedy-Splat prune iteration=", iteration, " phase=", soft ? "soft" : "hard",
+                core::Logger::instance().info(
+                    "Speedy-Splat prune iteration=", iteration, " phase=", soft ? "soft" : "hard",
                     " views=", views, " pruned=", remove, " remaining=", model.size(),
-                    " overhead_ms=", std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - score_start).count());
+                    " overhead_ms=",
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - score_start)
+                        .count());
             }
         }
 
         if (adaptive_multi_view && refinement_happened) {
-            const std::vector<float> window =
-                multi_view_stability_accumulator.to_vector();
+            const std::vector<float> window = multi_view_stability_accumulator.to_vector();
             multi_view_stability_accumulator.zero_();
             const float consistent_pixels = window[0];
             const float candidate_pixels = window[1];
             const float active_steps = window[2];
             if (candidate_pixels > 0.F && active_steps > 0.F) {
-                const float depth_consistency =
-                    consistent_pixels / candidate_pixels;
+                const float depth_consistency = consistent_pixels / candidate_pixels;
                 const detail::GeometryDistributionSummary distribution =
                     detail::summarize_geometry_distribution(model);
-                const detail::GeometryStabilityDecision decision =
-                    multi_view_scheduler.update({
-                        model.size(), latest_refinement.grown,
-                        latest_refinement.pruned, depth_consistency,
-                        distribution});
+                const detail::GeometryStabilityDecision decision = multi_view_scheduler.update(
+                    {model.size(), latest_refinement.grown, latest_refinement.pruned,
+                     depth_consistency, distribution});
                 adaptive_multi_view_options = options_;
                 adaptive_multi_view_options.multi_view_geo_weight *=
                     static_cast<float>(decision.interval);
@@ -2611,27 +2460,19 @@ GaussianModel Trainer::train(
                     static_cast<float>(decision.interval);
                 core::Logger::instance().info(
                     "splat_mv_stability iteration=", iteration,
-                    " reference_ready=", decision.reference_ready,
-                    " stable=", decision.stable,
+                    " reference_ready=", decision.reference_ready, " stable=", decision.stable,
                     " stable_refinements=", decision.stable_refinements,
-                    " interval=", decision.interval,
-                    " reduced=", decision.reduced,
-                    " recovered=", decision.recovered,
-                    " gaussian_count=", model.size(),
-                    " count_delta=", decision.count_delta,
-                    " churn=", decision.churn,
-                    " depth_consistency=", depth_consistency,
-                    " depth_delta=", decision.depth_delta,
+                    " interval=", decision.interval, " reduced=", decision.reduced,
+                    " recovered=", decision.recovered, " gaussian_count=", model.size(),
+                    " count_delta=", decision.count_delta, " churn=", decision.churn,
+                    " depth_consistency=", depth_consistency, " depth_delta=", decision.depth_delta,
                     " opacity_mean=", distribution.opacity_mean,
                     " opacity_std=", distribution.opacity_stddev,
                     " log_scale_mean=", distribution.log_scale_mean,
                     " log_scale_std=", distribution.log_scale_stddev,
-                    " log_anisotropy_mean=",
-                    distribution.log_anisotropy_mean,
-                    " distribution_delta=",
-                    decision.distribution_delta,
-                    " window_steps=", active_steps,
-                    " consistent_pixels=", consistent_pixels,
+                    " log_anisotropy_mean=", distribution.log_anisotropy_mean,
+                    " distribution_delta=", decision.distribution_delta,
+                    " window_steps=", active_steps, " consistent_pixels=", consistent_pixels,
                     " candidate_pixels=", candidate_pixels);
             } else {
                 const detail::GeometryStabilityDecision decision =
@@ -2639,11 +2480,9 @@ GaussianModel Trainer::train(
                 adaptive_multi_view_options = options_;
                 core::Logger::instance().info(
                     "splat_mv_stability iteration=", iteration,
-                    " reference_ready=false stable=false interval=",
-                    decision.interval,
+                    " reference_ready=false stable=false interval=", decision.interval,
                     " recovered=", decision.recovered,
-                    " reason=no_depth_candidates window_steps=",
-                    active_steps);
+                    " reason=no_depth_candidates window_steps=", active_steps);
             }
         }
         cuda_profiler.mark(CudaTrainingStage::refinement);
@@ -2657,94 +2496,99 @@ GaussianModel Trainer::train(
                 iteration > grow_stop_iteration(options_) &&
                 options_.filter_3d_update_interval != 0 &&
                 iteration % options_.filter_3d_update_interval == 0 &&
-                iteration + options_.filter_3d_update_interval <
-                    options_.iterations;
+                iteration + options_.filter_3d_update_interval < options_.iterations;
             filter_refreshed = refinement_happened || periodic_refresh;
             if (filter_refreshed)
-                model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras, filter_3d_factor);
+                model.filter_3d =
+                    detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
         }
         cuda_profiler.mark(CudaTrainingStage::filter_3d);
         cuda_profiler.end_iteration(
-            iteration, model.size(),
-            static_cast<std::size_t>(rendered.rendered_instances),
-            depth_normal_active, multi_view_active, refinement_happened,
-            filter_refreshed);
+            iteration, model.size(), static_cast<std::size_t>(rendered.rendered_instances),
+            depth_normal_active, multi_view_active, refinement_happened, filter_refreshed);
         bool continue_training = true;
         if (report_progress) {
             const auto now = std::chrono::steady_clock::now();
             const double interval_ms =
-                std::chrono::duration<double, std::milli>(
-                    now - interval_started).count();
+                std::chrono::duration<double, std::milli>(now - interval_started).count();
             const unsigned steps = iteration - last_progress_iteration;
             double milliseconds = 0.0;
             if (last_progress_iteration > 0 && steps > 0) {
-                const double mean_ms =
-                    interval_ms / static_cast<double>(steps);
-                ema_step_ms = ema_step_ms <= 0.0
-                    ? mean_ms
-                    : k_step_time_ema * ema_step_ms +
-                          (1.0 - k_step_time_ema) * mean_ms;
+                const double mean_ms = interval_ms / static_cast<double>(steps);
+                ema_step_ms = ema_step_ms <= 0.0 ? mean_ms
+                                                 : k_step_time_ema * ema_step_ms +
+                                                       (1.0 - k_step_time_ema) * mean_ms;
                 milliseconds = ema_step_ms;
             }
             const DeviceVramSample vram = sample_device_vram(vulkan_backend);
-            continue_training = progress({
-                iteration, options_.iterations, model.size(),
-                static_cast<std::size_t>(rendered.rendered_instances),
-                view_index, latest_refinement.grown,
-                latest_refinement.pruned, loss.total, loss.rgb,
-                loss.alpha_value, loss.depth_value, loss.normal_value,
-                opacity_stats.gradient_mean,
-                opacity_stats.positive_gradient_fraction,
-                opacity_stats.opacity_mean,
-                milliseconds, weighted_multi_view_geometry, weighted_multi_view_ncc,
-                multi_view_loss.geometry_pixels,
-                multi_view_loss.ncc_pixels, active_resolution_scale,
-                target.camera.width, target.camera.height,
-                active_sh_degree, active_multi_view_interval,
-                multi_view_loss.geometry_candidates != 0
-                    ? static_cast<float>(
-                          multi_view_loss.geometry_pixels) /
-                          static_cast<float>(
-                              multi_view_loss.geometry_candidates)
-                    : 0.F,
-                vram.used, vram.total});
+            continue_training = progress(
+                {iteration,
+                 options_.iterations,
+                 model.size(),
+                 static_cast<std::size_t>(rendered.rendered_instances),
+                 view_index,
+                 latest_refinement.grown,
+                 latest_refinement.pruned,
+                 loss.total,
+                 loss.rgb,
+                 loss.alpha_value,
+                 loss.depth_value,
+                 loss.normal_value,
+                 opacity_stats.gradient_mean,
+                 opacity_stats.positive_gradient_fraction,
+                 opacity_stats.opacity_mean,
+                 milliseconds,
+                 weighted_multi_view_geometry,
+                 weighted_multi_view_ncc,
+                 multi_view_loss.geometry_pixels,
+                 multi_view_loss.ncc_pixels,
+                 active_resolution_scale,
+                 target.camera.width,
+                 target.camera.height,
+                 active_sh_degree,
+                 active_multi_view_interval,
+                 multi_view_loss.geometry_candidates != 0
+                     ? static_cast<float>(multi_view_loss.geometry_pixels) /
+                           static_cast<float>(multi_view_loss.geometry_candidates)
+                     : 0.F,
+                 vram.used,
+                 vram.total});
             interval_started = now;
             last_progress_iteration = iteration;
         }
         completed_iteration = iteration;
         checkpoint_step(iteration, !continue_training);
-        if (!continue_training) break;
+        if (!continue_training)
+            break;
         if (evaluate &&
             std::find(
-                options_.evaluation_iterations.begin(),
-                options_.evaluation_iterations.end(),
+                options_.evaluation_iterations.begin(), options_.evaluation_iterations.end(),
                 iteration) != options_.evaluation_iterations.end())
             launch_evaluation(iteration, model);
     }
-    if (!vulkan_backend) cudaDeviceSynchronize();
-    core::Logger::instance().info("splat_optimization_s=",
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - optimization_started).count());
+    if (!vulkan_backend)
+        cudaDeviceSynchronize();
+    core::Logger::instance().info(
+        "splat_optimization_s=",
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - optimization_started)
+            .count());
     cuda_profiler.flush();
     if (device_preview) {
         core::Logger::instance().info(
             "splat_preview_frames_queued=", preview_frames_queued,
-            " editor_ack_frames=", preview_ack_frames,
-            " acknowledged=", has_preview_ack ? 1 : 0);
+            " editor_ack_frames=", preview_ack_frames, " acknowledged=", has_preview_ack ? 1 : 0);
     }
     if (options_.profile_cuda) {
         const auto cache = view_cache.stats();
         core::Logger::instance().info(
-            "splat_data_cache requests=", cache.requests,
-            " device_hits=", cache.device_hits,
+            "splat_data_cache requests=", cache.requests, " device_hits=", cache.device_hits,
             " async_upload_hits=", cache.async_upload_hits,
             " async_upload_issued=", cache.async_upload_issued,
             " async_upload_waits=", cache.async_upload_waits,
             " async_upload_failures=", cache.async_upload_failures,
             " async_upload_pending=", cache.async_upload_pending,
             " async_upload_pending_bytes=", cache.async_upload_pending_bytes,
-            " get_wall_ms=", cache.get_wall_ms,
-            " uploaded_bytes=", cache.uploaded_bytes,
+            " get_wall_ms=", cache.get_wall_ms, " uploaded_bytes=", cache.uploaded_bytes,
             " device_resident_bytes=", cache.device_resident_bytes,
             " device_budget_bytes=", cache.device_budget_bytes,
             " device_budget_ceiling_bytes=", cache.device_budget_ceiling_bytes,
@@ -2752,38 +2596,29 @@ GaussianModel Trainer::train(
             " device_budget_rollbacks=", cache.device_budget_rollbacks,
             " device_hit_rate=", cache.device_hit_rate,
             " host_budget_bytes=", cache.host_budget_bytes,
-            " dataset_packed_bytes=", cache.dataset_packed_bytes,
-            " host_hits=", cache.host_hits,
-            " prefetch_issued=", cache.prefetch_issued,
-            " prefetch_depth=", cache.prefetch_depth,
-            " host_load_mean_ms=", cache.host_load_mean_ms,
-            " step_mean_ms=", cache.step_mean_ms);
+            " dataset_packed_bytes=", cache.dataset_packed_bytes, " host_hits=", cache.host_hits,
+            " prefetch_issued=", cache.prefetch_issued, " prefetch_depth=", cache.prefetch_depth,
+            " host_load_mean_ms=", cache.host_load_mean_ms, " step_mean_ms=", cache.step_mean_ms);
     }
     finish_evaluation();
     if (vulkan_backend) {
         tinytensor::vulkan::synchronize();
         const auto pool = tinytensor::vulkan::buffer_pool_stats();
         core::Logger::instance().info(
-            "splat_vulkan_buffer_pool hits=", pool.hits,
-            " misses=", pool.misses,
-            " miss_bytes=", pool.miss_bytes,
-            " drops=", pool.drops,
-            " drop_bytes=", pool.drop_bytes,
+            "splat_vulkan_buffer_pool hits=", pool.hits, " misses=", pool.misses,
+            " miss_bytes=", pool.miss_bytes, " drops=", pool.drops, " drop_bytes=", pool.drop_bytes,
             // Live/free attribution for the retained pool memory: free blocks
             // are reclaimable in principle (a smaller budget) while live bytes
             // are tensors the training state still owns.
-            " reserved_bytes=", pool.reserved_bytes,
-            " live_bytes=", pool.live_bytes,
-            " free_bytes=", pool.free_bytes,
-            " budget_bytes=", pool.budget_bytes,
-            " retained_bytes=", pool.miss_bytes > pool.drop_bytes
-                ? pool.miss_bytes - pool.drop_bytes : 0);
+            " reserved_bytes=", pool.reserved_bytes, " live_bytes=", pool.live_bytes,
+            " free_bytes=", pool.free_bytes, " budget_bytes=", pool.budget_bytes,
+            " retained_bytes=",
+            pool.miss_bytes > pool.drop_bytes ? pool.miss_bytes - pool.drop_bytes : 0);
     } else {
         const cudaError_t error = cudaDeviceSynchronize();
         if (error != cudaSuccess)
             throw std::runtime_error(
-                std::string("Splat training synchronization failed: ") +
-                cudaGetErrorString(error));
+                std::string("Splat training synchronization failed: ") + cudaGetErrorString(error));
     }
     if (focus_bounds.valid) {
         if (!prune_to_focus(focus_bounds, options_.iterations))
@@ -2791,14 +2626,15 @@ GaussianModel Trainer::train(
     }
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, full_resolution_filter_cameras,
-            filter_3d_factor);
+            model.means, full_resolution_filter_cameras, filter_3d_factor);
     return model;
 }
 
 RenderMetrics render_evaluation_png(
-    const GaussianModel& model, const mvs::MvsView& view,
-    const std::filesystem::path& path, const TrainingOptions& training_options) {
+    const GaussianModel& model,
+    const mvs::MvsView& view,
+    const std::filesystem::path& path,
+    const TrainingOptions& training_options) {
     // Held-out evaluation uses RGB/cameras only. It must neither request an AI
     // prediction for a held-out image nor load its geometry supervision cache.
     auto evaluation_options = training_options;
@@ -2811,24 +2647,20 @@ RenderMetrics render_evaluation_png(
     options.require_depth = false;
     options.record_backward_state = false;
     Rasterizer rasterizer;
-    RenderResult rendered = rasterizer.forward(
-        model, target.camera, options);
+    RenderResult rendered = rasterizer.forward(model, target.camera, options);
     rendered.context.impl.reset();
     const float ssim = model.means.device() == tinytensor::Device::Vulkan
-        ? 1.F - rasterizer.photometric_loss(
-              rendered, target.rgb, target.mask, target.has_mask,
-              1.F, 1.F)
-        : detail::fused_ssim_metric(
-              rendered.color, target.rgb, target.mask, target.has_mask,
-              target.camera.width, target.camera.height);
+                           ? 1.F - rasterizer.photometric_loss(
+                                       rendered, target.rgb, target.mask, target.has_mask, 1.F, 1.F)
+                           : detail::fused_ssim_metric(
+                                 rendered.color, target.rgb, target.mask, target.has_mask,
+                                 target.camera.width, target.camera.height);
     const std::vector<float> color = download<float>(rendered.color);
     const std::vector<float> alpha = download<float>(rendered.alpha);
     const std::vector<float> target_rgb = download<float>(target.rgb);
     const std::vector<float> mask =
-        target.has_mask ? download<float>(target.mask)
-                        : std::vector<float>{};
-    const std::size_t pixels =
-        static_cast<std::size_t>(target.camera.width) * target.camera.height;
+        target.has_mask ? download<float>(target.mask) : std::vector<float>{};
+    const std::size_t pixels = static_cast<std::size_t>(target.camera.width) * target.camera.height;
 
     io::RgbImage image;
     image.width = target.camera.width;
@@ -2841,25 +2673,23 @@ RenderMetrics render_evaluation_png(
     std::size_t samples = 0;
     std::size_t covered = 0;
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-        if (alpha[pixel] > 0.01F) ++covered;
-        const double predicted_alpha = std::clamp(
-            static_cast<double>(alpha[pixel]), 1e-7, 1.0 - 1e-7);
+        if (alpha[pixel] > 0.01F)
+            ++covered;
+        const double predicted_alpha =
+            std::clamp(static_cast<double>(alpha[pixel]), 1e-7, 1.0 - 1e-7);
         const bool foreground = !target.has_mask || mask[pixel] > 0.F;
         const double target_alpha = foreground ? 1.0 : 0.0;
         alpha_bce -= target_alpha * std::log(predicted_alpha) +
-            (1.0 - target_alpha) * std::log(1.0 - predicted_alpha);
+                     (1.0 - target_alpha) * std::log(1.0 - predicted_alpha);
         for (int channel = 0; channel < 3; ++channel) {
-            const std::size_t planar =
-                static_cast<std::size_t>(channel) * pixels + pixel;
+            const std::size_t planar = static_cast<std::size_t>(channel) * pixels + pixel;
             const float prediction = std::clamp(color[planar], 0.F, 1.F);
-            image.pixels[3 * pixel + channel] = static_cast<std::uint8_t>(
-                std::lround(prediction * 255.F));
-            const double full_difference =
-                static_cast<double>(prediction - target_rgb[planar]);
+            image.pixels[3 * pixel + channel] =
+                static_cast<std::uint8_t>(std::lround(prediction * 255.F));
+            const double full_difference = static_cast<double>(prediction - target_rgb[planar]);
             full_squared_error += full_difference * full_difference;
             if (foreground) {
-                const double difference =
-                    static_cast<double>(prediction - target_rgb[planar]);
+                const double difference = static_cast<double>(prediction - target_rgb[planar]);
                 absolute_error += std::abs(difference);
                 squared_error += difference * difference;
                 ++samples;
@@ -2875,29 +2705,24 @@ RenderMetrics render_evaluation_png(
     // Both numbers come from the same render: `psnr` covers every pixel,
     // `foreground_psnr` only the unmasked ones. Comparing a masked run against
     // an unmasked one is only meaningful on the pixel set they share.
-    metrics.psnr = full_mse > 0.0
-        ? static_cast<float>(-10.0 * std::log10(full_mse))
-        : std::numeric_limits<float>::infinity();
-    metrics.foreground_psnr = mse > 0.0
-        ? static_cast<float>(-10.0 * std::log10(mse))
-        : std::numeric_limits<float>::infinity();
+    metrics.psnr = full_mse > 0.0 ? static_cast<float>(-10.0 * std::log10(full_mse))
+                                  : std::numeric_limits<float>::infinity();
+    metrics.foreground_psnr = mse > 0.0 ? static_cast<float>(-10.0 * std::log10(mse))
+                                        : std::numeric_limits<float>::infinity();
     metrics.mae = static_cast<float>(absolute_error * inverse_samples);
-    const double masked_mse = squared_error /
-        static_cast<double>(std::max<std::size_t>(3 * pixels, 1));
-    metrics.masked_psnr = masked_mse > 0.0
-        ? static_cast<float>(-10.0 * std::log10(masked_mse))
-        : std::numeric_limits<float>::infinity();
+    const double masked_mse =
+        squared_error / static_cast<double>(std::max<std::size_t>(3 * pixels, 1));
+    metrics.masked_psnr = masked_mse > 0.0 ? static_cast<float>(-10.0 * std::log10(masked_mse))
+                                           : std::numeric_limits<float>::infinity();
     metrics.ssim = ssim;
-    metrics.alpha_bce = static_cast<float>(alpha_bce /
-        static_cast<double>(std::max<std::size_t>(pixels, 1)));
-    metrics.alpha_coverage = pixels != 0
-        ? static_cast<float>(covered) / static_cast<float>(pixels)
-        : 0.F;
+    metrics.alpha_bce =
+        static_cast<float>(alpha_bce / static_cast<double>(std::max<std::size_t>(pixels, 1)));
+    metrics.alpha_coverage =
+        pixels != 0 ? static_cast<float>(covered) / static_cast<float>(pixels) : 0.F;
     return metrics;
 }
 
-void save_gaussians_ply(
-    const GaussianModel& model, const std::filesystem::path& path) {
+void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path& path) {
     const std::size_t count = model.size();
     const std::size_t bases = model.sh.shape()[1];
     // Keep CPU snapshots by reference, including the final shared-memory
@@ -2905,8 +2730,9 @@ void save_gaussians_ply(
     std::vector<tinytensor::Tensor> host_storage;
     host_storage.reserve(7);
     const auto host = [&](const tinytensor::Tensor& tensor) -> std::span<const float> {
-        auto cpu = (tensor.device() == tinytensor::Device::CPU
-            ? tensor : tensor.to(tinytensor::Device::CPU)).contiguous();
+        auto cpu = (tensor.device() == tinytensor::Device::CPU ? tensor
+                                                               : tensor.to(tinytensor::Device::CPU))
+                       .contiguous();
         host_storage.push_back(cpu);
         return {cpu.ptr<float>(), cpu.numel()};
     };
@@ -2915,29 +2741,21 @@ void save_gaussians_ply(
     const auto rotations = host(model.quaternions);
     const auto opacities = host(model.opacity_logits);
     const auto sh = host(model.sh);
-    const bool has_normal_features = model.normal_features.is_valid() &&
-        model.normal_features.shape().rank() == 2 &&
-        model.normal_features.shape()[0] == count &&
-        model.normal_features.shape()[1] == 4;
-    const auto normal_features = has_normal_features
-        ? host(model.normal_features)
-        : std::span<const float>{};
-    const bool has_filter = model.filter_3d.is_valid() &&
-        model.filter_3d.numel() == count;
-    const auto filter_3d = has_filter
-        ? host(model.filter_3d)
-        : std::span<const float>{};
-    const auto require_finite = [](const std::span<const float> values,
-                                   const char* name) {
+    const bool has_normal_features =
+        model.normal_features.is_valid() && model.normal_features.shape().rank() == 2 &&
+        model.normal_features.shape()[0] == count && model.normal_features.shape()[1] == 4;
+    const auto normal_features =
+        has_normal_features ? host(model.normal_features) : std::span<const float>{};
+    const bool has_filter = model.filter_3d.is_valid() && model.filter_3d.numel() == count;
+    const auto filter_3d = has_filter ? host(model.filter_3d) : std::span<const float>{};
+    const auto require_finite = [](const std::span<const float> values, const char* name) {
         const auto invalid = std::find_if(
-            values.begin(), values.end(),
-            [](const float value) { return !std::isfinite(value); });
+            values.begin(), values.end(), [](const float value) { return !std::isfinite(value); });
         if (invalid != values.end()) {
-            const auto index = static_cast<std::size_t>(
-                std::distance(values.begin(), invalid));
+            const auto index = static_cast<std::size_t>(std::distance(values.begin(), invalid));
             throw std::runtime_error(
-                std::string("Refusing to write non-finite splat parameter ") +
-                name + " at scalar index " + std::to_string(index));
+                std::string("Refusing to write non-finite splat parameter ") + name +
+                " at scalar index " + std::to_string(index));
         }
     };
     require_finite(means, "means");
@@ -2947,9 +2765,11 @@ void save_gaussians_ply(
     require_finite(sh, "SH");
     if (has_normal_features)
         require_finite(normal_features, "normal_features");
-    if (has_filter) require_finite(filter_3d, "filter_3D");
+    if (has_filter)
+        require_finite(filter_3d, "filter_3D");
     std::ofstream output(path, std::ios::binary);
-    if (!output) throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
+    if (!output)
+        throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
     output << "ply\nformat binary_little_endian 1.0\n"
            << "comment Photara splat (GGGS-derived geometry; 3DGS-compatible SH layout)\n"
            << "comment photara_render_method "
@@ -2963,14 +2783,14 @@ void save_gaussians_ply(
         output << "property float f_rest_" << i << '\n';
     output << "property float opacity\n"
            << "property float scale_0\nproperty float scale_1\nproperty float scale_2\n"
-           << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n"
+           << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float "
+              "rot_3\n"
            << (has_filter ? "property float filter_3D\n" : "")
-           << (has_normal_features
-                   ? "property float gaussian_features_0\n"
-                     "property float gaussian_features_1\n"
-                     "property float gaussian_features_2\n"
-                     "property float gaussian_features_3\n"
-                   : "")
+           << (has_normal_features ? "property float gaussian_features_0\n"
+                                     "property float gaussian_features_1\n"
+                                     "property float gaussian_features_2\n"
+                                     "property float gaussian_features_3\n"
+                                   : "")
            << "end_header\n";
     // Preserve the PLY layout while batching scalar serialization into 1 MiB
     // writes. Millions of Gaussians otherwise make tens of millions of tiny
@@ -2978,18 +2798,24 @@ void save_gaussians_ply(
     std::vector<float> block;
     block.reserve(256U * 1024U);
     const auto flush = [&] {
-        if (block.empty()) return;
-        output.write(reinterpret_cast<const char*>(block.data()),
-                     static_cast<std::streamsize>(block.size() * sizeof(float)));
+        if (block.empty())
+            return;
+        output.write(
+            reinterpret_cast<const char*>(block.data()),
+            static_cast<std::streamsize>(block.size() * sizeof(float)));
         block.clear();
     };
     const auto append = [&](const float value) {
         block.push_back(value);
-        if (block.size() == block.capacity()) flush();
+        if (block.size() == block.capacity())
+            flush();
     };
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
-        for (int axis = 0; axis < 3; ++axis) append(means[3 * gaussian + axis]);
-        append(0.F); append(0.F); append(0.F);
+        for (int axis = 0; axis < 3; ++axis)
+            append(means[3 * gaussian + axis]);
+        append(0.F);
+        append(0.F);
+        append(0.F);
         for (int channel = 0; channel < 3; ++channel)
             append(sh[(gaussian * bases) * 3 + channel]);
         // Standard 3DGS PLY stores all remaining bases for R, then G, then B.
@@ -3001,22 +2827,24 @@ void save_gaussians_ply(
             append(log_scales[3 * gaussian + axis]);
         for (int component = 0; component < 4; ++component)
             append(rotations[4 * gaussian + component]);
-        if (has_filter) append(filter_3d[gaussian]);
+        if (has_filter)
+            append(filter_3d[gaussian]);
         if (has_normal_features)
             for (int component = 0; component < 4; ++component)
                 append(normal_features[4 * gaussian + component]);
     }
     flush();
     output.close();
-    if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
+    if (!output)
+        throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
 }
 
 GaussianModel load_gaussians_ply(
-    const std::filesystem::path& path, const tinytensor::Device device) {
+    const std::filesystem::path& path,
+    const tinytensor::Device device) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
-        throw std::runtime_error(
-            "Failed to open Gaussian PLY: " + path.string());
+        throw std::runtime_error("Failed to open Gaussian PLY: " + path.string());
 
     std::string line;
     if (!std::getline(input, line) || line != "ply")
@@ -3028,23 +2856,34 @@ GaussianModel load_gaussians_ply(
     bool reading_vertices = false;
     std::vector<std::string> properties;
     while (std::getline(input, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line == "end_header") break;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line == "end_header")
+            break;
         std::istringstream tokens(line);
         std::string keyword;
         tokens >> keyword;
         if (keyword == "comment") {
-            std::string key, method; tokens >> key >> method;
+            std::string key, method;
+            tokens >> key >> method;
             if (key == "photara_render_method") {
-                if (method == "3dgut") render_method = RenderMethod::gaussian_3dgut;
-                else if (method == "3dgs") render_method = RenderMethod::gaussian_3dgs;
-                else throw std::runtime_error("Unknown Gaussian PLY rendering method: " + method);
+                if (method == "3dgut")
+                    render_method = RenderMethod::gaussian_3dgut;
+                else if (method == "3dgs")
+                    render_method = RenderMethod::gaussian_3dgs;
+                else
+                    throw std::runtime_error("Unknown Gaussian PLY rendering method: " + method);
             } else if (key == "photara_filter_mode") {
-                if (method == "classic") filter_mode = SplatFilterMode::classic;
-                else if (method == "mip2d") filter_mode = SplatFilterMode::mip_2d;
-                else if (method == "mip3d") filter_mode = SplatFilterMode::mip_3d;
-                else if (method == "mip") filter_mode = SplatFilterMode::mip;
-                else throw std::runtime_error("Unknown Gaussian PLY filter mode: " + method);
+                if (method == "classic")
+                    filter_mode = SplatFilterMode::classic;
+                else if (method == "mip2d")
+                    filter_mode = SplatFilterMode::mip_2d;
+                else if (method == "mip3d")
+                    filter_mode = SplatFilterMode::mip_3d;
+                else if (method == "mip")
+                    filter_mode = SplatFilterMode::mip;
+                else
+                    throw std::runtime_error("Unknown Gaussian PLY filter mode: " + method);
             }
         } else if (keyword == "format") {
             std::string format;
@@ -3055,22 +2894,21 @@ GaussianModel load_gaussians_ply(
             std::size_t element_count = 0;
             tokens >> element >> element_count;
             reading_vertices = element == "vertex";
-            if (reading_vertices) count = element_count;
+            if (reading_vertices)
+                count = element_count;
         } else if (keyword == "property" && reading_vertices) {
             std::string type;
             std::string name;
             tokens >> type >> name;
             if (type != "float" && type != "float32")
                 throw std::runtime_error(
-                    "Gaussian PLY requires float vertex properties: " +
-                    path.string());
+                    "Gaussian PLY requires float vertex properties: " + path.string());
             properties.push_back(std::move(name));
         }
     }
     if (!binary_little_endian || count == 0 || properties.empty())
         throw std::runtime_error(
-            "Gaussian PLY must contain binary little-endian vertices: " +
-            path.string());
+            "Gaussian PLY must contain binary little-endian vertices: " + path.string());
 
     std::unordered_map<std::string, std::size_t> property_index;
     property_index.reserve(properties.size());
@@ -3080,34 +2918,28 @@ GaussianModel load_gaussians_ply(
         const auto found = property_index.find(name);
         if (found == property_index.end())
             throw std::runtime_error(
-                "Gaussian PLY is missing property " + name + ": " +
-                path.string());
+                "Gaussian PLY is missing property " + name + ": " + path.string());
         return found->second;
     };
-    const std::array<std::size_t, 3> position_index{
-        required("x"), required("y"), required("z")};
+    const std::array<std::size_t, 3> position_index{required("x"), required("y"), required("z")};
     const std::array<std::size_t, 3> dc_index{
         required("f_dc_0"), required("f_dc_1"), required("f_dc_2")};
     const std::size_t opacity_index = required("opacity");
     const std::array<std::size_t, 3> scale_index{
         required("scale_0"), required("scale_1"), required("scale_2")};
     const std::array<std::size_t, 4> rotation_index{
-        required("rot_0"), required("rot_1"), required("rot_2"),
-        required("rot_3")};
+        required("rot_0"), required("rot_1"), required("rot_2"), required("rot_3")};
 
     std::size_t rest_count = 0;
     while (property_index.contains("f_rest_" + std::to_string(rest_count)))
         ++rest_count;
     if (rest_count % 3U != 0)
-        throw std::runtime_error(
-            "Gaussian PLY has an invalid SH property count: " + path.string());
+        throw std::runtime_error("Gaussian PLY has an invalid SH property count: " + path.string());
     const std::size_t bases = 1U + rest_count / 3U;
-    const unsigned degree = static_cast<unsigned>(
-        std::lround(std::sqrt(static_cast<double>(bases)))) - 1U;
-    if (static_cast<std::size_t>(degree + 1U) * (degree + 1U) != bases ||
-        degree > 3U)
-        throw std::runtime_error(
-            "Gaussian PLY has unsupported SH degree: " + path.string());
+    const unsigned degree =
+        static_cast<unsigned>(std::lround(std::sqrt(static_cast<double>(bases)))) - 1U;
+    if (static_cast<std::size_t>(degree + 1U) * (degree + 1U) != bases || degree > 3U)
+        throw std::runtime_error("Gaussian PLY has unsupported SH degree: " + path.string());
     std::vector<std::size_t> rest_index(rest_count);
     for (std::size_t rest = 0; rest < rest_count; ++rest)
         rest_index[rest] = required("f_rest_" + std::to_string(rest));
@@ -3120,12 +2952,12 @@ GaussianModel load_gaussians_ply(
     std::vector<float> normal_features(count * 4U, 0.F);
     const auto filter_property = property_index.find("filter_3D");
     std::vector<float> filter;
-    if (filter_property != property_index.end()) filter.resize(count);
+    if (filter_property != property_index.end())
+        filter.resize(count);
     std::array<std::size_t, 4> normal_feature_index{};
     bool has_normal_features = true;
     for (std::size_t component = 0; component < 4; ++component) {
-        const auto found = property_index.find(
-            "gaussian_features_" + std::to_string(component));
+        const auto found = property_index.find("gaussian_features_" + std::to_string(component));
         if (found == property_index.end()) {
             has_normal_features = false;
             break;
@@ -3138,8 +2970,7 @@ GaussianModel load_gaussians_ply(
             reinterpret_cast<char*>(row.data()),
             static_cast<std::streamsize>(row.size() * sizeof(float)));
         if (!input)
-            throw std::runtime_error(
-                "Gaussian PLY ended inside vertex data: " + path.string());
+            throw std::runtime_error("Gaussian PLY ended inside vertex data: " + path.string());
         for (int axis = 0; axis < 3; ++axis) {
             means[3U * gaussian + static_cast<std::size_t>(axis)] =
                 row[position_index[static_cast<std::size_t>(axis)]];
@@ -3151,57 +2982,46 @@ GaussianModel load_gaussians_ply(
                 row[rotation_index[static_cast<std::size_t>(component)]];
         opacities[gaussian] = row[opacity_index];
         for (int channel = 0; channel < 3; ++channel) {
-            sh[(gaussian * bases) * 3U +
-               static_cast<std::size_t>(channel)] =
+            sh[(gaussian * bases) * 3U + static_cast<std::size_t>(channel)] =
                 row[dc_index[static_cast<std::size_t>(channel)]];
             for (std::size_t basis = 1; basis < bases; ++basis) {
                 const std::size_t rest =
-                    static_cast<std::size_t>(channel) * (bases - 1U) +
-                    basis - 1U;
-                sh[(gaussian * bases + basis) * 3U +
-                   static_cast<std::size_t>(channel)] =
+                    static_cast<std::size_t>(channel) * (bases - 1U) + basis - 1U;
+                sh[(gaussian * bases + basis) * 3U + static_cast<std::size_t>(channel)] =
                     row[rest_index[rest]];
             }
         }
-        if (!filter.empty()) filter[gaussian] = row[filter_property->second];
+        if (!filter.empty())
+            filter[gaussian] = row[filter_property->second];
         if (has_normal_features)
             for (std::size_t component = 0; component < 4; ++component)
-                normal_features[4U * gaussian + component] =
-                    row[normal_feature_index[component]];
+                normal_features[4U * gaussian + component] = row[normal_feature_index[component]];
     }
     if (!has_normal_features) {
         // Legacy 3DGS PLY: seed the field from the thinnest covariance axis.
         // Its orientation is necessarily ambiguous without learned features;
         // w=1 keeps the field usable for PAM while further training can flip it.
         for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
-            const auto scale = scales.begin() +
-                static_cast<std::ptrdiff_t>(3U * gaussian);
-            const int axis = static_cast<int>(std::distance(
-                scale, std::min_element(scale, scale + 3)));
+            const auto scale = scales.begin() + static_cast<std::ptrdiff_t>(3U * gaussian);
+            const int axis =
+                static_cast<int>(std::distance(scale, std::min_element(scale, scale + 3)));
             float w = rotations[4U * gaussian];
             float x = rotations[4U * gaussian + 1U];
             float y = rotations[4U * gaussian + 2U];
             float z = rotations[4U * gaussian + 3U];
-            const float inverse_norm = 1.F / std::max(
-                std::sqrt(w * w + x * x + y * y + z * z), 1e-12F);
+            const float inverse_norm =
+                1.F / std::max(std::sqrt(w * w + x * x + y * y + z * z), 1e-12F);
             w *= inverse_norm;
             x *= inverse_norm;
             y *= inverse_norm;
             z *= inverse_norm;
-            const std::array<std::array<float, 3>, 3> columns{{
-                {{1.F - 2.F * (y * y + z * z),
-                  2.F * (x * y + w * z),
-                  2.F * (x * z - w * y)}},
-                {{2.F * (x * y - w * z),
-                  1.F - 2.F * (x * x + z * z),
-                  2.F * (y * z + w * x)}},
-                {{2.F * (x * z + w * y),
-                  2.F * (y * z - w * x),
-                  1.F - 2.F * (x * x + y * y)}}}};
+            const std::array<std::array<float, 3>, 3> columns{
+                {{{1.F - 2.F * (y * y + z * z), 2.F * (x * y + w * z), 2.F * (x * z - w * y)}},
+                 {{2.F * (x * y - w * z), 1.F - 2.F * (x * x + z * z), 2.F * (y * z + w * x)}},
+                 {{2.F * (x * z + w * y), 2.F * (y * z - w * x), 1.F - 2.F * (x * x + y * y)}}}};
             for (int component = 0; component < 3; ++component)
                 normal_features[4U * gaussian + component] =
-                    columns[static_cast<std::size_t>(axis)]
-                           [static_cast<std::size_t>(component)];
+                    columns[static_cast<std::size_t>(axis)][static_cast<std::size_t>(component)];
             normal_features[4U * gaussian + 3U] = 1.F;
         }
     }
@@ -3217,42 +3037,32 @@ GaussianModel load_gaussians_ply(
         }
     }
     if (saturated_opacities)
-        core::Logger::instance().info("Gaussian PLY saturated opacity logits=",
-            saturated_opacities, " canonicalized to finite float32 endpoints");
+        core::Logger::instance().info(
+            "Gaussian PLY saturated opacity logits=", saturated_opacities,
+            " canonicalized to finite float32 endpoints");
     const auto finite = [](const std::vector<float>& values) {
         return std::all_of(
-            values.begin(), values.end(),
-            [](const float value) { return std::isfinite(value); });
+            values.begin(), values.end(), [](const float value) { return std::isfinite(value); });
     };
-    if (!finite(means) || !finite(scales) || !finite(rotations) ||
-        !finite(opacities) || !finite(sh) || !finite(normal_features) ||
-        (!filter.empty() && !finite(filter)))
-        throw std::runtime_error(
-            "Gaussian PLY contains non-finite parameters: " + path.string());
+    if (!finite(means) || !finite(scales) || !finite(rotations) || !finite(opacities) ||
+        !finite(sh) || !finite(normal_features) || (!filter.empty() && !finite(filter)))
+        throw std::runtime_error("Gaussian PLY contains non-finite parameters: " + path.string());
 
     GaussianModel model;
     model.render_method = render_method;
     model.filter_mode = filter_mode;
-    model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, device);
-    model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, device);
-    model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, device);
-    model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, device);
-    model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, device);
-    model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4U}, device);
+    model.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3U}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, 4U}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(opacities, {count, 1U}, device);
+    model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, device);
+    model.normal_features = tinytensor::Tensor::from_vector(normal_features, {count, 4U}, device);
     if (!filter.empty())
-        model.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {count, 1U}, device);
+        model.filter_3d = tinytensor::Tensor::from_vector(filter, {count, 1U}, device);
     model.sh_degree = degree;
     core::Logger::instance().info(
-        "loaded splat PLY=", path, " gaussians=", count,
-        " sh_degree=", degree, " filter_3d=", !filter.empty(),
-        " learned_normal_field=", has_normal_features);
+        "loaded splat PLY=", path, " gaussians=", count, " sh_degree=", degree,
+        " filter_3d=", !filter.empty(), " learned_normal_field=", has_normal_features);
     return model;
 }
 
@@ -3262,7 +3072,9 @@ std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
         const std::uint32_t version = k_gaussian_chunk_version;
         const std::uint64_t stored_count = 0;
         const std::uint32_t sh_degree = model.sh_degree;
-        const std::uint32_t flags = (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) | (static_cast<std::uint32_t>(model.filter_mode) << 3U);
+        const std::uint32_t flags =
+            (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) |
+            (static_cast<std::uint32_t>(model.filter_mode) << 3U);
         std::vector<std::uint8_t> bytes(4 + 8 + 4 + 4);
         std::memcpy(bytes.data(), &version, 4);
         std::memcpy(bytes.data() + 4, &stored_count, 8);
@@ -3276,33 +3088,31 @@ std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     const auto rotations = download<float>(model.quaternions);
     const auto opacities = download<float>(model.opacity_logits);
     const auto sh = count == 0 ? std::vector<float>{} : download<float>(model.sh);
-    const bool has_normal_features = model.normal_features.is_valid() &&
-        model.normal_features.shape().rank() == 2 &&
-        model.normal_features.shape()[0] == count &&
-        model.normal_features.shape()[1] == 4;
-    const auto normal_features = has_normal_features
-        ? download<float>(model.normal_features)
-        : std::vector<float>{};
-    const bool has_filter = model.filter_3d.is_valid() &&
-        model.filter_3d.numel() == count;
-    const auto filter_3d = has_filter
-        ? download<float>(model.filter_3d)
-        : std::vector<float>{};
-    std::uint32_t flags = (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) | (static_cast<std::uint32_t>(model.filter_mode) << 3U);
-    if (has_filter) flags |= 1U;
-    if (has_normal_features) flags |= 2U;
+    const bool has_normal_features =
+        model.normal_features.is_valid() && model.normal_features.shape().rank() == 2 &&
+        model.normal_features.shape()[0] == count && model.normal_features.shape()[1] == 4;
+    const auto normal_features =
+        has_normal_features ? download<float>(model.normal_features) : std::vector<float>{};
+    const bool has_filter = model.filter_3d.is_valid() && model.filter_3d.numel() == count;
+    const auto filter_3d = has_filter ? download<float>(model.filter_3d) : std::vector<float>{};
+    std::uint32_t flags = (model.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) |
+                          (static_cast<std::uint32_t>(model.filter_mode) << 3U);
+    if (has_filter)
+        flags |= 1U;
+    if (has_normal_features)
+        flags |= 2U;
     const std::uint32_t version = k_gaussian_chunk_version;
     const std::uint64_t stored_count = count;
     const std::uint32_t sh_degree = model.sh_degree;
     std::vector<std::uint8_t> bytes(
-        sizeof(version) + sizeof(stored_count) + sizeof(sh_degree) +
-        sizeof(flags) +
-        (means.size() + log_scales.size() + rotations.size() + opacities.size() +
-         sh.size() + normal_features.size() + filter_3d.size()) *
+        sizeof(version) + sizeof(stored_count) + sizeof(sh_degree) + sizeof(flags) +
+        (means.size() + log_scales.size() + rotations.size() + opacities.size() + sh.size() +
+         normal_features.size() + filter_3d.size()) *
             sizeof(float));
     std::uint8_t* cursor = bytes.data();
     const auto append = [&](const void* data, const std::size_t size) {
-        if (size == 0) return;
+        if (size == 0)
+            return;
         std::memcpy(cursor, data, size);
         cursor += size;
     };
@@ -3343,13 +3153,12 @@ GaussianModel decode_gaussians(
     std::memcpy(&sh_degree, take(sizeof(sh_degree)), sizeof(sh_degree));
     std::memcpy(&flags, take(sizeof(flags)), sizeof(flags));
     if (version == 0 || version > k_gaussian_chunk_version)
-        throw std::runtime_error(io::unsupported_payload_version(
-            "Gaussian chunk", version, k_gaussian_chunk_version));
+        throw std::runtime_error(
+            io::unsupported_payload_version("Gaussian chunk", version, k_gaussian_chunk_version));
     if (count64 > 50'000'000ULL || sh_degree > 3)
         throw std::runtime_error("Gaussian chunk header is invalid");
     const std::size_t count = static_cast<std::size_t>(count64);
-    const std::size_t bases =
-        static_cast<std::size_t>(sh_degree + 1U) * (sh_degree + 1U);
+    const std::size_t bases = static_cast<std::size_t>(sh_degree + 1U) * (sh_degree + 1U);
     const bool has_filter = (flags & 1U) != 0;
     const bool has_normal_features = (flags & 2U) != 0;
     std::vector<float> means(count * 3U);
@@ -3360,10 +3169,10 @@ GaussianModel decode_gaussians(
     std::vector<float> normal_features(has_normal_features ? count * 4U : 0);
     std::vector<float> filter(has_filter ? count : 0);
     const auto take_floats = [&](std::vector<float>& values) {
-        if (values.empty()) return;
+        if (values.empty())
+            return;
         std::memcpy(
-            values.data(), take(values.size() * sizeof(float)),
-            values.size() * sizeof(float));
+            values.data(), take(values.size() * sizeof(float)), values.size() * sizeof(float));
     };
     take_floats(means);
     take_floats(scales);
@@ -3374,30 +3183,26 @@ GaussianModel decode_gaussians(
     take_floats(filter);
 
     GaussianModel model;
-    model.render_method = version >= 2 && (flags & 4U) ? RenderMethod::gaussian_3dgut : RenderMethod::gaussian_3dgs;
+    model.render_method =
+        version >= 2 && (flags & 4U) ? RenderMethod::gaussian_3dgut : RenderMethod::gaussian_3dgs;
     if (version >= 3) {
         const auto filter = (flags >> 3U) & 7U;
         if (filter < 1U || filter > 4U)
             throw std::runtime_error("Gaussian chunk filter mode is invalid");
         model.filter_mode = static_cast<SplatFilterMode>(filter);
     }
-    if (count == 0) return model;
-    model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, device);
-    model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, device);
-    model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, device);
-    model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, device);
-    model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, device);
+    if (count == 0)
+        return model;
+    model.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3U}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, 4U}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(opacities, {count, 1U}, device);
+    model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, device);
     if (has_normal_features)
-        model.normal_features = tinytensor::Tensor::from_vector(
-            normal_features, {count, 4U}, device);
+        model.normal_features =
+            tinytensor::Tensor::from_vector(normal_features, {count, 4U}, device);
     if (has_filter)
-        model.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {count, 1U}, device);
+        model.filter_3d = tinytensor::Tensor::from_vector(filter, {count, 1U}, device);
     model.sh_degree = sh_degree;
     return model;
 }
@@ -3421,7 +3226,8 @@ void run_orbit_preview(
         std::uint64_t revision = 0;
         VisualizeOptions vis;
         vis.active_sh_degree = model.sh_degree;
-        const bool mip2d = model.filter_mode == SplatFilterMode::mip_2d || model.filter_mode == SplatFilterMode::mip;
+        const bool mip2d = model.filter_mode == SplatFilterMode::mip_2d ||
+                           model.filter_mode == SplatFilterMode::mip;
         vis.kernel_size = mip2d ? 0.1F : 0.3F;
         vis.rasterization.compensate_2d = mip2d;
         std::uint64_t vis_revision = last_vis_revision;
@@ -3436,4 +3242,4 @@ void run_orbit_preview(
     }
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

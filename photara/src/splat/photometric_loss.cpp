@@ -15,8 +15,7 @@ void photometric_loss(
     const std::uint32_t height,
     const PhotometricLossOptions& options) {
     fused_l1_ssim_loss(
-        prediction, target, mask, mask_enabled,
-        options.ssim_weight, options.photometric_weight,
+        prediction, target, mask, mask_enabled, options.ssim_weight, options.photometric_weight,
         gradient, scalar_terms, width, height);
 }
 
@@ -30,8 +29,8 @@ splat_drender::vulkan::SplatDevicePhotometricOutput photometric_loss(
         prediction.color.buffer == VK_NULL_HANDLE)
         throw std::invalid_argument("Vulkan photometric loss requires a device render");
     return rasterizer.fused_l1_ssim_device(
-        prediction.color, target, prediction.width, prediction.height,
-        options.ssim_weight, options.photometric_weight, mask);
+        prediction.color, target, prediction.width, prediction.height, options.ssim_weight,
+        options.photometric_weight, mask);
 }
 
 float photometric_loss_scalar(
@@ -40,4 +39,4 @@ float photometric_loss_scalar(
     return rasterizer.read_photometric_loss(output);
 }
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

@@ -8,26 +8,35 @@ namespace splat_drender::vulkan {
 struct SplatColorCorrectionCommand;
 struct SplatDeviceMultiViewInput;
 struct SplatDeviceMultiViewOutput;
-}
+} // namespace splat_drender::vulkan
 
 namespace photara::splat::detail {
 
 RenderResult vulkan_raster_forward(
-    std::shared_ptr<void>& backend, const GaussianModel& model,
-    const Camera& camera, const RasterizeOptions& options);
+    std::shared_ptr<void>& backend,
+    const GaussianModel& model,
+    const Camera& camera,
+    const RasterizeOptions& options);
 
 tinytensor::Tensor vulkan_pruning_scores(
-    std::shared_ptr<void>& backend, const GaussianModel& model,
-    const Camera& camera, RasterizeOptions options);
+    std::shared_ptr<void>& backend,
+    const GaussianModel& model,
+    const Camera& camera,
+    RasterizeOptions options);
 
 float vulkan_photometric_loss(
-    const RenderResult& rendered, const tinytensor::Tensor& target,
-    const tinytensor::Tensor& mask, bool mask_enabled,
-    float ssim_weight, float photometric_weight, bool read_loss_value,
+    const RenderResult& rendered,
+    const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask,
+    bool mask_enabled,
+    float ssim_weight,
+    float photometric_weight,
+    bool read_loss_value,
     tinytensor::Tensor* color_gradient);
 
 ModelGradients vulkan_raster_backward(
-    const GaussianModel& model, const RenderResult& rendered,
+    const GaussianModel& model,
+    const RenderResult& rendered,
     const tinytensor::Tensor& grad_color,
     const tinytensor::Tensor& grad_alpha,
     const tinytensor::Tensor& grad_depth,
@@ -39,16 +48,22 @@ ModelGradients vulkan_raster_backward(
 void vulkan_materialize_visibility(RenderResult& rendered);
 
 DepthSampleResult vulkan_sample_depth(
-    std::shared_ptr<void>& backend, const GaussianModel& model,
-    const tinytensor::Tensor& points, const Camera& camera,
+    std::shared_ptr<void>& backend,
+    const GaussianModel& model,
+    const tinytensor::Tensor& points,
+    const Camera& camera,
     const RasterizeOptions& options);
 // Reuse is limited to consecutive chunks of the same model/view/options.
 OccupancyResult vulkan_occupancy(
-    std::shared_ptr<void>& backend, const GaussianModel& model,
-    const tinytensor::Tensor& points, const Camera& camera,
-    const RasterizeOptions& options, bool reuse_prepared_view = false);
+    std::shared_ptr<void>& backend,
+    const GaussianModel& model,
+    const tinytensor::Tensor& points,
+    const Camera& camera,
+    const RasterizeOptions& options,
+    bool reuse_prepared_view = false);
 DepthSampleGradients vulkan_sample_depth_backward(
-    const GaussianModel& model, const DepthSampleResult& sampled,
+    const GaussianModel& model,
+    const DepthSampleResult& sampled,
     const tinytensor::Tensor& gradient);
 void vulkan_multi_view_loss(
     const RenderResult& rendered,
@@ -60,4 +75,4 @@ void vulkan_multi_view_loss(
 bool vulkan_dispatch_color_correction(
     std::span<const splat_drender::vulkan::SplatColorCorrectionCommand> commands);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

@@ -15,52 +15,70 @@ struct Push {
 void main(uint3 id : SV_DispatchThreadID) {
     uint p = id.x;
     if (pc.stage == 3) {
-        if (p != 0) return;
+        if (p != 0)
+            return;
         uint count = 0;
-        for (uint b=0; b<256; ++b) count += stats[4+b];
-        float lo=0, hi=1;
+        for (uint b = 0; b < 256; ++b)
+            count += stats[4 + b];
+        float lo = 0, hi = 1;
         if (count > 0) {
-            float minimum=asfloat(stats[1]), span=asfloat(stats[0])-minimum;
-            uint low=(count-1)/100, high=(count-1)*99/100, cumulative=0;
-            bool found=false;
-            for (uint b=0; b<256; ++b) {
-                cumulative += stats[4+b];
-                if (!found && cumulative > low) { lo=minimum+span*b/256; found=true; }
-                if (cumulative > high) { hi=minimum+span*(b+1)/256; break; }
+            float minimum = asfloat(stats[1]), span = asfloat(stats[0]) - minimum;
+            uint low = (count - 1) / 100, high = (count - 1) * 99 / 100, cumulative = 0;
+            bool found = false;
+            for (uint b = 0; b < 256; ++b) {
+                cumulative += stats[4 + b];
+                if (!found && cumulative > low) {
+                    lo = minimum + span * b / 256;
+                    found = true;
+                }
+                if (cumulative > high) {
+                    hi = minimum + span * (b + 1) / 256;
+                    break;
+                }
             }
-            hi=max(hi,lo+max(0.0001,lo*0.0001));
+            hi = max(hi, lo + max(0.0001, lo * 0.0001));
         }
-        stats[2]=asuint(lo); stats[3]=asuint(hi);
+        stats[2] = asuint(lo);
+        stats[3] = asuint(hi);
         return;
     }
-    if (p >= pc.pixels) return;
-    float d=depth[p];
-    bool valid=isfinite(d) && d>0 && isfinite(alpha[p]) && alpha[p]>.05;
+    if (p >= pc.pixels)
+        return;
+    float d = depth[p];
+    bool valid = isfinite(d) && d > 0 && isfinite(alpha[p]) && alpha[p] > .05;
     if (pc.stage == 1) {
-        if (valid) { InterlockedMax(stats[0],asuint(d)); InterlockedMin(stats[1],asuint(d)); }
+        if (valid) {
+            InterlockedMax(stats[0], asuint(d));
+            InterlockedMin(stats[1], asuint(d));
+        }
         return;
     }
     if (pc.stage == 2) {
         if (valid) {
-            float minimum=asfloat(stats[1]), span=max(asfloat(stats[0])-minimum,1e-8);
-            uint bin=min(255u,(uint)(saturate((d-minimum)/span)*256));
-            InterlockedAdd(stats[4+bin],1);
+            float minimum = asfloat(stats[1]), span = max(asfloat(stats[0]) - minimum, 1e-8);
+            uint bin = min(255u, (uint)(saturate((d - minimum) / span) * 256));
+            InterlockedAdd(stats[4 + bin], 1);
         }
         return;
     }
-    float3 rgb=0;
+    float3 rgb = 0;
     if (valid) {
         if (pc.channel == 1) {
-            float t=saturate((d-asfloat(stats[2]))/max(asfloat(stats[3])-asfloat(stats[2]),1e-8));
-            rgb=pc.grayscale ? (1-t).xxx : saturate(1.5-abs(4*(1-t)-float3(3,2,1)));
+            float t = saturate(
+                (d - asfloat(stats[2])) / max(asfloat(stats[3]) - asfloat(stats[2]), 1e-8));
+            rgb = pc.grayscale ? (1 - t).xxx : saturate(1.5 - abs(4 * (1 - t) - float3(3, 2, 1)));
         } else {
-            float3 n=float3(normal[p],normal[pc.pixels+p],normal[2*pc.pixels+p]);
-            if (pc.world) n=float3(dot(float3(pc.r0,pc.r1,pc.r2),n),
-                                  dot(float3(pc.r3,pc.r4,pc.r5),n),
-                                  dot(float3(pc.r6,pc.r7,pc.r8),n));
-            float len=length(n);
-            if (all(isfinite(n)) && len>1e-8) rgb=saturate(n/len*.5+.5);
+            float3 n = float3(normal[p], normal[pc.pixels + p], normal[2 * pc.pixels + p]);
+            if (pc.world)
+                n = float3(
+                    dot(float3(pc.r0, pc.r1, pc.r2), n), dot(float3(pc.r3, pc.r4, pc.r5), n),
+                    dot(float3(pc.r6, pc.r7, pc.r8), n));
+            float len = length(n);
+            if (all(isfinite(n)) && len > 1e-8)
+                rgb = saturate(n / len * .5 + .5);
         }
     }
-    color[p]=rgb.x; color[pc.pixels+p]=rgb.y; color[2*pc.pixels+p]=rgb.z;
+    color[p] = rgb.x;
+    color[pc.pixels + p] = rgb.y;
+    color[2 * pc.pixels + p] = rgb.z;
 }

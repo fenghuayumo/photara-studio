@@ -8,18 +8,16 @@ namespace photara::splat::dataset_detail {
 namespace {
 
 class ColmapReader final : public DatasetReader {
-public:
+  public:
     [[nodiscard]] DatasetFormat format() const noexcept override {
         return DatasetFormat::colmap;
     }
 
-    [[nodiscard]] bool probe(
-        const DatasetLoadRequest& request) const override {
+    [[nodiscard]] bool probe(const DatasetLoadRequest& request) const override {
         return has_colmap_model(request.source);
     }
 
-    [[nodiscard]] DatasetLoadResult load(
-        const DatasetLoadRequest& request) const override {
+    [[nodiscard]] DatasetLoadResult load(const DatasetLoadRequest& request) const override {
         std::filesystem::path images = request.image_directory;
         if (images.empty()) {
             auto root = source_directory(request.source);
@@ -31,8 +29,7 @@ public:
                 root = root.parent_path();
             }
         }
-        auto colmap = load_colmap_scene(
-            request.source, images);
+        auto colmap = load_colmap_scene(request.source, images);
         DatasetLoadResult result;
         result.scene = std::move(colmap.scene);
         result.format = format();
@@ -41,10 +38,10 @@ public:
     }
 };
 
-}  // namespace
+} // namespace
 
 std::unique_ptr<DatasetReader> make_colmap_reader() {
     return std::make_unique<ColmapReader>();
 }
 
-}  // namespace photara::splat::dataset_detail
+} // namespace photara::splat::dataset_detail

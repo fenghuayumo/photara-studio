@@ -19,4 +19,4 @@ ColmapLoadResult load_colmap_scene(
     const std::filesystem::path& model_directory,
     const std::filesystem::path& image_directory);
 
-}  // namespace photara::splat
+} // namespace photara::splat

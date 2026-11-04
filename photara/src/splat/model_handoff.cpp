@@ -14,16 +14,18 @@ namespace photara::splat {
 namespace {
 constexpr std::size_t kHeader = 20;
 
-using io::detail::Mapping;
 using io::detail::ack_path;
+using io::detail::Mapping;
 using io::detail::publish_text;
 
 GaussianModel cpu_snapshot(const GaussianModel& model) {
     GaussianModel copy = model;
     const auto cpu = [](const tinytensor::Tensor& tensor) {
-        if (!tensor.is_valid()) return tinytensor::Tensor{};
-        return (tensor.device() == tinytensor::Device::CPU
-                    ? tensor : tensor.to(tinytensor::Device::CPU)).contiguous();
+        if (!tensor.is_valid())
+            return tinytensor::Tensor{};
+        return (tensor.device() == tinytensor::Device::CPU ? tensor
+                                                           : tensor.to(tinytensor::Device::CPU))
+            .contiguous();
     };
     copy.means = cpu(model.means);
     copy.log_scales = cpu(model.log_scales);
@@ -34,7 +36,7 @@ GaussianModel cpu_snapshot(const GaussianModel& model) {
     copy.filter_3d = cpu(model.filter_3d);
     return copy;
 }
-}  // namespace
+} // namespace
 
 struct ModelHandoff::Impl {
     GaussianModel snapshot;
@@ -57,8 +59,9 @@ ModelHandoff::ModelHandoff(const GaussianModel& model, const std::filesystem::pa
         s.quaternions.numel() != count * 4U || s.opacity_logits.numel() != count ||
         s.sh.numel() != count * bases * 3U)
         throw std::runtime_error("Invalid final-model handoff layout");
-    const auto bytes = kHeader + count * (11U + bases * 3U + (normals ? 4U : 0U) +
-                                        (filter ? 1U : 0U)) * sizeof(float);
+    const auto bytes = kHeader + count *
+                                     (11U + bases * 3U + (normals ? 4U : 0U) + (filter ? 1U : 0U)) *
+                                     sizeof(float);
     const auto token = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 #ifdef _WIN32
     impl_->name = "Local\\Photara.model." + std::to_string(GetCurrentProcessId()) + "." + token;
@@ -75,9 +78,12 @@ ModelHandoff::ModelHandoff(const GaussianModel& model, const std::filesystem::pa
     const std::uint32_t version = k_gaussian_chunk_version;
     const std::uint64_t stored_count = count;
     const std::uint32_t flags = (filter ? 1U : 0U) | (normals ? 2U : 0U) |
-        (s.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) |
-        (static_cast<std::uint32_t>(s.filter_mode) << 3U);
-    append(&version, 4); append(&stored_count, 8); append(&s.sh_degree, 4); append(&flags, 4);
+                                (s.render_method == RenderMethod::gaussian_3dgut ? 4U : 0U) |
+                                (static_cast<std::uint32_t>(s.filter_mode) << 3U);
+    append(&version, 4);
+    append(&stored_count, 8);
+    append(&s.sh_degree, 4);
+    append(&flags, 4);
     const auto tensor = [&](const tinytensor::Tensor& t) {
         const auto* data = t.ptr<float>();
         for (std::size_t i = 0; i < t.numel(); ++i)
@@ -85,24 +91,33 @@ ModelHandoff::ModelHandoff(const GaussianModel& model, const std::filesystem::pa
                 throw std::runtime_error("Non-finite final-model handoff parameter");
         append(data, t.numel() * sizeof(float));
     };
-    tensor(s.means); tensor(s.log_scales); tensor(s.quaternions);
-    tensor(s.opacity_logits); tensor(s.sh);
-    if (normals) tensor(s.normal_features);
-    if (filter) tensor(s.filter_3d);
-    if (!ready.parent_path().empty()) std::filesystem::create_directories(ready.parent_path());
-    publish_text(ready, "PHOTARA_MODEL_HANDOFF 1\n" + impl_->name + "\n" +
-                        std::to_string(bytes) + "\n");
+    tensor(s.means);
+    tensor(s.log_scales);
+    tensor(s.quaternions);
+    tensor(s.opacity_logits);
+    tensor(s.sh);
+    if (normals)
+        tensor(s.normal_features);
+    if (filter)
+        tensor(s.filter_3d);
+    if (!ready.parent_path().empty())
+        std::filesystem::create_directories(ready.parent_path());
+    publish_text(
+        ready, "PHOTARA_MODEL_HANDOFF 1\n" + impl_->name + "\n" + std::to_string(bytes) + "\n");
 }
 
 ModelHandoff::~ModelHandoff() = default;
-const GaussianModel& ModelHandoff::model() const { return impl_->snapshot; }
+const GaussianModel& ModelHandoff::model() const {
+    return impl_->snapshot;
+}
 
 bool ModelHandoff::wait_for_reader(const std::chrono::milliseconds timeout) const {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     do {
         std::ifstream in(ack_path(impl_->ready));
         std::string name;
-        if (std::getline(in, name) && name == impl_->name) return true;
+        if (std::getline(in, name) && name == impl_->name)
+            return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while (std::chrono::steady_clock::now() < deadline);
     return false;
@@ -112,27 +127,30 @@ GaussianModel receive_model_handoff(const std::filesystem::path& ready) {
     std::ifstream in(ready);
     std::string magic, name;
     std::size_t bytes{};
-    if (!std::getline(in, magic) || magic != "PHOTARA_MODEL_HANDOFF 1" ||
-        !std::getline(in, name) || !(in >> bytes) || bytes < kHeader ||
-        bytes > 50'000'000ULL * 64U * sizeof(float) + kHeader)
+    if (!std::getline(in, magic) || magic != "PHOTARA_MODEL_HANDOFF 1" || !std::getline(in, name) ||
+        !(in >> bytes) || bytes < kHeader || bytes > 50'000'000ULL * 64U * sizeof(float) + kHeader)
         throw std::runtime_error("Invalid final-model handoff manifest");
     Mapping mapping;
     mapping.open(name, bytes, false);
     const auto* data = static_cast<const std::uint8_t*>(mapping.data);
     std::uint32_t version{}, degree{}, flags{};
     std::uint64_t count{};
-    std::memcpy(&version, data, 4); std::memcpy(&count, data + 4, 8);
-    std::memcpy(&degree, data + 12, 4); std::memcpy(&flags, data + 16, 4);
-    if (version != k_gaussian_chunk_version || count == 0 || count > 50'000'000 ||
-        degree > 3 || (flags & ~63U) != 0 || ((flags >> 3U) & 7U) < 1U || ((flags >> 3U) & 7U) > 4U)
+    std::memcpy(&version, data, 4);
+    std::memcpy(&count, data + 4, 8);
+    std::memcpy(&degree, data + 12, 4);
+    std::memcpy(&flags, data + 16, 4);
+    if (version != k_gaussian_chunk_version || count == 0 || count > 50'000'000 || degree > 3 ||
+        (flags & ~63U) != 0 || ((flags >> 3U) & 7U) < 1U || ((flags >> 3U) & 7U) > 4U)
         throw std::runtime_error("Invalid final-model handoff header");
     const auto expected = kHeader + count *
-        (11U + (degree + 1U) * (degree + 1U) * 3U +
-         ((flags & 2U) ? 4U : 0U) + ((flags & 1U) ? 1U : 0U)) * sizeof(float);
-    if (expected != bytes) throw std::runtime_error("Truncated final-model handoff payload");
+                                        (11U + (degree + 1U) * (degree + 1U) * 3U +
+                                         ((flags & 2U) ? 4U : 0U) + ((flags & 1U) ? 1U : 0U)) *
+                                        sizeof(float);
+    if (expected != bytes)
+        throw std::runtime_error("Truncated final-model handoff payload");
     // Acknowledging the open mapping lets the publisher finish without waiting
     // for CPU decoding or GPU upload. Our handle keeps its storage alive.
     publish_text(ack_path(ready), name + "\n");
     return decode_gaussians(std::span<const std::uint8_t>(data, bytes), tinytensor::Device::CPU);
 }
-}  // namespace photara::splat
+} // namespace photara::splat

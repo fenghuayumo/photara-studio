@@ -35,8 +35,7 @@ float logit(const float opacity) {
 }
 
 void quat_normalize(float q[4]) {
-    const float n = std::sqrt(
-        q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    const float n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (!(n > 1e-12F)) {
         q[0] = 1.F;
         q[1] = q[2] = q[3] = 0.F;
@@ -127,10 +126,7 @@ void covariance(const float q[4], const float s[3], float cov[6]) {
 }
 
 void jacobi_eigen_spd(const float cov[6], float eval[3], float evec[9]) {
-    float a[9] = {
-        cov[0], cov[3], cov[4],
-        cov[3], cov[1], cov[5],
-        cov[4], cov[5], cov[2]};
+    float a[9] = {cov[0], cov[3], cov[4], cov[3], cov[1], cov[5], cov[4], cov[5], cov[2]};
     evec[0] = evec[4] = evec[8] = 1.F;
     evec[1] = evec[2] = evec[3] = evec[5] = evec[6] = evec[7] = 0.F;
     for (int iter = 0; iter < 24; ++iter) {
@@ -147,16 +143,17 @@ void jacobi_eigen_spd(const float cov[6], float eval[3], float evec[9]) {
             q = 2;
             apq = yz;
         }
-        if (apq < 1e-12F) break;
+        if (apq < 1e-12F)
+            break;
         const float app = a[p * 3 + p];
         const float aqq = a[q * 3 + q];
         const float tau = (aqq - app) / (2.F * a[p * 3 + q]);
-        const float t = std::copysign(
-            1.F / (std::abs(tau) + std::sqrt(1.F + tau * tau)), tau);
+        const float t = std::copysign(1.F / (std::abs(tau) + std::sqrt(1.F + tau * tau)), tau);
         const float c = 1.F / std::sqrt(1.F + t * t);
         const float s = t * c;
         for (int k = 0; k < 3; ++k) {
-            if (k == p || k == q) continue;
+            if (k == p || k == q)
+                continue;
             const float akp = a[k * 3 + p];
             const float akq = a[k * 3 + q];
             a[k * 3 + p] = a[p * 3 + k] = c * akp - s * akq;
@@ -194,8 +191,10 @@ void covariance_to_qs(const float cov[6], float q[4], float s[3]) {
 }
 
 float kl_gaussian(
-    const float mu_p[3], const float cov_p[6],
-    const float mu_q[3], const float cov_q[6]) {
+    const float mu_p[3],
+    const float cov_p[6],
+    const float mu_q[3],
+    const float cov_q[6]) {
     float eval[3], evec[9];
     jacobi_eigen_spd(cov_q, eval, evec);
     float inv[6]{};
@@ -213,14 +212,14 @@ float kl_gaussian(
     const float d1 = mu_p[1] - mu_q[1];
     const float d2 = mu_p[2] - mu_q[2];
     const float mahal = d0 * (inv[0] * d0 + inv[3] * d1 + inv[4] * d2) +
-        d1 * (inv[3] * d0 + inv[1] * d1 + inv[5] * d2) +
-        d2 * (inv[4] * d0 + inv[5] * d1 + inv[2] * d2);
+                        d1 * (inv[3] * d0 + inv[1] * d1 + inv[5] * d2) +
+                        d2 * (inv[4] * d0 + inv[5] * d1 + inv[2] * d2);
     const float tr = inv[0] * cov_p[0] + inv[1] * cov_p[1] + inv[2] * cov_p[2] +
-        2.F * (inv[3] * cov_p[3] + inv[4] * cov_p[4] + inv[5] * cov_p[5]);
+                     2.F * (inv[3] * cov_p[3] + inv[4] * cov_p[4] + inv[5] * cov_p[5]);
     float eval_p[3], evec_p[9];
     jacobi_eigen_spd(cov_p, eval_p, evec_p);
-    const float log_det = std::log(eval[0] * eval[1] * eval[2] /
-        (eval_p[0] * eval_p[1] * eval_p[2]));
+    const float log_det =
+        std::log(eval[0] * eval[1] * eval[2] / (eval_p[0] * eval_p[1] * eval_p[2]));
     return 0.5F * (tr + mahal - 3.F + log_det);
 }
 
@@ -247,17 +246,22 @@ const float* mean_at(const SplatSet& set, const std::size_t i) {
 }
 
 void swap_splat(SplatSet& set, const std::size_t a, const std::size_t b) {
-    if (a == b) return;
-    for (int k = 0; k < 3; ++k) std::swap(set.mean[a * 3 + k], set.mean[b * 3 + k]);
-    for (int k = 0; k < 3; ++k) std::swap(set.scale[a * 3 + k], set.scale[b * 3 + k]);
-    for (int k = 0; k < 4; ++k) std::swap(set.quat[a * 4 + k], set.quat[b * 4 + k]);
+    if (a == b)
+        return;
+    for (int k = 0; k < 3; ++k)
+        std::swap(set.mean[a * 3 + k], set.mean[b * 3 + k]);
+    for (int k = 0; k < 3; ++k)
+        std::swap(set.scale[a * 3 + k], set.scale[b * 3 + k]);
+    for (int k = 0; k < 4; ++k)
+        std::swap(set.quat[a * 4 + k], set.quat[b * 4 + k]);
     std::swap(set.opacity[a], set.opacity[b]);
     for (std::size_t k = 0; k < set.sh_dim; ++k)
         std::swap(set.sh[a * set.sh_dim + k], set.sh[b * set.sh_dim + k]);
     if (!set.normal.empty())
         for (int k = 0; k < 4; ++k)
             std::swap(set.normal[a * 4 + k], set.normal[b * 4 + k]);
-    if (!set.filter.empty()) std::swap(set.filter[a], set.filter[b]);
+    if (!set.filter.empty())
+        std::swap(set.filter[a], set.filter[b]);
 }
 
 void compact_to(SplatSet& set, const std::size_t n) {
@@ -267,14 +271,17 @@ void compact_to(SplatSet& set, const std::size_t n) {
     set.quat.resize(n * 4);
     set.opacity.resize(n);
     set.sh.resize(n * set.sh_dim);
-    if (!set.normal.empty()) set.normal.resize(n * 4);
-    if (!set.filter.empty()) set.filter.resize(n);
+    if (!set.normal.empty())
+        set.normal.resize(n * 4);
+    if (!set.filter.empty())
+        set.filter.resize(n);
 }
 
 SplatSet from_model(const GaussianModel& model) {
     SplatSet set;
     set.n = model.size();
-    if (set.n == 0) return set;
+    if (set.n == 0)
+        return set;
     set.sh_degree = model.sh_degree;
     set.render_method = model.render_method;
     set.filter_mode = model.filter_mode;
@@ -301,8 +308,7 @@ SplatSet from_model(const GaussianModel& model) {
         if (i * set.sh_dim < sh.size())
             std::copy_n(sh.data() + i * set.sh_dim, take, set.sh.data() + i * set.sh_dim);
     }
-    if (model.normal_features.is_valid() &&
-        model.normal_features.numel() == set.n * 4)
+    if (model.normal_features.is_valid() && model.normal_features.numel() == set.n * 4)
         set.normal = model.normal_features.to_vector();
     if (model.filter_3d.is_valid() && model.filter_3d.numel() == set.n)
         set.filter = model.filter_3d.to_vector();
@@ -314,7 +320,8 @@ GaussianModel to_model(const SplatSet& set) {
     model.sh_degree = set.sh_degree;
     model.render_method = set.render_method;
     model.filter_mode = set.filter_mode;
-    if (set.n == 0) return model;
+    if (set.n == 0)
+        return model;
     std::vector<float> logs(set.n * 3), logits(set.n);
     for (std::size_t i = 0; i < set.n; ++i) {
         logs[i * 3] = std::log(std::max(set.scale[i * 3], k_scale_eps));
@@ -328,22 +335,21 @@ GaussianModel to_model(const SplatSet& set) {
     model.quaternions = tinytensor::Tensor::from_vector(set.quat, {set.n, 4}, cpu);
     model.opacity_logits = tinytensor::Tensor::from_vector(logits, {set.n, 1}, cpu);
     const std::size_t bases = std::max<std::size_t>(1, set.sh_dim / 3);
-    model.sh = tinytensor::Tensor::from_vector(
-        set.sh, {set.n, bases, 3}, cpu);
+    model.sh = tinytensor::Tensor::from_vector(set.sh, {set.n, bases, 3}, cpu);
     if (!set.normal.empty())
-        model.normal_features = tinytensor::Tensor::from_vector(
-            set.normal, {set.n, 4}, cpu);
+        model.normal_features = tinytensor::Tensor::from_vector(set.normal, {set.n, 4}, cpu);
     if (!set.filter.empty())
-        model.filter_3d = tinytensor::Tensor::from_vector(
-            set.filter, {set.n, 1}, cpu);
+        model.filter_3d = tinytensor::Tensor::from_vector(set.filter, {set.n, 1}, cpu);
     return model;
 }
 
 void prune_opacity(SplatSet& set, const float min_opacity) {
     std::size_t w = 0;
     for (std::size_t i = 0; i < set.n; ++i) {
-        if (set.opacity[i] < min_opacity) continue;
-        if (w != i) swap_splat(set, w, i);
+        if (set.opacity[i] < min_opacity)
+            continue;
+        if (w != i)
+            swap_splat(set, w, i);
         ++w;
     }
     compact_to(set, w);
@@ -357,9 +363,14 @@ struct KdNode {
 };
 
 void build_kd(
-    std::vector<KdNode>& nodes, std::vector<std::uint32_t>& order,
-    const SplatSet& set, const int begin, const int end, const int axis) {
-    if (begin >= end) return;
+    std::vector<KdNode>& nodes,
+    std::vector<std::uint32_t>& order,
+    const SplatSet& set,
+    const int begin,
+    const int end,
+    const int axis) {
+    if (begin >= end)
+        return;
     const int mid = (begin + end) / 2;
     std::nth_element(
         order.begin() + begin, order.begin() + mid, order.begin() + end,
@@ -372,23 +383,25 @@ void build_kd(
     nodes[static_cast<std::size_t>(id)].axis = static_cast<std::uint8_t>(axis);
     const int next = (axis + 1) % 3;
     if (begin < mid) {
-        nodes[static_cast<std::size_t>(id)].left =
-            static_cast<std::int32_t>(nodes.size());
+        nodes[static_cast<std::size_t>(id)].left = static_cast<std::int32_t>(nodes.size());
         build_kd(nodes, order, set, begin, mid, next);
     }
     if (mid + 1 < end) {
-        nodes[static_cast<std::size_t>(id)].right =
-            static_cast<std::int32_t>(nodes.size());
+        nodes[static_cast<std::size_t>(id)].right = static_cast<std::int32_t>(nodes.size());
         build_kd(nodes, order, set, mid + 1, end, next);
     }
 }
 
 void knn_search(
-    const std::vector<KdNode>& nodes, const SplatSet& set, const std::size_t query,
-    const unsigned k, std::int32_t node,
+    const std::vector<KdNode>& nodes,
+    const SplatSet& set,
+    const std::size_t query,
+    const unsigned k,
+    std::int32_t node,
     std::array<std::pair<float, std::uint32_t>, 16>& heap,
     unsigned& heap_size) {
-    if (node < 0) return;
+    if (node < 0)
+        return;
     const KdNode& cur = nodes[static_cast<std::size_t>(node)];
     const float* q = mean_at(set, query);
     const float* p = mean_at(set, cur.index);
@@ -412,12 +425,13 @@ void knn_search(
         knn_search(nodes, set, query, k, second, heap, heap_size);
 }
 
-std::vector<std::array<std::uint32_t, 16>> knn_graph(
-    const SplatSet& set, const unsigned k) {
+std::vector<std::array<std::uint32_t, 16>> knn_graph(const SplatSet& set, const unsigned k) {
     const unsigned kk = std::min(k, 16U);
     std::vector<std::array<std::uint32_t, 16>> graph(set.n);
-    for (auto& row : graph) row.fill(~0U);
-    if (set.n <= 1) return graph;
+    for (auto& row : graph)
+        row.fill(~0U);
+    if (set.n <= 1)
+        return graph;
     std::vector<std::uint32_t> order(set.n);
     std::iota(order.begin(), order.end(), 0U);
     std::vector<KdNode> nodes;
@@ -476,22 +490,22 @@ void merge_pair(SplatSet& set, const std::size_t a, const std::size_t b) {
     covariance_to_qs(cov, q, s);
     // Spread lives in the merged covariance. Opacity stays a mass-weighted
     // blend, not total mass divided by the new volume.
-    const float opacity = std::clamp(
-        w1 * set.opacity[a] + w2 * set.opacity[b],
-        k_logit_eps, 1.F - k_logit_eps);
-    for (int k = 0; k < 3; ++k) set.mean[a * 3 + k] = mu[k];
-    for (int k = 0; k < 3; ++k) set.scale[a * 3 + k] = s[k];
-    for (int k = 0; k < 4; ++k) set.quat[a * 4 + k] = q[k];
+    const float opacity =
+        std::clamp(w1 * set.opacity[a] + w2 * set.opacity[b], k_logit_eps, 1.F - k_logit_eps);
+    for (int k = 0; k < 3; ++k)
+        set.mean[a * 3 + k] = mu[k];
+    for (int k = 0; k < 3; ++k)
+        set.scale[a * 3 + k] = s[k];
+    for (int k = 0; k < 4; ++k)
+        set.quat[a * 4 + k] = q[k];
     set.opacity[a] = opacity;
     for (std::size_t k = 0; k < set.sh_dim; ++k)
         set.sh[a * set.sh_dim + k] =
             w1 * set.sh[a * set.sh_dim + k] + w2 * set.sh[b * set.sh_dim + k];
     if (!set.normal.empty()) {
         for (int k = 0; k < 4; ++k)
-            set.normal[a * 4 + k] =
-                w1 * set.normal[a * 4 + k] + w2 * set.normal[b * 4 + k];
-        const float nx = set.normal[a * 4], ny = set.normal[a * 4 + 1],
-                    nz = set.normal[a * 4 + 2];
+            set.normal[a * 4 + k] = w1 * set.normal[a * 4 + k] + w2 * set.normal[b * 4 + k];
+        const float nx = set.normal[a * 4], ny = set.normal[a * 4 + 1], nz = set.normal[a * 4 + 2];
         const float nn = std::sqrt(nx * nx + ny * ny + nz * nz);
         if (nn > 1e-8F) {
             set.normal[a * 4] = nx / nn;
@@ -527,7 +541,7 @@ float pair_cost(const SplatSet& set, const std::size_t a, const std::size_t b) {
     cov[4] = w1 * (cov1[4] + d1[0] * d1[2]) + w2 * (cov2[4] + d2[0] * d2[2]);
     cov[5] = w1 * (cov1[5] + d1[1] * d1[2]) + w2 * (cov2[5] + d2[1] * d2[2]);
     const float geom = m1 * kl_gaussian(mean_at(set, a), cov1, mu, cov) +
-        m2 * kl_gaussian(mean_at(set, b), cov2, mu, cov);
+                       m2 * kl_gaussian(mean_at(set, b), cov2, mu, cov);
     float app = 0.F;
     const std::size_t dim = std::min<std::size_t>(3, set.sh_dim);
     for (std::size_t k = 0; k < dim; ++k) {
@@ -548,14 +562,15 @@ bool cancelled(const SimplifyOptions& options) {
 }
 
 void report(const SimplifyOptions& options, const float progress) {
-    if (options.progress) options.progress(std::clamp(progress, 0.F, 1.F));
+    if (options.progress)
+        options.progress(std::clamp(progress, 0.F, 1.F));
 }
 
-}  // namespace
+} // namespace
 
-GaussianModel simplify_gaussians(
-    const GaussianModel& model, const SimplifyOptions& options) {
-    if (model.size() == 0) return model;
+GaussianModel simplify_gaussians(const GaussianModel& model, const SimplifyOptions& options) {
+    if (model.size() == 0)
+        return model;
     if (!(options.keep_ratio > 0.F) || options.keep_ratio > 1.F)
         throw std::invalid_argument("simplify keep_ratio must be in (0, 1]");
     if (options.knn == 0)
@@ -566,22 +581,24 @@ GaussianModel simplify_gaussians(
     report(options, 0.08F);
     const std::size_t target = std::max<std::size_t>(
         1, static_cast<std::size_t>(std::llround(
-               static_cast<double>(original) *
-               static_cast<double>(options.keep_ratio))));
+               static_cast<double>(original) * static_cast<double>(options.keep_ratio))));
     const unsigned knn = std::min(options.knn, 16U);
     const float cap = std::clamp(options.merge_cap, 0.01F, 0.9F);
     int pass = 0;
     while (set.n > target) {
-        if (cancelled(options)) break;
+        if (cancelled(options))
+            break;
         auto graph = knn_graph(set, knn);
         std::vector<Edge> edges;
         edges.reserve(set.n * knn);
         for (std::size_t i = 0; i < set.n; ++i) {
             for (unsigned n = 0; n < knn; ++n) {
                 const std::uint32_t j = graph[i][n];
-                if (j == ~0U || j <= i || j >= set.n) continue;
-                edges.push_back({options.vulkan ? 0.F : pair_cost(set, i, j),
-                    static_cast<std::uint32_t>(i), j});
+                if (j == ~0U || j <= i || j >= set.n)
+                    continue;
+                edges.push_back(
+                    {options.vulkan ? 0.F : pair_cost(set, i, j), static_cast<std::uint32_t>(i),
+                     j});
             }
         }
         if (options.vulkan && !edges.empty()) {
@@ -591,46 +608,51 @@ GaussianModel simplify_gaussians(
                 float* row = values.data() + i * 16;
                 std::copy_n(mean_at(set, i), 3, row);
                 row[3] = mass_of(set, i);
-                covariance(&set.quat[i*4], &set.scale[i*3], row+4);
+                covariance(&set.quat[i * 4], &set.scale[i * 3], row + 4);
                 float eval[3], evec[9];
-                jacobi_eigen_spd(row+4, eval, evec);
-                row[10] = std::log(eval[0]*eval[1]*eval[2]);
-                std::copy_n(set.sh.data()+i*set.sh_dim, 3, row+11);
+                jacobi_eigen_spd(row + 4, eval, evec);
+                row[10] = std::log(eval[0] * eval[1] * eval[2]);
+                std::copy_n(set.sh.data() + i * set.sh_dim, 3, row + 11);
             }
             // Bound transient edge buffers; evaluate costs in GPU batches.
             constexpr std::size_t batch = 262144;
             for (std::size_t start = 0; start < edges.size(); start += batch) {
-                if (cancelled(options)) return to_model(set);
-                const auto count = std::min(batch, edges.size()-start);
-                std::vector<std::int32_t> pairs(count*2);
-                for (std::size_t i=0;i<count;++i) {
-                    pairs[i*2]=static_cast<std::int32_t>(edges[start+i].a);
-                    pairs[i*2+1]=static_cast<std::int32_t>(edges[start+i].b);
+                if (cancelled(options))
+                    return to_model(set);
+                const auto count = std::min(batch, edges.size() - start);
+                std::vector<std::int32_t> pairs(count * 2);
+                for (std::size_t i = 0; i < count; ++i) {
+                    pairs[i * 2] = static_cast<std::int32_t>(edges[start + i].a);
+                    pairs[i * 2 + 1] = static_cast<std::int32_t>(edges[start + i].b);
                 }
-                const auto costs=detail::lod_costs_vulkan(values,pairs);
-                for (std::size_t i=0;i<count;++i) edges[start+i].cost=costs[i];
+                const auto costs = detail::lod_costs_vulkan(values, pairs);
+                for (std::size_t i = 0; i < count; ++i)
+                    edges[start + i].cost = costs[i];
             }
 #else
             throw std::runtime_error("Vulkan simplification was not compiled");
 #endif
         }
-        std::sort(edges.begin(), edges.end(),
-            [](const Edge& a, const Edge& b) { return a.cost < b.cost; });
+        std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
+            return a.cost < b.cost;
+        });
         const std::size_t room = set.n > target ? set.n - target : 0;
         const std::size_t max_merges = std::min(
             room,
-            std::max<std::size_t>(
-                1, static_cast<std::size_t>(static_cast<float>(set.n) * cap)));
+            std::max<std::size_t>(1, static_cast<std::size_t>(static_cast<float>(set.n) * cap)));
         std::vector<std::uint8_t> used(set.n, 0);
         std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
         pairs.reserve(max_merges);
         for (const Edge& edge : edges) {
-            if (pairs.size() >= max_merges) break;
-            if (used[edge.a] || used[edge.b]) continue;
+            if (pairs.size() >= max_merges)
+                break;
+            if (used[edge.a] || used[edge.b])
+                continue;
             used[edge.a] = used[edge.b] = 1;
             pairs.push_back({edge.a, edge.b});
         }
-        if (pairs.empty()) break;
+        if (pairs.empty())
+            break;
         std::vector<std::uint8_t> drop(set.n, 0);
         for (const auto& [a, b] : pairs) {
             merge_pair(set, a, b);
@@ -638,28 +660,28 @@ GaussianModel simplify_gaussians(
         }
         std::size_t w = 0;
         for (std::size_t i = 0; i < set.n; ++i) {
-            if (drop[i]) continue;
-            if (w != i) swap_splat(set, w, i);
+            if (drop[i])
+                continue;
+            if (w != i)
+                swap_splat(set, w, i);
             ++w;
         }
         compact_to(set, w);
         ++pass;
-        const float done = original > target
-            ? static_cast<float>(original - set.n) /
-                  static_cast<float>(original - target)
-            : 1.F;
+        const float done = original > target ? static_cast<float>(original - set.n) /
+                                                   static_cast<float>(original - target)
+                                             : 1.F;
         report(options, 0.1F + 0.85F * std::min(done, 1.F));
-        if (pass > 64) break;
+        if (pass > 64)
+            break;
     }
-    if (options.sh_degree >= 0 &&
-        static_cast<unsigned>(options.sh_degree) < set.sh_degree) {
-        const std::size_t keep = static_cast<std::size_t>(
-            (options.sh_degree + 1) * (options.sh_degree + 1) * 3);
+    if (options.sh_degree >= 0 && static_cast<unsigned>(options.sh_degree) < set.sh_degree) {
+        const std::size_t keep =
+            static_cast<std::size_t>((options.sh_degree + 1) * (options.sh_degree + 1) * 3);
         if (keep < set.sh_dim) {
             std::vector<float> sh(set.n * keep);
             for (std::size_t i = 0; i < set.n; ++i)
-                std::copy_n(set.sh.data() + i * set.sh_dim, keep,
-                    sh.data() + i * keep);
+                std::copy_n(set.sh.data() + i * set.sh_dim, keep, sh.data() + i * keep);
             set.sh = std::move(sh);
             set.sh_dim = keep;
             set.sh_degree = static_cast<unsigned>(options.sh_degree);
@@ -667,9 +689,9 @@ GaussianModel simplify_gaussians(
     }
     report(options, 1.F);
     core::Logger::instance().info(
-        "splat simplify original=", original, " kept=", set.n,
-        " keep_ratio=", options.keep_ratio, " passes=", pass);
+        "splat simplify original=", original, " kept=", set.n, " keep_ratio=", options.keep_ratio,
+        " passes=", pass);
     return to_model(set);
 }
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -12,7 +12,7 @@ namespace photara::splat {
 // manifest lives on disk; Gaussian arrays use pagefile/POSIX shared memory.
 // Keep this owner alive until the reader has opened its own mapping.
 class ModelHandoff {
-public:
+  public:
     ModelHandoff(const GaussianModel& model, const std::filesystem::path& ready);
     ~ModelHandoff();
     ModelHandoff(const ModelHandoff&) = delete;
@@ -22,7 +22,7 @@ public:
     [[nodiscard]] const GaussianModel& model() const;
     bool wait_for_reader(std::chrono::milliseconds timeout) const;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
@@ -31,4 +31,4 @@ private:
 // and returns an owned CPU model. Safe after the publisher exits once opened.
 GaussianModel receive_model_handoff(const std::filesystem::path& ready);
 
-}  // namespace photara::splat
+} // namespace photara::splat

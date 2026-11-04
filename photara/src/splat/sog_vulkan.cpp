@@ -13,7 +13,9 @@
 
 namespace photara::splat::detail {
 namespace {
-struct Push { unsigned mode, count, dims, clusters, branches, iteration; };
+struct Push {
+    unsigned mode, count, dims, clusters, branches, iteration;
+};
 static_assert(sizeof(Push) == 24);
 struct Backend {
     photara::vk::Device device;
@@ -32,14 +34,16 @@ struct Backend {
             wanted.emplace();
             for (unsigned i = 0; i < VK_UUID_SIZE; ++i) {
                 unsigned byte = 0;
-                const auto parsed = std::from_chars(value.data() + 2 * i, value.data() + 2 * i + 2, byte, 16);
+                const auto parsed =
+                    std::from_chars(value.data() + 2 * i, value.data() + 2 * i + 2, byte, 16);
                 if (parsed.ec != std::errc{} || parsed.ptr != value.data() + 2 * i + 2)
                     throw std::invalid_argument("Invalid PHOTARA_VULKAN_DEVICE_UUID");
                 (*wanted)[i] = static_cast<std::uint8_t>(byte);
             }
         } else if (const char* index = std::getenv("TINYTENSOR_VULKAN_DEVICE")) {
             const std::string_view value(index);
-            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), request.device_index);
+            const auto parsed =
+                std::from_chars(value.data(), value.data() + value.size(), request.device_index);
             if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
                 throw std::invalid_argument("Invalid TINYTENSOR_VULKAN_DEVICE index");
         }
@@ -52,15 +56,19 @@ struct Backend {
             if (vkEnumeratePhysicalDevices(device.instance(), &count, nullptr) != VK_SUCCESS)
                 throw std::runtime_error("Cannot enumerate SOG Vulkan devices");
             std::vector<VkPhysicalDevice> candidates(count);
-            if (vkEnumeratePhysicalDevices(device.instance(), &count, candidates.data()) != VK_SUCCESS)
+            if (vkEnumeratePhysicalDevices(device.instance(), &count, candidates.data()) !=
+                VK_SUCCESS)
                 throw std::runtime_error("Cannot enumerate SOG Vulkan devices");
             unsigned selected = count;
             for (unsigned i = 0; i < count; ++i) {
-                VkPhysicalDeviceIDProperties identity{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-                VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+                VkPhysicalDeviceIDProperties identity{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+                VkPhysicalDeviceProperties2 properties{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
                 properties.pNext = &identity;
                 vkGetPhysicalDeviceProperties2(candidates[i], &properties);
-                if (std::equal(wanted->begin(), wanted->end(), identity.deviceUUID)) selected = i;
+                if (std::equal(wanted->begin(), wanted->end(), identity.deviceUUID))
+                    selected = i;
             }
             if (selected == count)
                 throw std::runtime_error("No SOG Vulkan device matches PHOTARA_VULKAN_DEVICE_UUID");
@@ -70,13 +78,19 @@ struct Backend {
                 device = photara::vk::Device::create(request);
             }
         }
-        pipeline = device.create_compute(std::as_bytes(std::span{sog_cluster_hlsl_spv}), 10, sizeof(Push));
+        pipeline =
+            device.create_compute(std::as_bytes(std::span{sog_cluster_hlsl_spv}), 10, sizeof(Push));
         ring = photara::vk::EncoderRing(device, 1, photara::vk::BarrierPolicy::after_compute);
     }
 };
 
-SogPalette cluster_batch(Backend& backend, const std::vector<float>& values, unsigned first, unsigned n,
-                         unsigned dims, unsigned budget) {
+SogPalette cluster_batch(
+    Backend& backend,
+    const std::vector<float>& values,
+    unsigned first,
+    unsigned n,
+    unsigned dims,
+    unsigned budget) {
     using photara::vk::MemoryKind;
     const unsigned target = std::bit_floor(std::min(n, budget));
     const auto buffer = [&](std::size_t words) {
@@ -91,8 +105,8 @@ SogPalette cluster_batch(Backend& backend, const std::vector<float>& values, uns
     auto upload = backend.device.create_buffer(points.size(), MemoryKind::host_visible);
     upload.upload(values.data() + std::size_t(first) * dims, points.size());
     auto bindings = [&] {
-        const std::array buffers{&points, &centers, &labels, &counts, &offsets, &cursors,
-                                &indices, &parent_offsets, &parent_indices, &blocks};
+        const std::array buffers{&points,  &centers, &labels,         &counts,         &offsets,
+                                 &cursors, &indices, &parent_offsets, &parent_indices, &blocks};
         std::array<photara::vk::BufferBinding, 10> result;
         for (unsigned i = 0; i < result.size(); ++i) {
             result[i] = photara::vk::binding(*buffers[i]);
@@ -104,15 +118,17 @@ SogPalette cluster_batch(Backend& backend, const std::vector<float>& values, uns
     auto dispatch = [&](auto& encoder, const auto& buffers, unsigned mode, unsigned threads) {
         push.mode = mode;
         const unsigned groups = (threads + 63U) / 64U;
-        encoder.dispatch(backend.pipeline, buffers, &push, sizeof(push),
-                         std::min(groups, 65535U), (groups + 65534U) / 65535U);
+        encoder.dispatch(
+            backend.pipeline, buffers, &push, sizeof(push), std::min(groups, 65535U),
+            (groups + 65534U) / 65535U);
     };
     {
         auto buffers = bindings();
         auto& encoder = backend.ring.acquire();
         encoder.copy(points, 0, upload, 0, points.size());
         dispatch(encoder, buffers, 0, n);
-        backend.ring.submit(); encoder.wait();
+        backend.ring.submit();
+        encoder.wait();
     }
     upload = {};
     unsigned parents = 1;
@@ -134,29 +150,35 @@ SogPalette cluster_batch(Backend& backend, const std::vector<float>& values, uns
             dispatch(encoder, buffers, 8, n);
             dispatch(encoder, buffers, 9, push.clusters * 64U);
         }
-        backend.ring.submit(); encoder.wait();
+        backend.ring.submit();
+        encoder.wait();
         parents = push.clusters;
     } while (parents < target);
     std::vector<unsigned> host_counts(target), host_labels(n);
     std::vector<float> host_centers(std::size_t(target) * dims);
-    auto readback = backend.device.create_buffer(counts.size() + labels.size() + centers.size(), MemoryKind::host_cached);
+    auto readback = backend.device.create_buffer(
+        counts.size() + labels.size() + centers.size(), MemoryKind::host_cached);
     auto& encoder = backend.ring.acquire();
-    encoder.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    encoder.barrier(
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     encoder.copy(readback, 0, counts, 0, counts.size());
     encoder.copy(readback, counts.size(), labels, 0, labels.size());
     encoder.copy(readback, counts.size() + labels.size(), centers, 0, centers.size());
-    backend.ring.submit(); encoder.wait();
+    backend.ring.submit();
+    encoder.wait();
     readback.download(host_counts.data(), counts.size());
     readback.download(host_labels.data(), labels.size(), counts.size());
     readback.download(host_centers.data(), centers.size(), counts.size() + labels.size());
     SogPalette result;
     std::vector<unsigned> remap(target, ~0U);
     for (unsigned c = 0; c < target; ++c) {
-        if (!host_counts[c]) continue;
+        if (!host_counts[c])
+            continue;
         remap[c] = static_cast<unsigned>(result.centroids.size() / dims);
-        result.centroids.insert(result.centroids.end(), host_centers.begin() + std::size_t(c) * dims,
-                                host_centers.begin() + std::size_t(c + 1) * dims);
+        result.centroids.insert(
+            result.centroids.end(), host_centers.begin() + std::size_t(c) * dims,
+            host_centers.begin() + std::size_t(c + 1) * dims);
     }
     result.labels.reserve(n);
     for (unsigned c : host_labels) {
@@ -168,8 +190,11 @@ SogPalette cluster_batch(Backend& backend, const std::vector<float>& values, uns
 }
 } // namespace
 
-SogPalette cluster_sog_vulkan(const std::vector<float>& values, unsigned n,
-                              unsigned dims, unsigned budget) {
+SogPalette cluster_sog_vulkan(
+    const std::vector<float>& values,
+    unsigned n,
+    unsigned dims,
+    unsigned budget) {
     if (!n || !dims || dims > 45 || !budget || budget > 65536 ||
         values.size() != std::size_t(n) * dims)
         throw std::invalid_argument("Invalid Vulkan SOG clustering input");
@@ -194,8 +219,10 @@ SogPalette cluster_sog_vulkan(const std::vector<float>& values, unsigned n,
         const unsigned count = end - first, share = palette_budget / batches;
         auto chunk = cluster_batch(backend, values, first, count, dims, share);
         const unsigned base = static_cast<unsigned>(result.centroids.size() / dims);
-        result.centroids.insert(result.centroids.end(), chunk.centroids.begin(), chunk.centroids.end());
-        for (auto label : chunk.labels) result.labels.push_back(base + label);
+        result.centroids.insert(
+            result.centroids.end(), chunk.centroids.begin(), chunk.centroids.end());
+        for (auto label : chunk.labels)
+            result.labels.push_back(base + label);
     }
     return result;
 }

@@ -14,15 +14,16 @@ struct GaussianModel;
 namespace detail {
 // Serializes checkpoint writes with the trainer; released by the OS on exit.
 class TrainingCheckpointLease {
-public:
+  public:
     explicit TrainingCheckpointLease(const std::filesystem::path& path);
     ~TrainingCheckpointLease();
     TrainingCheckpointLease(const TrainingCheckpointLease&) = delete;
     TrainingCheckpointLease& operator=(const TrainingCheckpointLease&) = delete;
-private:
+
+  private:
     std::intptr_t handle_{-1};
 };
-}
+} // namespace detail
 
 struct TrainingCheckpointInfo {
     unsigned iteration{};
@@ -38,9 +39,11 @@ std::vector<std::uint8_t> training_checkpoint_info_bytes(const TrainingCheckpoin
 GaussianModel checkpoint_model(const std::filesystem::path& path);
 namespace detail {
 // Caller holds the checkpoint lease. Model publication precedes the manifest.
-void save_model_checkpoint(const std::filesystem::path& path,
-    const TrainingCheckpointInfo& info, const GaussianModel& model);
-}
+void save_model_checkpoint(
+    const std::filesystem::path& path,
+    const TrainingCheckpointInfo& info,
+    const GaussianModel& model);
+} // namespace detail
 
 bool training_checkpoint_in_use(const std::filesystem::path& path);
 // Accepts only PLY manifests and current embedded model progress.
@@ -48,7 +51,8 @@ std::optional<TrainingCheckpointInfo> inspect_training_checkpoint(
     const std::filesystem::path& path);
 std::vector<std::uint8_t> training_checkpoint_bytes(const std::filesystem::path& path);
 void restore_training_checkpoint(
-    std::span<const std::uint8_t> bytes, const std::filesystem::path& path);
+    std::span<const std::uint8_t> bytes,
+    const std::filesystem::path& path);
 void remove_training_checkpoint(const std::filesystem::path& path);
 
 } // namespace photara::splat

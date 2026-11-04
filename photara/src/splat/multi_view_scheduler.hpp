@@ -11,10 +11,11 @@
 namespace photara::splat::detail {
 
 [[nodiscard]] constexpr bool tail_multi_view_scheduled(
-    const unsigned iteration, const unsigned grow_stop_iteration,
+    const unsigned iteration,
+    const unsigned grow_stop_iteration,
     const unsigned interval) noexcept {
     return iteration <= grow_stop_iteration ||
-        (iteration - grow_stop_iteration) % std::max(1U, interval) == 0;
+           (iteration - grow_stop_iteration) % std::max(1U, interval) == 0;
 }
 
 struct GeometryStabilitySample {
@@ -39,19 +40,17 @@ struct GeometryStabilityDecision {
 };
 
 class MultiViewStabilityScheduler {
-public:
+  public:
     explicit MultiViewStabilityScheduler(const TrainingOptions& options)
-        : maximum_interval_(std::max(
-              1U, options.multi_view_adaptive_max_interval)),
-          required_stable_refinements_(std::max(
-              1U, options.multi_view_adaptive_stable_refinements)),
+        : maximum_interval_(std::max(1U, options.multi_view_adaptive_max_interval)),
+          required_stable_refinements_(
+              std::max(1U, options.multi_view_adaptive_stable_refinements)),
           count_threshold_(options.multi_view_adaptive_count_threshold),
           churn_threshold_(options.multi_view_adaptive_churn_threshold),
           depth_threshold_(options.multi_view_adaptive_depth_threshold),
-          minimum_depth_consistency_(
-              options.multi_view_adaptive_min_depth_consistency),
-          distribution_threshold_(
-              options.multi_view_adaptive_distribution_threshold) {}
+          minimum_depth_consistency_(options.multi_view_adaptive_min_depth_consistency),
+          distribution_threshold_(options.multi_view_adaptive_distribution_threshold) {
+    }
 
     struct CheckpointState {
         unsigned interval{1};
@@ -66,10 +65,14 @@ public:
         if (!state.interval || state.interval > maximum_interval_ ||
             state.stable_refinements >= required_stable_refinements_)
             throw std::runtime_error("Invalid checkpoint scheduler state");
-        interval_ = state.interval; stable_refinements_ = state.stable_refinements;
-        has_previous_ = state.has_previous; previous_ = state.previous;
+        interval_ = state.interval;
+        stable_refinements_ = state.stable_refinements;
+        has_previous_ = state.has_previous;
+        previous_ = state.previous;
     }
-    [[nodiscard]] unsigned interval() const noexcept { return interval_; }
+    [[nodiscard]] unsigned interval() const noexcept {
+        return interval_;
+    }
 
     GeometryStabilityDecision invalidate() noexcept {
         GeometryStabilityDecision decision;
@@ -91,24 +94,20 @@ public:
         }
 
         decision.reference_ready = true;
-        const float previous_count = static_cast<float>(
-            std::max<std::size_t>(previous_.gaussian_count, 1));
-        decision.count_delta = std::abs(
-            static_cast<float>(sample.gaussian_count) - previous_count) /
-            previous_count;
-        decision.churn = static_cast<float>(sample.grown + sample.pruned) /
-            previous_count;
-        decision.depth_delta = std::abs(
-            sample.depth_consistency - previous_.depth_consistency);
-        decision.distribution_delta = distribution_delta(
-            sample.distribution, previous_.distribution);
-        decision.stable =
-            std::isfinite(sample.depth_consistency) &&
-            sample.depth_consistency >= minimum_depth_consistency_ &&
-            decision.count_delta <= count_threshold_ &&
-            decision.churn <= churn_threshold_ &&
-            decision.depth_delta <= depth_threshold_ &&
-            decision.distribution_delta <= distribution_threshold_;
+        const float previous_count =
+            static_cast<float>(std::max<std::size_t>(previous_.gaussian_count, 1));
+        decision.count_delta =
+            std::abs(static_cast<float>(sample.gaussian_count) - previous_count) / previous_count;
+        decision.churn = static_cast<float>(sample.grown + sample.pruned) / previous_count;
+        decision.depth_delta = std::abs(sample.depth_consistency - previous_.depth_consistency);
+        decision.distribution_delta =
+            distribution_delta(sample.distribution, previous_.distribution);
+        decision.stable = std::isfinite(sample.depth_consistency) &&
+                          sample.depth_consistency >= minimum_depth_consistency_ &&
+                          decision.count_delta <= count_threshold_ &&
+                          decision.churn <= churn_threshold_ &&
+                          decision.depth_delta <= depth_threshold_ &&
+                          decision.distribution_delta <= distribution_threshold_;
 
         if (decision.stable) {
             ++stable_refinements_;
@@ -131,32 +130,24 @@ public:
         return decision;
     }
 
-private:
+  private:
     [[nodiscard]] static float relative_delta(
-        const float current, const float previous,
+        const float current,
+        const float previous,
         const float floor) noexcept {
-        return std::abs(current - previous) /
-            std::max(std::abs(previous), floor);
+        return std::abs(current - previous) / std::max(std::abs(previous), floor);
     }
 
     [[nodiscard]] static float distribution_delta(
         const GeometryDistributionSummary& current,
         const GeometryDistributionSummary& previous) noexcept {
-        return std::max({
-            relative_delta(
-                current.opacity_mean, previous.opacity_mean, 0.1F),
-            relative_delta(
-                current.opacity_stddev, previous.opacity_stddev, 0.05F),
-            std::abs(current.log_scale_mean - previous.log_scale_mean),
-            relative_delta(
-                current.log_scale_stddev,
-                previous.log_scale_stddev, 0.1F),
-            relative_delta(
-                current.log_anisotropy_mean,
-                previous.log_anisotropy_mean, 0.1F),
-            relative_delta(
-                current.log_anisotropy_stddev,
-                previous.log_anisotropy_stddev, 0.1F)});
+        return std::max(
+            {relative_delta(current.opacity_mean, previous.opacity_mean, 0.1F),
+             relative_delta(current.opacity_stddev, previous.opacity_stddev, 0.05F),
+             std::abs(current.log_scale_mean - previous.log_scale_mean),
+             relative_delta(current.log_scale_stddev, previous.log_scale_stddev, 0.1F),
+             relative_delta(current.log_anisotropy_mean, previous.log_anisotropy_mean, 0.1F),
+             relative_delta(current.log_anisotropy_stddev, previous.log_anisotropy_stddev, 0.1F)});
     }
 
     unsigned maximum_interval_{1};
@@ -172,4 +163,4 @@ private:
     GeometryStabilitySample previous_;
 };
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

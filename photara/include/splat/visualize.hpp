@@ -37,18 +37,21 @@ struct VisualizeOptions {
     float depth_far{10.F};
 };
 
-[[nodiscard]] inline const char* visualization_mode_name(
-    const VisualizationMode mode) noexcept {
+[[nodiscard]] inline const char* visualization_mode_name(const VisualizationMode mode) noexcept {
     switch (mode) {
-        case VisualizationMode::points: return "points";
-        case VisualizationMode::rings: return "rings";
-        case VisualizationMode::splat:
-        default: return "splat";
+    case VisualizationMode::points:
+        return "points";
+    case VisualizationMode::rings:
+        return "rings";
+    case VisualizationMode::splat:
+    default:
+        return "splat";
     }
 }
 
 inline bool parse_visualization_mode(
-    const std::string_view text, VisualizationMode& mode) noexcept {
+    const std::string_view text,
+    VisualizationMode& mode) noexcept {
     if (text == "points" || text == "1") {
         mode = VisualizationMode::points;
         return true;
@@ -65,41 +68,50 @@ inline bool parse_visualization_mode(
 }
 
 inline bool write_visualization_sidecar(
-    const std::filesystem::path& path, const VisualizeOptions& options,
+    const std::filesystem::path& path,
+    const VisualizeOptions& options,
     const std::uint64_t revision) {
-    if (path.empty()) return false;
+    if (path.empty())
+        return false;
     std::ofstream output(path, std::ios::trunc);
-    if (!output) return false;
+    if (!output)
+        return false;
     output << std::setprecision(9);
     output << revision << '\n'
            << visualization_mode_name(options.mode) << "+near" << '\n'
            << options.point_size_px << '\n'
            << options.ring_scale << '\n'
-           << static_cast<unsigned>(options.channel) << ' '
-           << options.automatic_depth << ' ' << options.grayscale_depth << ' '
-           << options.world_normals << ' ' << options.depth_near << ' '
-           << options.depth_far << '\n'
+           << static_cast<unsigned>(options.channel) << ' ' << options.automatic_depth << ' '
+           << options.grayscale_depth << ' ' << options.world_normals << ' ' << options.depth_near
+           << ' ' << options.depth_far << '\n'
            << options.rasterization.near_plane << '\n';
     return static_cast<bool>(output);
 }
 
 inline bool load_visualization_sidecar(
-    const std::filesystem::path& path, VisualizeOptions& options,
+    const std::filesystem::path& path,
+    VisualizeOptions& options,
     std::uint64_t& revision) {
-    if (path.empty()) return false;
+    if (path.empty())
+        return false;
     std::ifstream input(path);
-    if (!input) return false;
+    if (!input)
+        return false;
     std::uint64_t parsed_revision{};
     std::string mode_text;
     float point_size = options.point_size_px;
     float ring_scale = options.ring_scale;
     input >> parsed_revision >> mode_text >> point_size >> ring_scale;
     constexpr std::string_view near_suffix = "+near";
-    const bool has_clip = mode_text.size() >= near_suffix.size() &&
-        mode_text.compare(mode_text.size() - near_suffix.size(), near_suffix.size(), near_suffix) == 0;
-    if (has_clip) mode_text.resize(mode_text.size() - near_suffix.size());
+    const bool has_clip =
+        mode_text.size() >= near_suffix.size() &&
+        mode_text.compare(mode_text.size() - near_suffix.size(), near_suffix.size(), near_suffix) ==
+            0;
+    if (has_clip)
+        mode_text.resize(mode_text.size() - near_suffix.size());
     VisualizationMode mode = options.mode;
-    if (!input || !parse_visualization_mode(mode_text, mode)) return false;
+    if (!input || !parse_visualization_mode(mode_text, mode))
+        return false;
     VisualizeOptions parsed = options;
     parsed.mode = mode;
     parsed.point_size_px = std::max(0.5F, point_size);
@@ -111,7 +123,8 @@ inline bool load_visualization_sidecar(
     float near_depth{}, far_depth{};
     input >> std::ws;
     const bool has_diagnostics = input.peek() != std::char_traits<char>::eof();
-    if (has_clip && !has_diagnostics) return false;
+    if (has_clip && !has_diagnostics)
+        return false;
     if (has_diagnostics) {
         if (!(input >> channel >> automatic >> grayscale >> world >> near_depth >> far_depth))
             return false;
@@ -128,7 +141,8 @@ inline bool load_visualization_sidecar(
         // Legacy sidecars retain the caller's rasterization policy.
         input >> std::ws;
         const bool has_near_value = input.peek() != std::char_traits<char>::eof();
-        if (has_clip && !has_near_value) return false;
+        if (has_clip && !has_near_value)
+            return false;
         if (has_near_value) {
             float near_clip{};
             if (!(input >> near_clip) || !std::isfinite(near_clip) || near_clip <= 0.F)
@@ -141,22 +155,20 @@ inline bool load_visualization_sidecar(
     return true;
 }
 
-[[nodiscard]] inline const char* camera_model_token(
-    const CameraModel model) noexcept {
+[[nodiscard]] inline const char* camera_model_token(const CameraModel model) noexcept {
     switch (model) {
-        case CameraModel::opencv_fisheye:
-            return "opencv_fisheye";
-        case CameraModel::equirectangular:
-            return "equirectangular";
-        case CameraModel::pinhole:
-        case CameraModel::automatic:
-        default:
-            return "pinhole";
+    case CameraModel::opencv_fisheye:
+        return "opencv_fisheye";
+    case CameraModel::equirectangular:
+        return "equirectangular";
+    case CameraModel::pinhole:
+    case CameraModel::automatic:
+    default:
+        return "pinhole";
     }
 }
 
-inline bool parse_camera_model_token(
-    const std::string_view text, CameraModel& model) noexcept {
+inline bool parse_camera_model_token(const std::string_view text, CameraModel& model) noexcept {
     if (text == "opencv_fisheye" || text == "fisheye") {
         model = CameraModel::opencv_fisheye;
         return true;
@@ -180,39 +192,49 @@ inline bool parse_camera_model_token(
 //   [vis_mode point_size ring_scale]
 // The model token is optional so older pinhole-only files still load.
 inline bool write_preview_camera_sidecar(
-    const std::filesystem::path& path, const Camera& camera,
-    const std::uint64_t revision, const char* vis_mode = nullptr,
-    const float point_size_px = 2.5F, const float ring_scale = 2.828427F) {
-    if (path.empty()) return false;
+    const std::filesystem::path& path,
+    const Camera& camera,
+    const std::uint64_t revision,
+    const char* vis_mode = nullptr,
+    const float point_size_px = 2.5F,
+    const float ring_scale = 2.828427F) {
+    if (path.empty())
+        return false;
     std::ofstream output(path, std::ios::trunc);
-    if (!output) return false;
+    if (!output)
+        return false;
     output << std::setprecision(9);
     output << revision << '\n';
     for (std::size_t i = 0; i < camera.world_to_camera.size(); ++i) {
-        if (i) output << ' ';
+        if (i)
+            output << ' ';
         output << camera.world_to_camera[i];
     }
     output << '\n'
-           << camera.position[0] << ' ' << camera.position[1] << ' '
-           << camera.position[2] << '\n'
-           << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' '
-           << camera.cy << ' ' << camera.width << ' ' << camera.height << ' '
-           << (camera.orthographic ? "orthographic" : camera_model_token(camera.model)) << ' ' << camera.k1 << ' '
-           << camera.k2 << ' ' << camera.k3 << ' ' << camera.k4 << '\n';
+           << camera.position[0] << ' ' << camera.position[1] << ' ' << camera.position[2] << '\n'
+           << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' ' << camera.cy << ' '
+           << camera.width << ' ' << camera.height << ' '
+           << (camera.orthographic ? "orthographic" : camera_model_token(camera.model)) << ' '
+           << camera.k1 << ' ' << camera.k2 << ' ' << camera.k3 << ' ' << camera.k4 << '\n';
     if (vis_mode != nullptr && vis_mode[0] != '\0')
         output << vis_mode << ' ' << point_size_px << ' ' << ring_scale << '\n';
     return static_cast<bool>(output);
 }
 
 inline bool load_preview_camera_sidecar(
-    const std::filesystem::path& path, Camera& camera, std::uint64_t& revision,
+    const std::filesystem::path& path,
+    Camera& camera,
+    std::uint64_t& revision,
     VisualizeOptions* vis = nullptr) {
-    if (path.empty()) return false;
+    if (path.empty())
+        return false;
     std::ifstream input(path);
-    if (!input) return false;
+    if (!input)
+        return false;
     std::uint64_t parsed_revision{};
     input >> parsed_revision;
-    for (float& value : camera.world_to_camera) input >> value;
+    for (float& value : camera.world_to_camera)
+        input >> value;
     input >> camera.position[0] >> camera.position[1] >> camera.position[2];
     double fx{}, fy{}, cx{}, cy{};
     unsigned width{}, height{};
@@ -230,12 +252,13 @@ inline bool load_preview_camera_sidecar(
     camera.orthographic = false;
     camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
 
-    const auto apply_vis = [&](const std::string& mode_text,
-                               const float point_size,
+    const auto apply_vis = [&](const std::string& mode_text, const float point_size,
                                const float ring_scale) {
-        if (vis == nullptr) return;
+        if (vis == nullptr)
+            return;
         VisualizationMode mode = vis->mode;
-        if (!parse_visualization_mode(mode_text, mode)) return;
+        if (!parse_visualization_mode(mode_text, mode))
+            return;
         vis->mode = mode;
         vis->point_size_px = std::max(0.5F, point_size);
         vis->ring_scale = std::clamp(ring_scale, 0.5F, 8.F);
@@ -246,7 +269,8 @@ inline bool load_preview_camera_sidecar(
         CameraModel model = CameraModel::pinhole;
         if (token == "orthographic" || parse_camera_model_token(token, model)) {
             float k1 = 0.F, k2 = 0.F, k3 = 0.F, k4 = 0.F;
-            if (!(input >> k1 >> k2 >> k3 >> k4)) return false;
+            if (!(input >> k1 >> k2 >> k3 >> k4))
+                return false;
             camera.model = model;
             camera.orthographic = token == "orthographic";
             camera.k1 = k1;
@@ -275,7 +299,8 @@ inline bool load_preview_camera_sidecar(
 // Splat Depth/Normal converts geometry attachments on the model device;
 // automatic depth uses a 256-bin approximation of the 1st/99th percentiles.
 [[nodiscard]] tinytensor::Tensor visualize(
-    const GaussianModel& model, const Camera& camera,
+    const GaussianModel& model,
+    const Camera& camera,
     const VisualizeOptions& options = {});
 
-}  // namespace photara::splat
+} // namespace photara::splat

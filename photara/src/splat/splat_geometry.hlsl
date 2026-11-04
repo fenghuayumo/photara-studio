@@ -6,35 +6,45 @@ StructuredBuffer<float> camera_data : register(t2);
 RWByteAddressBuffer output0 : register(u3);
 RWByteAddressBuffer output1 : register(u4);
 RWByteAddressBuffer terms : register(u5);
-struct Push { uint mode, count, width, height; float fx, fy, cx, cy;
-              float weight, focal; uint camera_count, euclidean; };
+struct Push {
+    uint mode, count, width, height;
+    float fx, fy, cx, cy;
+    float weight, focal;
+    uint camera_count, euclidean;
+};
 [[vk::push_constant]] Push pc;
 
 void add_float(RWByteAddressBuffer buffer, uint index, float value) {
-    if (value == 0.0f || isnan(value) || isinf(value)) return;
+    if (value == 0.0f || isnan(value) || isinf(value))
+        return;
     uint expected = buffer.Load(4u * index);
     for (;;) {
         uint observed;
-        buffer.InterlockedCompareExchange(4u * index, expected,
-            asuint(asfloat(expected) + value), observed);
-        if (observed == expected) return;
+        buffer.InterlockedCompareExchange(
+            4u * index, expected, asuint(asfloat(expected) + value), observed);
+        if (observed == expected)
+            return;
         expected = observed;
     }
 }
 float3 ray(uint x, uint y) {
     return float3(((float)x - pc.cx) / pc.fx, ((float)y - pc.cy) / pc.fy, 1.0f);
 }
-float3 depth_point(uint x, uint y) { return ray(x, y) * input0[y * pc.width + x]; }
+float3 depth_point(uint x, uint y) {
+    return ray(x, y) * input0[y * pc.width + x];
+}
 float3 camera_to_world(float3 p) {
-    return float3(dot(float3(camera_data[0], camera_data[1], camera_data[2]), p),
-                  dot(float3(camera_data[4], camera_data[5], camera_data[6]), p),
-                  dot(float3(camera_data[8], camera_data[9], camera_data[10]), p));
+    return float3(
+        dot(float3(camera_data[0], camera_data[1], camera_data[2]), p),
+        dot(float3(camera_data[4], camera_data[5], camera_data[6]), p),
+        dot(float3(camera_data[8], camera_data[9], camera_data[10]), p));
 }
 
 [numthreads(256, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint i = tid.x + tid.y * 65535u * 256u;
-    if (i >= pc.count) return;
+    if (i >= pc.count)
+        return;
     if (pc.mode == 13u) {
         // Full-image BCE for transparent masks. Match CUDA/torch.clamp:
         // saturated alpha has finite loss and zero derivative.
@@ -42,91 +52,110 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float raw = input0[i], target = input1[i];
         float p = clamp(raw, epsilon, 1.0f - epsilon);
         float scale = pc.weight / (float)pc.count;
-        float gradient = raw > epsilon && raw < 1.0f - epsilon
-            ? scale * ((1.0f-target)*p - target*(1.0f-p)) / (p*(1.0f-p))
-            : 0.0f;
-        output0.Store(4u*i, asuint(gradient));
+        float gradient =
+            raw > epsilon && raw < 1.0f - epsilon
+                ? scale * ((1.0f - target) * p - target * (1.0f - p)) / (p * (1.0f - p))
+                : 0.0f;
+        output0.Store(4u * i, asuint(gradient));
         if (pc.camera_count != 0u)
-            terms.Store(4u*i, asuint(-scale *
-                (target*log(p) + (1.0f-target)*log(1.0f-p))));
+            terms.Store(
+                4u * i, asuint(-scale * (target * log(p) + (1.0f - target) * log(1.0f - p))));
     } else if (pc.mode == 11u || pc.mode == 12u) {
         float mask = pc.euclidean != 0u ? camera_data[i] : 1.0f;
-        if (!(mask > 0.0f) || isnan(mask) || isinf(mask)) return;
+        if (!(mask > 0.0f) || isnan(mask) || isinf(mask))
+            return;
         float scale = pc.weight * mask / (float)pc.count;
         if (pc.mode == 11u) {
             float prediction = input0[i], target = input1[i];
-            if (!(prediction > 0.0f && target > 0.0f) || isinf(prediction) || isinf(target)) return;
+            if (!(prediction > 0.0f && target > 0.0f) || isinf(prediction) || isinf(target))
+                return;
             float denominator = max(target, 1.0e-4f);
-            float difference = (prediction-target)/denominator;
-            float robust = sqrt(difference*difference+pc.focal*pc.focal);
-            add_float(output0, i, scale*difference/(robust*denominator));
-            if (pc.camera_count != 0u) terms.Store(4u*i, asuint(scale*robust));
+            float difference = (prediction - target) / denominator;
+            float robust = sqrt(difference * difference + pc.focal * pc.focal);
+            add_float(output0, i, scale * difference / (robust * denominator));
+            if (pc.camera_count != 0u)
+                terms.Store(4u * i, asuint(scale * robust));
         } else {
-            float3 target = float3(input1[i],input1[pc.count+i],input1[2u*pc.count+i]);
-            float length2 = dot(target,target);
-            if (!(length2 > .25f) || isinf(length2)) return;
+            float3 target = float3(input1[i], input1[pc.count + i], input1[2u * pc.count + i]);
+            float length2 = dot(target, target);
+            if (!(length2 > .25f) || isinf(length2))
+                return;
             target *= rsqrt(length2);
-            float3 prediction = float3(input0[i],input0[pc.count+i],input0[2u*pc.count+i]);
-            if (any(isnan(prediction)) || any(isinf(prediction))) return;
-            add_float(output0,i,-scale*target.x);
-            add_float(output0,pc.count+i,-scale*target.y);
-            add_float(output0,2u*pc.count+i,-scale*target.z);
-            if (pc.camera_count != 0u) terms.Store(4u*i,asuint(scale*(1.0f-dot(prediction,target))));
+            float3 prediction = float3(input0[i], input0[pc.count + i], input0[2u * pc.count + i]);
+            if (any(isnan(prediction)) || any(isinf(prediction)))
+                return;
+            add_float(output0, i, -scale * target.x);
+            add_float(output0, pc.count + i, -scale * target.y);
+            add_float(output0, 2u * pc.count + i, -scale * target.z);
+            if (pc.camera_count != 0u)
+                terms.Store(4u * i, asuint(scale * (1.0f - dot(prediction, target))));
         }
     } else if (pc.mode == 10u) {
-        float3 scales = float3(input0[3u*i],input0[3u*i+1u],input0[3u*i+2u]);
+        float3 scales = float3(input0[3u * i], input0[3u * i + 1u], input0[3u * i + 2u]);
         scales = exp(scales);
         float filter = pc.euclidean != 0u ? camera_data[i] : 0.0f;
-        scales = sqrt(scales*scales + filter*filter);
+        scales = sqrt(scales * scales + filter * filter);
         uint axis = scales.y < scales.x ? 1u : 0u;
-        if (scales.z < scales[axis]) axis = 2u;
-        float4 q = float4(input1[4u*i],input1[4u*i+1u],input1[4u*i+2u],input1[4u*i+3u]);
-        q *= rsqrt(max(dot(q,q), 1.0e-20f));
-        float w=q.x, x=q.y, y=q.z, z=q.w;
-        float3 n = axis == 0u ? float3(1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)) :
-            axis == 1u ? float3(2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)) :
-                         float3(2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y));
-        output0.Store4(16u*i,asuint(float4(n,0.0f)));
+        if (scales.z < scales[axis])
+            axis = 2u;
+        float4 q =
+            float4(input1[4u * i], input1[4u * i + 1u], input1[4u * i + 2u], input1[4u * i + 3u]);
+        q *= rsqrt(max(dot(q, q), 1.0e-20f));
+        float w = q.x, x = q.y, y = q.z, z = q.w;
+        float3 n = axis == 0u
+                       ? float3(1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y))
+                   : axis == 1u
+                       ? float3(2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x))
+                       : float3(2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y));
+        output0.Store4(16u * i, asuint(float4(n, 0.0f)));
     } else if (pc.mode == 7u || pc.mode == 8u) {
-        float3 f = float3(input0[4u*i], input0[4u*i+1u], input0[4u*i+2u]);
+        float3 f = float3(input0[4u * i], input0[4u * i + 1u], input0[4u * i + 2u]);
         float len = length(f);
-        if (!(len > 1.0e-12f) || isinf(len)) return;
+        if (!(len > 1.0e-12f) || isinf(len))
+            return;
         float3 n = f / len;
-        float sign = tanh(input0[4u*i+3u]);
+        float sign = tanh(input0[4u * i + 3u]);
         if (pc.mode == 7u) {
-            output0.Store3(12u*i, asuint(sign * n));
+            output0.Store3(12u * i, asuint(sign * n));
         } else {
-            float3 g = float3(input1[3u*i], input1[3u*i+1u], input1[3u*i+2u]);
+            float3 g = float3(input1[3u * i], input1[3u * i + 1u], input1[3u * i + 2u]);
             float projection = dot(g, n);
-            output0.Store4(16u*i, asuint(float4(sign/len * (g-n*projection),
-                (1.0f-sign*sign)*projection)));
+            output0.Store4(
+                16u * i,
+                asuint(
+                    float4(sign / len * (g - n * projection), (1.0f - sign * sign) * projection)));
         }
     } else if (pc.mode == 0u || pc.mode == 9u) {
         uint x = i % pc.width, y = i / pc.width;
-        if (x == 0u || y == 0u || x + 1u >= pc.width || y + 1u >= pc.height) return;
+        if (x == 0u || y == 0u || x + 1u >= pc.width || y + 1u >= pc.height)
+            return;
         uint top = i - pc.width, bottom = i + pc.width, left = i - 1u, right = i + 1u;
         if (!(input0[i] > 0.0f && input0[top] > 0.0f && input0[bottom] > 0.0f &&
-              input0[left] > 0.0f && input0[right] > 0.0f)) return;
+              input0[left] > 0.0f && input0[right] > 0.0f))
+            return;
         float3 dy = depth_point(x, y + 1u) - depth_point(x, y - 1u);
         float3 dx = depth_point(x + 1u, y) - depth_point(x - 1u, y);
         float3 c = cross(dy, dx);
         float length2 = dot(c, c);
-        if (!(length2 > 1.0e-20f) || isinf(length2)) return;
+        if (!(length2 > 1.0e-20f) || isinf(length2))
+            return;
         float inv_length = rsqrt(length2);
         float3 dn = c * inv_length;
         float3 n = float3(input1[i], input1[pc.count + i], input1[2u * pc.count + i]);
         if (pc.mode == 9u) {
-            n = float3(dot(float3(camera_data[0],camera_data[4],camera_data[8]),n),
-                       dot(float3(camera_data[1],camera_data[5],camera_data[9]),n),
-                       dot(float3(camera_data[2],camera_data[6],camera_data[10]),n));
+            n = float3(
+                dot(float3(camera_data[0], camera_data[4], camera_data[8]), n),
+                dot(float3(camera_data[1], camera_data[5], camera_data[9]), n),
+                dot(float3(camera_data[2], camera_data[6], camera_data[10]), n));
         }
         float scale = pc.weight / (float)pc.count;
         // A single CAS accumulator across millions of pixels can time out on
         // display GPUs. Write disjoint terms and reduce them in a separate pass.
         if (pc.camera_count != 0u)
-            terms.Store(4u*i, asuint(scale * (1.0f - dot(n, dn))));
+            terms.Store(4u * i, asuint(scale * (1.0f - dot(n, dn))));
         float3 field_gradient = -scale * dn;
-        if (pc.mode == 9u) field_gradient = camera_to_world(field_gradient);
+        if (pc.mode == 9u)
+            field_gradient = camera_to_world(field_gradient);
         add_float(output1, i, field_gradient.x);
         add_float(output1, pc.count + i, field_gradient.y);
         add_float(output1, 2u * pc.count + i, field_gradient.z);
@@ -138,51 +167,62 @@ void main(uint3 tid : SV_DispatchThreadID) {
         add_float(output0, right, dot(gx, ray(x + 1u, y)));
         add_float(output0, left, -dot(gx, ray(x - 1u, y)));
     } else if (pc.mode == 1u) {
-        float3 world = float3(input0[3u*i], input0[3u*i+1u], input0[3u*i+2u]);
+        float3 world = float3(input0[3u * i], input0[3u * i + 1u], input0[3u * i + 2u]);
         float distance = asfloat(0x7f7fffffu);
         for (uint v = 0u; v < pc.camera_count; ++v) {
             uint b = 17u * v;
             float3 p = float3(
-                camera_data[b]*world.x + camera_data[b+4u]*world.y + camera_data[b+8u]*world.z + camera_data[b+12u],
-                camera_data[b+1u]*world.x + camera_data[b+5u]*world.y + camera_data[b+9u]*world.z + camera_data[b+13u],
-                camera_data[b+2u]*world.x + camera_data[b+6u]*world.y + camera_data[b+10u]*world.z + camera_data[b+14u]);
-            float focal = max(camera_data[b+16u], 1.0e-6f);
+                camera_data[b] * world.x + camera_data[b + 4u] * world.y +
+                    camera_data[b + 8u] * world.z + camera_data[b + 12u],
+                camera_data[b + 1u] * world.x + camera_data[b + 5u] * world.y +
+                    camera_data[b + 9u] * world.z + camera_data[b + 13u],
+                camera_data[b + 2u] * world.x + camera_data[b + 6u] * world.y +
+                    camera_data[b + 10u] * world.z + camera_data[b + 14u]);
+            float focal = max(camera_data[b + 16u], 1.0e-6f);
             distance = min(distance, length(p) / focal);
         }
-        output0.Store(4u*i, asuint(distance));
+        output0.Store(4u * i, asuint(distance));
         if (distance < asfloat(0x7f7fffffu)) {
             uint ignored;
             terms.InterlockedMax(0u, asuint(distance), ignored);
         }
     } else if (pc.mode == 2u) {
         float fallback = asfloat(terms.Load(0u));
-        if (!(fallback > 0.0f) || isinf(fallback)) fallback = 1.0f;
-        float distance = asfloat(output0.Load(4u*i));
-        if (!(distance < asfloat(0x7f7fffffu))) distance = fallback;
-        output0.Store(4u*i, asuint(distance * pc.weight / pc.focal));
+        if (!(fallback > 0.0f) || isinf(fallback))
+            fallback = 1.0f;
+        float distance = asfloat(output0.Load(4u * i));
+        if (!(distance < asfloat(0x7f7fffffu)))
+            distance = fallback;
+        output0.Store(4u * i, asuint(distance * pc.weight / pc.focal));
     } else if (pc.mode == 3u) {
         float d = input0[i];
-        float3 p = float3(asfloat(0x7fc00000u),asfloat(0x7fc00000u),asfloat(0x7fc00000u));
+        float3 p = float3(asfloat(0x7fc00000u), asfloat(0x7fc00000u), asfloat(0x7fc00000u));
         if (d > 0.0f && !isinf(d))
-            p = camera_to_world(ray(i%pc.width,i/pc.width)*d - float3(camera_data[12],camera_data[13],camera_data[14]));
-        output0.Store3(12u*i, asuint(p));
+            p = camera_to_world(
+                ray(i % pc.width, i / pc.width) * d -
+                float3(camera_data[12], camera_data[13], camera_data[14]));
+        output0.Store3(12u * i, asuint(p));
     } else if (pc.mode == 4u) {
-        float3 g = float3(input0[3u*i],input0[3u*i+1u],input0[3u*i+2u]);
-        float value = asfloat(output0.Load(4u*i)) + dot(g, camera_to_world(ray(i%pc.width,i/pc.width)));
-        output0.Store(4u*i, asuint(value));
+        float3 g = float3(input0[3u * i], input0[3u * i + 1u], input0[3u * i + 2u]);
+        float value = asfloat(output0.Load(4u * i)) +
+                      dot(g, camera_to_world(ray(i % pc.width, i / pc.width)));
+        output0.Store(4u * i, asuint(value));
     } else if (pc.mode == 5u) {
         if (i == 0u) {
-            add_float(output0,0u,input0[1]);
-            add_float(output0,1u,input0[4]);
-            add_float(output0,2u,1.0f);
+            add_float(output0, 0u, input0[1]);
+            add_float(output0, 1u, input0[4]);
+            add_float(output0, 2u, 1.0f);
         }
     } else if (pc.mode == 6u) {
-        float opacity = 1.0f/(1.0f+exp(-input1[i]));
-        float3 s = float3(input0[3u*i],input0[3u*i+1u],input0[3u*i+2u]);
-        float mean_s = (s.x+s.y+s.z)/3.0f;
-        float anisotropy = max(s.x,max(s.y,s.z))-min(s.x,min(s.y,s.z));
-        add_float(terms,0u,opacity); add_float(terms,1u,opacity*opacity);
-        add_float(terms,2u,mean_s); add_float(terms,3u,mean_s*mean_s);
-        add_float(terms,4u,anisotropy); add_float(terms,5u,anisotropy*anisotropy);
+        float opacity = 1.0f / (1.0f + exp(-input1[i]));
+        float3 s = float3(input0[3u * i], input0[3u * i + 1u], input0[3u * i + 2u]);
+        float mean_s = (s.x + s.y + s.z) / 3.0f;
+        float anisotropy = max(s.x, max(s.y, s.z)) - min(s.x, min(s.y, s.z));
+        add_float(terms, 0u, opacity);
+        add_float(terms, 1u, opacity * opacity);
+        add_float(terms, 2u, mean_s);
+        add_float(terms, 3u, mean_s * mean_s);
+        add_float(terms, 4u, anisotropy);
+        add_float(terms, 5u, anisotropy * anisotropy);
     }
 }

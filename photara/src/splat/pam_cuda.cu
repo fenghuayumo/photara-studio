@@ -23,20 +23,29 @@ __device__ void sift_down(float* distances, int* indices, int count) {
     int parent = 0;
     while (2 * parent + 1 < count) {
         int child = 2 * parent + 1;
-        if (child + 1 < count && greater(distances[child + 1], indices[child + 1],
-                                        distances[child], indices[child])) ++child;
-        if (!greater(distances[child], indices[child],
-                     distances[parent], indices[parent])) break;
-        float d = distances[parent]; distances[parent] = distances[child]; distances[child] = d;
-        int i = indices[parent]; indices[parent] = indices[child]; indices[child] = i;
+        if (child + 1 < count &&
+            greater(distances[child + 1], indices[child + 1], distances[child], indices[child]))
+            ++child;
+        if (!greater(distances[child], indices[child], distances[parent], indices[parent]))
+            break;
+        float d = distances[parent];
+        distances[parent] = distances[child];
+        distances[child] = d;
+        int i = indices[parent];
+        indices[parent] = indices[child];
+        indices[child] = i;
         parent = child;
     }
 }
 
 template <int HeapSize>
 __device__ float3 field_gradient(
-    const int* nodes, const float* values, const float* bounds, int root,
-    float3 query, int neighbors) {
+    const int* nodes,
+    const float* values,
+    const float* bounds,
+    int root,
+    float3 query,
+    int neighbors) {
     float distances[HeapSize];
     int indices[HeapSize];
     int count = 0;
@@ -45,11 +54,13 @@ __device__ float3 field_gradient(
     int pending[64];
     float planes[64];
     int size = 1;
-    pending[0] = root; planes[0] = -1.F;
+    pending[0] = root;
+    planes[0] = -1.F;
     while (size) {
         --size;
         const int node = pending[size];
-        if (node < 0 || (count == neighbors && planes[size] > distances[0])) continue;
+        if (node < 0 || (count == neighbors && planes[size] > distances[0]))
+            continue;
         if (count == neighbors) {
             const float* box = bounds + 6 * node;
             const float bx = fmaxf(fmaxf(box[0] - query.x, query.x - box[3]), 0.F);
@@ -70,24 +81,37 @@ __device__ float3 field_gradient(
         const float distance = dx * dx + (dy * dy + dz * dz);
         if (count < neighbors) {
             int position = count++;
-            distances[position] = distance; indices[position] = point;
+            distances[position] = distance;
+            indices[position] = point;
             while (position > 0) {
                 const int parent = (position - 1) / 2;
-                if (!greater(distances[position], indices[position],
-                             distances[parent], indices[parent])) break;
-                float d = distances[parent]; distances[parent] = distances[position]; distances[position] = d;
-                int i = indices[parent]; indices[parent] = indices[position]; indices[position] = i;
+                if (!greater(
+                        distances[position], indices[position], distances[parent], indices[parent]))
+                    break;
+                float d = distances[parent];
+                distances[parent] = distances[position];
+                distances[position] = d;
+                int i = indices[parent];
+                indices[parent] = indices[position];
+                indices[position] = i;
                 position = parent;
             }
         } else if (greater(distances[0], indices[0], distance, point)) {
-            distances[0] = distance; indices[0] = point;
+            distances[0] = distance;
+            indices[0] = point;
             sift_down(distances, indices, count);
         }
         const float delta = entry[3] == 0 ? dx : entry[3] == 1 ? dy : dz;
         const int near_child = delta < 0.F ? entry[1] : entry[2];
         const int far_child = delta < 0.F ? entry[2] : entry[1];
-        if (far_child >= 0) { pending[size] = far_child; planes[size++] = delta * delta; }
-        if (near_child >= 0) { pending[size] = near_child; planes[size++] = -1.F; }
+        if (far_child >= 0) {
+            pending[size] = far_child;
+            planes[size++] = delta * delta;
+        }
+        if (near_child >= 0) {
+            pending[size] = near_child;
+            planes[size++] = -1.F;
+        }
     }
     int ordered[HeapSize];
     const int found = count;
@@ -95,7 +119,8 @@ __device__ float3 field_gradient(
         ordered[count - 1] = indices[0];
         --count;
         if (count) {
-            distances[0] = distances[count]; indices[0] = indices[count];
+            distances[0] = distances[count];
+            indices[0] = indices[count];
             sift_down(distances, indices, count);
         }
     }
@@ -103,7 +128,8 @@ __device__ float3 field_gradient(
     for (int i = 0; i < found; ++i) {
         const float* g = values + 19 * ordered[i];
         const float dx = query.x - g[0], dy = query.y - g[1], dz = query.z - g[2];
-        if (g[3] * dx + (g[4] * dy + g[5] * dz) < 0.F) continue;
+        if (g[3] * dx + (g[4] * dy + g[5] * dz) < 0.F)
+            continue;
         const float x = g[9] * dx + (g[10] * dy + g[11] * dz);
         const float y = g[12] * dx + (g[13] * dy + g[14] * dz);
         const float z = g[15] * dx + (g[16] * dy + g[17] * dz);
@@ -120,30 +146,51 @@ __device__ float3 field_gradient(
 
 template <int HeapSize>
 __global__ void gradient_kernel(
-    const int* nodes, const float* values, const float* bounds, int root, const float* points,
-    float* gradients, std::size_t count, int neighbors) {
+    const int* nodes,
+    const float* values,
+    const float* bounds,
+    int root,
+    const float* points,
+    float* gradients,
+    std::size_t count,
+    int neighbors) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
-    const float3 g = field_gradient<HeapSize>(nodes, values, bounds, root,
-        make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
-    gradients[3*i] = g.x; gradients[3*i+1] = g.y; gradients[3*i+2] = g.z;
+    if (i >= count)
+        return;
+    const float3 g = field_gradient<HeapSize>(
+        nodes, values, bounds, root,
+        make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]), neighbors);
+    gradients[3 * i] = g.x;
+    gradients[3 * i + 1] = g.y;
+    gradients[3 * i + 2] = g.z;
 }
 
 template <int HeapSize>
 __global__ void refine_kernel(
-    const int* nodes, const float* values, const float* bounds, int root, float* points,
-    const float* occupancy, std::size_t count, int neighbors,
-    float iso_value, float minimum_norm_squared, float step) {
+    const int* nodes,
+    const float* values,
+    const float* bounds,
+    int root,
+    float* points,
+    const float* occupancy,
+    std::size_t count,
+    int neighbors,
+    float iso_value,
+    float minimum_norm_squared,
+    float step) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
-    const float3 g = field_gradient<HeapSize>(nodes, values, bounds, root,
-        make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
-    const float norm = g.x*g.x + (g.y*g.y + g.z*g.z);
-    if (!(norm > minimum_norm_squared)) return;
+    if (i >= count)
+        return;
+    const float3 g = field_gradient<HeapSize>(
+        nodes, values, bounds, root,
+        make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]), neighbors);
+    const float norm = g.x * g.x + (g.y * g.y + g.z * g.z);
+    if (!(norm > minimum_norm_squared))
+        return;
     const float alpha = fminf(fmaxf((occupancy[i] - iso_value) / norm, -1.F), 1.F);
-    points[3*i] += step * alpha * g.x;
-    points[3*i+1] += step * alpha * g.y;
-    points[3*i+2] += step * alpha * g.z;
+    points[3 * i] += step * alpha * g.x;
+    points[3 * i + 1] += step * alpha * g.y;
+    points[3 * i + 2] += step * alpha * g.z;
 }
 
 void check(cudaError_t error) {
@@ -152,56 +199,70 @@ void check(cudaError_t error) {
 }
 
 __global__ void accumulate_occupancy_kernel(
-    float* occupancy, bool* observed, const float* values, const bool* foreground,
-    const bool* background, const bool* visibility, std::size_t count) {
+    float* occupancy,
+    bool* observed,
+    const float* values,
+    const bool* foreground,
+    const bool* background,
+    const bool* visibility,
+    std::size_t count) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count) {
-        if (foreground[i]) occupancy[i] = fminf(occupancy[i], values[i]);
-        else if (background && background[i]) occupancy[i] = 0.F;
-        if (visibility[i]) observed[i] = true;
+        if (foreground[i])
+            occupancy[i] = fminf(occupancy[i], values[i]);
+        else if (background && background[i])
+            occupancy[i] = 0.F;
+        if (visibility[i])
+            observed[i] = true;
     }
 }
 
 int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigned neighbors) {
     if (!points.is_valid() || points.device() != tinytensor::Device::CUDA ||
         !points.is_contiguous() || points.dtype() != tinytensor::DataType::Float32 ||
-        points.shape().rank() != 2 || points.shape()[1] != 3 ||
-        field.root < 0 || !field.nodes.is_valid() || !field.values.is_valid() || !field.bounds.is_valid() ||
+        points.shape().rank() != 2 || points.shape()[1] != 3 || field.root < 0 ||
+        !field.nodes.is_valid() || !field.values.is_valid() || !field.bounds.is_valid() ||
         neighbors == 0 || neighbors > pam_gpu_max_neighbors)
         throw std::invalid_argument("Invalid PAM CUDA field query");
     return static_cast<int>(std::min<std::size_t>(neighbors, field.values.shape()[0]));
 }
 
-}  // namespace
+} // namespace
 
 void pam_accumulate_occupancy_cuda(
-    tinytensor::Tensor& occupancy, tinytensor::Tensor& observed,
-    const tinytensor::Tensor& values, const tinytensor::Tensor& foreground,
-    const tinytensor::Tensor& background, const tinytensor::Tensor& visibility) {
+    tinytensor::Tensor& occupancy,
+    tinytensor::Tensor& observed,
+    const tinytensor::Tensor& values,
+    const tinytensor::Tensor& foreground,
+    const tinytensor::Tensor& background,
+    const tinytensor::Tensor& visibility) {
     const auto valid = [&](const tinytensor::Tensor& t, tinytensor::DataType dtype) {
-        return t.is_valid() && t.device() == tinytensor::Device::CUDA &&
-            t.dtype() == dtype && t.is_contiguous() && t.shape() == occupancy.shape();
+        return t.is_valid() && t.device() == tinytensor::Device::CUDA && t.dtype() == dtype &&
+               t.is_contiguous() && t.shape() == occupancy.shape();
     };
     if (!valid(occupancy, tinytensor::DataType::Float32) || occupancy.shape().rank() != 1 ||
         !valid(values, tinytensor::DataType::Float32) ||
-        !valid(observed, tinytensor::DataType::Bool) || !valid(foreground, tinytensor::DataType::Bool) ||
+        !valid(observed, tinytensor::DataType::Bool) ||
+        !valid(foreground, tinytensor::DataType::Bool) ||
         (background.is_valid() && !valid(background, tinytensor::DataType::Bool)) ||
         (visibility.is_valid() && !valid(visibility, tinytensor::DataType::Bool)))
         throw std::invalid_argument("Invalid PAM CUDA occupancy accumulation");
-    if (!occupancy.numel()) return;
+    if (!occupancy.numel())
+        return;
     accumulate_occupancy_kernel<<<(occupancy.numel() + 255) / 256, 256>>>(
         occupancy.ptr<float>(), observed.ptr<bool>(), values.ptr<float>(), foreground.ptr<bool>(),
         background.is_valid() ? background.ptr<bool>() : nullptr,
-        visibility.is_valid() ? visibility.ptr<bool>() : foreground.ptr<bool>(),
-        occupancy.numel());
+        visibility.is_valid() ? visibility.ptr<bool>() : foreground.ptr<bool>(), occupancy.numel());
     check(cudaGetLastError());
 }
 
 tinytensor::Tensor pam_field_gradients(
-    const PamGpuField& field, const tinytensor::Tensor& points, unsigned neighbors) {
+    const PamGpuField& field,
+    const tinytensor::Tensor& points,
+    unsigned neighbors) {
 #ifdef TINYTENSOR_HAS_VULKAN
-    if(points.device()==tinytensor::Device::Vulkan)
-        return pam_field_gradients_vulkan(field,points,neighbors);
+    if (points.device() == tinytensor::Device::Vulkan)
+        return pam_field_gradients_vulkan(field, points, neighbors);
 #endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
@@ -210,24 +271,33 @@ tinytensor::Tensor pam_field_gradients(
         const std::size_t size = std::min(query_chunk, count - begin);
         const auto launch = [&]<int HeapSize>() {
             gradient_kernel<HeapSize><<<(size + block_size - 1) / block_size, block_size>>>(
-                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
-                points.ptr<float>() + 3*begin, gradients.ptr<float>() + 3*begin, size, k);
+                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(),
+                field.root, points.ptr<float>() + 3 * begin, gradients.ptr<float>() + 3 * begin,
+                size, k);
         };
-        if (k <= 32) launch.template operator()<32>();
-        else if (k <= 48) launch.template operator()<48>();
-        else launch.template operator()<64>();
+        if (k <= 32)
+            launch.template operator()<32>();
+        else if (k <= 48)
+            launch.template operator()<48>();
+        else
+            launch.template operator()<64>();
         check(cudaGetLastError());
     }
     return gradients;
 }
 
 void pam_refine_points(
-    const PamGpuField& field, tinytensor::Tensor& points,
-    const tinytensor::Tensor& occupancy, unsigned neighbors,
-    float iso_value, float minimum_gradient_norm_squared, float step) {
+    const PamGpuField& field,
+    tinytensor::Tensor& points,
+    const tinytensor::Tensor& occupancy,
+    unsigned neighbors,
+    float iso_value,
+    float minimum_gradient_norm_squared,
+    float step) {
 #ifdef TINYTENSOR_HAS_VULKAN
-    if(points.device()==tinytensor::Device::Vulkan) {
-        pam_refine_points_vulkan(field,points,occupancy,neighbors,iso_value,minimum_gradient_norm_squared,step);
+    if (points.device() == tinytensor::Device::Vulkan) {
+        pam_refine_points_vulkan(
+            field, points, occupancy, neighbors, iso_value, minimum_gradient_norm_squared, step);
         return;
     }
 #endif
@@ -241,15 +311,18 @@ void pam_refine_points(
         const std::size_t size = std::min(query_chunk, count - begin);
         const auto launch = [&]<int HeapSize>() {
             refine_kernel<HeapSize><<<(size + block_size - 1) / block_size, block_size>>>(
-                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
-                points.ptr<float>() + 3*begin, occupancy.ptr<float>() + begin, size, k,
-                iso_value, minimum_gradient_norm_squared, step);
+                field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(),
+                field.root, points.ptr<float>() + 3 * begin, occupancy.ptr<float>() + begin, size,
+                k, iso_value, minimum_gradient_norm_squared, step);
         };
-        if (k <= 32) launch.template operator()<32>();
-        else if (k <= 48) launch.template operator()<48>();
-        else launch.template operator()<64>();
+        if (k <= 32)
+            launch.template operator()<32>();
+        else if (k <= 48)
+            launch.template operator()<48>();
+        else
+            launch.template operator()<64>();
         check(cudaGetLastError());
     }
 }
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

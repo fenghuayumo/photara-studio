@@ -35,8 +35,12 @@ static const uint kModelFisheye = 1u;
 static const uint kModelEquirect = 3u;
 static const float kPi = 3.14159265358979323846f;
 
-bool focus_ray_axis(inout float t_near, inout float t_far, float origin,
-                    float direction, float half_extent) {
+bool focus_ray_axis(
+    inout float t_near,
+    inout float t_far,
+    float origin,
+    float direction,
+    float half_extent) {
     if (abs(direction) < 1e-9f)
         return abs(origin) <= half_extent;
     float enter = (-half_extent - origin) / direction;
@@ -55,9 +59,8 @@ bool focus_ray_hits(float3 origin, float3 direction, float3 half_extent) {
     float t_near = 0.0f;
     float t_far = 3.402823466e+38f;
     return focus_ray_axis(t_near, t_far, origin.x, direction.x, half_extent.x) &&
-        focus_ray_axis(t_near, t_far, origin.y, direction.y, half_extent.y) &&
-        focus_ray_axis(t_near, t_far, origin.z, direction.z, half_extent.z) &&
-        t_far >= 0.0f;
+           focus_ray_axis(t_near, t_far, origin.y, direction.y, half_extent.y) &&
+           focus_ray_axis(t_near, t_far, origin.z, direction.z, half_extent.z) && t_far >= 0.0f;
 }
 
 float fisheye_distorted(float theta, float k1, float k2, float k3, float k4) {
@@ -82,10 +85,12 @@ bool unproject_fisheye(float u, float v, out float3 ray) {
     [loop] for (uint i = 0u; i < 50u; ++i) {
         float t2 = theta * theta;
         float poly = 1.0f + t2 * (pc.k1 + t2 * (pc.k2 + t2 * (pc.k3 + t2 * pc.k4)));
-        float derivative = 1.0f + t2 * (3.0f * pc.k1 + t2 * (5.0f * pc.k2 +
-            t2 * (7.0f * pc.k3 + t2 * 9.0f * pc.k4)));
+        float derivative =
+            1.0f +
+            t2 * (3.0f * pc.k1 + t2 * (5.0f * pc.k2 + t2 * (7.0f * pc.k3 + t2 * 9.0f * pc.k4)));
         float error = theta * poly - radius;
-        if (abs(error) < 1e-12f) break;
+        if (abs(error) < 1e-12f)
+            break;
         theta -= error / max(derivative, 1e-12f);
         theta = clamp(theta, 0.0f, hi);
     }
@@ -110,7 +115,8 @@ bool unproject_equirect(float u, float v, out float3 ray) {
 void main(uint3 dtid : SV_DispatchThreadID) {
     uint pixels = pc.width * pc.height;
     uint pixel = dtid.x;
-    if (pixel >= pixels) return;
+    if (pixel >= pixels)
+        return;
     uint x = pixel % pc.width;
     uint y = pixel / pc.width;
     float3 ray;

@@ -31,8 +31,10 @@ IgsSelection select_igs_parents(
     const tinytensor::Tensor& replacement_weights,
     const tinytensor::Tensor& oversize_scores,
     const tinytensor::Tensor& growth_weights,
-    std::size_t replacement_slots, std::size_t desired_growth,
-    std::size_t capacity, std::mt19937* random = nullptr,
+    std::size_t replacement_slots,
+    std::size_t desired_growth,
+    std::size_t capacity,
+    std::mt19937* random = nullptr,
     IgsSelectionProfile* profile = nullptr);
 
 // ADC-IGS refinement. Every decision - prune masks, candidate scores and
@@ -44,12 +46,16 @@ IgsSelection select_igs_parents(
 // host rule at the sparse refinement boundary so CUDA and Vulkan select the
 // same parents. Shared device plumbing lives in densification_internal.hpp.
 class IgsStrategy {
-public:
+  public:
     RefinementCounts refine(
-        GaussianModel& model, detail::DensificationStats& stats,
-        unsigned iteration, float scene_extent,
-        const mvs::Vec3f& scene_center, const TrainingOptions& options,
-        std::mt19937& random, const AdamStates& states) const;
+        GaussianModel& model,
+        detail::DensificationStats& stats,
+        unsigned iteration,
+        float scene_extent,
+        const mvs::Vec3f& scene_center,
+        const TrainingOptions& options,
+        std::mt19937& random,
+        const AdamStates& states) const;
 };
 
-}  // namespace photara::splat::densification
+} // namespace photara::splat::densification

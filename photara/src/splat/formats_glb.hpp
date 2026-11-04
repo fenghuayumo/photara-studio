@@ -23,4 +23,4 @@ struct DecodedGlbGaussians {
 std::vector<std::uint8_t> save_glb(const GaussianModel& model);
 DecodedGlbGaussians load_glb(const std::filesystem::path& path);
 
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail

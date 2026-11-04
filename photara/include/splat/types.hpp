@@ -36,18 +36,18 @@ struct Camera {
 struct GaussianModel {
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
     SplatFilterMode filter_mode{SplatFilterMode::classic};
-    tinytensor::Tensor means;           // [N,3], world space
-    tinytensor::Tensor log_scales;      // [N,3]
-    tinytensor::Tensor quaternions;     // [N,4], scalar-first
-    tinytensor::Tensor opacity_logits;  // [N,1]
-    tinytensor::Tensor sh;              // [N,K,3]
+    tinytensor::Tensor means;          // [N,3], world space
+    tinytensor::Tensor log_scales;     // [N,3]
+    tinytensor::Tensor quaternions;    // [N,4], scalar-first
+    tinytensor::Tensor opacity_logits; // [N,1]
+    tinytensor::Tensor sh;             // [N,K,3]
     // GaussianWrapping normal-field features. xyz is a learnable direction;
     // w is an orientation logit. The surface normal used by training/PAM is
     // normalize(xyz) * tanh(w). Kept optional for legacy 3DGS PLY files.
     tinytensor::Tensor normal_features; // [N,4], optional
     // Mip-Splatting screen-space footprint converted to a world-space radius.
     // This is derived state (no gradient) and is recomputed as means change.
-    tinytensor::Tensor filter_3d;        // [N,1], optional
+    tinytensor::Tensor filter_3d; // [N,1], optional
     unsigned sh_degree{3};
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -57,11 +57,11 @@ struct GaussianModel {
 
 struct TrainingView {
     Camera camera;
-    tinytensor::Tensor rgb;     // [3,H,W], linear float RGB
-    tinytensor::Tensor gray;    // [H,W], optional NCC luminance
-    tinytensor::Tensor depth;   // [H,W], zero when unavailable
-    tinytensor::Tensor normal;  // [3,H,W], camera space
-    tinytensor::Tensor mask;    // [H,W], 0 or 1
+    tinytensor::Tensor rgb;    // [3,H,W], linear float RGB
+    tinytensor::Tensor gray;   // [H,W], optional NCC luminance
+    tinytensor::Tensor depth;  // [H,W], zero when unavailable
+    tinytensor::Tensor normal; // [3,H,W], camera space
+    tinytensor::Tensor mask;   // [H,W], 0 or 1
     bool has_mask{false};
     // The mask denotes available source pixels, not object occupancy.
     // Such a mask never generates alpha supervision.
@@ -97,11 +97,11 @@ struct RasterContext {
 };
 
 struct RenderResult {
-    tinytensor::Tensor color;         // [3,H,W]
-    tinytensor::Tensor alpha;         // [H,W]
-    tinytensor::Tensor median_depth;  // [H,W]
-    tinytensor::Tensor normal;        // [3,H,W]
-    tinytensor::Tensor radii;         // [N], int32
+    tinytensor::Tensor color;        // [3,H,W]
+    tinytensor::Tensor alpha;        // [H,W]
+    tinytensor::Tensor median_depth; // [H,W]
+    tinytensor::Tensor normal;       // [3,H,W]
+    tinytensor::Tensor radii;        // [N], int32
     // [N], 1 only when the Gaussian survives alpha/transmittance tests and
     // contributes to at least one pixel. This is stricter than radii > 0,
     // which only means that the Gaussian projected into the camera frustum.
@@ -113,22 +113,22 @@ struct RenderResult {
 struct DepthSampleContextImpl;
 
 struct DepthSampleResult {
-    tinytensor::Tensor camera_points;  // [P,3], neighbour camera space
-    tinytensor::Tensor inside;         // [P], CUDA bool / Vulkan int32 flags
+    tinytensor::Tensor camera_points; // [P,3], neighbour camera space
+    tinytensor::Tensor inside;        // [P], CUDA bool / Vulkan int32 flags
     std::shared_ptr<DepthSampleContextImpl> context;
     std::shared_ptr<void> backend_impl;
 };
 
 struct DepthSampleGradients {
     ModelGradients model;
-    tinytensor::Tensor points;         // [P,3], world space
+    tinytensor::Tensor points; // [P,3], world space
 };
 
 struct OccupancyResult {
     // GaussianWrapping calls this alpha_integrated: 1 - transmittance at each
     // world-space query point along the selected camera ray.
-    tinytensor::Tensor occupancy;  // [P]
-    tinytensor::Tensor inside;     // [P], bool camera-frustum membership
+    tinytensor::Tensor occupancy; // [P]
+    tinytensor::Tensor inside;    // [P], bool camera-frustum membership
 };
 
-}  // namespace photara::splat
+} // namespace photara::splat

@@ -40,25 +40,33 @@ struct Backend {
         external.enabled.push_descriptors = info.push_descriptors;
         external.enabled.buffer_atomic_f32 = info.buffer_atomic_f32;
         device = photara::vk::Device::adopt(external);
-        pipeline = device.create_compute(std::as_bytes(std::span{splat_geometry_hlsl_spv}), 6, sizeof(Push));
+        pipeline = device.create_compute(
+            std::as_bytes(std::span{splat_geometry_hlsl_spv}), 6, sizeof(Push));
         ring = photara::vk::EncoderRing(device, 4, photara::vk::BarrierPolicy::after_compute);
     }
     ~Backend() {
         // TinyTensor's buffer pool does not own these external submissions.
         // Keep their allocations alive until the corresponding fence retires.
-        for (std::uint32_t i = 0; i < ring.size(); ++i) ring.at(i).wait();
+        for (std::uint32_t i = 0; i < ring.size(); ++i)
+            ring.at(i).wait();
     }
 };
-Backend& backend() { static thread_local Backend value; return value; }
+Backend& backend() {
+    static thread_local Backend value;
+    return value;
+}
 
 void launch(Push push, const std::array<Tensor, 6>& tensors) {
-    if (push.count == 0) return;
+    if (push.count == 0)
+        return;
     tinytensor::vulkan::submit_async();
     auto& vk = backend();
     std::array<photara::vk::BufferBinding, 6> bindings;
-    const auto fallback = std::find_if(tensors.begin(), tensors.end(),
-        [](const auto& t) { return t.is_valid() && t.numel() > 0; });
-    if (fallback == tensors.end()) throw std::invalid_argument("Empty Vulkan geometry dispatch");
+    const auto fallback = std::find_if(tensors.begin(), tensors.end(), [](const auto& t) {
+        return t.is_valid() && t.numel() > 0;
+    });
+    if (fallback == tensors.end())
+        throw std::invalid_argument("Empty Vulkan geometry dispatch");
     for (std::size_t i = 0; i < tensors.size(); ++i) {
         const auto& t = tensors[i].is_valid() && tensors[i].numel() > 0 ? tensors[i] : *fallback;
         const auto view = tinytensor::vulkan::buffer_view(t);
@@ -69,8 +77,9 @@ void launch(Push push, const std::array<Tensor, 6>& tensors) {
     // Construct fresh Tensor handles: assigning into an existing Tensor view
     // would copy into that view instead of replacing its owner.
     vk.retained[vk.ring.index()] = std::make_unique<std::array<Tensor, 6>>(tensors);
-    encoder.dispatch(vk.pipeline, bindings, &push, sizeof(push),
-        std::min(groups, 65535u), (groups + 65534u) / 65535u);
+    encoder.dispatch(
+        vk.pipeline, bindings, &push, sizeof(push), std::min(groups, 65535u),
+        (groups + 65534u) / 65535u);
     vk.ring.submit();
 }
 Push camera_push(std::uint32_t mode, const Camera& camera) {
@@ -79,33 +88,46 @@ Push camera_push(std::uint32_t mode, const Camera& camera) {
         throw std::invalid_argument("Vulkan geometry losses require a valid pinhole camera");
     Push push;
     push.mode = mode;
-    push.width = camera.width; push.height = camera.height;
+    push.width = camera.width;
+    push.height = camera.height;
     push.count = camera.width * camera.height;
-    push.fx = camera.fx; push.fy = camera.fy; push.cx = camera.cx; push.cy = camera.cy;
+    push.fx = camera.fx;
+    push.fy = camera.fy;
+    push.cx = camera.cx;
+    push.cy = camera.cy;
     return push;
 }
 Tensor matrix(const Camera& camera) {
-    return Tensor::from_vector(std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),
+    return Tensor::from_vector(
+        std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),
         {std::size_t{16}}, device);
 }
 void geometry_gradients(const RenderResult& rendered, LossGradients& gradients) {
-    if (!gradients.depth.is_valid()) gradients.depth = Tensor::zeros_like(rendered.median_depth);
-    if (!gradients.normal.is_valid()) gradients.normal = Tensor::zeros_like(rendered.normal);
+    if (!gradients.depth.is_valid())
+        gradients.depth = Tensor::zeros_like(rendered.median_depth);
+    if (!gradients.normal.is_valid())
+        gradients.normal = Tensor::zeros_like(rendered.normal);
 }
 splat_drender::vulkan::SplatBufferView buffer(const Tensor& tensor) {
-    if (!tensor.is_valid()) return {};
+    if (!tensor.is_valid())
+        return {};
     const auto view = tinytensor::vulkan::buffer_view(tensor);
     return {view.buffer, view.offset, view.bytes};
 }
 splat_drender::vulkan::SplatCamera camera_view(const Camera& camera) {
     splat_drender::vulkan::SplatCamera result;
-    result.width = camera.width; result.height = camera.height;
-    result.fx = camera.fx; result.fy = camera.fy; result.cx = camera.cx; result.cy = camera.cy;
+    result.width = camera.width;
+    result.height = camera.height;
+    result.fx = camera.fx;
+    result.fy = camera.fy;
+    result.cx = camera.cx;
+    result.cy = camera.cy;
     result.mode = static_cast<std::uint32_t>(camera.model);
-    result.world_to_camera = camera.world_to_camera; result.center = camera.position;
+    result.world_to_camera = camera.world_to_camera;
+    result.center = camera.position;
     return result;
 }
-}  // namespace
+} // namespace
 
 namespace {
 void validate_normal_features(const Tensor& features) {
@@ -114,19 +136,23 @@ void validate_normal_features(const Tensor& features) {
         features.shape().rank() != 2 || features.shape()[1] != 4)
         throw std::invalid_argument("Normal features must be contiguous Vulkan float32 [N,4]");
 }
-}
+} // namespace
 
 Tensor normal_features_to_normals_vulkan(const Tensor& features) {
     validate_normal_features(features);
     auto result = Tensor::zeros({features.shape()[0], std::size_t{3}}, device);
-    Push push; push.mode = 7; push.count = static_cast<std::uint32_t>(features.shape()[0]);
+    Push push;
+    push.mode = 7;
+    push.count = static_cast<std::uint32_t>(features.shape()[0]);
     launch(push, {features, {}, {}, result, {}, {}});
     return result;
 }
 
 Tensor normal_features_from_smallest_axis_vulkan(const GaussianModel& model) {
     auto result = Tensor::empty({model.size(), std::size_t{4}}, device);
-    Push push; push.mode = 10; push.count = static_cast<std::uint32_t>(model.size());
+    Push push;
+    push.mode = 10;
+    push.count = static_cast<std::uint32_t>(model.size());
     push.euclidean = model.filter_3d.is_valid();
     launch(push, {model.log_scales, model.quaternions, model.filter_3d, result, {}, {}});
     return result;
@@ -138,26 +164,37 @@ Tensor normal_features_backward_vulkan(const Tensor& features, const Tensor& gra
         gradient.dtype() != tinytensor::DataType::Float32 || !gradient.is_contiguous() ||
         gradient.shape().rank() != 2 || gradient.shape()[0] != features.shape()[0] ||
         gradient.shape()[1] != 3)
-        throw std::invalid_argument("Normal feature gradient must be contiguous Vulkan float32 [N,3]");
+        throw std::invalid_argument(
+            "Normal feature gradient must be contiguous Vulkan float32 [N,3]");
     auto result = Tensor::zeros_like(features);
-    Push push; push.mode = 8; push.count = static_cast<std::uint32_t>(features.shape()[0]);
+    Push push;
+    push.mode = 8;
+    push.count = static_cast<std::uint32_t>(features.shape()[0]);
     launch(push, {features, gradient, {}, result, {}, {}});
     return result;
 }
 
-LossGradients compute_normal_field_loss_vulkan(const RenderResult& rendered,
-    const Camera& camera, float weight, bool collect_scalar_terms) {
+LossGradients compute_normal_field_loss_vulkan(
+    const RenderResult& rendered,
+    const Camera& camera,
+    float weight,
+    bool collect_scalar_terms) {
     auto push = camera_push(9, camera);
     if (!rendered.median_depth.is_valid() || !rendered.normal.is_valid() ||
         rendered.median_depth.numel() != push.count || rendered.color.numel() != 3u * push.count)
-        throw std::invalid_argument("Normal field loss requires matching color and depth attachments");
-    LossGradients result{Tensor::zeros_like(rendered.color), Tensor::zeros_like(rendered.alpha),
+        throw std::invalid_argument(
+            "Normal field loss requires matching color and depth attachments");
+    LossGradients result{
+        Tensor::zeros_like(rendered.color), Tensor::zeros_like(rendered.alpha),
         Tensor::zeros_like(rendered.median_depth), Tensor::zeros_like(rendered.normal)};
-    if (!(weight > 0.F)) return result;
+    if (!(weight > 0.F))
+        return result;
     push.weight = weight;
     push.camera_count = collect_scalar_terms;
     auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
-    launch(push, {rendered.median_depth, rendered.color, matrix(camera), result.depth, result.color, terms});
+    launch(
+        push,
+        {rendered.median_depth, rendered.color, matrix(camera), result.depth, result.color, terms});
     if (collect_scalar_terms) {
         result.normal_value = terms.sum().to_vector()[0];
         result.total = result.normal_value;
@@ -165,19 +202,27 @@ LossGradients compute_normal_field_loss_vulkan(const RenderResult& rendered,
     return result;
 }
 
-void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& camera,
-    float weight, LossGradients& gradients, bool collect_scalar_terms) {
+void add_depth_normal_loss_vulkan(
+    const RenderResult& rendered,
+    const Camera& camera,
+    float weight,
+    LossGradients& gradients,
+    bool collect_scalar_terms) {
     if (!rendered.median_depth.is_valid() || !rendered.normal.is_valid()) {
-        if (weight > 0.F) throw std::invalid_argument("Vulkan depth-normal loss requires geometry attachments");
+        if (weight > 0.F)
+            throw std::invalid_argument("Vulkan depth-normal loss requires geometry attachments");
         return;
     }
     geometry_gradients(rendered, gradients);
-    if (!(weight > 0.F)) return;
+    if (!(weight > 0.F))
+        return;
     auto push = camera_push(0, camera);
     push.weight = weight;
     push.camera_count = collect_scalar_terms;
     auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
-    launch(push, {rendered.median_depth, rendered.normal, {}, gradients.depth, gradients.normal, terms});
+    launch(
+        push,
+        {rendered.median_depth, rendered.normal, {}, gradients.depth, gradients.normal, terms});
     if (collect_scalar_terms) {
         const float value = terms.sum().to_vector()[0];
         gradients.normal_value += value;
@@ -185,8 +230,12 @@ void add_depth_normal_loss_vulkan(const RenderResult& rendered, const Camera& ca
     }
 }
 
-void add_alpha_mask_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
-    const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms) {
+void add_alpha_mask_loss_vulkan(
+    const RenderResult& rendered,
+    const TrainingView& target,
+    const TrainingOptions& options,
+    LossGradients& gradients,
+    bool collect_scalar_terms) {
     // Missing rays are not evidence of empty space; validity masks must never
     // supervise opacity, even if transparent mode was selected for the dataset.
     if (!options.use_mask || !target.has_mask || target.mask_is_validity ||
@@ -199,7 +248,8 @@ void add_alpha_mask_loss_vulkan(const RenderResult& rendered, const TrainingView
         if (!tensor->is_valid() || tensor->device() != device ||
             tensor->dtype() != tinytensor::DataType::Float32 || !tensor->is_contiguous() ||
             tensor->numel() != count)
-            throw std::invalid_argument("Missing or mismatched Vulkan transparent alpha/mask tensors");
+            throw std::invalid_argument(
+                "Missing or mismatched Vulkan transparent alpha/mask tensors");
     Push push;
     push.mode = 13;
     push.count = static_cast<std::uint32_t>(count);
@@ -215,9 +265,14 @@ void add_alpha_mask_loss_vulkan(const RenderResult& rendered, const TrainingView
     }
 }
 
-void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& target,
-    const TrainingOptions& options, LossGradients& gradients, bool collect_scalar_terms) {
-    if (!(options.lambda_d > 0.F || options.lambda_n > 0.F)) return;
+void add_prior_loss_vulkan(
+    const RenderResult& rendered,
+    const TrainingView& target,
+    const TrainingOptions& options,
+    LossGradients& gradients,
+    bool collect_scalar_terms) {
+    if (!(options.lambda_d > 0.F || options.lambda_n > 0.F))
+        return;
     auto push = camera_push(11, target.camera);
     const auto check = [&](const Tensor& tensor, std::size_t count) {
         if (!tensor.is_valid() || tensor.device() != device || !tensor.is_contiguous() ||
@@ -226,52 +281,68 @@ void add_prior_loss_vulkan(const RenderResult& rendered, const TrainingView& tar
     };
     geometry_gradients(rendered, gradients);
     const bool mask = target.has_mask && (options.use_mask || target.mask_is_validity);
-    if (mask) check(target.mask, push.count);
+    if (mask)
+        check(target.mask, push.count);
     push.euclidean = mask;
     push.camera_count = collect_scalar_terms;
     push.focal = options.geometry_epsilon;
-    const auto terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
+    const auto terms =
+        collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
     if (options.lambda_d > 0.F) {
-        check(rendered.median_depth, push.count); check(target.depth, push.count);
+        check(rendered.median_depth, push.count);
+        check(target.depth, push.count);
         push.weight = options.lambda_d;
-        launch(push, {rendered.median_depth, target.depth, target.mask, gradients.depth, {}, terms});
+        launch(
+            push, {rendered.median_depth, target.depth, target.mask, gradients.depth, {}, terms});
         if (collect_scalar_terms) {
             const float value = terms.sum().to_vector()[0];
-            gradients.depth_value += value; gradients.total += value;
+            gradients.depth_value += value;
+            gradients.total += value;
         }
     }
     if (options.lambda_n > 0.F) {
-        check(rendered.normal, 3ull*push.count); check(target.normal, 3ull*push.count);
-        push.mode = 12; push.weight = options.lambda_n;
+        check(rendered.normal, 3ull * push.count);
+        check(target.normal, 3ull * push.count);
+        push.mode = 12;
+        push.weight = options.lambda_n;
         // A separate zeroed term image is necessary when the depth dispatch
         // skipped pixels that are valid in the independent normal prior.
-        const auto normal_terms = collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
-        launch(push, {rendered.normal, target.normal, target.mask, gradients.normal, {}, normal_terms});
+        const auto normal_terms =
+            collect_scalar_terms ? Tensor::zeros({std::size_t{push.count}}, device) : Tensor{};
+        launch(
+            push,
+            {rendered.normal, target.normal, target.mask, gradients.normal, {}, normal_terms});
         if (collect_scalar_terms) {
             const float value = normal_terms.sum().to_vector()[0];
-            gradients.normal_value += value; gradients.total += value;
+            gradients.normal_value += value;
+            gradients.total += value;
         }
     }
 }
 
-Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& cameras,
+Tensor compute_3d_filter_vulkan(
+    const Tensor& means,
+    const std::vector<Camera>& cameras,
     float minimum_scale_factor) {
     if (means.dtype() != tinytensor::DataType::Float32 || means.shape().rank() != 2 ||
         means.shape()[1] != 3 || cameras.empty())
         throw std::invalid_argument("Vulkan 3D filter requires float32 [N,3] means and cameras");
     auto result = Tensor::empty({means.shape()[0], std::size_t{1}}, device);
-    if (means.shape()[0] == 0) return result;
+    if (means.shape()[0] == 0)
+        return result;
     std::vector<float> packed(cameras.size() * 17);
     for (std::size_t i = 0; i < cameras.size(); ++i) {
         const auto& camera = cameras[i];
         const auto base = 17 * i;
-        std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(), packed.begin() + base);
+        std::copy(
+            camera.world_to_camera.begin(), camera.world_to_camera.end(), packed.begin() + base);
         packed[base + 16] = camera.fx;
     }
     auto camera_tensor = Tensor::from_vector(packed, {packed.size()}, device);
     auto maximum = Tensor::zeros({1}, device);
     Push push;
-    push.mode = 1; push.count = static_cast<std::uint32_t>(means.shape()[0]);
+    push.mode = 1;
+    push.count = static_cast<std::uint32_t>(means.shape()[0]);
     push.camera_count = static_cast<std::uint32_t>(cameras.size());
     push.focal = 1.F;
     push.weight = std::sqrt(std::max(minimum_scale_factor, 0.F));
@@ -283,13 +354,16 @@ Tensor compute_3d_filter_vulkan(const Tensor& means, const std::vector<Camera>& 
 
 Tensor unproject_depth_to_world_vulkan(const Tensor& depth, const Camera& camera) {
     const auto push = camera_push(3, camera);
-    if (depth.numel() != push.count) throw std::invalid_argument("Vulkan depth unprojection shape mismatch");
+    if (depth.numel() != push.count)
+        throw std::invalid_argument("Vulkan depth unprojection shape mismatch");
     auto points = Tensor::empty({std::size_t{push.count}, std::size_t{3}}, device);
     launch(push, {depth, {}, matrix(camera), points, {}, {}});
     return points;
 }
 
-void add_sample_depth_point_gradients_vulkan(const Camera& camera, const Tensor& points,
+void add_sample_depth_point_gradients_vulkan(
+    const Camera& camera,
+    const Tensor& points,
     LossGradients& gradients) {
     const auto push = camera_push(4, camera);
     if (points.numel() != 3ull * push.count || gradients.depth.numel() != push.count)
@@ -297,39 +371,57 @@ void add_sample_depth_point_gradients_vulkan(const Camera& camera, const Tensor&
     launch(push, {points, {}, matrix(camera), gradients.depth, {}, {}});
 }
 
-MultiViewLoss add_multi_view_loss_vulkan(const Tensor& points, const Tensor& inside,
-    const RenderResult& rendered, const TrainingView& reference, const TrainingView& neighbour,
-    const TrainingOptions& options, LossGradients& gradients, Tensor& point_gradient,
-    bool collect_scalar_terms, Tensor* stability) {
+MultiViewLoss add_multi_view_loss_vulkan(
+    const Tensor& points,
+    const Tensor& inside,
+    const RenderResult& rendered,
+    const TrainingView& reference,
+    const TrainingView& neighbour,
+    const TrainingOptions& options,
+    LossGradients& gradients,
+    Tensor& point_gradient,
+    bool collect_scalar_terms,
+    Tensor* stability) {
     geometry_gradients(rendered, gradients);
     auto depth = Tensor::empty(rendered.median_depth.shape(), device);
     auto normal = Tensor::empty(rendered.normal.shape(), device);
     point_gradient = Tensor::empty(points.shape(), device);
     auto terms = Tensor::empty({5}, device);
     splat_drender::vulkan::SplatDeviceMultiViewInput input;
-    input.reference_camera = camera_view(reference.camera); input.neighbour_camera = camera_view(neighbour.camera);
-    input.reference_depth = buffer(rendered.median_depth); input.reference_normal = buffer(rendered.normal);
-    input.reference_gray = buffer(reference.gray); input.neighbour_gray = buffer(neighbour.gray);
-    input.sampled_neighbour_points = buffer(points); input.sampled_inside = buffer(inside);
+    input.reference_camera = camera_view(reference.camera);
+    input.neighbour_camera = camera_view(neighbour.camera);
+    input.reference_depth = buffer(rendered.median_depth);
+    input.reference_normal = buffer(rendered.normal);
+    input.reference_gray = buffer(reference.gray);
+    input.neighbour_gray = buffer(neighbour.gray);
+    input.sampled_neighbour_points = buffer(points);
+    input.sampled_inside = buffer(inside);
     // sample_depth's Vulkan mask is a uint32 array, unlike CUDA's byte bools.
     if (inside.dtype() != tinytensor::DataType::Int32)
         throw std::invalid_argument("Vulkan multi-view inside flags must be int32");
-    input.reference_mask = reference.has_mask ? buffer(reference.mask) : splat_drender::vulkan::SplatBufferView{};
-    input.neighbour_mask = neighbour.has_mask ? buffer(neighbour.mask) : splat_drender::vulkan::SplatBufferView{};
-    input.geometry_weight = options.multi_view_geo_weight; input.ncc_weight = options.multi_view_ncc_weight;
+    input.reference_mask =
+        reference.has_mask ? buffer(reference.mask) : splat_drender::vulkan::SplatBufferView{};
+    input.neighbour_mask =
+        neighbour.has_mask ? buffer(neighbour.mask) : splat_drender::vulkan::SplatBufferView{};
+    input.geometry_weight = options.multi_view_geo_weight;
+    input.ncc_weight = options.multi_view_ncc_weight;
     input.pixel_noise_threshold = options.multi_view_pixel_noise_threshold;
     input.robust_ncc = options.multi_view_robust_ncc;
     input.ncc_lambda_reference = options.multi_view_ncc_lambda_reference;
-    input.ncc_sharpness = options.multi_view_ncc_sharpness; input.ncc_min_weight = options.multi_view_ncc_min_weight;
+    input.ncc_sharpness = options.multi_view_ncc_sharpness;
+    input.ncc_min_weight = options.multi_view_ncc_min_weight;
     tinytensor::vulkan::submit_async();
-    vulkan_multi_view_loss(rendered, input, {buffer(depth), buffer(normal), buffer(point_gradient), buffer(terms)});
+    vulkan_multi_view_loss(
+        rendered, input, {buffer(depth), buffer(normal), buffer(point_gradient), buffer(terms)});
     gradients.depth.copy_from(gradients.depth.add(depth));
     gradients.normal.copy_from(gradients.normal.add(normal));
     if (stability) {
         if (stability->device() != device || stability->numel() != 3 ||
             stability->dtype() != tinytensor::DataType::Float32)
             throw std::invalid_argument("Vulkan stability accumulator must be float32[3]");
-        Push push; push.mode = 5; push.count = 1;
+        Push push;
+        push.mode = 5;
+        push.count = 1;
         launch(push, {terms, {}, {}, *stability, {}, {}});
     }
     MultiViewLoss result;
@@ -346,19 +438,26 @@ MultiViewLoss add_multi_view_loss_vulkan(const Tensor& points, const Tensor& ins
 
 GeometryDistributionSummary summarize_geometry_distribution_vulkan(const GaussianModel& model) {
     GeometryDistributionSummary result;
-    if (model.size() == 0) return result;
+    if (model.size() == 0)
+        return result;
     auto terms = Tensor::zeros({6}, device);
-    Push push; push.mode = 6; push.count = static_cast<std::uint32_t>(model.size());
+    Push push;
+    push.mode = 6;
+    push.count = static_cast<std::uint32_t>(model.size());
     launch(push, {model.log_scales, model.opacity_logits, {}, {}, {}, terms});
     const auto values = terms.to_vector();
     const auto moment = [&](unsigned i) {
         const float mean = values[i] / model.size();
-        return std::array{mean, std::sqrt(std::max(values[i+1] / model.size() - mean*mean, 0.F))};
+        return std::array{
+            mean, std::sqrt(std::max(values[i + 1] / model.size() - mean * mean, 0.F))};
     };
     const auto o = moment(0), s = moment(2), a = moment(4);
-    result.opacity_mean = o[0]; result.opacity_stddev = o[1];
-    result.log_scale_mean = s[0]; result.log_scale_stddev = s[1];
-    result.log_anisotropy_mean = a[0]; result.log_anisotropy_stddev = a[1];
+    result.opacity_mean = o[0];
+    result.opacity_stddev = o[1];
+    result.log_scale_mean = s[0];
+    result.log_scale_stddev = s[1];
+    result.log_anisotropy_mean = a[0];
+    result.log_anisotropy_stddev = a[1];
     return result;
 }
-}  // namespace photara::splat::detail
+} // namespace photara::splat::detail
