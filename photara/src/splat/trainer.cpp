@@ -1279,9 +1279,8 @@ GaussianModel Trainer::train(
         std::any_of(all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
             return uses_native_splat_projection(camera.model);
         });
-    // Native projections disable the pinhole geometry losses below. Keep
-    // their geometry-only Mip filter disabled as well: otherwise every
-    // refresh scans all Gaussian/camera pairs without active supervision.
+    // The current Mip3D visibility/filter calculation is pinhole-only.
+    // Native depth-normal supervision does not enable this separate filter.
     const bool use_3d_filter =
         !native_non_pinhole && (options_.filter_mode == SplatFilterMode::mip_3d ||
                                 options_.filter_mode == SplatFilterMode::mip);
@@ -1321,10 +1320,10 @@ GaussianModel Trainer::train(
     }
     if (native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F || options_.multi_view_ncc_weight > 0.F ||
-         options_.use_depth_normal_loss || options_.use_normal_field || options_.use_mvs_depth ||
+         options_.use_mvs_depth ||
          options_.use_mvs_normals)) {
         core::Logger::instance().info(
-            "Disabling pinhole-only depth-normal, normal-field and multi-view losses; "
+            "Disabling pinhole-only multi-view losses and MVS supervision; "
             "native views do not reuse MVS depth/normal maps without reprojection. Cameras: "
             "fisheye/equirectangular splat cameras");
     }
@@ -1796,10 +1795,10 @@ GaussianModel Trainer::train(
         raster_options.point_depth_bracket = point_query.bracket;
         raster_options.point_depth_tolerance = point_query.tolerance;
         const bool ai_prior_active = use_ai_prior && iteration >= options_.depth_normal_from_iter;
-        const bool depth_normal_active = !native_non_pinhole && options_.use_depth_normal_loss &&
+        const bool depth_normal_active = options_.render_method != RenderMethod::gaussian_3dgut && options_.use_depth_normal_loss &&
                                          options_.depth_normal_weight > 0.F &&
                                          iteration >= options_.depth_normal_from_iter;
-        const bool normal_field_active = !native_non_pinhole && options_.use_normal_field &&
+        const bool normal_field_active = options_.render_method != RenderMethod::gaussian_3dgut && options_.use_normal_field &&
                                          options_.normal_field_weight > 0.F &&
                                          iteration >= options_.normal_field_from_iter;
         const bool multi_view_eligible = use_multi_view &&

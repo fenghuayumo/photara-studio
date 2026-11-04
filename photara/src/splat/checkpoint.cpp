@@ -540,6 +540,10 @@ std::uint64_t training_fingerprint(const mvs::MvsScene& scene, const TrainingOpt
             options.render_method == RenderMethod::gaussian_3dgs &&
             options.backend == TrainingBackend::cuda && !options.undistort_to_pinhole)
             hash.append_string("native_panorama_side_ray_backward_v2");
+        if (uses_native_splat_projection(camera.model) && !options.undistort_to_pinhole &&
+            options.render_method == RenderMethod::gaussian_3dgs &&
+            (options.use_depth_normal_loss || options.use_normal_field))
+            hash.append_string("native_depth_normal_v1");
         hash.append_bytes(camera.world_to_camera.data(), sizeof(float) * 16);
         hash.append_bytes(camera.position.data(), sizeof(float) * 3);
         hash.append(camera.fx);

@@ -11,6 +11,8 @@ struct Push {
     float fx, fy, cx, cy;
     float weight, focal;
     uint camera_count, euclidean;
+    uint camera_model;
+    float k1, k2, k3, k4;
 };
 [[vk::push_constant]] Push pc;
 
@@ -28,6 +30,25 @@ void add_float(RWByteAddressBuffer buffer, uint index, float value) {
     }
 }
 float3 ray(uint x, uint y) {
+    if (pc.camera_model == 3u) {
+        float az = ((float)x-pc.cx)/pc.fx, el=((float)y-pc.cy)/pc.fy;
+        return float3(cos(el)*sin(az),sin(el),cos(el)*cos(az));
+    }
+    if (pc.camera_model == 1u) {
+        float2 p=float2(((float)x-pc.cx)/pc.fx,((float)y-pc.cy)/pc.fy);
+        float r=length(p), lo=0.0f, hi=1.57079632679f, q=hi*hi;
+        float limit=hi*(1+q*(pc.k1+q*(pc.k2+q*(pc.k3+q*pc.k4))));
+        if (!(r<limit)) return 0.0f;
+        for (int j=0;j<28;++j) {
+            float t=(lo+hi)*0.5f, t2=t*t;
+            float td=t*(1+t2*(pc.k1+t2*(pc.k2+t2*(pc.k3+t2*pc.k4))));
+            if(td<r) lo=t; else hi=t;
+        }
+        float theta=(lo+hi)*0.5f, t2=theta*theta;
+        float derivative=1+t2*(3*pc.k1+t2*(5*pc.k2+t2*(7*pc.k3+9*t2*pc.k4)));
+        if (!(derivative>1e-6f) || !(cos(theta)>1e-6f)) return 0.0f;
+        return float3(p*(r>1e-8f ? tan(theta)/r : 1.0f),1.0f);
+    }
     return float3(((float)x - pc.cx) / pc.fx, ((float)y - pc.cy) / pc.fy, 1.0f);
 }
 float3 depth_point(uint x, uint y) {
@@ -127,14 +148,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     } else if (pc.mode == 0u || pc.mode == 9u) {
         uint x = i % pc.width, y = i / pc.width;
-        if (x == 0u || y == 0u || x + 1u >= pc.width || y + 1u >= pc.height)
+        bool wrap=pc.camera_model==3u;
+        if ((!wrap && (x==0u || x+1u>=pc.width)) || y==0u || y+1u>=pc.height)
             return;
-        uint top = i - pc.width, bottom = i + pc.width, left = i - 1u, right = i + 1u;
+        uint lx=x==0u?pc.width-1u:x-1u, rx=x+1u==pc.width?0u:x+1u;
+        uint top=i-pc.width, bottom=i+pc.width, left=y*pc.width+lx, right=y*pc.width+rx;
+        if (pc.camera_model==1u && (ray(x,y).z==0 || ray(lx,y).z==0 || ray(rx,y).z==0 || ray(x,y-1u).z==0 || ray(x,y+1u).z==0)) return;
         if (!(input0[i] > 0.0f && input0[top] > 0.0f && input0[bottom] > 0.0f &&
               input0[left] > 0.0f && input0[right] > 0.0f))
             return;
         float3 dy = depth_point(x, y + 1u) - depth_point(x, y - 1u);
-        float3 dx = depth_point(x + 1u, y) - depth_point(x - 1u, y);
+        float3 dx = depth_point(rx, y) - depth_point(lx, y);
         float3 c = cross(dy, dx);
         float length2 = dot(c, c);
         if (!(length2 > 1.0e-20f) || isinf(length2))
@@ -164,8 +188,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 gy = cross(dx, gc), gx = cross(gc, dy);
         add_float(output0, bottom, dot(gy, ray(x, y + 1u)));
         add_float(output0, top, -dot(gy, ray(x, y - 1u)));
-        add_float(output0, right, dot(gx, ray(x + 1u, y)));
-        add_float(output0, left, -dot(gx, ray(x - 1u, y)));
+        add_float(output0, right, dot(gx, ray(rx, y)));
+        add_float(output0, left, -dot(gx, ray(lx, y)));
     } else if (pc.mode == 1u) {
         float3 world = float3(input0[3u * i], input0[3u * i + 1u], input0[3u * i + 2u]);
         float distance = asfloat(0x7f7fffffu);

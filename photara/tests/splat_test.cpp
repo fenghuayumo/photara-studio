@@ -1269,7 +1269,7 @@ void test_fisheye_filter_and_supervision() {
     options.undistort_to_pinhole = false;
     const auto native_model = Trainer(options).train(scene);
     require(!native_model.filter_3d.is_valid(),
-        "Native fisheye retained the geometry-only filter with supervision disabled");
+        "Native fisheye enabled the pinhole-only Mip3D filter");
     options.undistort_to_pinhole = true;
     const auto pinhole_model = Trainer(options).train(scene);
     require(pinhole_model.filter_3d.is_valid(),
@@ -6201,6 +6201,8 @@ void test_ssim_loss() {
         "fused SSIM gradient field differs from the Python CUDA reference");
 }
 
+#include "native_geometry_test.hpp"
+
 void test_gggs_depth_normal_consistency(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::size_t side = 5;
@@ -8551,6 +8553,15 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--adc-fused-only") {
             test_vulkan_adc_fused();
             test_densify_statistics_and_oversize_weights();
+            return 0;
+        }
+        if (argc>1 && std::string(argv[1])=="--native-geometry-only") {
+            test_native_geometry(tinytensor::Device::CUDA);
+            test_native_geometry_trainer(photara::splat::TrainingBackend::cuda);
+#ifdef TINYTENSOR_HAS_VULKAN
+            test_native_geometry(tinytensor::Device::Vulkan);
+            test_native_geometry_trainer(photara::splat::TrainingBackend::vulkan);
+#endif
             return 0;
         }
         if (argc>1 && std::string(argv[1])=="--geometry-audit") {

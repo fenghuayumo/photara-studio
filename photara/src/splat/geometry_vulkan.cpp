@@ -20,8 +20,10 @@ struct Push {
     std::uint32_t mode{}, count{}, width{}, height{};
     float fx{}, fy{}, cx{}, cy{}, weight{}, focal{};
     std::uint32_t camera_count{}, euclidean{};
+    std::uint32_t camera_model{};
+    float k1{}, k2{}, k3{}, k4{};
 };
-static_assert(sizeof(Push) == 48);
+static_assert(sizeof(Push) == 68);
 
 struct Backend {
     photara::vk::Device device;
@@ -83,9 +85,10 @@ void launch(Push push, const std::array<Tensor, 6>& tensors) {
     vk.ring.submit();
 }
 Push camera_push(std::uint32_t mode, const Camera& camera) {
-    if (camera.model != CameraModel::pinhole || camera.width == 0 || camera.height == 0 ||
+    if ((camera.model != CameraModel::pinhole &&
+         !((mode == 0 || mode == 9) && uses_native_splat_projection(camera.model))) || camera.width == 0 || camera.height == 0 ||
         !(camera.fx > 0.F) || !(camera.fy > 0.F))
-        throw std::invalid_argument("Vulkan geometry losses require a valid pinhole camera");
+        throw std::invalid_argument("Vulkan geometry operation requires a valid supported camera");
     Push push;
     push.mode = mode;
     push.width = camera.width;
@@ -95,6 +98,8 @@ Push camera_push(std::uint32_t mode, const Camera& camera) {
     push.fy = camera.fy;
     push.cx = camera.cx;
     push.cy = camera.cy;
+    push.camera_model = static_cast<std::uint32_t>(camera.model);
+    push.k1=camera.k1; push.k2=camera.k2; push.k3=camera.k3; push.k4=camera.k4;
     return push;
 }
 Tensor matrix(const Camera& camera) {

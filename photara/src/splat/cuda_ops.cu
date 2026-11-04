@@ -1,4 +1,5 @@
 #include "cuda_ops.hpp"
+#include "splat_drender/camera.h"
 #include "geometry_vulkan.hpp"
 #include "adc_backends.hpp"
 #include "rasterizer_vulkan.hpp"
@@ -966,6 +967,19 @@ __device__ float3 scale3(const float3 value, const float scale) {
     return make_float3(value.x * scale, value.y * scale, value.z * scale);
 }
 
+// Match the rasterizer's depth contract: panorama range; fisheye camera Z.
+__device__ float3 geometry_depth_ray(unsigned x, unsigned y, const Camera& camera) {
+    if (camera.model == CameraModel::pinhole)
+        return make_float3((float(x)-camera.cx)/camera.fx, (float(y)-camera.cy)/camera.fy, 1.F);
+    splat_drender::CameraIntrinsics k;
+    k.fx=camera.fx; k.fy=camera.fy; k.cx=camera.cx; k.cy=camera.cy;
+    k.mode=static_cast<splat_drender::CameraMode>(camera.model);
+    k.k1=camera.k1; k.k2=camera.k2; k.k3=camera.k3; k.k4=camera.k4;
+    const auto r=splat_drender::pixel_unit_ray(float(x), float(y), k);
+    if (camera.model == CameraModel::equirectangular) return r;
+    return r.z > 1e-6F ? make_float3(r.x/r.z,r.y/r.z,1.F) : make_float3(0.F,0.F,0.F);
+}
+
 __global__ void depth_normal_consistency_kernel(
     const float* depth,
     const float* normal,
@@ -1123,6 +1137,90 @@ __global__ void normal_field_consistency_kernel(
     atomicAdd(grad_depth + top, -dot3(grad_dy, ray(x, y - 1)));
     atomicAdd(grad_depth + right, dot3(grad_dx, ray(x + 1, y)));
     atomicAdd(grad_depth + left, -dot3(grad_dx, ray(x - 1, y)));
+}
+
+template<bool world_field>
+__global__ void native_geometry_consistency_kernel(
+    const float* depth,
+    const float* oriented_normal,
+    float* grad_depth,
+    float* grad_oriented_normal,
+    float* terms,
+    const Camera camera,
+    const float weight) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t pixels = static_cast<std::size_t>(camera.width) * camera.height;
+    if (pixel >= pixels)
+        return;
+    const std::uint32_t x = static_cast<std::uint32_t>(pixel % camera.width);
+    const std::uint32_t y = static_cast<std::uint32_t>(pixel / camera.width);
+    const bool wrap = camera.model == CameraModel::equirectangular;
+    if ((!wrap && (x == 0 || x + 1 >= camera.width)) || y == 0 || y + 1 >= camera.height)
+        return;
+
+    const std::size_t top = pixel - camera.width;
+    const std::size_t bottom = pixel + camera.width;
+    const unsigned lx = x == 0 ? camera.width - 1 : x - 1;
+    const unsigned rx = x + 1 == camera.width ? 0 : x + 1;
+    const std::size_t left = y * camera.width + lx;
+    const std::size_t right = y * camera.width + rx;
+    if (!(depth[pixel] > 0.F && depth[top] > 0.F && depth[bottom] > 0.F && depth[left] > 0.F &&
+          depth[right] > 0.F))
+        return;
+    const float3 rt = geometry_depth_ray(x,y-1,camera);
+    const float3 rb = geometry_depth_ray(x,y+1,camera);
+    const float3 rl = geometry_depth_ray(lx,y,camera);
+    const float3 rr = geometry_depth_ray(rx,y,camera);
+    if (!wrap && (geometry_depth_ray(x,y,camera).z == 0.F ||
+                  rt.z == 0.F || rb.z == 0.F || rl.z == 0.F || rr.z == 0.F)) return;
+    const float3 dy = subtract3(scale3(rb,depth[bottom]),scale3(rt,depth[top]));
+    const float3 dx = subtract3(scale3(rr,depth[right]),scale3(rl,depth[left]));
+    const float3 cross = cross3(dy, dx);
+    const float length_squared = dot3(cross, cross);
+    if (!(length_squared > 1e-20F) || !isfinite(length_squared))
+        return;
+    const float inverse_length = rsqrtf(length_squared);
+    const float3 depth_normal = scale3(cross, inverse_length);
+
+    const float3 normal_world = make_float3(
+        oriented_normal[pixel], oriented_normal[pixels + pixel],
+        oriented_normal[2 * pixels + pixel]);
+    // Camera.world_to_camera is column-major. Apply the conventional R to
+    // compare the learned world-space field against the camera-space depth
+    // normal, exactly matching GaussianWrapping's world conversion.
+    const float3 normal_camera = world_field ? make_float3(
+        camera.world_to_camera[0] * normal_world.x + camera.world_to_camera[4] * normal_world.y +
+            camera.world_to_camera[8] * normal_world.z,
+        camera.world_to_camera[1] * normal_world.x + camera.world_to_camera[5] * normal_world.y +
+            camera.world_to_camera[9] * normal_world.z,
+        camera.world_to_camera[2] * normal_world.x + camera.world_to_camera[6] * normal_world.y +
+            camera.world_to_camera[10] * normal_world.z) : normal_world;
+    const float normalization = weight / static_cast<float>(pixels);
+    if (terms)
+        atomicAdd(terms + 2, normalization * (1.F - dot3(normal_camera, depth_normal)));
+
+    const float3 grad_camera = scale3(depth_normal, -normalization);
+    const float3 grad_world = world_field ? make_float3(
+        camera.world_to_camera[0] * grad_camera.x + camera.world_to_camera[1] * grad_camera.y +
+            camera.world_to_camera[2] * grad_camera.z,
+        camera.world_to_camera[4] * grad_camera.x + camera.world_to_camera[5] * grad_camera.y +
+            camera.world_to_camera[6] * grad_camera.z,
+        camera.world_to_camera[8] * grad_camera.x + camera.world_to_camera[9] * grad_camera.y +
+            camera.world_to_camera[10] * grad_camera.z) : grad_camera;
+    atomicAdd(grad_oriented_normal + pixel, grad_world.x);
+    atomicAdd(grad_oriented_normal + pixels + pixel, grad_world.y);
+    atomicAdd(grad_oriented_normal + 2 * pixels + pixel, grad_world.z);
+
+    const float3 grad_unit = scale3(normal_camera, -normalization);
+    const float projection = dot3(depth_normal, grad_unit);
+    const float3 grad_cross =
+        scale3(subtract3(grad_unit, scale3(depth_normal, projection)), inverse_length);
+    const float3 grad_dy = cross3(dx, grad_cross);
+    const float3 grad_dx = cross3(grad_cross, dy);
+    atomicAdd(grad_depth + bottom, dot3(grad_dy, rb));
+    atomicAdd(grad_depth + top, -dot3(grad_dy, rt));
+    atomicAdd(grad_depth + right, dot3(grad_dx, rr));
+    atomicAdd(grad_depth + left, -dot3(grad_dx, rl));
 }
 
 __global__ void normal_features_forward_kernel(
@@ -2738,12 +2836,20 @@ LossGradients compute_training_loss(
             target.camera.height);
     if (depth_normal_active && result.depth.is_valid() && result.normal.is_valid() &&
         options.depth_normal_weight > 0.F) {
+        if (target.camera.model == CameraModel::pinhole) {
         depth_normal_consistency_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
             rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
             result.depth.ptr<float>(), result.normal.ptr<float>(),
             collect_scalar_terms ? terms.ptr<float>() : nullptr, target.camera.width,
             target.camera.height, target.camera.fx, target.camera.fy, target.camera.cx,
             target.camera.cy, options.depth_normal_weight);
+        } else {
+        native_geometry_consistency_kernel<false><<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
+            rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
+            result.depth.ptr<float>(), result.normal.ptr<float>(),
+            collect_scalar_terms ? terms.ptr<float>() : nullptr, target.camera,
+            options.depth_normal_weight);
+        }
         check_cuda(cudaGetLastError(), "compute GGGS depth-normal consistency");
     }
     if (collect_scalar_terms) {
@@ -2779,10 +2885,17 @@ LossGradients compute_normal_field_loss(
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
     if (pixels != 0 && weight > 0.F) {
+        if (camera.model == CameraModel::pinhole) {
         normal_field_consistency_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
             rendered.median_depth.ptr<float>(), rendered.color.ptr<float>(),
             result.depth.ptr<float>(), result.color.ptr<float>(),
             collect_scalar_terms ? terms.ptr<float>() : nullptr, camera, weight);
+        } else {
+        native_geometry_consistency_kernel<true><<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
+            rendered.median_depth.ptr<float>(), rendered.color.ptr<float>(),
+            result.depth.ptr<float>(), result.color.ptr<float>(),
+            collect_scalar_terms ? terms.ptr<float>() : nullptr, camera, weight);
+        }
         check_cuda(cudaGetLastError(), "compute GGGS normal-field loss");
     }
     if (collect_scalar_terms) {
