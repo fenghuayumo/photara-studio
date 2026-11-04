@@ -411,10 +411,14 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
       !(std::getenv("PHOTARA_GUT_REFERENCE") &&
         std::getenv("PHOTARA_GUT_REFERENCE")[0] == '1')) {
     const auto fast_color = output[0].get(3 * P);
+    const char* candidate_env = std::getenv("PHOTARA_GUT_CANDIDATE_REFERENCE");
+    const std::string previous_candidates = candidate_env ? candidate_env : "";
 #ifdef _WIN32
     _putenv_s("PHOTARA_GUT_REFERENCE", "1");
+    _putenv_s("PHOTARA_GUT_CANDIDATE_REFERENCE", "1");
 #else
     setenv("PHOTARA_GUT_REFERENCE", "1", 1);
+    setenv("PHOTARA_GUT_CANDIDATE_REFERENCE", "1", 1);
 #endif
     for (int k = 0; k < 5; ++k)
       check(cudaMemset(grads[k].p, 0, gs[k] * sizeof(float)));
@@ -445,8 +449,11 @@ void run(CameraMode mode, bool geometry, bool compact, bool sh_colors,
     }
 #ifdef _WIN32
     _putenv_s("PHOTARA_GUT_REFERENCE", "");
+    _putenv_s("PHOTARA_GUT_CANDIDATE_REFERENCE", previous_candidates.c_str());
 #else
     unsetenv("PHOTARA_GUT_REFERENCE");
+    if (previous_candidates.empty()) unsetenv("PHOTARA_GUT_CANDIDATE_REFERENCE");
+    else setenv("PHOTARA_GUT_CANDIDATE_REFERENCE", previous_candidates.c_str(), 1);
 #endif
   }
   auto objective = [&] {

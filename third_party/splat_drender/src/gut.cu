@@ -1,4 +1,5 @@
 #include "device/gut.cuh"
+#include "device/gut_support.cuh"
 #include "device/sh.cuh"
 #include "device/tiles.cuh"
 #include "gut.h"
@@ -44,7 +45,7 @@ __device__ ushort4 fisheye_support_clip(float3 t, float3 scales, float opacity,
 __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
                         CameraIntrinsics K, int gx, int gy,
                         ws::GaussianState st, int *radii,
-                        unsigned long long* statistics = nullptr) {
+                        unsigned long long* statistics = nullptr, bool candidates = true) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= g.count)
     return;
@@ -138,8 +139,12 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings,
       : make_float4(yy / det, -xy / det, xx / det, g.opacities[i]);
   const int wrap = is_equirect(K.mode) ? cam.width : 0;
   ushort4 clip = make_ushort4(0, min(gx,65535), 0, min(gy,65535));
-  const bool use_clip = is_fisheye(K.mode) && gx <= 65535 && gy <= 65535;
-  if (use_clip && boundary)
+  const bool use_clip = (is_fisheye(K.mode) || is_pinhole(K.mode)) && gx <= 65535 && gy <= 65535;
+  if (use_clip && is_pinhole(K.mode) && candidates)
+    clip = pinhole_support_bounds(R, make_float3(g.scales[3*i],g.scales[3*i+1],g.scales[3*i+2]),
+        make_float3(cam.center[0]-mean.x,cam.center[1]-mean.y,cam.center[2]-mean.z),
+        cam,K,settings.scale_modifier,g.opacities[i],gx,gy);
+  if (use_clip && is_fisheye(K.mode) && boundary)
     clip = fisheye_support_clip(t,
         make_float3(g.scales[3*i],g.scales[3*i+1],g.scales[3*i+2]),
         g.opacities[i],settings.scale_modifier,center,K,gx,gy);
@@ -900,13 +905,15 @@ void count_contributors(const Gaussians &g, const CameraView &c,
 void preprocess(const Gaussians &g, const CameraView &c,
                 const RenderSettings &s, CameraIntrinsics K, int gx, int gy,
                 ws::GaussianState st, int *radii) {
+  const char* candidate_reference = std::getenv("PHOTARA_GUT_CANDIDATE_REFERENCE");
+  const bool candidates = !(candidate_reference && candidate_reference[0] == '1');
   if (s.debug) {
     unsigned long long* totals = nullptr;
     unsigned long long host[6]{};
     auto error = cudaMalloc(&totals, sizeof(host));
     if (error == cudaSuccess) error = cudaMemset(totals, 0, sizeof(host));
     if (error == cudaSuccess) {
-      prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii, totals);
+      prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii, totals, candidates);
       error = cudaGetLastError();
     }
     if (error == cudaSuccess)
@@ -917,7 +924,7 @@ void preprocess(const Gaussians &g, const CameraView &c,
     std::fprintf(stderr, "GUT bins regular_gaussians=%llu regular_instances=%llu boundary_gaussians=%llu boundary_instances=%llu plane_crossing_gaussians=%llu plane_crossing_instances=%llu\n",
                  host[0], host[1], host[2], host[3], host[4], host[5]);
   } else {
-    prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii);
+    prepare<<<(g.count + 255) / 256, 256>>>(g, c, s, K, gx, gy, st, radii, nullptr, candidates);
   }
 }
 void forward(const Gaussians &g, const CameraView &c, const RenderSettings &s,

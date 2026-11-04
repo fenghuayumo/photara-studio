@@ -199,7 +199,7 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
                        gst.tiles_touched, gst.visible_offset, g.count), "tile scan");
         launch::emit_packed_instances(g.count, gst, grid_x, grid_y, wrap_width,
                                       ist.packed_key[0], ist.instance_value[0],
-                                      g.primitive == Primitive::gaussian_3dgut && is_fisheye(cam.mode) &&
+                                      g.primitive == Primitive::gaussian_3dgut && (is_fisheye(cam.mode) || is_pinhole(cam.mode)) &&
                                           grid_x <= 65535 && grid_y <= 65535);
         check_cuda(cudaGetLastError(), "emit packed instances");
         cub::DoubleBuffer<unsigned long long> keys(ist.packed_key[0], ist.packed_key[1]);
@@ -250,7 +250,7 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
                            gst.mean2d, gst.conic_opacity, ist.compact_offset,
                            grid_x, grid_y, wrap_width, ist.tile_key[0],
                            ist.instance_value[0],
-                           g.primitive == Primitive::gaussian_3dgut && is_fisheye(cam.mode) &&
+                           g.primitive == Primitive::gaussian_3dgut && (is_fisheye(cam.mode) || is_pinhole(cam.mode)) &&
                                grid_x <= 65535 && grid_y <= 65535
                                ? gst.screen_bounds : nullptr);
     check_cuda(cudaGetLastError(), "emit_instances");

@@ -354,6 +354,37 @@ gradients. These comparisons use the same parameters and do not establish
 quality equivalence between independently trained GS and GUT models.
 
 
+## CUDA pinhole candidate bounds (2026-11-04)
+
+CUDA GUT now intersects its UT tile footprint with conservative alpha-support
+screen bounds. The halfspace test, cancellation padding, 12-step bisection and
+outward pixel padding follow the Vulkan support implementation. Count stores
+tile bounds in the existing `screen_bounds` array; both packed and two-stage
+emit paths consume exactly those cached bounds. This first implementation
+clips the enclosing tile rectangle; it does not apply Vulkan's additional
+four-plane rejection independently to every tile. No extra per-Gaussian
+workspace is allocated.
+
+Invalid or ill-conditioned transforms, nonpositive focal lengths and oversized
+images retain the original bounds. Other camera models retain their existing
+paths. `PHOTARA_GUT_CANDIDATE_REFERENCE=1` disables the new pinhole bounds for
+A/B comparisons. Rendering responses, ordering and backward arithmetic are
+unchanged for retained instances.
+
+On the current indoor iPhone cached model (1,815,977 Gaussians), camera 0 at
+1280x1920, one 10-sample synchronized forward/backward benchmark reduced
+candidates from 22,994,740 to 4,586,814 and median time from 42.15 to 13.68 ms.
+CUDA pool high-water usage fell from 2,692,743,168 to 2,120,220,672 bytes.
+Filtered/unfiltered RGB and alpha matched exactly. All five parameter gradient
+families passed numerical tolerances; maximum absolute difference was
+1.20e-6. This is a fixed-model comparison, not a new 30,000-step quality test.
+
+CUDA finite-difference tests now compare filtered optimized rendering with an
+unfiltered pixel reference, including transformed cameras, partial tiles,
+32/128 buckets and ADC outputs. These and the full Photara GUT training/parity
+regression passed. Local A/B artifacts are in
+`artifact/cuda_candidates_20261104/`.
+
 ## Vulkan viewport forward optimization
 
 The RGB/rings GPU preview uses a dedicated `splat_blend_gut_rgba` pipeline.
