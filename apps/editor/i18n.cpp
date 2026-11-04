@@ -408,7 +408,7 @@ constexpr Entry k_entries[] = {
     {"Loading AI priors...", "正在加载 AI 先验…", "AI事前情報を読み込み中…", "AI 사전 정보 로딩 중…"},
     {"Unable to preview this cache. It may be incomplete or its source image may have changed. Refresh after preparation finishes.", "无法预览此缓存：文件可能尚未生成完成，或原图已改变。请在准备完成后刷新。", "キャッシュが未完成か元画像が変更されています。準備完了後に更新してください。", "캐시가 불완전하거나 원본 이미지가 변경되었습니다. 준비 후 새로 고침하세요."},
     {"Cached AI predictions. Dark pixels are invalid. Inspect the cache folder when switching projects.", "这里显示缓存中的 AI 预测。深色像素表示无效；切换项目时请核对缓存目录。", "キャッシュ内のAI予測です。暗い画素は無効です。プロジェクト変更時にフォルダーを確認してください。", "캐시의 AI 예측입니다. 어두운 픽셀은 무효입니다. 프로젝트 변경 시 캐시 폴더를 확인하세요."},
-    {"Source photos may retain lens distortion; prior maps use rectified training cameras.", "原图可能保留镜头畸变；先验图使用训练时校正后的相机。", "元画像にはレンズ歪みが残る場合があります。事前マップは補正済みカメラを使います。", "원본 사진에는 렌즈 왜곡이 남을 수 있으며 사전 맵은 보정된 카메라를 사용합니다."},
+    {"Prior maps use the training camera projection; native fisheye and panorama maps retain their source projection.", "先验图使用训练相机投影；原生鱼眼和全景先验保持原始投影。", "事前マップは学習カメラの投影を使用します。魚眼・パノラマは元の投影を維持します。", "사전 맵은 학습 카메라 투영을 사용하며 어안과 파노라마는 원본 투영을 유지합니다."},
     {"Refresh", "刷新", "更新", "새로 고침"},
     {"Depth display range", "深度显示范围", "深度表示範囲", "깊이 표시 범위"},
     {"AI prior cache", "AI 先验缓存", "AI事前情報キャッシュ", "AI 사전 정보 캐시"},

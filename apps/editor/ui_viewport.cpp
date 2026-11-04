@@ -283,7 +283,7 @@ float draw_view_settings_button(App& app, const ImVec2 origin,
                     priors.data.prior.camera.width,priors.data.prior.camera.height);
                 ImGui::Text("%s: %s",tr("AI depth"),tr(priors.data.prior.depth.empty() ? "Not generated" : "Available"));
                 ImGui::Text("%s: %s",tr("AI normals"),tr(priors.data.prior.normals.empty() ? "Not generated" : "Available"));
-                ImGui::TextWrapped("%s",tr("Source photos may retain lens distortion; prior maps use rectified training cameras."));
+                ImGui::TextWrapped("%s",tr("Prior maps use the training camera projection; native fisheye and panorama maps retain their source projection."));
             } else if (!priors.error.empty()) {
                 ImGui::TextWrapped("%s",tr("Unable to preview this cache. It may be incomplete or its source image may have changed. Refresh after preparation finishes."));
                 ImGui::TextWrapped("%s",priors.error.c_str());
@@ -831,11 +831,6 @@ bool handle_viewport_double_click(
 }
 
 bool qa_preview_camera(const App& app, SplatPreviewCamera& camera);
-
-bool qa_undistort_to_pinhole(const App& app) {
-    return app.settings.ai_priors && app.settings.training_mode != 0 &&
-        (app.settings.ai_depth_weight > 0.F || app.settings.ai_normal_weight > 0.F);
-}
 
 void sync_qa_preview_camera(App& app) {
     if (app.layout.preview_camera_file.empty()) return;
@@ -1631,9 +1626,7 @@ bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
     const ViewPose& pose =
         app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
     if (!pose.registered || pose.width == 0 || pose.height == 0) return false;
-    camera = photara::splat::training_data::training_camera(
-        image_qa_training_view(pose, pose.image_path),
-        image_qa_training_options(false, {}, qa_undistort_to_pinhole(app)));
+    camera = image_qa_preview_camera(pose);
     return true;
 }
 
@@ -2155,7 +2148,7 @@ void draw_viewport_panel(App& app) {
         input.render_live = training_now && live_preview_active(app);
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
-        input.undistort_to_pinhole = qa_undistort_to_pinhole(app);
+        input.undistort_to_pinhole = false; // AI priors preserve native camera projections.
         input.use_metric_mask =
             (app.settings.use_mask || app.settings.sam_masks) &&
             app.settings.mask_mode == 0;

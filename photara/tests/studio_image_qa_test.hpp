@@ -43,6 +43,17 @@ inline void test_studio_image_qa_projection() {
     pose.fx = pose.fy = 40.F; pose.cx = 32.F; pose.cy = 24.F;
     auto options = editor::image_qa_training_options(false, {}, false);
     auto view = editor::image_qa_training_view(pose, path);
+    // Same camera-construction path used immediately on entering the 2D viewport.
+    // AI priors must not request pinhole undistortion for native cameras.
+    for(auto model : {CameraModel::pinhole,CameraModel::opencv_fisheye,CameraModel::equirectangular}) {
+        auto native=pose;native.model=model;native.image_path=path;
+        const auto camera=editor::image_qa_preview_camera(native);
+        check(camera.model==model,"2D QA changed the native camera projection");
+        const auto image=splat::training_data::load_training_image(
+            editor::image_qa_training_view(native,path),editor::image_qa_training_options(false,{},false));
+        check(image.camera.model==camera.model && image.camera.width==camera.width && image.camera.height==camera.height,
+            "2D render/GT projection mismatch");
+    }
     const auto original = splat::training_data::load_training_image(view, options);
     check(original.rgb.pixels == source.pixels && original.mask.pixels.empty(),
         "Zero-distortion QA must preserve the source pixels exactly");

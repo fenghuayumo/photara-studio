@@ -710,9 +710,9 @@ int main(int argc, char** argv) {
         command = editor::build_train_command("photara.exe",prior_settings,layout,{});
         require(command.find("--splat-prior-model \"") != std::string::npos &&
             command.find("--splat-prior-tokens 1200") != std::string::npos &&
-            command.find("--splat-undistort=true") != std::string::npos &&
+            command.find("--splat-undistort=true") == std::string::npos &&
             command.find("ai_priors") != std::string::npos,
-            "automatic preparation receives the model, token budget and task cache");
+            "automatic preparation receives model/cache settings without forcing pinhole projection");
         prior_settings.training_mode = 0; prior_settings.ai_prior_model.fill('\0');
         command = editor::build_train_command("photara.exe",prior_settings,layout,{});
         require(command.find("--splat-prior-") == std::string::npos,

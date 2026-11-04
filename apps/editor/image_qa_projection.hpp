@@ -54,6 +54,13 @@ inline photara::splat::TrainingOptions image_qa_training_options(
     return options;
 }
 
+// AI priors do not change the training projection. Keep the render camera
+// and ground-truth pixels on the same native projection, even before caches load.
+inline photara::splat::Camera image_qa_preview_camera(const ViewPose& pose) {
+    return photara::splat::training_data::training_camera(
+        image_qa_training_view(pose,pose.image_path),image_qa_training_options(false,{},false));
+}
+
 // Exact float bits distinguish small calibration updates, even on the same
 // file and camera index. Includes source and output projections separately.
 inline std::string image_qa_camera_key(const photara::splat::Camera& camera) {

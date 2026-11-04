@@ -12,6 +12,14 @@ template<class T> void read(std::istream& input,T& value) {
     input.read(reinterpret_cast<char*>(&value),sizeof(value));
     if(!input) throw std::runtime_error("Truncated training prior");
 }
+void read_native_camera(std::istream& input, const std::string& version,photara::splat::Camera& camera) {
+    if(version!="PHPRIOR3") return;
+    std::uint32_t model; read(input,model);
+    camera.model=static_cast<photara::CameraModel>(model);
+    read(input,camera.k1);read(input,camera.k2);read(input,camera.k3);read(input,camera.k4);
+    if(!photara::uses_native_splat_projection(camera.model))
+        throw std::runtime_error("Invalid native prior camera model");
+}
 std::uint32_t view_id(const std::filesystem::path& file) {
     const auto stem=file.stem().string();
     if(!stem.starts_with("view_") || stem.size()<=5) throw std::invalid_argument("Invalid prior filename");
@@ -44,8 +52,8 @@ std::filesystem::path find_prior_preview(
             std::ifstream input(file, std::ios::binary);
             char magic[8]{}; input.read(magic, 8);
             const std::string version(magic, 8);
-            if (version != "PHPRIOR1" && version != "PHPRIOR2") continue;
-            if (version == "PHPRIOR2") {
+            if (version != "PHPRIOR1" && version != "PHPRIOR2" && version != "PHPRIOR3") continue;
+            if (version != "PHPRIOR1") {
                 std::uint32_t maps{}; read(input, maps);
                 if (!maps || (maps & ~3U)) continue;
             }
@@ -53,6 +61,7 @@ std::filesystem::path find_prior_preview(
             read(input, camera.width); read(input, camera.height);
             read(input, camera.fx); read(input, camera.fy); read(input, camera.cx); read(input, camera.cy);
             for (float& value : camera.world_to_camera) read(input, value);
+            read_native_camera(input,version,camera);
             std::uint32_t length{}; read(input, length);
             if (!length || length > 32768) continue;
             std::string name(length, '\0'); input.read(name.data(), length);
@@ -133,14 +142,15 @@ PriorPreviewData load_prior_preview(const std::filesystem::path& file) {
     std::ifstream input(file,std::ios::binary);
     char magic[8]{}; input.read(magic,8);
     const std::string version(magic,8);
-    if(version!="PHPRIOR1" && version!="PHPRIOR2") throw std::runtime_error("Missing or invalid training prior");
+    if(version!="PHPRIOR1" && version!="PHPRIOR2" && version!="PHPRIOR3") throw std::runtime_error("Missing or invalid training prior");
     std::uint32_t maps=3;
-    if(version=="PHPRIOR2") read(input,maps);
+    if(version!="PHPRIOR1") read(input,maps);
     if(!maps || (maps&~3U)) throw std::runtime_error("Invalid training prior map flags");
     photara::splat::Camera camera;
     read(input,camera.width); read(input,camera.height);
     read(input,camera.fx); read(input,camera.fy); read(input,camera.cx); read(input,camera.cy);
     for(float& value:camera.world_to_camera) read(input,value);
+    read_native_camera(input,version,camera);
     std::uint32_t length{}; read(input,length);
     if(!length || length>32768) throw std::runtime_error("Invalid training prior source name");
     std::string name(length,'\0'); input.read(name.data(),length);

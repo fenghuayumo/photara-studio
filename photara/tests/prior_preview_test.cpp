@@ -124,6 +124,25 @@ int main(int argc,char** argv) {
         prior.depth={0,0,0,0};photara::splat::save_training_prior(depth,image,prior);
         data=editor::load_prior_preview(depth);
         check(data.depth.pixels[0]==0,"All-invalid depth preview failed");
+        for(auto model : {photara::CameraModel::opencv_fisheye,photara::CameraModel::equirectangular}) {
+            prior.camera.model=model;prior.camera.k1=model==photara::CameraModel::opencv_fisheye?.03F:0.F;
+            for(int maps=1;maps<=3;++maps) {
+                prior.depth=maps&1?std::vector<float>{0,1,2,3}:std::vector<float>{};
+                prior.normals=maps&2?std::vector<float>{0,0,0,0, 0,0,0,0, -1,-1,-1,-1}:std::vector<float>{};
+                const auto native=root/"view_1.prior";
+                photara::splat::save_training_prior(native,image,prior);
+                check(editor::find_prior_preview(root,image)==native,"Native prior lookup failed");
+                const auto loaded=editor::load_prior_preview(native);
+                check(loaded.prior.camera.model==model && loaded.prior.camera.k1==prior.camera.k1,
+                    "Native prior preview lost camera metadata");
+                check(loaded.depth.pixels.empty()==!(maps&1) && loaded.normal.pixels.empty()==!(maps&2),
+                    "Native preview independent maps failed");
+                check(editor::prior_preview_camera(loaded.prior.camera).model==model,"Native prior render projection changed");
+                std::filesystem::remove(native);
+            }
+        }
+        prior.camera.model=photara::CameraModel::pinhole;prior.camera.k1=0;
+        prior.depth={0,0,0,0};prior.normals.clear();
         std::ofstream(root/"view_invalid.prior")<<"incomplete";
         std::ofstream(root/"manifest.txt")<<"metadata";
         const auto files=editor::list_prior_previews(root);
