@@ -1,6 +1,7 @@
 #include "splat/rasterizer.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/optimizer.hpp"
 #include <cuda_runtime_api.h>
 #include <algorithm>
 #include <chrono>
@@ -266,7 +267,6 @@ void diagnostic_dump() {
                    opacities = before.opacities.to_vector();
         Rasterizer raster;
         RasterizeOptions o;
-        o.fuse_activation = true;
         o.require_depth = false;
         o.active_sh_degree = 3;
         configure_rasterization(o, TrainingOptions{});
@@ -308,169 +308,178 @@ void diagnostic_dump() {
 void correctness() {
     diagnostic_dump();
     Rasterizer raster;
-    for (const auto n : {137U, 140003U})
-        for (bool geometry : {false, true})
-            for (bool filter : {false, true})
-                for (const auto mode :
-                     {photara::CameraModel::pinhole, photara::CameraModel::opencv_fisheye,
-                      photara::CameraModel::equirectangular}) {
-                    if (n > 137 && mode != photara::CameraModel::pinhole)
-                        continue;
-                    auto original = fixture(n, 3, filter);
-                    auto c = camera();
-                    c.model = mode;
-                    RasterizeOptions reference;
-                    configure_rasterization(reference, TrainingOptions{});
-                    reference.active_sh_degree = 3;
-                    reference.require_depth = geometry;
-                    reference.fuse_activation = false;
-                    auto expected = raster.forward(original, c, reference);
-                    auto gc = Tensor::full(expected.color.shape(), 1e-5F, cuda);
-                    auto ga = Tensor::full(expected.alpha.shape(), 1e-5F, cuda);
-                    auto gd = geometry ? Tensor::full(expected.median_depth.shape(), 1e-5F, cuda)
-                                       : Tensor{};
-                    auto gn =
-                        geometry ? Tensor::full(expected.normal.shape(), 1e-5F, cuda) : Tensor{};
-                    const auto gradients = raster.backward(original, expected, gc, ga, gd, gn);
-                    {
-                        auto options = reference;
-                        options.fuse_activation = true;
+    for (const auto method : {RenderMethod::gaussian_3dgs, RenderMethod::gaussian_3dgut})
+        for (const auto n : {137U, 140003U})
+            for (bool geometry : {false, true})
+                for (bool filter : {false, true})
+                    for (const auto mode :
+                         {photara::CameraModel::pinhole, photara::CameraModel::opencv_fisheye,
+                          photara::CameraModel::equirectangular}) {
+                        if (method == RenderMethod::gaussian_3dgut && n > 137)
+                            continue;
+                        if (n > 137 && mode != photara::CameraModel::pinhole)
+                            continue;
+                        auto original = fixture(n, 3, filter);
+                        original.render_method = method;
+                        auto c = camera();
+                        c.model = mode;
+                        RasterizeOptions reference;
+                        configure_rasterization(reference, TrainingOptions{});
+                        reference.active_sh_degree = 3;
+                        reference.require_depth = geometry;
                         auto m = clone(original), ref = clone(original);
-                        auto frame = raster.forward(m, c, options);
-                        require(
-                            frame.rendered_instances == expected.rendered_instances,
-                            "instance count changed");
-                        close(expected.color, frame.color, "RGB", 2e-7F, 1e-6F);
-                        close(expected.alpha, frame.alpha, "alpha", 1e-7F, 1e-6F);
-                        close(expected.median_depth, frame.median_depth, "depth", 1e-8F, 5e-7F);
-                        close(expected.normal, frame.normal, "normal");
-                        close(expected.visibility, frame.visibility, "visibility", 0, 0);
-                        require(
-                            expected.radii.to_vector_int() == frame.radii.to_vector_int(),
-                            "radii changed");
-                        const auto g = raster.backward(m, frame, gc, ga, gd, gn);
-                        close_gradient(gradients.means, g.means, "mean gradients", 1e-9F, 5e-4F);
-                        close_gradient(gradients.sh, g.sh, "SH gradients", 1e-13F, 1e-6F);
-                        close_gradient(
-                            gradients.log_scales, g.log_scales, "scale gradients", 5e-11F, 1e-5F);
-                        close_gradient(
-                            gradients.quaternions, g.quaternions, "quaternion gradients", 5e-11F,
-                            1e-5F);
-                        close_gradient(
-                            gradients.opacity_logits, g.opacity_logits, "opacity gradients", 5e-10F,
-                            1e-4F);
-                        Optimizer a(m), b(ref);
-                        // Correctness cases need observable steps at float32 precision.
-                        // The benchmark retains production-scale learning rates.
-                        a.structure.means_lr = b.structure.means_lr = .01F;
-                        a.structure.scales_lr = b.structure.scales_lr = .02F;
-                        a.structure.quaternions_lr = b.structure.quaternions_lr = .02F;
-                        for (unsigned step = 0; step < 3; ++step) {
-                            const auto before = clone(ref);
-                            const auto x = raster.forward(m, c, options),
-                                       y = raster.forward(ref, c, reference);
-                            (void)raster.backward(m, x, gc, ga, gd, gn, {}, &a.sh, &a.structure);
-                            (void)raster.backward(ref, y, gc, ga, gd, gn, {}, &b.sh, &b.structure);
-                            close_update(before.means, ref.means, m.means, "Adam mean increments");
-                            close_update(
-                                before.log_scales, ref.log_scales, m.log_scales,
-                                "Adam scale increments");
-                            close_update(
-                                before.quaternions, ref.quaternions, m.quaternions,
-                                "Adam rotation increments", 1e-4F, 1e-9F);
-                            close_update(
-                                before.opacity_logits, ref.opacity_logits, m.opacity_logits,
-                                "Adam opacity increments");
-                            close_update(before.sh, ref.sh, m.sh, "Adam SH increments", 1e-3F);
-                            const Tensor first_a[]{
-                                a.structure.means_first, a.structure.scales_first,
-                                a.structure.rotations_first, a.structure.opacity_first};
-                            const Tensor first_b[]{
-                                b.structure.means_first, b.structure.scales_first,
-                                b.structure.rotations_first, b.structure.opacity_first};
-                            const Tensor second_a[]{
-                                a.structure.means_second, a.structure.scales_second,
-                                a.structure.rotations_second, a.structure.opacity_second};
-                            const Tensor second_b[]{
-                                b.structure.means_second, b.structure.scales_second,
-                                b.structure.rotations_second, b.structure.opacity_second};
-                            for (unsigned state = 0; state < 4; ++state) {
-                                close(
-                                    first_a[state], first_b[state], "Adam first moments", 2e-9F,
-                                    1e-4F);
-                                close(
-                                    second_a[state], second_b[state], "Adam second moments", 1e-10F,
-                                    1e-6F);
+                        const auto gc = Tensor::full({3, c.height, c.width}, 1e-5F, cuda);
+                        const auto ga = Tensor::full({c.height, c.width}, 1e-5F, cuda);
+                        const auto gd =
+                            geometry ? Tensor::full({c.height, c.width}, 1e-5F, cuda) : Tensor{};
+                        const auto gn =
+                            geometry ? Tensor::full({3, c.height, c.width}, 1e-5F, cuda) : Tensor{};
+                        {
+                            const auto options = reference;
+                            Optimizer a(m), b(ref);
+                            a.structure.capture_opacity_gradient = true;
+                            // Correctness cases need observable steps at float32 precision.
+                            // The benchmark retains production-scale learning rates.
+                            a.structure.means_lr = b.structure.means_lr = .01F;
+                            a.structure.scales_lr = b.structure.scales_lr = .02F;
+                            a.structure.quaternions_lr = b.structure.quaternions_lr = .02F;
+                            for (unsigned step = 0; step < 3; ++step) {
+                                const auto before = clone(ref);
+                                const auto x = raster.forward(m, c, options),
+                                           y = raster.forward(ref, c, reference);
+                                const unsigned iteration = step + 1;
+                                a.structure.correction1 = a.sh.correction1 =
+                                    1.F - std::pow(.9F, float(iteration));
+                                a.structure.correction2 = a.sh.correction2 =
+                                    1.F - std::pow(.999F, float(iteration));
+                                auto gradients = raster.backward(ref, y, gc, ga, gd, gn);
+                                detail::add_geometry_regularization(
+                                    ref, gradients, b.structure.opacity_reg * float(ref.size()),
+                                    b.structure.scale_reg * float(ref.size()) * 3.F);
+                                const auto fused =
+                                    raster.backward(m, x, gc, ga, gd, gn, {}, &a.sh, &a.structure);
+                                close_gradient(
+                                    gradients.opacity_logits, fused.opacity_logits,
+                                    "fused opacity gradient", 5e-10F, 1e-4F);
+                                TrainingOptions training;
+                                training.scales_lr = b.structure.scales_lr;
+                                training.quaternions_lr = b.structure.quaternions_lr;
+                                training.opacities_lr = b.structure.opacities_lr;
+                                training.adam_epsilon = b.structure.epsilon;
+                                detail::AdamState means{
+                                    b.structure.means_first, b.structure.means_second};
+                                detail::AdamState scales{
+                                    b.structure.scales_first, b.structure.scales_second};
+                                detail::AdamState rotations{
+                                    b.structure.rotations_first, b.structure.rotations_second};
+                                detail::AdamState opacity{
+                                    b.structure.opacity_first, b.structure.opacity_second};
+                                detail::adam_step_structure(
+                                    ref, gradients, means, scales, rotations, opacity,
+                                    b.structure.means_lr, iteration, training,
+                                    b.structure.minimum_log_scale, b.structure.maximum_log_scale);
+                                detail::ShAdamQuant sh{
+                                    b.sh.first, b.sh.packed, b.sh.bounds,
+                                    int(ref.sh.shape()[1] * 3)};
+                                detail::sh_adam_quant_step(
+                                    ref.sh, gradients.sh, sh, sh.stride, b.sh.lr, b.sh.rest_lr, .9F,
+                                    .999F, a.sh.correction1, a.sh.correction2, b.sh.epsilon, 0.F);
+                                close_update(
+                                    before.means, ref.means, m.means, "Adam mean increments");
+                                close_update(
+                                    before.log_scales, ref.log_scales, m.log_scales,
+                                    "Adam scale increments");
+                                close_update(
+                                    before.quaternions, ref.quaternions, m.quaternions,
+                                    "Adam rotation increments", 1e-4F, 1e-9F);
+                                close_update(
+                                    before.opacity_logits, ref.opacity_logits, m.opacity_logits,
+                                    "Adam opacity increments");
+                                close_update(before.sh, ref.sh, m.sh, "Adam SH increments", 1e-3F);
+                                const Tensor first_a[]{
+                                    a.structure.means_first, a.structure.scales_first,
+                                    a.structure.rotations_first, a.structure.opacity_first};
+                                const Tensor first_b[]{
+                                    b.structure.means_first, b.structure.scales_first,
+                                    b.structure.rotations_first, b.structure.opacity_first};
+                                const Tensor second_a[]{
+                                    a.structure.means_second, a.structure.scales_second,
+                                    a.structure.rotations_second, a.structure.opacity_second};
+                                const Tensor second_b[]{
+                                    b.structure.means_second, b.structure.scales_second,
+                                    b.structure.rotations_second, b.structure.opacity_second};
+                                for (unsigned state = 0; state < 4; ++state) {
+                                    close(
+                                        first_a[state], first_b[state], "Adam first moments", 2e-9F,
+                                        1e-4F);
+                                    close(
+                                        second_a[state], second_b[state], "Adam second moments",
+                                        1e-10F, 1e-6F);
+                                }
                             }
                         }
                     }
-                }
-    // Empty visibility must remain safe in both activation paths.
+    // Empty visibility remains safe with the single activation path.
     auto m = fixture(140003, 0, false);
     auto c = camera();
     c.world_to_camera[14] = -20.F;
-    for (bool fused : {false, true}) {
-        RasterizeOptions o;
-        o.require_depth = false;
-        o.fuse_activation = fused;
-        const auto frame = raster.forward(m, c, o);
-        require(frame.rendered_instances == 0, "empty camera emitted instances");
-    }
+    RasterizeOptions o;
+    o.require_depth = false;
+    require(raster.forward(m, c, o).rendered_instances == 0, "empty camera emitted instances");
     sync();
     std::cout << "CUDA frontend forward/gradient/Adam parity passed\n";
 }
-void benchmark(std::size_t n, unsigned iterations) {
+void benchmark(std::size_t n, unsigned iterations, RenderMethod method) {
     Rasterizer raster;
     const auto c = camera(960, 540);
-    // Alternate order across rounds to expose clock/temperature bias.
-    for (unsigned round = 0; round < 3; ++round)
-        for (unsigned arm = 0; arm < 2; ++arm) {
-            const unsigned variant = round % 2 ? 1 - arm : arm;
-            auto m = fixture(n, 3, false);
-            Optimizer optimizer(m);
-            RasterizeOptions o;
-            configure_rasterization(o, TrainingOptions{});
-            o.active_sh_degree = 3;
-            o.require_depth = false;
-            o.fuse_activation = variant != 0;
-            const auto gc = Tensor::full({3, c.height, c.width}, 1e-6F, cuda);
-            const auto ga = Tensor::zeros({c.height, c.width}, cuda);
-            const auto step = [&] {
-                const auto frame = raster.forward(m, c, o);
-                (void)raster.backward(
-                    m, frame, gc, ga, {}, {}, {}, &optimizer.sh, &optimizer.structure);
-            };
-            for (unsigned warm = 0; warm < 5; ++warm)
-                step();
-            sync();
-            cudaMemPool_t pool{};
-            require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "default pool");
-            std::uint64_t zero = 0;
-            require(
-                cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess,
-                "reset pool peak");
-            const auto start = std::chrono::steady_clock::now();
-            for (unsigned i = 0; i < iterations; ++i)
-                step();
-            sync();
-            const double ms =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-                    .count() /
-                iterations;
-            std::uint64_t peak = 0;
-            require(
-                cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
-                "pool peak");
-            std::cout << "frontend_bench count=" << n << " round=" << round
-                      << " variant=" << variant << " ms=" << ms << " peak_bytes=" << peak
-                      << std::endl;
-        }
+    for (unsigned round = 0; round < 3; ++round) {
+        auto m = fixture(n, 3, false);
+        m.render_method = method;
+        Optimizer optimizer(m);
+        RasterizeOptions o;
+        configure_rasterization(o, TrainingOptions{});
+        o.active_sh_degree = 3;
+        o.require_depth = false;
+        const auto gc = Tensor::full({3, c.height, c.width}, 1e-6F, cuda);
+        const auto ga = Tensor::zeros({c.height, c.width}, cuda);
+        const auto step = [&] {
+            const auto frame = raster.forward(m, c, o);
+            (void)raster.backward(
+                m, frame, gc, ga, {}, {}, {}, &optimizer.sh, &optimizer.structure);
+        };
+        for (unsigned warm = 0; warm < 5; ++warm)
+            step();
+        sync();
+        cudaMemPool_t pool{};
+        require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "default pool");
+        std::uint64_t zero = 0;
+        require(
+            cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &zero) == cudaSuccess,
+            "reset pool peak");
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i < iterations; ++i)
+            step();
+        sync();
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                .count() /
+            iterations;
+        std::uint64_t peak = 0;
+        require(
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
+            "pool peak");
+        std::cout << "frontend_bench method="
+                  << (method == RenderMethod::gaussian_3dgut ? "3dgut" : "3dgs") << " count=" << n
+                  << " round=" << round << " ms=" << ms << " peak_bytes=" << peak << std::endl;
+    }
 }
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--bench")
             benchmark(
-                argc > 2 ? std::stoul(argv[2]) : 1000000, argc > 3 ? std::stoul(argv[3]) : 40);
+                argc > 2 ? std::stoul(argv[2]) : 1000000, argc > 3 ? std::stoul(argv[3]) : 40,
+                argc > 4 && std::string(argv[4]) == "3dgut" ? RenderMethod::gaussian_3dgut
+                                                            : RenderMethod::gaussian_3dgs);
         else {
             comparison_guards();
             audit_errors = argc > 1 && std::string(argv[1]) == "--audit-errors";

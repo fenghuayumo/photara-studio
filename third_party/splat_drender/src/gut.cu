@@ -1,4 +1,5 @@
 #include "device/gut.cuh"
+#include "device/activation.cuh"
 #include "device/gut_support.cuh"
 #include "device/sh.cuh"
 #include "device/tiles.cuh"
@@ -62,9 +63,10 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings, Ca
         center.pixel_y = t.y > 0.f ? float(cam.height) : 0.f;
         center.valid = true;
     }
-    if (!center.valid || !(g.opacities[i] >= cfg::kAlphaFloor))
+    const auto activated = load_activation(g, i);
+    if (!center.valid || !(activated.opacity >= cfg::kAlphaFloor))
         return;
-    const auto R = mat::quat_rotation(reinterpret_cast<const float4*>(g.rotations)[i]);
+    const auto R = mat::quat_rotation(activated.rotation);
     float2 points[7];
     points[0] = make_float2(center.pixel_x, center.pixel_y);
     float2 mu = make_float2(.25f * points[0].x, .25f * points[0].y);
@@ -78,7 +80,7 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings, Ca
             make_float3(cam.center[0] - mean.x, cam.center[1] - mean.y, cam.center[2] - mean.z);
         float o[3], d[3], od = 0.f, dd = 0.f;
         for (int a = 0; a < 3; ++a) {
-            const float inv = 1.f / (settings.scale_modifier * g.scales[3 * i + a]);
+            const float inv = 1.f / (settings.scale_modifier * (&activated.scale.x)[a]);
             o[a] = (R.m[a][0] * delta.x + R.m[a][1] * delta.y + R.m[a][2] * delta.z) * inv;
             d[a] = (R.m[a][0] * up.x + R.m[a][1] * up.y + R.m[a][2] * up.z) * inv;
             od += o[a] * d[a];
@@ -90,12 +92,12 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings, Ca
             const float q = o[a] + peak * d[a];
             distance += q * q;
         }
-        boundary |= dd > 0.f && distance <= -2.f * logf(cfg::kAlphaFloor / g.opacities[i]) * 1.001f;
+        boundary |= dd > 0.f && distance <= -2.f * logf(cfg::kAlphaFloor / activated.opacity) * 1.001f;
     }
     // Symmetric seven-point UT: lambda=1, weights 1/4 and 1/8.
     for (int a = 0; a < 3; ++a)
         for (int b = 0; b < 2; ++b) {
-            const float spread = (b ? 2.f : -2.f) * settings.scale_modifier * g.scales[3 * i + a];
+            const float spread = (b ? 2.f : -2.f) * settings.scale_modifier * (&activated.scale.x)[a];
             const float3 sigma =
                 make_float3(mean.x + spread * R.m[a][0], mean.y + spread * R.m[a][1],
                             mean.z + spread * R.m[a][2]);
@@ -132,20 +134,20 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings, Ca
     if (!(det > 0.f) || !isfinite(det))
         return;
     const float4 co = boundary && is_equirect(K.mode)
-                          ? make_float4(-1.f, 0.f, -1.f, g.opacities[i])
-                          : make_float4(yy / det, -xy / det, xx / det, g.opacities[i]);
+                          ? make_float4(-1.f, 0.f, -1.f, activated.opacity)
+                          : make_float4(yy / det, -xy / det, xx / det, activated.opacity);
     const int wrap = is_equirect(K.mode) ? cam.width : 0;
     ushort4 clip = make_ushort4(0, min(gx, 65535), 0, min(gy, 65535));
     const bool use_clip = (is_fisheye(K.mode) || is_pinhole(K.mode)) && gx <= 65535 && gy <= 65535;
     if (use_clip && is_pinhole(K.mode) && candidates)
         clip = pinhole_support_bounds(
-            R, make_float3(g.scales[3 * i], g.scales[3 * i + 1], g.scales[3 * i + 2]),
+            R, make_float3(activated.scale.x, activated.scale.y, activated.scale.z),
             make_float3(cam.center[0] - mean.x, cam.center[1] - mean.y, cam.center[2] - mean.z),
-            cam, K, settings.scale_modifier, g.opacities[i], gx, gy);
+            cam, K, settings.scale_modifier, activated.opacity, gx, gy);
     if (use_clip && is_fisheye(K.mode) && boundary)
         clip = fisheye_support_clip(
-            t, make_float3(g.scales[3 * i], g.scales[3 * i + 1], g.scales[3 * i + 2]),
-            g.opacities[i], settings.scale_modifier, center, K, gx, gy);
+            t, make_float3(activated.scale.x, activated.scale.y, activated.scale.z),
+            activated.opacity, settings.scale_modifier, center, K, gx, gy);
     st.screen_bounds[i] = clip;
     const unsigned touched = tiles::enumerate(mu, co, gx, gy, i, 0, nullptr, nullptr, wrap, nullptr,
                                               0, use_clip ? &clip : nullptr);
@@ -177,7 +179,7 @@ __global__ void prepare(Gaussians g, CameraView cam, RenderSettings settings, Ca
                            : make_float2(1.f / (fabsf(center.J.du[0]) + 1e-6f),
                                          1.f / (fabsf(center.J.dv[1]) + 1e-6f));
     for (int a = 0; a < 3; ++a) {
-        const float inv = 1.f / (settings.scale_modifier * g.scales[3 * i + a]);
+        const float inv = 1.f / (settings.scale_modifier * (&activated.scale.x)[a]);
         const float3 b = make_float3(R.m[a][0] * inv, R.m[a][1] * inv, R.m[a][2] * inv);
         st.gut_rows[3 * i + a] = make_float4(b.x, b.y, b.z, mat::dot3(b, origin));
     }
@@ -229,7 +231,7 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s, C
         float p[10];
         parameters(g, i, p);
         auto r = response(p, origin, dir, ray_z, cam.world_to_camera, s.scale_modifier);
-        const float raw = g.opacities[i] * r.weight;
+        const float raw = st.conic_opacity[i].w * r.weight;
         const float alpha = fminf(cam.alpha_clip, raw);
         if (!(alpha >= cfg::kAlphaFloor))
             continue;
@@ -260,7 +262,7 @@ __global__ void reference_blend(Gaussians g, CameraView cam, RenderSettings s, C
             for (int k = 0; k < 10; ++k)
                 dp[k] = Dual::variable(p[k], k);
             const auto dr = response(dp, origin, dir, ray_z, cam.world_to_camera, s.scale_modifier);
-            const float dw = raw < cam.alpha_clip ? da * g.opacities[i] : 0.f;
+            const float dw = raw < cam.alpha_clip ? da * st.conic_opacity[i].w : 0.f;
             float derivatives[10];
             for (int k = 0; k < 10; ++k) {
                 float d = dw * dr.weight.d[k];
@@ -392,7 +394,7 @@ __global__ void blend_rgb(Gaussians g, CameraView cam, RenderSettings s, CameraI
             float3 c = make_float3(0, 0, 0);
             if constexpr (!CONTRIBUTOR_ONLY)
                 c = g.colors ? reinterpret_cast<const float3*>(g.colors)[i] : st.rgb[i];
-            colors[rank] = make_float4(c.x, c.y, c.z, g.opacities[i]);
+            colors[rank] = make_float4(c.x, c.y, c.z, st.conic_opacity[i].w);
         }
         __syncthreads();
         for (unsigned j = 0; j < batch && !done; ++j) {
@@ -522,7 +524,7 @@ __global__ void backward_buckets(Gaussians g, CameraView cam, RenderSettings s, 
             c = st.gut_rows[3 * id + 2];
             const float3 color =
                 g.colors ? reinterpret_cast<const float3*>(g.colors)[id] : st.rgb[id];
-            rgb = make_float4(color.x, color.y, color.z, g.opacities[id]);
+            rgb = make_float4(color.x, color.y, color.z, st.conic_opacity[id].w);
             rf = st.gut_refine[id];
             if (is_fisheye(K.mode)) {
                 const auto t = mat::xform_point(
@@ -803,14 +805,15 @@ __global__ void transform_backward(Gaussians g, CameraView cam, RenderSettings s
                       grad.d_ray_plane[i].z + go.y * u.z},
                      {grad.d_normal[i].x + go.z * u.x, grad.d_normal[i].y + go.z * u.y,
                       grad.d_normal[i].z + go.z * u.z}};
+    const auto activated = load_activation(g, i);
     const float3 ds =
-        make_float3(-(D[0][0] * b0.x + D[0][1] * b0.y + D[0][2] * b0.z) / g.scales[3 * i],
-                    -(D[1][0] * b1.x + D[1][1] * b1.y + D[1][2] * b1.z) / g.scales[3 * i + 1],
-                    -(D[2][0] * b2.x + D[2][1] * b2.y + D[2][2] * b2.z) / g.scales[3 * i + 2]);
+        make_float3(-(D[0][0] * b0.x + D[0][1] * b0.y + D[0][2] * b0.z) / activated.scale.x,
+                    -(D[1][0] * b1.x + D[1][1] * b1.y + D[1][2] * b1.z) / activated.scale.y,
+                    -(D[2][0] * b2.x + D[2][1] * b2.y + D[2][2] * b2.z) / activated.scale.z);
     for (int a = 0; a < 3; ++a)
         for (int b = 0; b < 3; ++b)
-            D[a][b] /= g.scales[3 * i + a] * s.scale_modifier;
-    const float4 q = reinterpret_cast<const float4*>(g.rotations)[i];
+            D[a][b] /= (&activated.scale.x)[a] * s.scale_modifier;
+    const float4 q = activated.rotation;
     const float w = q.x, x = q.y, y = q.z, z = q.w;
     const float4 dq = make_float4(
         2.f * (z * (D[0][1] - D[1][0]) + y * (D[2][0] - D[0][2]) + x * (D[1][2] - D[2][1])),

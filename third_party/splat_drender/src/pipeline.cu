@@ -419,8 +419,7 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools, const Gaussians& 
                                   const RenderOutputs& out) {
     check(g.count > 0 && cam.width > 0 && cam.height > 0, "empty inputs");
     check((g.sh != nullptr) != (g.colors != nullptr), "exactly one color source required");
-    check(!g.raw.log_scales || (g.primitive == Primitive::gaussian_3dgs &&
-          g.raw.quaternions && g.raw.opacity_logits && !g.covariances && !g.scales &&
+    check(!g.raw.log_scales || (g.raw.quaternions && g.raw.opacity_logits && !g.covariances && !g.scales &&
           !g.rotations && !g.opacities), "invalid raw activation inputs");
     check((g.scales != nullptr || g.raw.log_scales != nullptr) != (g.covariances != nullptr),
           "exactly one covariance source required");
@@ -429,7 +428,8 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools, const Gaussians& 
         check(out.median_depth && out.normal, "depth outputs required");
 
     if (g.primitive == Primitive::gaussian_3dgut)
-        check(g.scales && g.rotations && !g.covariances, "3DGUT requires scales and rotations");
+        check((g.raw.log_scales || (g.scales && g.rotations)) && !g.covariances,
+              "3DGUT requires scales and rotations");
     const CameraIntrinsics K = intrinsics_of(cam);
     const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;

@@ -1757,12 +1757,6 @@ GaussianModel Trainer::train(
                                             options_.use_mvs_normals || depth_normal_active ||
                                             normal_field_active || multi_view_active;
         raster_options.require_depth = need_geometry_channels;
-        // Auxiliary gradient merges and frozen structure use standalone Adam.
-        // Keep their activation arrays rather than recomputing them in backward.
-        raster_options.fuse_activation = !normal_field_active && !multi_view_active &&
-            (options_.structure_freeze_iter == 0 || iteration <= options_.structure_freeze_iter) &&
-            (!options_.input_is_dense || options_.dense_structure_freeze_iter == 0 ||
-             iteration <= options_.dense_structure_freeze_iter);
         // Vulkan previews render their own requested camera below; they never
         // consume the current training view's copied RGB/alpha tensors. Keep
         // the fused-loss frame backend-resident even when live preview is on.

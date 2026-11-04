@@ -30,8 +30,9 @@ struct CameraView {
     const float* center = nullptr;
 };
 
-// Optional raw training parameters. 3DGS projection can activate these in
-// registers; the legacy activated-array API remains available to all callers.
+// Optional raw training parameters. CUDA projection can activate these in
+// registers for both 3DGS and 3DGUT. Native activated/covariance inputs remain
+// supported by the low-level API.
 struct RawActivation {
     const float* log_scales = nullptr;
     const float* quaternions = nullptr;

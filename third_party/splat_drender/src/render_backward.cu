@@ -933,7 +933,7 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree, int 
                         st, gs, grad_mean, grad_sh, grad_colors, grad_opacity, grad_scale,
                         grad_rotation, grad_cov, sh_adam, structure_adam, raw);
             };
-            if constexpr (!kCov && !kGut) {
+            if constexpr (!kCov) {
                 if (raw.log_scales) launch_activation(std::true_type{});
                 else launch_activation(std::false_type{});
             } else launch_activation(std::false_type{});

@@ -3,6 +3,7 @@
 // selection and sorting in 3DGS). Derivatives below follow the ray response.
 #pragma once
 #include "matrix.cuh"
+#include "activation.cuh"
 #include "splat_drender/api.h"
 
 namespace splat_drender::gut {
@@ -95,12 +96,13 @@ __device__ Response<T> response(const T* p, float3 origin, float3 direction, flo
 }
 
 __device__ inline void parameters(const Gaussians& g, int i, float* p) {
+    const auto activated = load_activation(g, i);
     for (int a = 0; a < 3; ++a) {
         p[a] = g.means[3 * i + a];
-        p[3 + a] = g.scales[3 * i + a];
+        p[3 + a] = (&activated.scale.x)[a];
     }
     for (int a = 0; a < 4; ++a)
-        p[6 + a] = g.rotations[4 * i + a];
+        p[6 + a] = (&activated.rotation.x)[a];
 }
 
 __device__ inline void ray(const CameraView& cam, CameraIntrinsics K, int x, int y, float3& origin,

@@ -1,21 +1,29 @@
 # CUDA 3DGS front-end audit (2026-11-04)
 
-This change concerns CUDA 3DGS, not 3DGUT. Vulkan and CUDA point-depth queries
-retain their existing paths.
+The initial audit concerned CUDA 3DGS. A subsequent cleanup makes fused
+activation the only Photara CUDA render path for both 3DGS and 3DGUT, and uses
+raw parameters for CUDA depth/occupancy queries. Vulkan retains its own path.
 
 ## Retained optimization
 
-`RasterizeOptions::fuse_activation` lets the CUDA rasterizer consume raw log
-scales, scalar-first quaternions and opacity logits. Projection activates one
+The CUDA rasterizer consumes raw log scales, scalar-first quaternions and
+opacity logits directly. Projection activates one
 row in registers, including the Mip3D determinant correction, without three
 full-model output arrays. Fused projection backward/structure Adam reconstructs
 the row before updating parameters, reusing its unfiltered scales for the chain
 rule. At one million rows the eliminated arrays total 32,000,000 bytes.
 
-The trainer selects this path only when there is no normal-field or multi-view
-gradient merge and structure is not frozen. Standalone callers default to the
-materialized path. Explicit fused-forward callers that request standalone
-backward materialize the existing activation chain locally in backward.
+There is no runtime activation switch or alternate preactivated forward in
+Photara. Standalone gradient merges and diagnostics materialize activation
+only for their chain rule or export, not for projection. The shared helper
+also remains necessary for export/visualization. The lower-level renderer's
+native activated/covariance input contract remains supported for its consumers.
+
+3DGUT reuses the same row helper for unscented preprocessing, transform
+backward, and fused Adam. Blending fetches opacity from the preprocessed
+`conic_opacity.w`, including the reference geometry renderer. Its reference
+ray-response path loads shape through the shared helper as needed. CUDA depth
+and occupancy contexts no longer retain full-model activated arrays.
 
 ## Count-readback experiments
 
@@ -54,11 +62,13 @@ ctest --test-dir build -C Release -R '^photara.splat.cuda_frontend$' --output-on
 & build/photara/Release/photara_splat_cuda_frontend_test.exe --bench 262144 120
 ```
 
-Variant 0 is materialized activation, variant 1 is fused activation. The test
-compares RGB, alpha, depth, normals, visibility, radii, instance counts,
-standalone gradients and three fused Adam steps, including nonzero moment
-state, culled/zero-quaternion rows, filtered/unfiltered models, pinhole,
-fisheye and equirectangular cameras, and empty visibility.
+The A/B variants in the table below were measured before cleanup (commit
+9bb6390). The current benchmark reports three runs of the single fused path.
+The frontend test compares fused Adam with independent standalone gradient,
+chain-rule and optimizer operations for both rendering methods, including
+nonzero moment state, culled/zero-quaternion rows, filtered/unfiltered models,
+pinhole, fisheye and equirectangular cameras, and empty visibility. Dedicated
+rasterizer/GUT oracle and finite-difference tests validate rendering and gradients.
 
 ## Final measurements
 
@@ -90,40 +100,41 @@ compute path still uses raw parameters; no snapshot is allocated on normal
 non-diagnostic fused steps. Regression coverage verifies the three activation
 files exactly match the pre-update values and that the model actually changes.
 
-Parity checks use measured, quantity-specific absolute/relative tolerances:
+The current frontend regression compares fused backward/Adam against independent
+standalone gradients plus the standalone structure and quantized-SH optimizers.
+It covers both 3DGS and 3DGUT. The retired preactivated render path and its A/B
+switch have been deleted from Photara; test-only baseline rendering is not
+retained in production. Existing CPU-oracle/finite-difference/rasterizer/GUT
+parity suites cover render outputs and the complete gradient chain.
 
-| Quantity | Absolute tolerance | Relative tolerance |
-| --- | ---: | ---: |
-| RGB / normal | 2e-7 | 1e-6 |
-| Alpha | 1e-7 | 1e-6 |
-| Depth | 1e-8 | 5e-7 |
-| SH gradient | 1e-13 | 1e-6 |
-| Scale / quaternion gradient | 5e-11 | 1e-5 |
-| Opacity gradient | 5e-10 | 1e-4 |
-| Mean gradient, per component | 1e-9 | 5e-4 |
-| Adam first moments | 2e-9 | 1e-4 |
-| Adam second moments | 1e-10 | 1e-6 |
+Captured fused opacity gradients use per-component absolute/relative limits
+5e-10 / 1e-4 plus an independent relative L2 limit of 2e-6. Adam first-moment
+limits are 2e-9 / 1e-4; second-moment limits are 1e-10 / 1e-6, for all eight
+structure-state arrays. Parameter increments allow one ULP at parameter
+magnitude plus 0.01% of the actual change. Quaternion increments additionally
+allow 1e-9 absolute error; quantized-SH increments allow 0.1%. No tolerance was
+relaxed for the switch to the independent optimizer reference.
 
-Every gradient tensor also has an independent relative L2 error limit of 2e-6.
-The mean-gradient component tolerance accommodates cancellation in geometry
-terms; tightening its absolute floor to 1e-10 failed the actual filtered
-geometry cases. The norm bound prevents that local allowance from hiding a
-systematic gradient bias. Measured RGB/alpha differences were zero, depth was
-within 3 ULP, and SH gradient error was about 1e-12. These measurements guide
-thresholds but do not require bit identity from unordered GPU reductions.
+Explicit comparator guards reject zero gradients, skipped updates, and injected
+1% biases. Every gradient check rejects an all-zero result, and update checks
+require a signal above rounding noise. Correctness cases use larger observable
+learning rates; the performance benchmark keeps its original settings.
+`--audit-errors` reports maxima for the quantities currently compared.
 
-Parameter increments allow one ULP at the parameter magnitude plus 0.01% of
-the update. Quaternion increments additionally allow 1e-9 absolute error; SH
-increments allow 0.1% because quantized optimizer state can cross bins. The
-old common 0.5% increment tolerance is removed. All eight structure Adam
-moment arrays are checked. Each gradient comparison must reject an all-zero
-result; each increment comparison must have a signal larger than the rounding
-floor and reject a missing update. Explicit comparator guard cases reject
-zero gradients, skipped updates, and injected 1% biases. Correctness cases
-use larger observable learning rates; benchmark settings are unchanged.
+## Single-path cleanup validation
 
-The tightened frontend parity suite passed five consecutive runs. Use
-`photara_splat_cuda_frontend_test --audit-errors` to inspect maximum absolute,
-relative and ULP errors and the largest per-tensor relative L2 error. Large
-relative/ULP errors near a cancellation zero should be interpreted alongside
-absolute and norm errors, not in isolation.
+`photara.splat.cuda_frontend`, `photara.splat.rasterizer` and
+`photara.splat.gut` passed after unifying the paths. The GUT suite includes its
+CUDA/Vulkan/reference parity and geometry tests. The frontend covers filtered
+and unfiltered models, both render methods, RGB and geometry, culled rows,
+zero quaternions, camera types, standalone optimizer references and diagnostics.
+
+A 1M-row, 960x540 synthetic forward/backward/Adam benchmark (three rounds of
+120 steps) measured 3DGS at 2.815/2.836/2.829 ms with a CUDA pool peak of
+791,674,880 bytes. 3DGUT measured 3.433/3.439/3.439 ms and 925,892,608 bytes.
+These are current-path samples, not a new matched before/after speedup claim.
+
+```powershell
+& build/photara/Release/photara_splat_cuda_frontend_test.exe --bench 1000000 120
+& build/photara/Release/photara_splat_cuda_frontend_test.exe --bench 1000000 120 3dgut
+```

@@ -29,4 +29,15 @@ __device__ inline ActivatedRow activate_row(RawActivation raw, int i) {
     a.opacity = (1.f / (1.f + expf(-raw.opacity_logits[i]))) * ratio;
     return a;
 }
+__device__ inline ActivatedRow load_activation(const Gaussians& g, int i) {
+    if (g.raw.log_scales)
+        return activate_row(g.raw, i);
+    ActivatedRow a{};
+    if (g.scales)
+        a.scale = reinterpret_cast<const float3*>(g.scales)[i];
+    if (g.rotations)
+        a.rotation = reinterpret_cast<const float4*>(g.rotations)[i];
+    a.opacity = g.opacities[i];
+    return a;
+}
 } // namespace splat_drender
