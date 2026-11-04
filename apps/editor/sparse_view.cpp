@@ -2135,14 +2135,21 @@ SceneLoad gaussian_scene_from_model(
             result.error = "Gaussian model contains no points";
             return result;
         }
-        const auto means = model.means.to_vector();
-        const auto sh = model.sh.to_vector();
-        const auto log_scales = model.log_scales.is_valid()
-            ? model.log_scales.to_vector()
-            : std::vector<float>{};
-        const auto rotations = model.quaternions.is_valid()
-            ? model.quaternions.to_vector()
-            : std::vector<float>{};
+        // CPU imports already own contiguous arrays. Keep those tensors alive
+        // while sampling instead of copying every SH coefficient for the preview.
+        const auto cpu = [](const tinytensor::Tensor& tensor) {
+            if (!tensor.is_valid()) return tinytensor::Tensor{};
+            return (tensor.device() == tinytensor::Device::CPU
+                        ? tensor : tensor.to(tinytensor::Device::CPU)).contiguous();
+        };
+        const auto means_host = cpu(model.means);
+        const auto sh_host = cpu(model.sh);
+        const auto scales_host = cpu(model.log_scales);
+        const auto rotations_host = cpu(model.quaternions);
+        const auto means = means_host.ptr<float>();
+        const auto sh = sh_host.ptr<float>();
+        const auto log_scales = scales_host.is_valid() ? scales_host.ptr<float>() : nullptr;
+        const auto rotations = rotations_host.is_valid() ? rotations_host.ptr<float>() : nullptr;
         const std::size_t count = model.size();
         const std::size_t stride = std::max<std::size_t>(
             1, (count + k_max_loaded_points - 1U) / k_max_loaded_points);
@@ -2168,8 +2175,8 @@ SceneLoad gaussian_scene_from_model(
                 channel(0), channel(1), channel(2), 255));
             const std::size_t scale_offset = index * 3U;
             const std::size_t quat_offset = index * 4U;
-            if (scale_offset + 2U < log_scales.size() &&
-                quat_offset + 3U < rotations.size()) {
+            if (log_scales && rotations && scale_offset + 2U < scales_host.numel() &&
+                quat_offset + 3U < rotations_host.numel()) {
                 GaussianPrimitive primitive;
                 primitive.scale = {
                     std::exp(log_scales[scale_offset]),

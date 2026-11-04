@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -37,6 +38,85 @@ GaussianModel fixture(unsigned n, unsigned degree) {
     m.opacity_logits = tinytensor::Tensor::zeros({n, 1}, cpu);
     m.sh = tinytensor::Tensor::from_vector(sh, {n, bases, 3}, cpu);
     return m;
+}
+// Reordered properties, optional fields and a partial batch after 4 MiB.
+void ply_loading(const std::filesystem::path& folder) {
+    for (bool learned : {false, true}) {
+        constexpr std::size_t n = 18001, bases = 16;
+        std::vector<std::string> names{"x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2",
+            "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3", "nx"};
+        for (unsigned i = 0; i < 45; ++i) names.push_back("f_rest_" + std::to_string(i));
+        if (learned) {
+            names.push_back("filter_3D");
+            for (unsigned i = 0; i < 4; ++i) names.push_back("gaussian_features_" + std::to_string(i));
+        }
+        std::reverse(names.begin(), names.end());
+        const auto path = folder / "batched.ply";
+        std::ofstream output(path, std::ios::binary);
+        output << "ply\nformat binary_little_endian 1.0\nelement vertex " << n << '\n';
+        for (const auto& name : names) output << "property float " << name << '\n';
+        output << "end_header\n";
+        const auto payload = output.tellp();
+        const auto value = [](std::size_t row, const std::string& name) {
+            if (name == "rot_0") return 1.F;
+            if (name.starts_with("rot_")) return 0.F;
+            if (name.starts_with("scale_")) return -2.F;
+            if (name == "opacity" && row < 2)
+                return row == 0 ? std::numeric_limits<float>::infinity() : -std::numeric_limits<float>::infinity();
+            return float(row % 101) * .01F + float(name.size()) * .001F;
+        };
+        for (std::size_t row = 0; row < n; ++row)
+            for (const auto& name : names) {
+                const float v = value(row, name);
+                output.write(reinterpret_cast<const char*>(&v), sizeof(v));
+            }
+        output.close();
+        const auto m = load_gaussians(path, tinytensor::Device::CPU);
+        require(m.size() == n && m.sh_degree == 3, "Batched PLY changed shape");
+        for (std::size_t i = 0; i < n; ++i) {
+            require(m.means.ptr<float>()[i * 3] == value(i, "x"), "Batched PLY changed position");
+            for (unsigned c = 0; c < 3; ++c) {
+                require(m.sh.ptr<float>()[i * bases * 3 + c] == value(i, "f_dc_" + std::to_string(c)),
+                        "Batched PLY changed DC");
+                for (unsigned b = 1; b < bases; ++b)
+                    require(m.sh.ptr<float>()[(i * bases + b) * 3 + c] ==
+                            value(i, "f_rest_" + std::to_string(c * 15 + b - 1)), "Batched PLY changed SH order");
+            }
+            for (unsigned c = 0; c < 4; ++c)
+                require(m.normal_features.ptr<float>()[i * 4 + c] ==
+                        (learned ? value(i, "gaussian_features_" + std::to_string(c)) : ((c == 0 || c == 3) ? 1.F : 0.F)),
+                        "Batched PLY changed normal features");
+            if (learned) require(m.filter_3d.ptr<float>()[i] == value(i, "filter_3D"), "Batched PLY changed filter");
+        }
+        require(m.opacity_logits.ptr<float>()[0] == 104.F && m.opacity_logits.ptr<float>()[1] == -104.F,
+                "Batched PLY lost saturated opacity handling");
+        // A non-finite attribute must still be rejected after direct tensor decoding.
+        std::fstream corrupt(path, std::ios::binary | std::ios::in | std::ios::out);
+        corrupt.seekp(payload);
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        corrupt.write(reinterpret_cast<const char*>(&nan), sizeof(nan));
+        corrupt.close();
+        bool rejected = false;
+        try { (void)load_gaussians(path, tinytensor::Device::CPU); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "PLY accepted non-finite parameters");
+        std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
+        rejected = false;
+        try { (void)load_gaussians(path, tinytensor::Device::CPU); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "PLY accepted a truncated final batch");
+    }
+}
+// Reproducible CPU loading benchmark; the generated PLY is about 248 MB.
+void ply_load_benchmark(const std::filesystem::path& folder) {
+    const auto path = folder / "load-benchmark.ply";
+    save_gaussians(fixture(1'000'000, 3), path);
+    for (int run = 0; run < 3; ++run) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto model = load_gaussians(path, tinytensor::Device::CPU);
+        require(model.size() == 1'000'000, "Benchmark lost Gaussians");
+        std::cout << "PLY load run=" << run << " seconds="
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
+                  << std::endl;
+    }
 }
 void antialias_metadata(const std::filesystem::path& folder) {
     for (auto mode : {SplatFilterMode::classic, SplatFilterMode::mip_2d}) {
@@ -267,6 +347,10 @@ int main(int argc, char** argv) {
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(folder);
         struct Cleanup { std::filesystem::path p; ~Cleanup() { std::error_code e; std::filesystem::remove_all(p, e); } } cleanup{folder};
+        if (argc > 1 && std::string(argv[1]) == "--ply-load-benchmark") {
+            ply_load_benchmark(folder);
+            return 0;
+        }
         if (gpu) {
 #if defined(TINYTENSOR_HAS_VULKAN)
             gpu_clustering(2049, 64);
@@ -279,10 +363,12 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Vulkan test requires Vulkan build");
 #endif
         } else {
+            ply_loading(folder);
             antialias_metadata(folder);
             gut_exports(folder);
             scalar_quantization();
             for (unsigned d = 0; d <= 3; ++d) {
+                roundtrip(folder, 17, d, GaussianFormat::ply);
                 roundtrip(folder, 17, d, GaussianFormat::sog);
                 roundtrip(folder, 17, d, GaussianFormat::glb);
                 roundtrip(folder, 17, d, GaussianFormat::spz);

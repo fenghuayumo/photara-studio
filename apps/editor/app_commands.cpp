@@ -4842,6 +4842,7 @@ void queue_splat_model_load(
             };
             check_cancel();
             auto model = load();
+            const auto loaded_at = std::chrono::steady_clock::now();
             check_cancel();
             const auto cpu = [](const tinytensor::Tensor& t) {
                 if (!t.is_valid()) return tinytensor::Tensor{};
@@ -4894,6 +4895,7 @@ void queue_splat_model_load(
                 model.normal_features.numel() == count * 4U
                     ? model.normal_features.ptr<float>() : nullptr;
             prepared.edit.sync(key, host);
+            const auto edited_at = std::chrono::steady_clock::now();
             check_cancel();
             prepared.renderer = std::make_unique<splat_render::Renderer>();
             prepared.renderer->attach(runtime);
@@ -4903,6 +4905,9 @@ void queue_splat_model_load(
             photara::core::Logger::instance().info(
                 "editor_splat_prepare_seconds=",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
+                " load_seconds=", std::chrono::duration<double>(loaded_at - started).count(),
+                " edit_seconds=", std::chrono::duration<double>(edited_at - loaded_at).count(),
+                " upload_seconds=", std::chrono::duration<double>(std::chrono::steady_clock::now() - edited_at).count(),
                 " source=", handoff ? "shared_memory" : "saved_model", " count=", count);
             return prepared;
         });

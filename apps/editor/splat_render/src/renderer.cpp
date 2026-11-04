@@ -591,7 +591,11 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     std::vector<float> centers(count * 4U);
     std::vector<float> scales(count * 4U, 1.F);
     std::vector<float> rotations(count * 4U);
-    std::vector<float> harmonics(count * bases * 3U, 0.F);
+    // The SH layout already matches GPU storage; upload the caller's array.
+    // Only models without SH need a zero-filled fallback.
+    std::vector<float> zero_harmonics;
+    if (cloud.sh == nullptr) zero_harmonics.resize(count * bases * 3U, 0.F);
+    const float* harmonics = cloud.sh ? cloud.sh : zero_harmonics.data();
     for (std::size_t index = 0; index < count; ++index) {
         const ActivatedGaussian activated = activate_gaussian(cloud, index);
         centers[index * 4U] = cloud.means[index * 3U];
@@ -605,14 +609,6 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
         rotations[index * 4U + 1U] = activated.rotation[1];
         rotations[index * 4U + 2U] = activated.rotation[2];
         rotations[index * 4U + 3U] = activated.rotation[3];
-        if (cloud.sh != nullptr) {
-            const std::uint32_t src_bases = std::max(cloud.sh_bases, bases);
-            const std::size_t src = index * src_bases * 3U;
-            const std::size_t dst = index * bases * 3U;
-            std::memcpy(
-                harmonics.data() + dst, cloud.sh + src,
-                static_cast<std::size_t>(bases) * 3U * sizeof(float));
-        }
     }
 
     wait_gpu();
@@ -625,7 +621,7 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     upload_storage(centers_, centers.data(), centers.size() * sizeof(float));
     upload_storage(scales_, scales.data(), scales.size() * sizeof(float));
     upload_storage(rotations_, rotations.data(), rotations.size() * sizeof(float));
-    upload_storage(harmonics_, harmonics.data(), harmonics.size() * sizeof(float));
+    upload_storage(harmonics_, harmonics, count * bases * 3U * sizeof(float));
     create_storage(
         quads_, std::max<VkDeviceSize>(count, 1) * 7U * sizeof(float) * 4U,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -1004,18 +1000,15 @@ void Renderer::sync_ewa(const GaussianCloud& cloud) {
     }
     const std::uint32_t count = cloud.count;
     const std::uint32_t bases = std::max(1U, sh_bases_);
-    const std::uint32_t src_bases = cloud.sh == nullptr ? 1U : std::max(cloud.sh_bases, bases);
-    std::vector<float> means(static_cast<std::size_t>(count) * 3U);
     std::vector<float> opacities(count);
     std::vector<float> scales(static_cast<std::size_t>(count) * 3U);
     std::vector<float> rotations(static_cast<std::size_t>(count) * 4U);
-    std::vector<float> harmonics(static_cast<std::size_t>(count) * bases * 3U, 0.0F);
+    std::vector<float> zero_harmonics;
+    if (cloud.sh == nullptr)
+        zero_harmonics.resize(static_cast<std::size_t>(count) * bases * 3U, 0.F);
     ewa_opacity_factors_.resize(count);
     for (std::uint32_t index = 0; index < count; ++index) {
         const ActivatedGaussian activated = activate_gaussian(cloud, index);
-        means[static_cast<std::size_t>(index) * 3U] = cloud.means[index * 3U];
-        means[static_cast<std::size_t>(index) * 3U + 1U] = cloud.means[index * 3U + 1U];
-        means[static_cast<std::size_t>(index) * 3U + 2U] = cloud.means[index * 3U + 2U];
         opacities[index] = activated.opacity;
         ewa_opacity_factors_[index] = activated.opacity_factor;
         scales[static_cast<std::size_t>(index) * 3U] = activated.scales[0];
@@ -1025,18 +1018,15 @@ void Renderer::sync_ewa(const GaussianCloud& cloud) {
         rotations[static_cast<std::size_t>(index) * 4U + 1U] = activated.rotation[1];
         rotations[static_cast<std::size_t>(index) * 4U + 2U] = activated.rotation[2];
         rotations[static_cast<std::size_t>(index) * 4U + 3U] = activated.rotation[3];
-        if (cloud.sh == nullptr) continue;
-        std::memcpy(
-            harmonics.data() + static_cast<std::size_t>(index) * bases * 3U,
-            cloud.sh + static_cast<std::size_t>(index) * src_bases * 3U,
-            static_cast<std::size_t>(bases) * 3U * sizeof(float));
     }
     splat_drender::vulkan::SplatGaussians gaussians;
-    gaussians.means = means;
+    gaussians.means = std::span<const float>(cloud.means, static_cast<std::size_t>(count) * 3U);
     gaussians.opacities = opacities;
     gaussians.scales = scales;
     gaussians.rotations = rotations;
-    gaussians.sh = harmonics;
+    gaussians.sh = cloud.sh
+        ? std::span<const float>(cloud.sh, static_cast<std::size_t>(count) * bases * 3U)
+        : std::span<const float>(zero_harmonics);
     gaussians.sh_degree = cloud.sh == nullptr ? 0U : sh_degree_;
     gaussians.sh_bases = cloud.sh == nullptr ? 1U : bases;
     ewa_->rasterizer.upload_model(gaussians);

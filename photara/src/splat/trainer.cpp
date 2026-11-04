@@ -42,6 +42,7 @@
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -2944,16 +2945,36 @@ GaussianModel load_gaussians_ply(
     for (std::size_t rest = 0; rest < rest_count; ++rest)
         rest_index[rest] = required("f_rest_" + std::to_string(rest));
 
-    std::vector<float> means(count * 3U);
-    std::vector<float> scales(count * 3U);
-    std::vector<float> rotations(count * 4U);
-    std::vector<float> opacities(count);
-    std::vector<float> sh(count * bases * 3U, 0.F);
-    std::vector<float> normal_features(count * 4U, 0.F);
+    // Check the payload before allocating arrays from the header's vertex count.
+    const auto payload_start = input.tellg();
+    input.seekg(0, std::ios::end);
+    const auto payload_end = input.tellg();
+    const std::size_t row_bytes = properties.size() * sizeof(float);
+    if (payload_start < 0 || payload_end < payload_start ||
+        count > static_cast<std::uint64_t>(payload_end - payload_start) / row_bytes)
+        throw std::runtime_error("Gaussian PLY ended inside vertex data: " + path.string());
+    input.seekg(payload_start);
+
+    // Decode directly into the model's CPU storage, avoiding a second full
+    // copy (and pinned allocations) before the editor can upload the model.
+    GaussianModel model;
+    model.render_method = render_method;
+    model.filter_mode = filter_mode;
+    model.sh_degree = degree;
+    const auto allocate = [](tinytensor::Tensor& tensor, tinytensor::TensorShape shape) {
+        tensor = tinytensor::Tensor::empty_unpinned(shape);
+        return std::span<float>(tensor.ptr<float>(), tensor.numel());
+    };
+    auto means = allocate(model.means, {count, 3U});
+    auto scales = allocate(model.log_scales, {count, 3U});
+    auto rotations = allocate(model.quaternions, {count, 4U});
+    auto opacities = allocate(model.opacity_logits, {count, 1U});
+    auto sh = allocate(model.sh, {count, bases, 3U});
+    auto normal_features = allocate(model.normal_features, {count, 4U});
     const auto filter_property = property_index.find("filter_3D");
-    std::vector<float> filter;
+    std::span<float> filter;
     if (filter_property != property_index.end())
-        filter.resize(count);
+        filter = allocate(model.filter_3d, {count, 1U});
     std::array<std::size_t, 4> normal_feature_index{};
     bool has_normal_features = true;
     for (std::size_t component = 0; component < 4; ++component) {
@@ -2964,38 +2985,44 @@ GaussianModel load_gaussians_ply(
         }
         normal_feature_index[component] = found->second;
     }
-    std::vector<float> row(properties.size());
-    for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
-        input.read(
-            reinterpret_cast<char*>(row.data()),
-            static_cast<std::streamsize>(row.size() * sizeof(float)));
+    // Bound temporary storage while amortizing stream overhead over ~4 MiB.
+    const std::size_t batch_rows = std::min(count, std::max<std::size_t>(1, (4U << 20U) / row_bytes));
+    std::vector<float> batch(batch_rows * properties.size());
+    for (std::size_t first = 0; first < count; first += batch_rows) {
+        const auto rows = std::min(batch_rows, count - first);
+        input.read(reinterpret_cast<char*>(batch.data()),
+                   static_cast<std::streamsize>(rows * row_bytes));
         if (!input)
             throw std::runtime_error("Gaussian PLY ended inside vertex data: " + path.string());
-        for (int axis = 0; axis < 3; ++axis) {
-            means[3U * gaussian + static_cast<std::size_t>(axis)] =
-                row[position_index[static_cast<std::size_t>(axis)]];
-            scales[3U * gaussian + static_cast<std::size_t>(axis)] =
-                row[scale_index[static_cast<std::size_t>(axis)]];
-        }
-        for (int component = 0; component < 4; ++component)
-            rotations[4U * gaussian + static_cast<std::size_t>(component)] =
-                row[rotation_index[static_cast<std::size_t>(component)]];
-        opacities[gaussian] = row[opacity_index];
-        for (int channel = 0; channel < 3; ++channel) {
-            sh[(gaussian * bases) * 3U + static_cast<std::size_t>(channel)] =
-                row[dc_index[static_cast<std::size_t>(channel)]];
-            for (std::size_t basis = 1; basis < bases; ++basis) {
-                const std::size_t rest =
-                    static_cast<std::size_t>(channel) * (bases - 1U) + basis - 1U;
-                sh[(gaussian * bases + basis) * 3U + static_cast<std::size_t>(channel)] =
-                    row[rest_index[rest]];
+        for (std::size_t local = 0; local < rows; ++local) {
+            const auto gaussian = first + local;
+            const float* row = batch.data() + local * properties.size();
+            for (int axis = 0; axis < 3; ++axis) {
+                means[3U * gaussian + static_cast<std::size_t>(axis)] =
+                    row[position_index[static_cast<std::size_t>(axis)]];
+                scales[3U * gaussian + static_cast<std::size_t>(axis)] =
+                    row[scale_index[static_cast<std::size_t>(axis)]];
             }
+            for (int component = 0; component < 4; ++component)
+                rotations[4U * gaussian + static_cast<std::size_t>(component)] =
+                    row[rotation_index[static_cast<std::size_t>(component)]];
+            opacities[gaussian] = row[opacity_index];
+            for (int channel = 0; channel < 3; ++channel) {
+                sh[(gaussian * bases) * 3U + static_cast<std::size_t>(channel)] =
+                    row[dc_index[static_cast<std::size_t>(channel)]];
+                for (std::size_t basis = 1; basis < bases; ++basis) {
+                    const std::size_t rest =
+                        static_cast<std::size_t>(channel) * (bases - 1U) + basis - 1U;
+                    sh[(gaussian * bases + basis) * 3U + static_cast<std::size_t>(channel)] =
+                        row[rest_index[rest]];
+                }
+            }
+            if (!filter.empty())
+                filter[gaussian] = row[filter_property->second];
+            if (has_normal_features)
+                for (std::size_t component = 0; component < 4; ++component)
+                    normal_features[4U * gaussian + component] = row[normal_feature_index[component]];
         }
-        if (!filter.empty())
-            filter[gaussian] = row[filter_property->second];
-        if (has_normal_features)
-            for (std::size_t component = 0; component < 4; ++component)
-                normal_features[4U * gaussian + component] = row[normal_feature_index[component]];
     }
     if (!has_normal_features) {
         // Legacy 3DGS PLY: seed the field from the thinnest covariance axis.
@@ -3040,7 +3067,7 @@ GaussianModel load_gaussians_ply(
         core::Logger::instance().info(
             "Gaussian PLY saturated opacity logits=", saturated_opacities,
             " canonicalized to finite float32 endpoints");
-    const auto finite = [](const std::vector<float>& values) {
+    const auto finite = [](std::span<const float> values) {
         return std::all_of(
             values.begin(), values.end(), [](const float value) { return std::isfinite(value); });
     };
@@ -3048,18 +3075,15 @@ GaussianModel load_gaussians_ply(
         !finite(sh) || !finite(normal_features) || (!filter.empty() && !finite(filter)))
         throw std::runtime_error("Gaussian PLY contains non-finite parameters: " + path.string());
 
-    GaussianModel model;
-    model.render_method = render_method;
-    model.filter_mode = filter_mode;
-    model.means = tinytensor::Tensor::from_vector(means, {count, 3U}, device);
-    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, 3U}, device);
-    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, 4U}, device);
-    model.opacity_logits = tinytensor::Tensor::from_vector(opacities, {count, 1U}, device);
-    model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, device);
-    model.normal_features = tinytensor::Tensor::from_vector(normal_features, {count, 4U}, device);
-    if (!filter.empty())
-        model.filter_3d = tinytensor::Tensor::from_vector(filter, {count, 1U}, device);
-    model.sh_degree = degree;
+    if (device != tinytensor::Device::CPU) {
+        model.means = model.means.to(device);
+        model.log_scales = model.log_scales.to(device);
+        model.quaternions = model.quaternions.to(device);
+        model.opacity_logits = model.opacity_logits.to(device);
+        model.sh = model.sh.to(device);
+        model.normal_features = model.normal_features.to(device);
+        if (model.filter_3d.is_valid()) model.filter_3d = model.filter_3d.to(device);
+    }
     core::Logger::instance().info(
         "loaded splat PLY=", path, " gaussians=", count, " sh_degree=", degree,
         " filter_3d=", !filter.empty(), " learned_normal_field=", has_normal_features);
