@@ -409,10 +409,22 @@ build\photara\Release\photara.exe `
   tile ranges and bucket offsets, while regenerating attachments and snapshots
   for its own backward. The model geometry must remain unchanged until this
   auxiliary backward completes; camera/projection settings and geometry buffer
-  identity are checked before reuse. CUDA keeps its existing path.
+  identity are checked before reuse.
   `SPLAT_VULKAN_DISABLE_NORMAL_REUSE=1` selects a full auxiliary forward for A/B
   comparison. Keep the primary owned radii/visibility tensors for ADC because
   the auxiliary render overwrites the backend's internal attachments.
+- CUDA 3DGS normal-field training uses `Rasterizer::forward_colors` after
+  primary backward. It consumes the primary context, reuses projected geometry,
+  sorted draw indices, tile ranges and compact contributor buckets, and refreshes
+  feature-color snapshots for auxiliary backward. Alpha, median depth, footprint
+  normals, radii and visibility share the original owned tensors; a specialized
+  blend skips the repeated median-depth search. No second projection, sort,
+  contributor prepass or count readback is performed. The source context must
+  have exclusive ownership and completed backward, and geometry must remain
+  unchanged through auxiliary backward. Geometry buffer replacement and fused
+  structure-Adam updates are rejected; callers must also avoid in-place geometry
+  edits. The regular RGB path retains no extra CUDA workspace. This optimization
+  applies to 3DGS; normal-field training remains disabled for 3DGUT.
 - Vulkan's default RGB path fuses FP32 Adam for means, log scales, raw
   quaternions and opacity logits into projection backward, together with SH
   Adam. Intermediate structure gradients remain invocation-local; only ADC

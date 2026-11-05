@@ -2239,18 +2239,15 @@ GaussianModel Trainer::train(
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal, densify_map,
             fused_sh ? &sh_update : nullptr, fused_structure ? &structure_update : nullptr);
-        // Backward has consumed CUDA projection/sort/snapshot state. Keep the
-        // owned radii/visibility outputs for ADC, without retaining old model
-        // storage during optimizer/refinement or an auxiliary render.
+        // Keep CUDA projection/sort/snapshots only until the normal-field
+        // color pass consumes them, before any model/optimizer update.
         const std::weak_ptr<RasterContextImpl> primary_context = rendered.context.impl;
-        rendered.context.impl.reset();
-        if (!primary_context.expired())
-            throw std::logic_error("Training still retains the primary CUDA workspace");
+        if (!normal_field_active || vulkan_backend)
+            rendered.context.impl.reset();
         ModelGradients normal_field_gradients;
         if (normal_field_active) {
-            // Normal-field supervision uses the same unchanged model, but its
-            // render need not overlap the main render's bucket snapshots. Keep
-            // owned outputs (radii/visibility) for ADC; only release CUDA state.
+            // Geometry is unchanged: CUDA consumes the primary context and
+            // refreshes color snapshots; Vulkan reuses its backend draw list.
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
@@ -2261,7 +2258,9 @@ GaussianModel Trainer::train(
             normal_options.copy_attachments = true;
             normal_options.copy_color_only = false;
             const RenderResult normal_field_render =
-                rasterizer.forward(model, target.camera, normal_options);
+                vulkan_backend
+                    ? rasterizer.forward(model, target.camera, normal_options)
+                    : rasterizer.forward_colors(model, rendered, normal_options.colors_precomp);
             const auto normal_field_loss = detail::compute_normal_field_loss(
                 normal_field_render, geometry_target.camera,
                 options_.normal_field_weight * options_.normal_field_depth_ratio, report_progress);
@@ -2281,6 +2280,8 @@ GaussianModel Trainer::train(
             normal_field_gradients = {};
             normal_field_gradients.normal_features = std::move(feature_gradient);
         }
+        if (!primary_context.expired())
+            throw std::logic_error("Training still retains the primary CUDA workspace");
         cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
             detail::add_sample_depth_model_gradients(multi_view_sample_gradients, gradients);

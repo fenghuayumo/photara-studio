@@ -43,6 +43,11 @@ struct RasterContextImpl {
     RasterizeOptions options;
     Camera camera;
     splat_drender::ForwardResult forward{};
+    std::array<const void*, 5> geometry_inputs{};
+    std::size_t gaussian_count{};
+    RenderMethod render_method{};
+    bool backward_consumed{false};
+    bool geometry_updated{false};
 };
 
 struct DepthSampleContextImpl {
@@ -312,6 +317,13 @@ void validate_model(const GaussianModel& model, const RasterizeOptions& options)
         throw std::invalid_argument("Precomputed colors must have shape [N,3]");
 }
 
+std::array<const void*, 5> geometry_inputs_of(const GaussianModel& model) {
+    return {
+        model.means.data_ptr(), model.log_scales.data_ptr(), model.quaternions.data_ptr(),
+        model.opacity_logits.data_ptr(),
+        model.filter_3d.is_valid() ? model.filter_3d.data_ptr() : nullptr};
+}
+
 } // namespace
 
 RenderResult Rasterizer::forward(
@@ -332,6 +344,9 @@ RenderResult Rasterizer::forward(
     context->camera = camera;
     context->options = requested_options;
     context->colors_precomp = requested_options.colors_precomp;
+    context->geometry_inputs = geometry_inputs_of(model);
+    context->gaussian_count = model.size();
+    context->render_method = model.render_method;
     context->options.active_sh_degree =
         std::min(requested_options.active_sh_degree, model.sh_degree);
     context->constants = prepare_camera_constants(camera);
@@ -372,6 +387,53 @@ RenderResult Rasterizer::forward(
     if (context->forward.compact_instances || context->forward.instance_count == 0 ||
         !context->options.record_backward_state)
         context->instance_buffer = {};
+    result.context.impl = std::move(context);
+    return result;
+}
+
+RenderResult Rasterizer::forward_colors(
+    const GaussianModel& model,
+    RenderResult& source,
+    const tinytensor::Tensor& colors_precomp) const {
+    if (model.means.device() != tinytensor::Device::CUDA ||
+        model.render_method != RenderMethod::gaussian_3dgs || !source.context.impl)
+        throw std::invalid_argument("Color reuse requires a live CUDA 3DGS forward");
+    if (source.context.impl.use_count() != 1)
+        throw std::invalid_argument("Color reuse requires exclusive ownership of the context");
+    const auto& previous = *source.context.impl;
+    if (!previous.options.record_backward_state || !previous.backward_consumed ||
+        previous.geometry_updated)
+        throw std::invalid_argument("Color reuse requires backward before any geometry update");
+    auto options = previous.options;
+    options.colors_precomp = colors_precomp;
+    if (!colors_precomp.is_valid())
+        throw std::invalid_argument("Color reuse requires precomputed colors");
+    validate_model(model, options);
+    if (previous.geometry_inputs != geometry_inputs_of(model) ||
+        previous.gaussian_count != model.size() || previous.render_method != model.render_method)
+        throw std::invalid_argument("Color reuse requires unchanged model geometry buffers");
+
+    RenderResult result;
+    result.color = tinytensor::Tensor::zeros(source.color.shape(), tinytensor::Device::CUDA);
+    // These channels depend only on geometry and alpha, not on feature colors.
+    result.alpha = source.alpha;
+    result.median_depth = source.median_depth;
+    result.normal = source.normal;
+    result.radii = source.radii;
+    result.visibility = source.visibility;
+    result.rendered_instances = source.rendered_instances;
+    auto context = std::move(source.context.impl);
+    context->options = options;
+    context->colors_precomp = colors_precomp;
+    context->backward_consumed = false;
+    if (model.size() != 0) {
+        splat_drender::RenderOutputs out;
+        out.color = result.color.ptr<float>();
+        splat_drender::Rasterizer::forward_colors(
+            pools_of(*context), gaussians_of(model, options, colors_precomp),
+            camera_view_of(context->camera, context->constants, options), settings_of(options),
+            context->forward, out);
+    }
     result.context.impl = std::move(context);
     return result;
 }
@@ -684,6 +746,8 @@ ModelGradients Rasterizer::backward(
             camera_file.write(reinterpret_cast<const char*>(host_camera), sizeof(host_camera));
         }
     }
+    rendered.context.impl->backward_consumed = true;
+    rendered.context.impl->geometry_updated |= structure_adam != nullptr;
     return gradients;
 }
 

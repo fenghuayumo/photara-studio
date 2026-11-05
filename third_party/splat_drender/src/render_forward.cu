@@ -271,19 +271,32 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets, const uint2* __res
 
 // Single-pass blender: color, alpha, accumulated normal and the
 // median-depth bisection refine, with numbering-preserving warp culling.
-template <bool GEOMETRY>
-__global__ void __launch_bounds__(cfg::kTileThreads)
-    blend_tile(const uint2* __restrict__ tile_range, const unsigned* __restrict__ instance_value,
-               int width, int height, CameraIntrinsics K, int wrap_width,
-               const float2* __restrict__ mean2d, const float4* __restrict__ conic_opacity,
-               const float3* __restrict__ rgb, const float* __restrict__ colors,
-               const float4* __restrict__ ray_plane, const float3* __restrict__ normal,
-               const ushort4* __restrict__ screen_bounds, unsigned* __restrict__ n_contrib,
-               unsigned* __restrict__ max_contributor, const unsigned* __restrict__ bucket_offset,
-               unsigned* __restrict__ bucket_tile, ws::PixelState pst, float3 background,
-               float* __restrict__ out_color, float* __restrict__ out_alpha,
-               float* __restrict__ out_normal, float* __restrict__ out_median_depth,
-               float* __restrict__ visibility) {
+template <bool GEOMETRY, bool REUSE_GEOMETRY = false>
+__global__ void __launch_bounds__(cfg::kTileThreads) blend_tile(
+    const uint2* __restrict__ tile_range,
+    const unsigned* __restrict__ instance_value,
+    int width,
+    int height,
+    CameraIntrinsics K,
+    int wrap_width,
+    const float2* __restrict__ mean2d,
+    const float4* __restrict__ conic_opacity,
+    const float3* __restrict__ rgb,
+    const float* __restrict__ colors,
+    const float4* __restrict__ ray_plane,
+    const float3* __restrict__ normal,
+    const ushort4* __restrict__ screen_bounds,
+    unsigned* __restrict__ n_contrib,
+    unsigned* __restrict__ max_contributor,
+    const unsigned* __restrict__ bucket_offset,
+    unsigned* __restrict__ bucket_tile,
+    ws::PixelState pst,
+    float3 background,
+    float* __restrict__ out_color,
+    float* __restrict__ out_alpha,
+    float* __restrict__ out_normal,
+    float* __restrict__ out_median_depth,
+    float* __restrict__ visibility) {
     auto block = cg::this_thread_block();
     const unsigned tiles_x = (width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const unsigned tile_id = block.group_index().y * tiles_x + block.group_index().x;
@@ -407,7 +420,7 @@ __global__ void __launch_bounds__(cfg::kTileThreads)
 
     // ---- pass 2: median-depth bisection ----
     float median_depth = 0.f;
-    if constexpr (GEOMETRY) {
+    if constexpr (GEOMETRY && !REUSE_GEOMETRY) {
         float depth_min = fmaxf(depth_seed - cfg::kDepthSeedWindow, 0.f);
         float depth_max = fmaxf(depth_seed + cfg::kDepthSeedWindow, 0.f);
         bool in_range = transmittance <= cfg::kDepthMinTransmittance;
@@ -510,7 +523,7 @@ __global__ void __launch_bounds__(cfg::kTileThreads)
                                                            : background.z);
         if (out_alpha)
             out_alpha[pix_id] = 1.f - transmittance;
-        if constexpr (GEOMETRY) {
+        if constexpr (GEOMETRY && !REUSE_GEOMETRY) {
             const float rln = pixel_ray_z(pixf.x, pixf.y, K);
             out_median_depth[pix_id] = median_depth * rln;
             const float len_normal = 1.f - transmittance;
@@ -609,7 +622,15 @@ void blend(bool need_depth, const uint2* tile_range, const unsigned* instance_va
            float* out_alpha, float* out_normal, float* out_median_depth, float* visibility,
            dim3 grid) {
     dim3 block(cfg::kTileWidth, cfg::kTileHeight);
-    if (need_depth) {
+    if (need_depth && !out_median_depth) {
+        // Auxiliary feature colors retain the source geometry attachments;
+        // only color and backward snapshots need refreshing.
+        kernels::blend_tile<true, true><<<grid, block>>>(
+            tile_range, instance_value, width, height, K, wrap_width, mean2d, conic_opacity, rgb,
+            colors, ray_plane, normal, screen_bounds, n_contrib, max_contributor, bucket_offset,
+            bucket_tile, pst, background, out_color, out_alpha, out_normal, out_median_depth,
+            visibility);
+    } else if (need_depth) {
         kernels::blend_tile<true><<<grid, block>>>(
             tile_range, instance_value, width, height, K, wrap_width, mean2d, conic_opacity, rgb,
             colors, ray_plane, normal, screen_bounds, n_contrib, max_contributor, bucket_offset,

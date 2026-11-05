@@ -435,6 +435,234 @@ void correctness() {
     sync();
     std::cout << "CUDA frontend forward/gradient/Adam parity passed\n";
 }
+
+void reused_gradient_close(const Tensor& a, const Tensor& b, const char* name,
+                           float atol, float rtol) {
+    close(a, b, name, atol, rtol);
+    const auto x = a.to_vector(), y = b.to_vector();
+    double norm = 0, error = 0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        norm += double(x[i]) * x[i];
+        error += double(x[i] - y[i]) * (x[i] - y[i]);
+    }
+    require(error <= norm * 1e-10, name); // Relative L2 <= 1e-5; rejects missing small gradients.
+}
+
+void normal_color_reuse() {
+    Rasterizer raster;
+    for (int camera_type = 0; camera_type < 4; ++camera_type)
+        for (bool compact : {false, true})
+            for (bool depth : {false, true}) {
+                auto m = fixture(1031, 3, compact);
+                auto scales = m.log_scales.to_vector();
+                for (auto& v : scales)
+                    v += 4.5F;
+                m.log_scales = Tensor::from_vector(scales, m.log_scales.shape(), cuda);
+                std::vector<float> features(m.size() * 4);
+                for (std::size_t i = 0; i < m.size(); ++i) {
+                    features[4 * i] = .3F;
+                    features[4 * i + 1] = -.7F;
+                    features[4 * i + 2] = 1.F;
+                    features[4 * i + 3] = i % 2 ? -.5F : .8F;
+                }
+                m.normal_features = Tensor::from_vector(features, {m.size(), 4}, cuda);
+                auto c = camera(97, 65);
+                if (camera_type == 1) {
+                    c.model = photara::CameraModel::opencv_fisheye;
+                    c.k1 = .02F;
+                } else if (camera_type == 2) {
+                    c.model = photara::CameraModel::equirectangular;
+                    c.fx = c.width / (2.F * 3.14159265F);
+                    c.fy = c.height / 3.14159265F;
+                } else if (camera_type == 3) {
+                    c.orthographic = true;
+                    c.fx = c.fy = 10.F;
+                }
+                RasterizeOptions o;
+                configure_rasterization(o, TrainingOptions{});
+                o.require_depth = depth;
+                o.active_sh_degree = 3;
+                o.background = {.03F, -.02F, .04F};
+                o.rasterization.pixel_center_offset = .5F;
+                o.rasterization.compensate_2d = compact;
+                o.compact_instance_storage = compact;
+                o.snapshot_compaction_threshold = compact ? 0 : std::size_t(-1);
+                auto primary = raster.forward(m, c, o);
+                require(primary.rendered_instances > 0, "Reuse fixture has no instances");
+                const auto gc = Tensor::full(primary.color.shape(), .0003F, cuda);
+                const auto ga = Tensor::full(primary.alpha.shape(), -.0002F, cuda);
+                const auto gd =
+                    depth ? Tensor::full(primary.alpha.shape(), .0001F, cuda) : Tensor{};
+                const auto gn =
+                    depth ? Tensor::full(primary.color.shape(), -.0001F, cuda) : Tensor{};
+                (void)raster.backward(m, primary, gc, ga, gd, gn);
+                const auto colors = detail::normal_features_to_normals(m.normal_features);
+                o.colors_precomp = colors;
+                auto reference = raster.forward(m, c, o);
+                const auto expected = raster.backward(m, reference, gc, ga, gd, gn);
+                const auto reused = raster.forward_colors(m, primary, colors);
+                require(!primary.context.impl, "Reuse did not consume the primary context");
+                require(
+                    reused.alpha.data_ptr() == primary.alpha.data_ptr() &&
+                        reused.median_depth.data_ptr() == primary.median_depth.data_ptr() &&
+                        reused.normal.data_ptr() == primary.normal.data_ptr(),
+                    "Reuse allocated duplicate geometry attachments");
+                close(reference.color, reused.color, "Reused signed feature render", 0, 0);
+                close(reference.alpha, reused.alpha, "Reused alpha", 0, 0);
+                close(reference.median_depth, reused.median_depth, "Reused median depth", 0, 0);
+                close(reference.normal, reused.normal, "Reused normal", 0, 0);
+                close(reference.visibility, reused.visibility, "Reused visibility", 0, 0);
+                require(
+                    reference.radii.to_vector_int() == reused.radii.to_vector_int(),
+                    "Reused radii differ");
+                auto actual = raster.backward(m, reused, gc, ga, gd, gn);
+                const auto compare_gradients = [&](const ModelGradients& a,
+                                                   const ModelGradients& b) {
+                    reused_gradient_close(a.means, b.means, "Reused means gradient", 2e-7F, 2e-5F);
+                    reused_gradient_close(a.log_scales, b.log_scales, "Reused scales gradient", 2e-7F, 2e-5F);
+                    reused_gradient_close(a.quaternions, b.quaternions, "Reused quaternion gradient", 2e-7F, 2e-5F);
+                    reused_gradient_close(
+                        a.opacity_logits, b.opacity_logits, "Reused opacity gradient", 2e-7F,
+                        2e-5F);
+                    reused_gradient_close(
+                        a.colors_precomp, b.colors_precomp, "Reused colors gradient", 2e-7F, 2e-5F);
+                    reused_gradient_close(
+                        detail::normal_features_backward(m.normal_features, a.colors_precomp),
+                        detail::normal_features_backward(m.normal_features, b.colors_precomp),
+                        "Reused normal feature gradient", 2e-7F, 2e-5F);
+                    require(!b.sh.is_valid(), "Feature render differentiated SH");
+                };
+                compare_gradients(expected, actual);
+                if (depth) {
+                    const auto target_camera = raster_sample_camera(c, o);
+                    const auto loss_a =
+                        detail::compute_normal_field_loss(reference, target_camera, .03F, true);
+                    const auto loss_b =
+                        detail::compute_normal_field_loss(reused, target_camera, .03F, true);
+                    require(std::abs(loss_a.total - loss_b.total) <= 1e-7F + 1e-6F * std::abs(loss_a.total),
+                            "Reused normal-field loss differs");
+                    if (camera_type == 0) {
+                        require(loss_a.total > 0.F, "Normal field fixture has no loss");
+                        const auto values = loss_a.color.to_vector();
+                        require(
+                            std::any_of(
+                                values.begin(), values.end(),
+                                [](float v) { return std::abs(v) > 1e-8F; }),
+                            "Normal field fixture has no feature gradients");
+                    }
+                    compare_gradients(
+                        raster.backward(
+                            m, reference, loss_a.color, loss_a.alpha, loss_a.depth, loss_a.normal),
+                        raster.backward(
+                            m, reused, loss_b.color, loss_b.alpha, loss_b.depth, loss_b.normal));
+                }
+            }
+    // Zero instances still blend the background and preserve empty geometry.
+    auto m = fixture(137, 0, false);
+    auto c = camera(33, 17);
+    c.world_to_camera[14] = -20.F;
+    RasterizeOptions o;
+    o.background = {.1F, .2F, -.3F};
+    auto source = raster.forward(m, c, o);
+    auto gc = Tensor::zeros(source.color.shape(), cuda);
+    auto ga = Tensor::zeros(source.alpha.shape(), cuda);
+    (void)raster.backward(m, source, gc, ga, ga, gc);
+    o.colors_precomp = Tensor::full({m.size(), 3}, -.5F, cuda);
+    auto reused = raster.forward_colors(m, source, o.colors_precomp);
+    auto reference = raster.forward(m, c, o);
+    close(reference.color, reused.color, "Reused empty draw list", 0, 0);
+    close(reference.median_depth, reused.median_depth, "Reused empty depth", 0, 0);
+    auto g = raster.backward(m, reused, gc, ga, ga, gc);
+    close(g.means, Tensor::zeros(g.means.shape(), cuda), "Empty reused gradient", 0, 0);
+
+    const auto rejects = [&](RenderResult& frame, const GaussianModel& model) {
+        bool rejected = false;
+        try {
+            (void)raster.forward_colors(model, frame, o.colors_precomp);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected && frame.context.impl, "Unsafe reuse was accepted or consumed source");
+    };
+    source = raster.forward(m, c, o);
+    rejects(source, m); // Primary backward must run first.
+    (void)raster.backward(m, source, gc, ga, ga, gc);
+    auto alias = source;
+    rejects(source, m);
+    alias.context.impl.reset();
+    auto changed = clone(m);
+    rejects(source, changed);
+    c = camera(33, 17);
+    source = raster.forward(m, c, RasterizeOptions{});
+    Optimizer optimizer(m);
+    (void)raster.backward(m, source, gc, ga, ga, gc, {}, nullptr, &optimizer.structure);
+    rejects(source, m); // Fused structure Adam invalidates the projection.
+    sync();
+    std::cout << "CUDA normal-field color reuse parity and lifecycle passed\n";
+}
+
+void benchmark_normal_reuse(std::size_t n, unsigned iterations) {
+    const auto c = camera(960, 540);
+    auto m = fixture(n, 3, true);
+    std::vector<float> features(n * 4);
+    for (std::size_t i = 0; i < n; ++i) {
+        features[4 * i] = .3F;
+        features[4 * i + 1] = -.7F;
+        features[4 * i + 2] = 1.F;
+        features[4 * i + 3] = i % 2 ? -.5F : .8F;
+    }
+    m.normal_features = Tensor::from_vector(features, {n, 4}, cuda);
+    Rasterizer raster;
+    RasterizeOptions o;
+    configure_rasterization(o, TrainingOptions{});
+    o.active_sh_degree = 3;
+    const auto gc = Tensor::full({3, c.height, c.width}, 1e-6F, cuda);
+    const auto ga = Tensor::zeros({c.height, c.width}, cuda);
+    const auto gn = Tensor::zeros({3, c.height, c.width}, cuda);
+    for (unsigned round = 0; round < 3; ++round)
+        for (unsigned arm = 0; arm < 2; ++arm) {
+            const bool reuse = (arm + round) % 2;
+            const auto step = [&] {
+                auto primary = raster.forward(m, c, o);
+                (void)raster.backward(m, primary, gc, ga, ga, gn);
+                auto field_options = o;
+                field_options.colors_precomp =
+                    detail::normal_features_to_normals(m.normal_features);
+                if (!reuse)
+                    primary.context.impl.reset();
+                auto field = reuse ? raster.forward_colors(m, primary, field_options.colors_precomp)
+                                   : raster.forward(m, c, field_options);
+                const auto loss = detail::compute_normal_field_loss(field, c, .03F, false);
+                auto gradients =
+                    raster.backward(m, field, loss.color, loss.alpha, loss.depth, loss.normal);
+                gradients.normal_features =
+                    detail::normal_features_backward(m.normal_features, gradients.colors_precomp);
+            };
+            for (unsigned warm = 0; warm < 5; ++warm)
+                step();
+            sync();
+            cudaMemPool_t pool{};
+            require(cudaDeviceGetDefaultMemPool(&pool, 0) == cudaSuccess, "default pool");
+            std::uint64_t peak = 0;
+            require(
+                cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
+                "reset pool peak");
+            const auto start = std::chrono::steady_clock::now();
+            for (unsigned i = 0; i < iterations; ++i)
+                step();
+            sync();
+            const auto ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                    .count() /
+                iterations;
+            require(
+                cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &peak) == cudaSuccess,
+                "pool peak");
+            std::cout << "normal_reuse_bench count=" << n << " round=" << round
+                      << " reuse=" << reuse << " ms=" << ms << " peak_bytes=" << peak << std::endl;
+        }
+}
+
 void benchmark(std::size_t n, unsigned iterations, RenderMethod method, bool vulkan) {
     const auto device = vulkan ? tinytensor::Device::Vulkan : cuda;
     const auto wait_gpu = [&] {
@@ -497,7 +725,13 @@ void benchmark(std::size_t n, unsigned iterations, RenderMethod method, bool vul
 }
 int main(int argc, char** argv) {
     try {
-        if (argc > 1 &&
+        if (argc > 1 && std::string(argv[1]) == "--bench-normal-reuse") {
+            benchmark_normal_reuse(
+                argc > 2 ? std::stoul(argv[2]) : 1000000, argc > 3 ? std::stoul(argv[3]) : 120);
+        } else if (argc > 1 && std::string(argv[1]) == "--normal-reuse") {
+            normal_color_reuse();
+        } else if (
+            argc > 1 &&
             (std::string(argv[1]) == "--bench" || std::string(argv[1]) == "--bench-vulkan"))
             benchmark(
                 argc > 2 ? std::stoul(argv[2]) : 1000000, argc > 3 ? std::stoul(argv[3]) : 40,
@@ -508,6 +742,7 @@ int main(int argc, char** argv) {
             comparison_guards();
             audit_errors = argc > 1 && std::string(argv[1]) == "--audit-errors";
             correctness();
+            normal_color_reuse();
             for (const auto& [name, error] : error_summaries)
                 std::cout << name << " max_abs=" << error.absolute << " max_rel=" << error.relative
                           << " max_ulps=" << error.ulps << " relative_l2=" << error.relative_l2

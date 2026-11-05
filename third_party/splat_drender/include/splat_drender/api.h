@@ -245,6 +245,18 @@ class Rasterizer {
                                  const CameraView& cam, const RenderSettings& s,
                                  const RenderOutputs& out);
 
+    // 3DGS feature-color pass over an unchanged forward draw list. Consumes
+    // the original pixel snapshots: finish its backward before this call.
+    // Camera, geometry, settings and workspace layout must remain unchanged.
+    // Only out.color is required; omitted geometry attachments are preserved.
+    static void forward_colors(
+        const WorkspacePools& pools,
+        const Gaussians& g,
+        const CameraView& cam,
+        const RenderSettings& s,
+        const ForwardResult& fwd,
+        const RenderOutputs& out);
+
     // Consumes the pools filled by forward() plus per-pixel loss gradients
     // and accumulates model gradients (buffers are NOT zeroed here).
     static void backward(const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,

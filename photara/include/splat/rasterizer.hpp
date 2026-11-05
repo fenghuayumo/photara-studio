@@ -126,6 +126,16 @@ class Rasterizer {
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
+    // CUDA 3DGS auxiliary colors, after source.backward() and before updating
+    // model geometry. Consumes source's exclusive context and overwrites its
+    // pixel snapshots, retaining its owned geometry/visibility attachments.
+    // Camera and raster settings are inherited from source. In-place model
+    // geometry changes between the calls are forbidden.
+    RenderResult forward_colors(
+        const GaussianModel& model,
+        RenderResult& source,
+        const tinytensor::Tensor& colors_precomp) const;
+
     // Fused training objective primitive. The Vulkan implementation keeps the
     // image gradient in its render context for backward(); CUDA training keeps
     // using the existing fused loss path.

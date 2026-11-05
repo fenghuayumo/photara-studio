@@ -572,6 +572,40 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools, const Gaussians& 
     return r;
 }
 
+void Rasterizer::forward_colors(
+    const WorkspacePools& pools,
+    const Gaussians& g,
+    const CameraView& cam,
+    const RenderSettings& s,
+    const ForwardResult& fwd,
+    const RenderOutputs& out) {
+    check(g.primitive == Primitive::gaussian_3dgs, "color reuse requires 3DGS");
+    check(
+        g.colors && !g.sh && out.color && s.record_backward_state,
+        "color reuse requires precomputed colors and a training forward");
+    const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
+    const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
+    GaussianState gst;
+    InstanceState ist;
+    TileState tst;
+    PixelState pst;
+    rebuild_views(
+        pools, g, cam, fwd.visible_count, fwd.instance_count, s.need_depth,
+        gaussian_workspace_geometry(s, s.need_depth), gst, ist, tst, pst, true,
+        fwd.snapshot_buckets, fwd.compact_instances);
+    // Alpha/termination are color-independent, so both compact contributor
+    // buckets and the original draw order remain exact. No scans, sorting,
+    // contributor prepass or device-to-host count reads are needed here.
+    launch::blend(
+        s.need_depth, tst.range, ist.instance_value[fwd.instance_selector], cam.width, cam.height,
+        intrinsics_of(cam), is_equirect(cam.mode) ? cam.width : 0, gst.mean2d, gst.conic_opacity,
+        gst.rgb, g.colors, gst.ray_plane, gst.normal, gst.screen_bounds, pst.n_contrib,
+        tst.max_contributor, tst.bucket_offset, tst.bucket_tile, pst,
+        make_float3(s.background[0], s.background[1], s.background[2]), out.color, out.alpha,
+        out.normal, out.median_depth, out.visibility, dim3(grid_x, grid_y));
+    check_cuda(cudaGetLastError(), "blend reused colors");
+}
+
 void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
                           const RenderSettings& s, const ForwardResult& fwd,
                           const ForwardOutputsView& fo, const LossGradients& dL,
