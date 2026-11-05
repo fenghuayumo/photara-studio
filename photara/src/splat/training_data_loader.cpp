@@ -1186,6 +1186,10 @@ struct TrainingDataLoader::Impl {
         return view;
     }
 
+    Camera get_camera(const std::size_t index) const {
+        return training_camera(source_.at(index), options_, resolution_scale_);
+    }
+
     TrainingView upload_view(const HostTrainingView& host) {
         WallTimer timer{upload_submit_ms_};
         return upload_training_view(host, options_, &memory_, device_ring_.capacity());
@@ -2538,6 +2542,10 @@ TrainingDataLoader& TrainingDataLoader::operator=(TrainingDataLoader&&) noexcept
 
 TrainingView TrainingDataLoader::get(const std::size_t index) {
     return impl_->get(index);
+}
+
+Camera TrainingDataLoader::get_camera(const std::size_t index) const {
+    return impl_->get_camera(index);
 }
 
 bool TrainingDataLoader::has_mask(const std::size_t index) {

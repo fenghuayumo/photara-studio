@@ -1689,6 +1689,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_test(NAME photara.splat.shape_regularizers COMMAND photara_splat_test --erank-only)
         add_test(NAME photara.splat.scale_regularizer COMMAND photara_splat_test --scale-reg-only)
         add_test(NAME photara.splat.pruning_schedule COMMAND photara_splat_test --speedy-schedule-only)
+        add_test(NAME photara.splat.pruning_camera COMMAND photara_splat_test --speedy-camera-only)
         if(TARGET splat_drender::vulkan)
             add_test(NAME photara.splat.vulkan_geometry
                 COMMAND photara_splat_test --vulkan-geometry-only)

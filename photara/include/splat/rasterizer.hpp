@@ -36,6 +36,9 @@ struct RasterizeOptions {
     bool debug{false};
     // Inference/preview callers can omit all backward-only pixel state.
     bool record_backward_state{true};
+    // 3DGS analysis passes can keep contributor counts and sorted indices
+    // without the per-bucket snapshots needed by backward().
+    bool record_contributor_counts{false};
     bool compact_pixel_snapshots{true};
     bool compact_instance_storage{true};
     std::size_t snapshot_compaction_threshold{512ULL * 1024 * 1024};

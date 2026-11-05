@@ -84,6 +84,8 @@ struct RenderSettings {
     // termination. The prepass preserves blending and gradient arithmetic.
     bool compact_pixel_snapshots = true;
     bool record_backward_state = true;
+    // 3DGS forward analysis: retain only n_contrib, not backward snapshots.
+    bool record_contributor_counts = false;
     std::size_t snapshot_compaction_threshold = 512ULL * 1024 * 1024;
 };
 

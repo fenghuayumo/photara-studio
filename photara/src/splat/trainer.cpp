@@ -2461,10 +2461,10 @@ GaussianModel Trainer::train(
                 for (std::size_t v = 0; v < views; ++v) {
                     // Evenly spaced deterministic training-only cameras. A
                     // view subset is an explicit approximation of full scores.
-                    const auto score_view =
-                        view_cache.get(view_indices[v * view_indices.size() / views]);
+                    const auto score_camera =
+                        view_cache.get_camera(view_indices[v * view_indices.size() / views]);
                     scores = scores.add(
-                        rasterizer.pruning_scores(model, score_view.camera, score_options));
+                        rasterizer.pruning_scores(model, score_camera, score_options));
                 }
                 const auto values = scores.to_vector();
                 if (!std::all_of(values.begin(), values.end(), [](float x) {

@@ -79,6 +79,9 @@ class TrainingDataLoader {
     TrainingDataLoader& operator=(const TrainingDataLoader&) = delete;
 
     [[nodiscard]] TrainingView get(std::size_t index);
+    // Calibration only: identical training resolution/projection, no image I/O,
+    // GPU uploads, cache lookups or changes to the training request cadence.
+    [[nodiscard]] Camera get_camera(std::size_t index) const;
     [[nodiscard]] bool has_mask(std::size_t index);
     void prefetch(std::size_t index);
     // Current prefetch lookahead in views. Callers offer at least this many

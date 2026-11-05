@@ -252,6 +252,7 @@ splat_drender::RenderSettings settings_of(const RasterizeOptions& options) {
     s.need_depth = options.require_depth;
     s.debug = options.debug;
     s.record_backward_state = options.record_backward_state;
+    s.record_contributor_counts = options.record_contributor_counts;
     s.compact_pixel_snapshots = options.compact_pixel_snapshots;
     s.snapshot_compaction_threshold = options.snapshot_compaction_threshold;
     const char* fixed_points = std::getenv("PHOTARA_SPLAT_DEVICE_POINTS");
@@ -385,7 +386,7 @@ RenderResult Rasterizer::forward(
     }
     result.rendered_instances = context->forward.instance_count;
     if (context->forward.compact_instances || context->forward.instance_count == 0 ||
-        !context->options.record_backward_state)
+        (!context->options.record_backward_state && !context->options.record_contributor_counts))
         context->instance_buffer = {};
     result.context.impl = std::move(context);
     return result;
@@ -449,7 +450,8 @@ tinytensor::Tensor Rasterizer::pruning_scores(
     if (model.means.device() != tinytensor::Device::CUDA)
         throw std::invalid_argument("Speedy-Splat pruning requires a CUDA or Vulkan model");
     options.require_depth = false;
-    options.record_backward_state = true;
+    options.record_backward_state = false;
+    options.record_contributor_counts = true;
     options.colors_precomp = {};
     const auto rendered = forward(model, camera, options);
     auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
@@ -461,9 +463,7 @@ tinytensor::Tensor Rasterizer::pruning_scores(
     const auto ts = splat_drender::ws::TileState::from_pool(
         reinterpret_cast<char*>(ctx.tile_buffer.data_ptr()),
         ((camera.width + 15) / 16) * ((camera.height + 15) / 16), 0);
-    const auto ps = splat_drender::ws::PixelState::from_pool(
-        reinterpret_cast<char*>(ctx.pixel_buffer.data_ptr()),
-        std::size_t(camera.width) * camera.height, 0, false);
+    const auto* contributors = reinterpret_cast<const unsigned*>(ctx.pixel_buffer.data_ptr());
     const unsigned* ids;
     if (ctx.forward.compact_instances)
         ids = reinterpret_cast<const unsigned*>(ctx.compact_instance_buffer.data_ptr());
@@ -476,7 +476,7 @@ tinytensor::Tensor Rasterizer::pruning_scores(
     sensitivity_scores<<<dim3((camera.width + 15) / 16, (camera.height + 15) / 16), dim3(16, 16)>>>(
         camera.width, camera.height,
         camera.model == CameraModel::equirectangular ? int(camera.width) : 0, gs, ids, ts.range,
-        ps.n_contrib, rendered.color.ptr<float>(), scores.ptr<float>(),
+        contributors, rendered.color.ptr<float>(), scores.ptr<float>(),
         options.rasterization.alpha_clip);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess)

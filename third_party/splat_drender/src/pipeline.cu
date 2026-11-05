@@ -551,6 +551,8 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools, const Gaussians& 
         pst = PixelState::from_pool(ppool, pixels, snapshot_buckets, s.need_depth);
     } else {
         snapshot_buckets = 0;
+        if (s.record_contributor_counts)
+            pst.n_contrib = reinterpret_cast<unsigned*>(pools.pixel(pixels * sizeof(unsigned)));
     }
 
     launch::blend(s.need_depth, tst.range, ist.instance_value[counts.instance_selector], cam.width,

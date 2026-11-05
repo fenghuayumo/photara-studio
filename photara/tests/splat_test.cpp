@@ -27,6 +27,7 @@
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
+#include "sfm/asfm.hpp"
 #ifdef TINYTENSOR_HAS_VULKAN
 #include "vulkan/backend.hpp"
 #endif
@@ -5273,8 +5274,17 @@ void test_compressed_training_cache(
                 "Compressed cache changed RGB/mask/gray/depth/normal supervision");
     };
     splat::training_data::TrainingDataLoader cache(views, options);
-    for (std::size_t i = 0; i < views.size(); ++i)
-        (void)cache.get(i).rgb.to_vector();
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        const auto camera = cache.get_camera(i);
+        const auto loaded = cache.get(i);
+        require(camera.width == loaded.camera.width && camera.height == loaded.camera.height &&
+                camera.fx == loaded.camera.fx && camera.fy == loaded.camera.fy &&
+                camera.cx == loaded.camera.cx && camera.cy == loaded.camera.cy &&
+                camera.world_to_camera == loaded.camera.world_to_camera &&
+                camera.position == loaded.camera.position && camera.model == loaded.camera.model,
+                "Camera-only request differs from the decoded training view");
+        (void)loaded.rgb.to_vector();
+    }
     require(cache.stats().host_compressed_bytes > 0 &&
             cache.stats().host_resident_bytes <= options.training_view_cache_bytes,
             "Compressed cache failed to share the host RAM budget");
@@ -8382,6 +8392,177 @@ void test_speedy_conservative_schedule() {
     std::cout << "Conservative Speedy-Splat schedule checks passed\n";
 }
 
+void test_speedy_camera_only() {
+    using namespace photara;
+    for (auto mode : {CameraModel::pinhole, CameraModel::opencv_fisheye, CameraModel::equirectangular}) {
+        mvs::MvsView view;
+        view.path = std::filesystem::temp_directory_path() / "photara-missing-score-image.png";
+        view.source_model = mode;
+        view.width = view.src_width = 127;
+        view.height = view.src_height = 65;
+        view.fx = view.src_fx = 80; view.fy = view.src_fy = 81;
+        view.cx = view.src_cx = 63; view.cy = view.src_cy = 32;
+        view.k1 = .01F; view.p1 = .002F;
+        const std::vector<mvs::MvsView> views{view};
+        splat::TrainingOptions options;
+        options.adaptive_training_cache = false;
+        options.training_device_cache_bytes = options.training_view_cache_bytes = 0;
+        options.training_async_upload = false;
+        options.max_image_dimension = 93;
+        splat::training_data::TrainingDataLoader loader(views, options);
+        for (float scale : {1.F, .25F, .5F}) {
+            loader.set_resolution_scale(scale);
+            const auto actual = loader.get_camera(0);
+            const auto expected = splat::training_data::training_camera(view, options, scale);
+            require(actual.width == expected.width && actual.height == expected.height &&
+                    actual.fx == expected.fx && actual.fy == expected.fy &&
+                    actual.cx == expected.cx && actual.cy == expected.cy &&
+                    actual.model == expected.model && actual.k1 == expected.k1 && actual.k3 == expected.k3 &&
+                    actual.world_to_camera == expected.world_to_camera && actual.position == expected.position,
+                    "Camera-only scoring changed projection or training resolution");
+        }
+        const auto stats = loader.stats();
+        require(stats.requests == 0 && stats.host_decodes == 0 && stats.uploaded_bytes == 0 &&
+                stats.prefetch_issued == 0, "Camera-only scoring touched image caches");
+        bool rejected = false;
+        try { (void)loader.get_camera(1); } catch (const std::out_of_range&) { rejected = true; }
+        require(rejected, "Camera-only scoring accepted an invalid view index");
+    }
+}
+
+void benchmark_speedy_native(const char* ply, const char* sfm_path, unsigned repeats) {
+    using namespace photara;
+    using namespace photara::splat;
+    require(repeats > 0, "Positive benchmark repeat count required");
+    auto& profiler = tinytensor::VramProfiler::instance();
+    profiler.setEnabled(true);
+    const auto model = load_gaussians(ply);
+    const auto scene = sfm::load_asfm(sfm_path);
+    std::vector<std::size_t> registered;
+    for (std::size_t i = 0; i < scene.images.size(); ++i) if (scene.images[i].registered) registered.push_back(i);
+    require(!registered.empty(), "No registered cameras");
+    Rasterizer raster;
+    RasterizeOptions options;
+    options.active_sh_degree = model.sh_degree;
+    options.require_depth = false;
+    for (std::size_t v = 0; v < std::min<std::size_t>(3, registered.size()); ++v) {
+        const auto& image = scene.images[registered[v * registered.size() / std::min<std::size_t>(3, registered.size())]];
+        const auto& intr = scene.camera_of(image);
+        mvs::MvsView view;
+        view.pose = image.pose; view.source_model = intr.model;
+        view.width = view.src_width = intr.width; view.height = view.src_height = intr.height;
+        view.fx = view.src_fx = intr.fx; view.fy = view.src_fy = intr.fy;
+        view.cx = view.src_cx = intr.cx; view.cy = view.src_cy = intr.cy;
+        view.k1 = intr.k1; view.k2 = intr.k2; view.p1 = intr.p1; view.p2 = intr.p2;
+        TrainingOptions camera_options; camera_options.max_image_dimension = 960;
+        const auto camera = training_data::training_camera(view, camera_options);
+        std::vector<float> reference;
+        for (bool snapshots : {true, false}) {
+            auto forward_options = options;
+            forward_options.record_backward_state = snapshots;
+            forward_options.record_contributor_counts = !snapshots;
+            for (unsigned warm = 0; warm < 2; ++warm) {
+                const auto frame = raster.forward(model, camera, forward_options);
+                require(cudaDeviceSynchronize() == cudaSuccess, "Forward warmup failed");
+            }
+            const auto start = std::chrono::steady_clock::now();
+            for (unsigned i = 0; i < repeats; ++i) {
+                const auto frame = raster.forward(model, camera, forward_options);
+                require(cudaDeviceSynchronize() == cudaSuccess, "Forward benchmark failed");
+            }
+            const double ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count() / repeats;
+            const auto frame = raster.forward(model, camera, forward_options);
+            const auto rgb = frame.color.to_vector();
+            if (snapshots) reference = rgb;
+            else require(rgb == reference, "Contributor-only forward changed real-scene pixels");
+            std::size_t pixel_bytes = 0;
+            for (const auto& row : profiler.snapshot().rows)
+                if (row.scope.ends_with("workspace.pixel")) pixel_bytes += row.live_bytes;
+            std::cout << "speedy_forward view=" << v << " snapshots=" << snapshots << " ms=" << ms
+                      << " gaussians=" << model.size() << " resolution=" << camera.width << 'x' << camera.height
+                      << " pixel_workspace_bytes=" << pixel_bytes << std::endl;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        auto scores = raster.pruning_scores(model, camera, options).to_vector();
+        require(std::all_of(scores.begin(), scores.end(), [](float x) { return std::isfinite(x) && x >= 0; }), "Invalid real-scene score");
+        std::cout << "speedy_scores view=" << v << " ms=" <<
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count() << std::endl;
+    }
+}
+
+void benchmark_speedy_image_pass(const char* ply, const char* sfm_path, const char* images) {
+    using namespace photara;
+    using namespace photara::splat;
+    const auto model = load_gaussians(ply);
+    const auto scene = sfm::load_asfm(sfm_path);
+    std::vector<mvs::MvsView> views;
+    for (const auto& image : scene.images) if (image.registered) {
+        const auto& intr = scene.camera_of(image);
+        mvs::MvsView view;
+        view.path = std::filesystem::path(images) / image.path.filename();
+        require(std::filesystem::is_regular_file(view.path), "Registered image missing from supplied directory");
+        view.pose = image.pose; view.source_model = intr.model;
+        view.width = view.src_width = intr.width; view.height = view.src_height = intr.height;
+        view.fx = view.src_fx = intr.fx; view.fy = view.src_fy = intr.fy;
+        view.cx = view.src_cx = intr.cx; view.cy = view.src_cy = intr.cy;
+        view.k1 = intr.k1; view.k2 = intr.k2; view.p1 = intr.p1; view.p2 = intr.p2;
+        views.push_back(std::move(view));
+    }
+    require(!views.empty(), "No registered views");
+    TrainingOptions training;
+    training.max_image_dimension = 960;
+    training.adaptive_training_cache = false;
+    training.training_device_cache_bytes = 0;
+    training.training_view_cache_bytes = 64 * 1024 * 1024;
+    training.training_async_upload = false;
+    training.training_prefetch_views = 1;
+    training.use_mask = training.use_mvs_depth = training.use_mvs_normals = false;
+    training.lambda_d = training.lambda_n = training.multi_view_ncc_weight = 0;
+    RasterizeOptions options;
+    options.active_sh_degree = model.sh_degree;
+    options.require_depth = false;
+    Rasterizer raster;
+    std::cout << "image_pass_start views=" << views.size() << " gaussians=" << model.size()
+              << " max_dimension=960 host_cache_mb=64 device_cache_mb=0" << std::endl;
+    std::vector<float> baseline;
+    for (bool camera_only : {false, true}) {
+        training_data::TrainingDataLoader loader(views, training);
+        auto total = tinytensor::Tensor::zeros({model.size()}, tinytensor::Device::CUDA);
+        const auto start = std::chrono::steady_clock::now();
+        for (std::size_t v = 0; v < views.size(); ++v) {
+            Camera camera;
+            if (camera_only) camera = loader.get_camera(v);
+            else {
+                const auto loaded = loader.get(v);
+                camera = loaded.camera;
+                const auto expected = loader.get_camera(v);
+                require(camera.width == expected.width && camera.height == expected.height && camera.fx == expected.fx &&
+                        camera.fy == expected.fy && camera.cx == expected.cx && camera.cy == expected.cy &&
+                        camera.world_to_camera == expected.world_to_camera && camera.model == expected.model,
+                        "Real image decode changed scoring camera");
+            }
+            total = total.add(raster.pruning_scores(model, camera, options));
+            if ((v + 1) % 100 == 0) std::cout << "image_pass_progress camera_only=" << camera_only << " views=" << v + 1 << std::endl;
+        }
+        const auto scores = total.to_vector();
+        const auto stats = loader.stats();
+        double delta = 0, magnitude = 0;
+        if (!camera_only) baseline = scores;
+        for (std::size_t i = 0; i < scores.size(); ++i) {
+            require(std::isfinite(scores[i]) && scores[i] >= 0, "Invalid full-view score");
+            delta += std::abs(double(scores[i]) - baseline[i]); magnitude += baseline[i];
+        }
+        const double relative = delta / std::max(magnitude, 1e-20);
+        require(relative < 1e-5, "Camera-only full pass changed scores");
+        if (camera_only) require(stats.host_decodes == 0 && stats.requests == 0 && stats.uploaded_bytes == 0,
+                                "Camera-only pass loaded image data");
+        std::cout << "image_pass_result camera_only=" << camera_only << " views=" << views.size()
+                  << " seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
+                  << " host_decodes=" << stats.host_decodes << " uploaded_bytes=" << stats.uploaded_bytes
+                  << " image_requests=" << stats.requests << " score_relative_l1=" << relative << std::endl;
+    }
+}
+
 void benchmark_speedy_scores(const char* ply, const char* colmap, const char* images,
                             unsigned repeats) {
 #ifdef TINYTENSOR_HAS_VULKAN
@@ -8548,6 +8729,18 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--speedy-schedule-only") {
             test_speedy_conservative_schedule();
+            return 0;
+        }
+        if (argc == 5 && std::string(argv[1]) == "--speedy-native-bench") {
+            benchmark_speedy_native(argv[2], argv[3], unsigned(std::stoul(argv[4])));
+            return 0;
+        }
+        if (argc == 5 && std::string(argv[1]) == "--speedy-image-pass") {
+            benchmark_speedy_image_pass(argv[2], argv[3], argv[4]);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--speedy-camera-only") {
+            test_speedy_camera_only();
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--adc-fused-only") {
