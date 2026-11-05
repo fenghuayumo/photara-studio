@@ -11,6 +11,7 @@ if(PHOTARA_HAS_INFERENCE)
         src/inference/models/moge/weights.cpp
         src/inference/models/moge/encoder.cpp
         src/inference/models/moge/decoder.cpp
+        src/inference/models/moge/postprocess_gpu.cpp
         src/inference/models/moge/postprocess.cpp
         src/inference/models/moge/preprocess.cpp
         src/inference/models/moge/predictor.cpp
@@ -25,6 +26,15 @@ if(PHOTARA_HAS_INFERENCE)
     target_link_libraries(photara_inference PRIVATE ggml)
     if(TARGET ggml-vulkan)
         target_compile_definitions(photara_inference PRIVATE PHOTARA_INFERENCE_HAS_VULKAN=1)
+    endif()
+    if(TARGET photara_vk AND PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
+        target_link_libraries(photara_inference PRIVATE photara_vk::photara_vk)
+        target_compile_definitions(photara_inference PRIVATE PHOTARA_MOGE_GPU_GEOMETRY=1)
+        include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+        photara_vk_embed_hlsl(TARGET photara_inference
+            SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/inference/models/moge/moge_geometry.hlsl"
+            PROFILE cs_6_0 ENV vulkan1.2
+            OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/moge_vulkan")
     endif()
     set_target_properties(photara_inference PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -1466,6 +1476,9 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                 VERBATIM)
         endif()
         add_test(NAME photara.inference.moge_geometry COMMAND photara_moge_geometry_test)
+        if(TARGET photara_vk AND PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
+            add_test(NAME photara.inference.moge_geometry_vulkan COMMAND photara_moge_geometry_test --vulkan)
+        endif()
         photara_exclude_from_default(photara_moge_geometry_test)
         add_dependencies(photara_tests photara_moge_geometry_test)
         add_executable(photara_moge_postprocess_compare tests/inference/moge_postprocess_compare.cpp)

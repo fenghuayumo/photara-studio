@@ -1,4 +1,5 @@
 #include "splat/prior_prepare.hpp"
+#include "core/logging.hpp"
 #include "splat/dataset.hpp"
 #include "splat/prior.hpp"
 #include "training_data_loader.hpp"
@@ -31,6 +32,7 @@ int main(int argc, char** argv) {
             std::cout << "Prior preparation skipped: lambda_d=0 lambda_n=0\n";
             return 0;
         }
+        photara::core::Logger::instance().configure(argv[4], "prior-profile");
         photara::splat::DatasetLoadRequest request;
         request.source = argv[1]; request.image_directory = argv[2];
         auto loaded = photara::splat::load_splat_dataset(request);

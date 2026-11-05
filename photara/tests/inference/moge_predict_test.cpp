@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc < 8) {
-            std::cerr << "Usage: moge_predict_test model.gguf rgb.bin width height tokens output-dir vulkan [--focal pixels] [--preprocess-only] [--lifecycle] [--benchmark-network]\n";
+            std::cerr << "Usage: moge_predict_test model.gguf rgb.bin width height tokens output-dir vulkan [--focal pixels] [--preprocess-only] [--lifecycle] [--benchmark-network] [--cpu-geometry]\n";
             return 1;
         }
         photara::io::RgbImage image;
@@ -86,7 +86,8 @@ int main(int argc, char** argv) {
         GeometryInput geometry{image, {}};
         for (int i = 8; i < argc; ++i) {
             const std::string option(argv[i]);
-            if (option == "--benchmark-network") benchmark_network = true;
+            if (option == "--cpu-geometry") options.gpu_geometry = false;
+            else if (option == "--benchmark-network") benchmark_network = true;
             else if (option == "--preprocess-only") preprocess_only = true;
             else if (option == "--lifecycle") lifecycle = true;
             else if (option == "--focal" && i + 1 < argc) {

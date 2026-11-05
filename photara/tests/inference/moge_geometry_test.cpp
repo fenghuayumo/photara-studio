@@ -1,4 +1,5 @@
 #include "inference/models/moge.hpp"
+#include "models/moge/postprocess_gpu.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -101,8 +102,47 @@ void failure_cases() {
     invalid([&] { (void)recover_moge_geometry(raw, options, {}, {}); });
 }
 }
-int main() {
+void gpu_parity() {
+    const auto devices = available_devices();
+    const auto device = std::find_if(devices.begin(), devices.end(), [](const auto& d) { return d.backend == Backend::vulkan; });
+    check(device != devices.end(), "Vulkan device missing");
+    auto gpu = detail::create_moge_geometry_gpu(*device);
+    check(bool(gpu), "GPU geometry was not compiled in");
+    for (const auto size : {std::pair{40U,32U}, std::pair{137U,91U}, std::pair{2049U,513U}, std::pair{17U,9U}}) {
+        for (int mode = 0; mode < 4; ++mode) {
+            MogeGeometryOptions source; source.width=40; source.height=32;
+            const PinholeIntrinsics k{50,53,19.5F,15.5F};
+            auto raw=synthetic(source,k,.4);
+            for (std::size_t i=0;i<raw.mask_logits.size();++i) {
+                raw.normals[3*i]=float(i%11)*.01F;
+                raw.normals[3*i+1]=float(i%7)*.02F;
+                if(mode==2 && i%5==0)raw.mask_logits[i]=-5;
+            }
+            if(mode==2) { raw.normals[8]=0; raw.points[3*17]=std::numeric_limits<float>::quiet_NaN(); }
+            if(mode==3) std::fill(raw.mask_logits.begin(),raw.mask_logits.end(),-10.F);
+            MogeGeometryOptions options; options.width=size.first; options.height=size.second;
+            if(mode!=1) options.intrinsics=PinholeIntrinsics{k.fx*size.first/40,k.fy*size.second/32,
+                (k.cx+.5F)*size.first/40-.5F,(k.cy+.5F)*size.second/32-.5F};
+            const auto reference=recover_moge_geometry(raw,options,{},*device);
+            const auto actual=detail::recover_moge_geometry_gpu(raw,options,{},*device,*gpu);
+            check(actual.recovery.status==reference.recovery.status &&
+                actual.recovery.z_shift==reference.recovery.z_shift &&
+                actual.recovery.sample_count==reference.recovery.sample_count,"GPU fitting changed");
+            check(actual.prior.valid==reference.prior.valid,"GPU pixel validity changed");
+            const auto close=[](float a,float b) { return std::abs(a-b)<=2e-5F*std::max(1.F,std::abs(b)); };
+            for(std::size_t i=0;i<actual.prior.depth.size();++i) {
+                check(close(actual.prior.depth[i],reference.prior.depth[i]),"GPU depth mismatch");
+                for(int c=0;c<3;++c) {
+                    check(close(actual.prior.points[i][c],reference.prior.points[i][c]),"GPU XYZ mismatch");
+                    check(close(actual.prior.normals[i][c],reference.prior.normals[i][c]),"GPU normal mismatch");
+                }
+            }
+        }
+    }
+}
+int main(int argc, char** argv) {
     try {
+        if (argc==2 && std::string(argv[1])=="--vulkan") { gpu_parity(); return 0; }
         for (const double shift : {-0.8, 0.0, 0.7}) { analytic(false, shift); analytic(true, shift); }
         analytic(true, 0.7, true); analytic(true, -0.8, false, true);
         failure_cases();

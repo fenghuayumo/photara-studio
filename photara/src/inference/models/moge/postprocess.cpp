@@ -1,4 +1,5 @@
 #include "inference/models/moge.hpp"
+#include "postprocess_gpu.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -70,8 +71,8 @@ Evaluation evaluate(const std::vector<Sample>& samples, double shift,
     return {cost / samples.size(), focal};
 }
 
-MogeRecoveryInfo recover(const std::vector<std::array<float, 3>>& points,
-    const std::vector<std::uint8_t>& valid, const MogeGeometryOptions& options) {
+template<class Pixel>
+MogeRecoveryInfo recover(Pixel pixel, const MogeGeometryOptions& options) {
     MogeRecoveryInfo result;
     result.used_known_intrinsics = options.intrinsics.has_value();
     const double diagonal = std::hypot(static_cast<double>(options.width), options.height);
@@ -87,9 +88,9 @@ MogeRecoveryInfo recover(const std::vector<std::array<float, 3>>& points,
             const auto sx = static_cast<std::uint32_t>(static_cast<std::uint64_t>(x) * options.width / 64);
             const auto sy = static_cast<std::uint32_t>(static_cast<std::uint64_t>(y) * options.height / 64);
             const auto index = static_cast<std::size_t>(sy) * options.width + sx;
-            if (!valid[index]) continue;
+            const auto [point, valid] = pixel(index);
+            if (!valid) continue;
             distinct_pixels.insert(index);
-            const auto& point = points[index];
             samples.push_back({point[0], point[1], point[2], 2.0 * (sx - cx) / diagonal, 2.0 * (sy - cy) / diagonal});
             min_z = std::min(min_z, static_cast<double>(point[2]));
             max_z = std::max(max_z, static_cast<double>(point[2]));
@@ -144,8 +145,9 @@ MogeRecoveryInfo recover(const std::vector<std::array<float, 3>>& points,
 }
 }
 
-MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
-    const MogeGeometryOptions& options, const ModelInfo& model, const DeviceInfo& device) {
+static MogeGeometryResult geometry_impl(const MogeRawGeometry& raw,
+    const MogeGeometryOptions& options, const ModelInfo& model, const DeviceInfo& device,
+    detail::MogeGeometryGpu* gpu) {
     require(raw.width > 0 && raw.height > 0 && options.width > 0 && options.height > 0,
         "MoGe postprocess requires nonzero dimensions");
     const auto source_count = static_cast<std::uint64_t>(raw.width) * raw.height;
@@ -165,24 +167,28 @@ MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
         require(std::isfinite(k.fx) && k.fx > 0 && std::isfinite(k.fy) && k.fy > 0 &&
             std::isfinite(k.cx) && std::isfinite(k.cy), "Invalid known MoGe intrinsics");
     }
-    auto point_values = resize(raw.points, 3, raw.width, raw.height, options.width, options.height);
-    auto normal_values = resize(raw.normals, 3, raw.width, raw.height, options.width, options.height);
-    auto logits = resize(raw.mask_logits, 1, raw.width, raw.height, options.width, options.height);
     const auto count = static_cast<std::size_t>(count64);
-    std::vector<std::array<float, 3>> affine(count), normals(count);
-    std::vector<std::uint8_t> valid(count, 0);
-    for (std::size_t i = 0; i < count; ++i) {
-        const double z = std::exp(static_cast<double>(point_values[3 * i + 2]));
-        affine[i] = {static_cast<float>(point_values[3 * i] * z),
-            static_cast<float>(point_values[3 * i + 1] * z), static_cast<float>(z)};
-        const double length = std::hypot(std::hypot(static_cast<double>(normal_values[3 * i]),
-            normal_values[3 * i + 1]), normal_values[3 * i + 2]);
-        const float exponential = std::exp(-std::abs(logits[i]));
-        const float probability = logits[i] >= 0 ? 1.F / (1.F + exponential) : exponential / (1.F + exponential);
-        if (!finite(affine[i]) || affine[i][2] <= 0 || !std::isfinite(length) || length <= 1e-12 ||
-            !std::isfinite(logits[i]) || !(probability > options.mask_threshold)) continue;
-        for (int axis = 0; axis < 3; ++axis) normals[i][axis] = static_cast<float>(normal_values[3 * i + axis] / length);
-        valid[i] = 1;
+    std::vector<std::array<float, 3>> affine, normals;
+    std::vector<std::uint8_t> valid;
+    if (!gpu) {
+        auto point_values = resize(raw.points, 3, raw.width, raw.height, options.width, options.height);
+        auto normal_values = resize(raw.normals, 3, raw.width, raw.height, options.width, options.height);
+        auto logits = resize(raw.mask_logits, 1, raw.width, raw.height, options.width, options.height);
+        affine.resize(count); normals.resize(count);
+        valid.resize(count, 0);
+        for (std::size_t i = 0; i < count; ++i) {
+            const double z = std::exp(static_cast<double>(point_values[3 * i + 2]));
+            affine[i] = {static_cast<float>(point_values[3 * i] * z),
+                static_cast<float>(point_values[3 * i + 1] * z), static_cast<float>(z)};
+            const double length = std::hypot(std::hypot(static_cast<double>(normal_values[3 * i]),
+                normal_values[3 * i + 1]), normal_values[3 * i + 2]);
+            const float exponential = std::exp(-std::abs(logits[i]));
+            const float probability = logits[i] >= 0 ? 1.F / (1.F + exponential) : exponential / (1.F + exponential);
+            if (!finite(affine[i]) || affine[i][2] <= 0 || !std::isfinite(length) || length <= 1e-12 ||
+                !std::isfinite(logits[i]) || !(probability > options.mask_threshold)) continue;
+            for (int axis = 0; axis < 3; ++axis) normals[i][axis] = static_cast<float>(normal_values[3 * i + axis] / length);
+            valid[i] = 1;
+        }
     }
     MogeGeometryResult result;
     auto& prior = result.prior;
@@ -198,7 +204,35 @@ MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
     prior.normals.resize(count);
     prior.valid.resize(count, 0);
     prior.intrinsics = options.intrinsics;
-    result.recovery = recover(affine, valid, options);
+    if (!gpu) {
+        result.recovery = recover([&](std::size_t i) { return std::pair{affine[i], bool(valid[i])}; }, options);
+    } else {
+        // Match the reference resize arithmetic at just the 64x64 fitting pixels.
+        const auto sample = [&](const std::vector<float>& values, int channels, std::size_t index, int c) {
+            if (raw.width == options.width && raw.height == options.height)
+                return values[index * channels + c];
+            const auto y = index / options.width, x = index % options.width;
+            const float sy = std::max(0.F, float((y + 0.5) * raw.height / options.height - 0.5));
+            const float sx = std::max(0.F, float((x + 0.5) * raw.width / options.width - 0.5));
+            const auto y0 = std::uint32_t(sy), x0 = std::uint32_t(sx);
+            const auto y1 = std::min(y0 + 1, raw.height - 1), x1 = std::min(x0 + 1, raw.width - 1);
+            const float dx = sx - x0, dy = sy - y0;
+            const auto at = [&](auto xx, auto yy) { return values[(std::size_t(yy) * raw.width + xx) * channels + c]; };
+            const float top = at(x0,y0)*(1.F-dx) + at(x1,y0)*dx;
+            const float bottom = at(x0,y1)*(1.F-dx) + at(x1,y1)*dx;
+            return top*(1.F-dy) + bottom*dy;
+        };
+        result.recovery = recover([&](std::size_t i) {
+            const double z = std::exp(double(sample(raw.points,3,i,2)));
+            const std::array<float,3> p{float(sample(raw.points,3,i,0)*z), float(sample(raw.points,3,i,1)*z), float(z)};
+            const double length = std::hypot(std::hypot(double(sample(raw.normals,3,i,0)),
+                sample(raw.normals,3,i,1)), sample(raw.normals,3,i,2));
+            const float logit = sample(raw.mask_logits,1,i,0), e = std::exp(-std::abs(logit));
+            const float probability = logit >= 0 ? 1.F/(1.F+e) : e/(1.F+e);
+            return std::pair{p, finite(p) && p[2]>0 && std::isfinite(length) && length>1e-12 &&
+                std::isfinite(logit) && probability>options.mask_threshold};
+        }, options);
+    }
     if (result.recovery.status != MogeRecoveryStatus::recovered) { prior.validate(); return result; }
     if (!prior.intrinsics) {
         const double pixels_focal = result.recovery.normalized_focal *
@@ -207,6 +241,11 @@ MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
             "Recovered MoGe focal is outside float range");
         prior.intrinsics = PinholeIntrinsics{static_cast<float>(pixels_focal), static_cast<float>(pixels_focal),
             (options.width - 1) / 2.F, (options.height - 1) / 2.F};
+    }
+    if (gpu) {
+        gpu->maps(raw, options, result.recovery, prior);
+        prior.validate();
+        return result;
     }
     const auto& k = *prior.intrinsics;
     for (std::uint32_t y = 0; y < options.height; ++y)
@@ -224,5 +263,15 @@ MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
         }
     prior.validate();
     return result;
+}
+MogeGeometryResult recover_moge_geometry(const MogeRawGeometry& raw,
+    const MogeGeometryOptions& options, const ModelInfo& model, const DeviceInfo& device) {
+    return geometry_impl(raw, options, model, device, nullptr);
+}
+namespace detail {
+MogeGeometryResult recover_moge_geometry_gpu(const MogeRawGeometry& raw,
+    const MogeGeometryOptions& options, const ModelInfo& model, const DeviceInfo& device, MogeGeometryGpu& gpu) {
+    return geometry_impl(raw, options, model, device, &gpu);
+}
 }
 } // namespace photara::inference

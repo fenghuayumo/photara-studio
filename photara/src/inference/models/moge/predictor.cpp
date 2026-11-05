@@ -1,6 +1,7 @@
 #include "inference/models/moge.hpp"
 #include "decoder.hpp"
 #include "preprocess.hpp"
+#include "postprocess_gpu.hpp"
 #include <cmath>
 #include <chrono>
 #include "core/logging.hpp"
@@ -21,7 +22,9 @@ class MogePredictor final : public GeometryPredictor {
 public:
     MogePredictor(const std::filesystem::path& path, const MogeOptions& options)
         : options_(checked(options)), runtime_(options_.runtime),
-          weights_(path, runtime_.backend(), options_.maximum_tensor_bytes) {}
+          weights_(path, runtime_.backend(), options_.maximum_tensor_bytes) {
+        if (options_.gpu_geometry) geometry_gpu_ = detail::create_moge_geometry_gpu(device_info());
+    }
     const ModelInfo& model_info() const noexcept override { return weights_.info().model; }
     const DeviceInfo& device_info() const noexcept override { return runtime_.device(); }
     GeometryPrior predict(const GeometryInput& input, const PredictOptions& options) override {
@@ -53,7 +56,9 @@ public:
         geometry.height = input.image.height;
         geometry.intrinsics = input.intrinsics;
         geometry.mask_threshold = options_.mask_threshold;
-        auto result = recover_moge_geometry(raw, geometry, model_info(), device_info());
+        auto result = geometry_gpu_
+            ? detail::recover_moge_geometry_gpu(raw, geometry, model_info(), device_info(), *geometry_gpu_)
+            : recover_moge_geometry(raw, geometry, model_info(), device_info());
         if (result.recovery.status != MogeRecoveryStatus::recovered)
             throw std::runtime_error("MoGe geometry recovery failed: insufficient or degenerate support");
         result.prior.preprocessing_revision = "moge2-rgb-aa-imagenet-geometry-v1";
@@ -72,6 +77,7 @@ private:
     detail::GgmlRuntime runtime_; // Must outlive the weight buffer.
     detail::MogeWeights weights_;
     detail::MogeGraphCache encoder_cache_, decoder_cache_;
+    std::unique_ptr<detail::MogeGeometryGpu> geometry_gpu_;
 };
 }
 std::unique_ptr<GeometryPredictor> create_moge_predictor(

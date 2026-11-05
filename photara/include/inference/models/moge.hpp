@@ -35,6 +35,7 @@ struct MogeOptions {
     std::uint32_t num_tokens = 1200;
     float mask_threshold = 0.5F;
     std::size_t maximum_tensor_bytes = 0;
+    bool gpu_geometry = true; // Use Vulkan dense postprocessing when compiled in.
 };
 // Vulkan only, with no CPU fallback. Loads weights once. Inputs are undistorted
 // pinhole RGB; known intrinsics describe those exact input pixels. Output maps
