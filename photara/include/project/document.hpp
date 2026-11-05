@@ -153,7 +153,7 @@ struct Settings : photara::splat::TrainingLossSettings {
     int ai_prior_source = 0;
     std::filesystem::path ai_prior_model;
     std::filesystem::path ai_prior_directory;
-    float ai_depth_weight = 0.01F;
+    float ai_depth_weight = 0.F;
     float ai_normal_weight = 0.01F;
     int ai_prior_tokens = 1200;
     // Training-time colour correction for auto-exposure / auto-white-balance
