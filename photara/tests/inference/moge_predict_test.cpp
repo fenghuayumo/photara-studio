@@ -1,5 +1,7 @@
 #include "inference/models/moge.hpp"
 #include "models/moge/preprocess.hpp"
+#include "models/moge/decoder.hpp"
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -59,7 +61,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc < 8) {
-            std::cerr << "Usage: moge_predict_test model.gguf rgb.bin width height tokens output-dir vulkan [--focal pixels] [--preprocess-only] [--lifecycle]\n";
+            std::cerr << "Usage: moge_predict_test model.gguf rgb.bin width height tokens output-dir vulkan [--focal pixels] [--preprocess-only] [--lifecycle] [--benchmark-network]\n";
             return 1;
         }
         photara::io::RgbImage image;
@@ -80,11 +82,12 @@ int main(int argc, char** argv) {
         options.runtime.backend = backend == "vulkan" ? Backend::vulkan : Backend::cpu;
         options.runtime.allow_cpu_fallback = false;
         options.runtime.cpu_threads = 8;
-        bool preprocess_only = false, lifecycle = false;
+        bool preprocess_only = false, lifecycle = false, benchmark_network = false;
         GeometryInput geometry{image, {}};
         for (int i = 8; i < argc; ++i) {
             const std::string option(argv[i]);
-            if (option == "--preprocess-only") preprocess_only = true;
+            if (option == "--benchmark-network") benchmark_network = true;
+            else if (option == "--preprocess-only") preprocess_only = true;
             else if (option == "--lifecycle") lifecycle = true;
             else if (option == "--focal" && i + 1 < argc) {
                 const float focal = std::stof(argv[++i]);
@@ -95,6 +98,31 @@ int main(int argc, char** argv) {
         save(output / "normalized.bin", preprocessed.normalized_rgb);
         { std::ofstream grid(output / "grid.txt"); grid << preprocessed.rows << ' ' << preprocessed.columns; }
         if (preprocess_only) return 0;
+        if (benchmark_network) {
+            detail::GgmlRuntime runtime(options.runtime);
+            detail::MogeWeights weights(argv[1], runtime.backend());
+            detail::MogeGraphCache encoder_cache, decoder_cache;
+            detail::DecoderResult reference;
+            for (int mode = 0; mode < 2; ++mode) {
+                double total = 0;
+                for (int repeat = 0; repeat < 4; ++repeat) {
+                    const auto start = std::chrono::steady_clock::now();
+                    const auto encoded = detail::encode_moge_vitb(weights, runtime,
+                        preprocessed.rows, preprocessed.columns, preprocessed.normalized_rgb, false,
+                        mode ? &encoder_cache : nullptr);
+                    auto raw = detail::decode_moge_vitb(weights, runtime, encoded,
+                        float(image.width) / image.height, false, mode ? &decoder_cache : nullptr);
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                    if (repeat) total += ms;
+                    if (!mode) reference = std::move(raw);
+                    else check(raw.points == reference.points && raw.normals == reference.normals &&
+                        raw.mask_logits == reference.mask_logits && raw.log_metric_scale == reference.log_metric_scale,
+                        "Cached network differs from uncached reference");
+                }
+                std::cout << (mode ? "Cached" : "Uncached") << " network mean_ms=" << total / 3 << '\n';
+            }
+            return 0;
+        }
         auto predictor = create_moge_predictor(argv[1], options);
         check(predictor->device_info().backend == options.runtime.backend, "Unexpected CPU fallback");
         if (lifecycle) {

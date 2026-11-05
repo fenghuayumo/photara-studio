@@ -14,6 +14,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <memory>
+#include <future>
+#include <span>
 
 namespace {
 double median(std::vector<double> values) {
@@ -28,15 +30,12 @@ struct Alignment {
     std::size_t samples;
 };
 Alignment align(
-    const photara::mvs::MvsScene& scene,
-    std::size_t view_index,
+    std::span<const photara::mvs::SparsePoint* const> observed_points,
     const photara::splat::Camera& camera,
     const photara::inference::GeometryPrior& prior) {
     std::vector<double> ratios;
-    for (const auto& point : scene.sparse_points) {
-        if (std::find(point.view_ids.begin(), point.view_ids.end(), view_index) ==
-            point.view_ids.end())
-            continue;
+    for (const auto* observed : observed_points) {
+        const auto& point = *observed;
         const auto& m = camera.world_to_camera;
         const auto p = point.position;
         const double x = m[0] * p.x() + m[4] * p.y() + m[8] * p.z() + m[12];
@@ -138,17 +137,38 @@ void prepare_training_priors(
     old.close();
     // A cancelled generation must not label a mixed old/new cache as reusable.
     std::filesystem::remove(signature);
+    // Build only when a cache miss actually reaches depth alignment. Cached
+    // runs and normal-only generation never allocate the observation index.
+    std::vector<std::vector<const mvs::SparsePoint*>> observed;
+    const auto observed_for = [&](std::size_t view_index) -> std::span<const mvs::SparsePoint* const> {
+        if (observed.empty()) {
+            observed.resize(scene.views.size());
+            // Preserve point order and deduplicate repeated observation IDs.
+            for (const auto& point : scene.sparse_points)
+                for (const auto id : point.view_ids)
+                    if (id < observed.size() && (observed[id].empty() || observed[id].back() != &point))
+                        observed[id].push_back(&point);
+        }
+        return observed[view_index];
+    };
     core::ProgressReporter progress("Prepare AI priors", total);
     std::unique_ptr<inference::GeometryPredictor> predictor;
     std::ofstream manifest;
     std::size_t reused = 0, generated = 0;
+    std::future<training_data::TrainingImage> prefetched;
+    std::size_t prefetched_index = scene.views.size();
     for (std::size_t i = 0; i < scene.views.size(); ++i) {
         if (held_out && i % split == 0)
             continue;
         const auto& view = scene.views[i];
         const auto camera = training_data::training_camera(view, training);
         const auto path = training_prior_path(output, view.id);
-        if (reuse) {
+        auto view_signature = path;
+        view_signature += ".generation";
+        std::ifstream view_stamp(view_signature);
+        const std::string view_identity((std::istreambuf_iterator<char>(view_stamp)), {});
+        view_stamp.close();
+        if (reuse || view_identity == identity.str()) {
             try {
                 (void)load_training_prior(path, view.path, camera, need_depth, need_normals);
                 ++reused;
@@ -173,12 +193,26 @@ void prepare_training_priors(
                      << "view\tscale\tlog_ratio_mad\tsparse_inliers\tvalid_fraction\tseconds\n";
         }
         const auto start = std::chrono::steady_clock::now();
+        const auto source = prefetched.valid() && prefetched_index == i
+            ? prefetched.get() : training_data::load_training_image(view, training);
+        // One image ahead, bounded memory; overlaps decoding/undistortion with inference.
+        if (!reuse) {
+            std::size_t next = i + 1;
+            while (next < scene.views.size() && held_out && next % split == 0) ++next;
+            if (next < scene.views.size()) {
+                if (prefetched.valid()) (void)prefetched.get();
+                prefetched_index = next;
+                prefetched = std::async(std::launch::async, [&, next] {
+                    return training_data::load_training_image(scene.views[next], training, false);
+                });
+            }
+        }
+        const auto loaded_at = std::chrono::steady_clock::now();
         TrainingPrior prior;
         Alignment alignment{1., 0., 0};
         const auto count = std::size_t(camera.width) * camera.height;
         std::size_t valid = 0;
         if (uses_native_splat_projection(camera.model)) {
-            const auto source = training_data::load_training_image(view, training);
             unsigned face_index = 0;
             prior = detail::predict_native_prior(
                 source.rgb, source.mask, camera, need_depth, need_normals,
@@ -189,7 +223,7 @@ void prepare_training_priors(
                 [&](const Camera& tile, const inference::GeometryPrior& prediction) {
                     const auto face = face_index++;
                     try {
-                        const auto support = align(scene, i, tile, prediction);
+                        const auto support = align(observed_for(i), tile, prediction);
                         alignment.samples += support.samples;
                         core::Logger::instance().info(
                             "AI native prior view=", view.id, " face=", face,
@@ -209,10 +243,10 @@ void prepare_training_priors(
                           (prior.normals[pixel] != 0 || prior.normals[count + pixel] != 0 ||
                            prior.normals[2 * count + pixel] != 0));
         } else {
-            const auto image = training_data::prior_input_image(view, training);
+            const auto& image = source.rgb;
             const auto prediction = predictor->predict(
                 {image, inference::PinholeIntrinsics{camera.fx, camera.fy, camera.cx, camera.cy}});
-            alignment = need_depth ? align(scene, i, camera, prediction) : Alignment{1., 0., 0};
+            alignment = need_depth ? align(observed_for(i), camera, prediction) : Alignment{1., 0., 0};
             prior.camera = camera;
 
             if (need_depth)
@@ -234,7 +268,20 @@ void prepare_training_priors(
                 ++valid;
             }
         }
+        const auto predicted_at = std::chrono::steady_clock::now();
+        // A per-view identity permits resuming incomplete generations. Remove it
+        // before overwriting so a failed write cannot bless mixed-generation data.
+        std::filesystem::remove(view_signature);
         save_training_prior(path, view.path, prior);
+        std::ofstream completed(view_signature, std::ios::trunc);
+        completed << identity.str();
+        completed.close();
+        if (!completed) throw std::runtime_error("Cannot write AI prior view identity");
+        const auto saved_at = std::chrono::steady_clock::now();
+        core::Logger::instance().info("AI prior timing view=", view.id,
+            " load_ms=", std::chrono::duration<double, std::milli>(loaded_at - start).count(),
+            " predict_align_ms=", std::chrono::duration<double, std::milli>(predicted_at - loaded_at).count(),
+            " save_ms=", std::chrono::duration<double, std::milli>(saved_at - predicted_at).count());
         const double seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         manifest << std::setprecision(12) << view.id << '\t' << alignment.scale << '\t'

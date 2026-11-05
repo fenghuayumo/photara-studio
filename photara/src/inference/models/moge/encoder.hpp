@@ -1,5 +1,6 @@
 #pragma once
 #include "weights.hpp"
+#include "graph_cache.hpp"
 #include "runtime/ggml_runtime.hpp"
 #include <cstdint>
 #include <span>
@@ -15,6 +16,7 @@ struct EncoderResult {
     std::uint32_t rows = 0, columns = 0;
     std::vector<float> features; // [rows*columns, 768], summed tap projections.
     std::vector<float> class_token; // [768], normalized block 11 class token.
+    ggml_tensor *device_features = nullptr, *device_class_token = nullptr; // Owned by cache.
     std::vector<EncoderStage> stages; // Optional diagnostics, no production cache.
 };
 
@@ -27,5 +29,5 @@ struct EncoderResult {
 // owned by the caller, never changed here via process environment variables.
 EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
     std::uint32_t rows, std::uint32_t columns, std::span<const float> normalized_rgb,
-    bool capture_stages = false);
+    bool capture_stages = false, MogeGraphCache* cache = nullptr);
 } // namespace photara::inference::detail

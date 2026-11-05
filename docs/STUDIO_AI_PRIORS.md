@@ -131,3 +131,39 @@ are made by this test. An explicit real-release check is available via:
 ```text
 photara_model_download_test --remote <output.gguf>
 ```
+
+
+## Prior preparation performance
+
+MoGe caches one encoder and one decoder graph per predictor. Grid changes rebuild
+the corresponding graph; decoder aspect-ratio changes also invalidate its graph.
+Position embeddings, UV maps and gather indices are uploaded once per graph and
+protected against in-place overwrites. Encoder features/class tokens remain on
+the GPU and are copied into decoder inputs without a host round trip. Separate
+graph arenas preserve their lifetimes; resident GPU memory can increase relative
+to the former shared scratch arena. All arenas are freed before training begins.
+Precision and the default 1200-token budget are unchanged.
+
+Fresh generation prefetches one image on a background thread with internal OpenMP
+packing disabled. Sparse alignment lazily builds its observation index at the
+first required depth alignment; full cache hits and normal-only generation skip
+this allocation. The index is also shared by the six native faces.
+Successful maps receive `.prior.generation` sidecars, allowing completed maps to
+be reused after interruption even without the final `generation.txt`. Camera,
+source-image metadata and requested map availability are still validated.
+Sidecars are removed before overwriting maps so incomplete writes regenerate.
+Existing completed caches remain compatible.
+
+Info logs emit `MoGe timing` (preprocess, encoder, decoder, geometry, total ms)
+and `AI prior timing` (image-load wait, prediction/alignment, save ms). Network
+stage times include graph construction on misses, transfers and synchronization;
+they are wall times rather than isolated GPU kernel times.
+
+The prediction diagnostic accepts `--benchmark-network` with its usual arguments.
+It checks raw output equality and reports three-run means after a warmup per path.
+A local RTX 5090 D v2 test at 560x420 / 1200 tokens measured 160.0 ms uncached and
+136.3 ms cached, about 15% less network time. This excludes preprocessing,
+geometry recovery, decoding and disk I/O; it is not a training speedup claim.
+Regression checks cover changed pixels, repeated runs and grid changes. A
+three-view smoke test verified reuse of two completed maps and regeneration of
+one partial map after removing the global completion stamp.

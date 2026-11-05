@@ -86,7 +86,7 @@ GgmlRuntime::~GgmlRuntime() {
     if (backend_) ggml_backend_free(backend_);
 }
 
-void GgmlRuntime::allocate(ggml_cgraph* graph) {
+void GgmlRuntime::allocate(ggml_cgraph* graph, ggml_gallocr_t allocator) {
     if (!graph) throw std::invalid_argument("Inference graph is null");
     for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
         const auto* node = ggml_graph_node(graph, i);
@@ -95,7 +95,7 @@ void GgmlRuntime::allocate(ggml_cgraph* graph) {
                 ggml_op_name(node->op) + " " + ggml_get_name(node) +
                 " shape=" + std::to_string(node->ne[0]) + "," + std::to_string(node->ne[1]) + "," + std::to_string(node->ne[2]) + "," + std::to_string(node->ne[3]));
     }
-    if (!ggml_gallocr_alloc_graph(allocator_, graph))
+    if (!ggml_gallocr_alloc_graph(allocator ? allocator : allocator_, graph))
         throw std::runtime_error("Could not allocate inference graph buffers");
 }
 

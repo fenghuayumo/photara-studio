@@ -62,6 +62,39 @@ int main(int argc, char** argv) {
         if (repeated.points != result.points || repeated.normals != result.normals ||
             repeated.mask_logits != result.mask_logits || repeated.log_metric_scale != result.log_metric_scale)
             throw std::runtime_error("Decoder diagnostic/normal path mismatch");
+        detail::MogeGraphCache encoder_cache, decoder_cache;
+        const auto verify = [&](const detail::EncoderResult& encoded) {
+            const auto expected = detail::decode_moge_vitb(weights, runtime, encoded, std::stof(argv[4]));
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                const auto actual = detail::decode_moge_vitb(weights, runtime, encoded, std::stof(argv[4]), false, &decoder_cache);
+                if (actual.points != expected.points || actual.normals != expected.normals ||
+                    actual.mask_logits != expected.mask_logits || actual.log_metric_scale != expected.log_metric_scale ||
+                    actual.width != expected.width || actual.height != expected.height)
+                    throw std::runtime_error("Cached decoder differs from reference");
+            }
+        };
+        verify(input);
+        if (!encoder_image.empty()) {
+            auto normalized = load(encoder_image, rows * columns * 3 * 14 * 14);
+            // Changed pixels catch stale-input bugs; transposed grid catches arena rebuilds.
+            for (int iteration = 0; iteration < 4; ++iteration) {
+                for (auto& value : normalized) value = value * .9F + .01F;
+                const auto r = iteration == 2 ? columns : rows, c = iteration == 2 ? rows : columns;
+                const auto host = detail::encode_moge_vitb(weights, runtime, r, c, normalized);
+                const auto device = detail::encode_moge_vitb(weights, runtime, r, c, normalized, false, &encoder_cache);
+                std::vector<float> features(host.features.size()), cls(host.class_token.size());
+                ggml_backend_tensor_get(device.device_features, features.data(), 0, features.size() * sizeof(float));
+                ggml_backend_tensor_get(device.device_class_token, cls.data(), 0, cls.size() * sizeof(float));
+                if (features != host.features || cls != host.class_token)
+                    throw std::runtime_error("Cached encoder differs from reference");
+                const auto expected = detail::decode_moge_vitb(weights, runtime, host, std::stof(argv[4]));
+                const auto actual = detail::decode_moge_vitb(weights, runtime, device, std::stof(argv[4]), false, &decoder_cache);
+                if (actual.points != expected.points || actual.normals != expected.normals ||
+                    actual.mask_logits != expected.mask_logits || actual.log_metric_scale != expected.log_metric_scale)
+                    throw std::runtime_error("Device transfer differs from host reference");
+                verify(device);
+            }
+        }
         std::cout << "Decoder " << rows << 'x' << columns << " patches on "
             << backend_name(runtime.device().backend) << ", " << result.stages.size()
             << " stages, compute buffers " << runtime.compute_buffer_bytes() << " bytes\n";

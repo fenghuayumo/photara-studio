@@ -26,6 +26,7 @@ public:
     ggml_tensor* float_input(int channels, int pixels, std::vector<float> values) {
         auto* tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, channels, pixels);
         ggml_set_input(tensor);
+        ggml_set_output(tensor); // Reusable graph constants must not be overwritten in-place.
         inputs.push_back({tensor, std::move(values), {}});
         return tensor;
     }
@@ -70,6 +71,7 @@ public:
             }
         auto* tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, indices.size());
         ggml_set_input(tensor);
+        ggml_set_output(tensor); // Reusable graph constants must not be overwritten in-place.
         inputs.push_back({tensor, {}, std::move(indices)});
         index_cache.emplace(key, tensor);
         return tensor;
@@ -152,7 +154,7 @@ public:
         for (const auto& input : inputs) {
             if (!input.floats.empty())
                 ggml_backend_tensor_set(input.tensor, input.floats.data(), 0, input.floats.size() * sizeof(float));
-            else ggml_backend_tensor_set(input.tensor, input.indices.data(), 0, input.indices.size() * sizeof(std::int32_t));
+            else if (!input.indices.empty()) ggml_backend_tensor_set(input.tensor, input.indices.data(), 0, input.indices.size() * sizeof(std::int32_t));
         }
     }
     ggml_context* ctx;
@@ -182,14 +184,39 @@ std::vector<float> read(ggml_tensor* tensor) {
 }
 
 DecoderResult decode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
-    const EncoderResult& encoder, float input_aspect_ratio, bool capture_stages) {
+    const EncoderResult& encoder, float input_aspect_ratio, bool capture_stages, MogeGraphCache* cache) {
+    const bool device_input = encoder.device_features && encoder.device_class_token;
     const auto pixels = static_cast<std::uint64_t>(encoder.rows) * encoder.columns;
-    if (!encoder.rows || !encoder.columns || pixels > 4096 || encoder.features.size() != pixels * 768 ||
-        encoder.class_token.size() != 768 || !std::isfinite(input_aspect_ratio) || input_aspect_ratio <= 0)
+    if (!encoder.rows || !encoder.columns || pixels > 4096 || (!device_input && (encoder.features.size() != pixels * 768 ||
+        encoder.class_token.size() != 768)) || !std::isfinite(input_aspect_ratio) || input_aspect_ratio <= 0)
         throw std::invalid_argument("Invalid MoGe decoder input");
     if (!std::all_of(encoder.features.begin(), encoder.features.end(), [](float x) { return std::isfinite(x); }) ||
         !std::all_of(encoder.class_token.begin(), encoder.class_token.end(), [](float x) { return std::isfinite(x); }))
         throw std::invalid_argument("Nonfinite MoGe decoder input");
+    if (capture_stages) cache = nullptr;
+    const auto upload_encoder = [&](ggml_tensor* features, ggml_tensor* cls) {
+        if (device_input) {
+            ggml_backend_tensor_copy(encoder.device_features, features);
+            ggml_backend_tensor_copy(encoder.device_class_token, cls);
+        } else {
+            ggml_backend_tensor_set(features, encoder.features.data(), 0, encoder.features.size() * sizeof(float));
+            ggml_backend_tensor_set(cls, encoder.class_token.data(), 0, encoder.class_token.size() * sizeof(float));
+        }
+    };
+    const auto cached_result = [&] {
+        runtime.compute(cache->graph);
+        DecoderResult result;
+        result.width = encoder.columns * 16; result.height = encoder.rows * 16;
+        result.points = read(cache->outputs[0]); result.normals = read(cache->outputs[1]);
+        result.mask_logits = read(cache->outputs[2]); result.log_metric_scale = read(cache->outputs[3])[0];
+        return result;
+    };
+    if (cache && cache->graph && cache->rows == encoder.rows && cache->columns == encoder.columns &&
+        cache->aspect == input_aspect_ratio && cache->weights == &weights && cache->backend == runtime.backend()) {
+        upload_encoder(cache->features, cache->class_token);
+        return cached_result();
+    }
+    if (cache) cache->reset();
     std::unique_ptr<ggml_context, decltype(&ggml_free)> context(
         ggml_init({32 * 1024 * 1024, nullptr, true}), &ggml_free);
     if (!context) throw std::runtime_error("Cannot create MoGe decoder graph context");
@@ -219,8 +246,19 @@ DecoderResult decode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
         ggml_set_output(tensor);
         ggml_build_forward_expand(builder.graph, tensor);
     }
-    runtime.allocate(builder.graph);
+    if (cache) cache->allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(runtime.backend()));
+    if (cache && !cache->allocator) throw std::runtime_error("Cannot create decoder allocator");
+    runtime.allocate(builder.graph, cache ? cache->allocator : nullptr);
     builder.upload();
+    upload_encoder(features, class_token);
+    if (cache) {
+        cache->context = std::move(context); cache->graph = builder.graph;
+        cache->features = features; cache->class_token = class_token;
+        cache->rows = encoder.rows; cache->columns = encoder.columns; cache->aspect = input_aspect_ratio;
+        cache->weights = &weights; cache->backend = runtime.backend();
+        cache->outputs = {points.tensor, normals.tensor, mask.tensor, scale};
+        return cached_result();
+    }
     runtime.compute(builder.graph);
     DecoderResult result;
     result.width = points.width;

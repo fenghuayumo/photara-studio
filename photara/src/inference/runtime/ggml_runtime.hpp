@@ -16,7 +16,7 @@ public:
     [[nodiscard]] ggml_backend_t backend() const noexcept { return backend_; }
     // Allocate before uploading graph inputs. Throws for unsupported operators;
     // no hidden per-operator CPU fallback or scheduler is used.
-    void allocate(ggml_cgraph* graph);
+    void allocate(ggml_cgraph* graph, ggml_gallocr_t allocator = nullptr);
     void compute(ggml_cgraph* graph);
     [[nodiscard]] std::size_t compute_buffer_bytes() const;
 private:

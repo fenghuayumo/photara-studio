@@ -21,8 +21,11 @@ struct TrainingImage {
     const TrainingOptions& options,
     float resolution_scale = 1.F);
 
+// Disable parallel packing for background prefetch to avoid competing with
+// foreground preprocessing and GPU submission.
 [[nodiscard]] TrainingImage load_training_image(
     const mvs::MvsView& view,
-    const TrainingOptions& options);
+    const TrainingOptions& options,
+    bool parallel_pack = true);
 
 } // namespace photara::splat::training_data

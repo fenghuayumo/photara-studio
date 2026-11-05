@@ -1097,11 +1097,12 @@ TrainingView upload_training_view(const HostTrainingView& host, const TrainingOp
 
 namespace training_data {
 
-TrainingImage load_training_image(const mvs::MvsView& view, const TrainingOptions& options) {
+TrainingImage load_training_image(
+    const mvs::MvsView& view, const TrainingOptions& options, bool parallel_pack) {
     auto image_options = options;
     image_options.lambda_d = image_options.lambda_n = 0.F;
     image_options.use_mvs_depth = image_options.use_mvs_normals = false;
-    const auto host = load_host_training_view(view, image_options, 1.F);
+    const auto host = load_host_training_view(view, image_options, 1.F, parallel_pack);
     TrainingImage result;
     result.camera = host.camera;
     auto& image = result.rgb;

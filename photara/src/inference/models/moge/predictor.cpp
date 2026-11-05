@@ -2,6 +2,8 @@
 #include "decoder.hpp"
 #include "preprocess.hpp"
 #include <cmath>
+#include <chrono>
+#include "core/logging.hpp"
 #include <stdexcept>
 
 namespace photara::inference {
@@ -35,12 +37,16 @@ public:
                 !std::isfinite(k.cx) || !std::isfinite(k.cy))
                 throw std::invalid_argument("Invalid MoGe input intrinsics");
         }
+        const auto start = std::chrono::steady_clock::now();
         auto image = detail::preprocess_moge(input.image, options_.num_tokens);
         boundary(0.1F);
-        auto encoded = detail::encode_moge_vitb(weights_, runtime_, image.rows, image.columns, image.normalized_rgb);
+        const auto preprocessed = std::chrono::steady_clock::now();
+        auto encoded = detail::encode_moge_vitb(weights_, runtime_, image.rows, image.columns, image.normalized_rgb, false, &encoder_cache_);
+        const auto encoded_at = std::chrono::steady_clock::now();
         boundary(0.5F);
         auto raw = detail::decode_moge_vitb(weights_, runtime_, encoded,
-            static_cast<float>(input.image.width) / input.image.height);
+            static_cast<float>(input.image.width) / input.image.height, false, &decoder_cache_);
+        const auto decoded_at = std::chrono::steady_clock::now();
         boundary(0.9F);
         MogeGeometryOptions geometry;
         geometry.width = input.image.width;
@@ -52,6 +58,12 @@ public:
             throw std::runtime_error("MoGe geometry recovery failed: insufficient or degenerate support");
         result.prior.preprocessing_revision = "moge2-rgb-aa-imagenet-geometry-v1";
         result.prior.validate();
+        const auto finished = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        core::Logger::instance().info("MoGe timing grid=", image.columns, "x", image.rows,
+            " preprocess_ms=", ms(start, preprocessed), " encoder_ms=", ms(preprocessed, encoded_at),
+            " decoder_ms=", ms(encoded_at, decoded_at), " geometry_ms=", ms(decoded_at, finished),
+            " total_ms=", ms(start, finished));
         boundary(1.F);
         return std::move(result.prior);
     }
@@ -59,6 +71,7 @@ private:
     MogeOptions options_;
     detail::GgmlRuntime runtime_; // Must outlive the weight buffer.
     detail::MogeWeights weights_;
+    detail::MogeGraphCache encoder_cache_, decoder_cache_;
 };
 }
 std::unique_ptr<GeometryPredictor> create_moge_predictor(

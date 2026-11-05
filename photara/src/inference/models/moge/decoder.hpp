@@ -11,5 +11,5 @@ struct DecoderResult : MogeRawGeometry {
 // Fixed MoGe-2 ViT-B normal topology. The input aspect ratio belongs to the
 // original image, which can differ from columns/rows after token-grid rounding.
 DecoderResult decode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
-    const EncoderResult& encoder, float input_aspect_ratio, bool capture_stages = false);
+    const EncoderResult& encoder, float input_aspect_ratio, bool capture_stages = false, MogeGraphCache* cache = nullptr);
 } // namespace photara::inference::detail

@@ -98,7 +98,7 @@ std::vector<float> patchify(int rows, int columns, std::span<const float> image)
 
 EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
     std::uint32_t rows, std::uint32_t columns, std::span<const float> normalized_rgb,
-    bool capture_stages) {
+    bool capture_stages, MogeGraphCache* cache) {
     // Dense attention is quadratic. Bound this correctness path to the model's
     // intended range; a memory planner/flash-attention path can extend it later.
     const auto patch_count = static_cast<std::uint64_t>(rows) * columns;
@@ -108,6 +108,20 @@ EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
         "normalized CHW image size mismatch");
     require(std::all_of(normalized_rgb.begin(), normalized_rgb.end(),
         [](float value) { return std::isfinite(value); }), "input contains nonfinite pixels");
+    // Diagnostic calls retain their original host-output path.
+    if (capture_stages) cache = nullptr;
+    if (cache && cache->graph && cache->rows == rows && cache->columns == columns &&
+        cache->weights == &weights && cache->backend == runtime.backend()) {
+        const auto patches = patchify(rows, columns, normalized_rgb);
+        ggml_backend_tensor_set(cache->input, patches.data(), 0, patches.size() * sizeof(float));
+        runtime.compute(cache->graph);
+        EncoderResult result;
+        result.rows = rows; result.columns = columns;
+        result.device_features = cache->features;
+        result.device_class_token = cache->class_token;
+        return result;
+    }
+    if (cache) cache->reset();
     const int tokens = static_cast<int>(patch_count) + 1;
     auto position_data = positions(weights, static_cast<int>(rows), static_cast<int>(columns));
     auto patch_data = patchify(static_cast<int>(rows), static_cast<int>(columns), normalized_rgb);
@@ -120,6 +134,7 @@ EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
     auto* position = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kEmbedding, tokens);
     ggml_set_input(patches);
     ggml_set_input(position);
+    if (cache) ggml_set_output(position); // Keep constant input alive across executions.
     std::vector<std::pair<std::string, ggml_tensor*>> stages;
     const auto trace = [&](const std::string& name, ggml_tensor* tensor) {
         if (capture_stages) {
@@ -191,7 +206,9 @@ EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
     ggml_set_output(class_token);
     ggml_build_forward_expand(graph, features);
     ggml_build_forward_expand(graph, class_token);
-    runtime.allocate(graph);
+    if (cache) cache->allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(runtime.backend()));
+    if (cache && !cache->allocator) throw std::runtime_error("Cannot create encoder allocator");
+    runtime.allocate(graph, cache ? cache->allocator : nullptr);
     ggml_backend_tensor_set(patches, patch_data.data(), 0, patch_data.size() * sizeof(float));
     ggml_backend_tensor_set(position, position_data.data(), 0, position_data.size() * sizeof(float));
     runtime.compute(graph);
@@ -203,6 +220,15 @@ EncoderResult encode_moge_vitb(MogeWeights& weights, GgmlRuntime& runtime,
     EncoderResult result;
     result.rows = rows;
     result.columns = columns;
+    if (cache) {
+        cache->context = std::move(context); cache->graph = graph;
+        cache->input = patches; cache->position = position;
+        cache->features = features; cache->class_token = class_token;
+        cache->rows = rows; cache->columns = columns;
+        cache->weights = &weights; cache->backend = runtime.backend();
+        result.device_features = features; result.device_class_token = class_token;
+        return result;
+    }
     result.features = read(features);
     result.class_token = read(class_token);
     for (const auto& [name, tensor] : stages) result.stages.push_back({name, read(tensor)});

@@ -245,6 +245,35 @@ void parameter_gradients(tinytensor::Device device, photara::CameraModel camera_
         check(objective(next)<objective(parameters),"Prior-only parameter step failed to reduce loss");
     }
 }
+void prefetch_image_parity() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("photara-prior-prefetch-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const auto path = directory / "source.png";
+    struct Cleanup {
+        std::filesystem::path path, directory;
+        ~Cleanup() { std::error_code ec; std::filesystem::remove(path, ec); std::filesystem::remove(directory, ec); }
+    } cleanup{path, directory};
+    photara::io::RgbImage source{128, 96, std::vector<std::uint8_t>(128 * 96 * 3)};
+    for (std::size_t i = 0; i < source.pixels.size(); ++i) source.pixels[i] = std::uint8_t(i * 37);
+    photara::io::save_rgb_png(source, path);
+    photara::mvs::MvsView view;
+    view.path = path; view.width = view.src_width = 128; view.height = view.src_height = 96;
+    view.fx = view.fy = view.src_fx = view.src_fy = 100.F;
+    view.cx = view.src_cx = 63.5F; view.cy = view.src_cy = 47.5F;
+    view.k1 = -.04F; view.k2 = .003F;
+    view.foreground_mask.resize(128 * 96);
+    for (std::size_t i = 0; i < view.foreground_mask.size(); ++i) view.foreground_mask[i] = std::uint8_t(i % 256);
+    TrainingOptions options;
+    options.use_source_resolution = false; options.max_image_dimension = 0;
+    options.use_mask = true; options.undistort_to_pinhole = true;
+    const auto foreground = training_data::load_training_image(view, options);
+    const auto background = training_data::load_training_image(view, options, false);
+    check(foreground.rgb.width * foreground.rgb.height >= 4096, "Prefetch test misses parallel threshold");
+    check(foreground.rgb.pixels == background.rgb.pixels && foreground.mask.pixels == background.mask.pixels,
+        "Background packing changed RGB or mask pixels");
+}
+
 void cache() {
     const auto directory=std::filesystem::temp_directory_path()/("photara-prior-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
@@ -342,7 +371,7 @@ void cache() {
 int main(int argc, char** argv) {
     try {
         if (argc == 1) {
-            native_priors(); cache(); losses(tinytensor::Device::CUDA);
+            prefetch_image_parity(); native_priors(); cache(); losses(tinytensor::Device::CUDA);
             losses(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);
             losses(tinytensor::Device::CUDA,photara::CameraModel::equirectangular); parameter_gradients(tinytensor::Device::CUDA);
             parameter_gradients(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);
