@@ -50,7 +50,7 @@ int main() {
         reject("ply\n" + std::string(70 * 1024, 'x'));
         reject(vertices + "element custom 1\n" + gaussian.substr(vertices.size()) + "end_header\n");
         require(editor::model_import_kind("model.OBJ") == ModelImportKind::mesh, "OBJ not recognized");
-        for (const char* name : {"model.SOG", "model.SPZ", "model.GLB", "model.USDC"})
+        for (const char* name : {"model.SOG", "model.SOG-XT", "model.SPZ", "model.GLB", "model.USDC"})
             require(editor::model_import_kind(name) == ModelImportKind::gaussians,
                     "Gaussian format not recognized");
         for (const char* name : {"images", "photo.JPG", "scene.ascan", "scene.asfm", "model.stl"})

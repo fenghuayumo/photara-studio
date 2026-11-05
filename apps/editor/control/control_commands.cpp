@@ -274,20 +274,20 @@ json execute_command(
             app.splat_export.job.valid()) return failure("BUSY", "An active task prevents export");
         if (!can_export_model(app)) return failure("PRECONDITION_FAILED", "No splat model to export");
         const std::string format = params.value("format", std::string("ply"));
-        const std::vector<std::string> formats{"ply", "sog", "spz", "glb"};
+        const std::vector<std::string> formats{"ply", "sog", "spz", "glb", "sog-xt"};
         const auto selected = std::find(formats.begin(), formats.end(), format);
         if (selected == formats.end())
-            return failure("UNSUPPORTED", "Supported formats: ply, sog, spz, glb");
+            return failure("UNSUPPORTED", "Supported formats: ply, sog, sog-xt, spz, glb");
         const json degree = params.value("sh_degree", json(3));
         if (!degree.is_number_integer() || degree.get<int>() < 0 || degree.get<int>() > 3)
             return failure("INVALID_REQUEST", "sh_degree must be an integer in [0, 3]");
         std::filesystem::path path;
         const json checked = output_path(app, params, "." + format, path);
         if (!ok(checked)) return checked;
-        app.splat_export.format = static_cast<int>(selected - formats.begin());
+        app.splat_export.format = format == "sog-xt" ? 6 : static_cast<int>(selected - formats.begin());
         app.splat_export.sh_degree = degree.get<int>();
         if (!export_trained_model_to_path(app, path)) return failure("INTERNAL", app.message);
-        return success({{"path", path_to_utf8(path)}, {"format", format}, {"completed", true}});
+        return success({{"path", path_to_utf8(path)}, {"format", format}, {"completed", !app.splat_export.job.valid()}});
     }
     if (method == "studio.view.patch") {
         if (app.loading_scene) return failure("BUSY", "Scene is loading");

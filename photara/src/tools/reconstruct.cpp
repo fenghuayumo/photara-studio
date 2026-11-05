@@ -448,7 +448,7 @@ void print_help(const cxxopts::Options& options) {
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply; with --mesh, an MVS surface\n"
               << "               (does not train splats unless --splat is also set)\n"
-              << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb/.usdc\n"
+              << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.sog-xt/.spz/.glb/.usdc\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
               << "  --splat-simplify PATH  NanoGS post-training simplify; writes --output\n"
               << "  --splat-simplify-keep R  keep ratio (0-1, default 0.8)\n"
@@ -593,7 +593,7 @@ void print_help(const cxxopts::Options& options) {
               << "  .ascan  Photara project (settings + completed stages)\n"
               << "  .asfm   native SfM scene (cameras, keypoints, tracks)\n"
               << "  .ply    sparse XYZRGB point cloud; splat sidecar is {stem}_splat.ply\n"
-              << "  .sog/.spz/.glb/.usdc  trained Gaussian file (format from the suffix)\n"
+              << "  .sog/.sog-xt/.spz/.glb/.usdc  trained Gaussian file (format from the suffix)\n"
               << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
               << "  --gui  editor: no ascan/asfm/PLY sidecars, eval PNG\n"
@@ -686,7 +686,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Also write the aligned scene as a COLMAP text model into this folder",
          cxxopts::value<std::string>()->default_value(""))
         ("o,output",
-         "Output path (.ascan, .asfm, .ply, .mvs, or .sog/.spz/.glb/.usdc for Gaussians)",
+         "Output path (.ascan, .asfm, .ply, .mvs, or .sog/.sog-xt/.spz/.glb/.usdc for Gaussians)",
          cxxopts::value<std::string>())
         ("gui",
          "Editor run: skip ascan/asfm/PLY sidecars and eval dumps",
@@ -2310,7 +2310,7 @@ std::string lower_extension(const std::filesystem::path& path) {
 #if defined(PHOTARA_HAS_SPLAT)
 bool is_gaussian_output(const std::filesystem::path& path) {
     const auto extension = lower_extension(path);
-    return extension == ".sog" || extension == ".spz" || extension == ".glb" || extension == ".usdc";
+    return extension == ".sog" || extension == ".sog-xt" || extension == ".spz" || extension == ".glb" || extension == ".usdc";
 }
 
 std::filesystem::path splat_file_path(const ReconstructCli& cli) {
@@ -2381,6 +2381,7 @@ void run_splat_view(
         : cli.output.parent_path();
     const std::string stem = cli.output.stem().string() + "_splat";
     candidates.push_back(parent / (stem + ".sog"));
+    candidates.push_back(parent / (stem + ".sog-xt"));
     candidates.push_back(parent / (stem + ".spz"));
     candidates.push_back(parent / (stem + ".glb"));
     candidates.push_back(parent / (stem + ".usdc"));
@@ -2435,6 +2436,7 @@ photara::splat::GaussianModel load_trained_gaussians(
         : cli.output.parent_path();
     const std::string stem = cli.output.stem().string() + "_splat";
     candidates.push_back(parent / (stem + ".sog"));
+    candidates.push_back(parent / (stem + ".sog-xt"));
     candidates.push_back(parent / (stem + ".spz"));
     candidates.push_back(parent / (stem + ".glb"));
     candidates.push_back(parent / (stem + ".usdc"));

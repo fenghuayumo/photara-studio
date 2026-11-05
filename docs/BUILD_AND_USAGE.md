@@ -577,6 +577,79 @@ fields, defaults and declaration links.
 
 ## Logging and validation
 
+### SOG-XT Gaussian exports
+
+Select **SOG-XT** in Studio's **Export Splat** panel to write a `.sog-xt`
+file. The file can be reopened or dropped into Studio like `.sog` and `.spz`.
+Export runs in the background. The control API accepts `format: "sog-xt"`;
+when it returns `completed: false`, poll `studio.job.status` and inspect
+`splat_export.running` and `splat_export.error` before using the output.
+The reconstruction CLI recognizes `.sog-xt` output paths. The C++ API supports
+`GaussianFormat::sog_xt` and extension-based detection; Python exposes
+`GaussianFormat.SOG_XT` when the Python module is built.
+
+This is Photara's native implementation of the image-coding ideas in
+[KISS-GS](https://arxiv.org/abs/2608.26948), not the complete KISS-GS training
+pipeline. It keeps the Gaussian count, performs coarse-to-fine local assignment
+sorting of both position byte planes and SH codebooks, selects equivalent
+rotation/scale representatives with PRAS, and quantizes the attributes before
+lossless WebP encoding. Non-DC SH clustering uses the existing Vulkan backend;
+non-Vulkan builds have a bounded-memory hierarchical two-means CPU path.
+0-3 SH degrees, image-grid padding, and Mip2D metadata are supported. Bake
+Mip3D before exporting, as for SOG. Loaded attributes use the existing renderer;
+the smaller file does not imply smaller runtime GPU storage.
+
+The `.sog-xt` container is a ZIP with `container_meta.yaml` and WebP attribute
+images. Version 2 exports use the paper reference decoder's global position
+range, scalar opacity range, and channel-major SH range ordering. Optional
+native fields preserve SH degree, active count, and Mip2D mode; reference
+decoders can ignore them. The reader accepts both JSON and ordinary block YAML,
+old native v1 files, and unmarked reference-style WebP directories (including a
+direct `container_meta.yaml` path). Missing degree defaults to 3, missing count
+is inferred from the active mask, and missing quantization levels use the
+reference's observed-image-range normalization. Positions and SH remain in
+Photara's PLY coordinate frame. PNG/JPEG-XL containers are not supported.
+
+The build now requires `yaml-cpp` (`libyaml-cpp-dev` on Debian/Ubuntu, or the
+`yaml-cpp` vcpkg port). An independent NumPy decoder using the paper's reference
+layout cross-checks exported degree-3 files against the C++ decoder. This tests
+the reference conventions, not the authors' unreleased encoder. The CPU sorter
+and hierarchical clustering remain independent implementations. POPSpa pruning
+and encoding-aware fine-tuning are not performed by this export.
+
+A check on the supplied indoor iPhone scene, with 1,738,589 degree-3 Gaussians,
+gave the following results (decimal MB, same count, no pruning):
+
+| Format | Size | Encode | Decode | Mean PSNR vs original render |
+| --- | ---: | ---: | ---: | ---: |
+| PLY | 458.99 MB | 0.37 s | 0.41 s | Reference |
+| SOG | 30.41 MB | 4.67 s | 0.67 s | 35.31 dB |
+| SOG-XT | 26.17 MB | 74.13 s | 0.92 s | 35.22 dB |
+
+Eight evenly spaced registered cameras from the neighboring `sfm.bin` were
+rendered at an 800-pixel maximum dimension using the same CUDA raster settings.
+PSNR measures deviation from the original PLY render, not fidelity to source
+photographs. SOG-XT is 13.95% smaller, averaging 0.096 dB below SOG; its worst
+view is 0.639 dB below SOG. This is one scene, not a universal rate-distortion
+claim. Encoding is substantially slower and does not reduce GPU storage.
+Do not apply the paper's full-pipeline compression factors to this export.
+To repeat the measurement and retain files/screenshots after building tests:
+
+```powershell
+build/photara/Release/photara_splat_formats_test.exe --sog-xt-benchmark model.ply output-directory
+python scripts/test_sog_xt_reference.py output-directory/benchmark.sog-xt output-directory/decoded-sog-xt.ply output-directory/reference-container
+build/photara/Release/photara_splat_formats_test.exe --sog-xt-compare output-directory/reference-container output-directory/decoded-sog-xt.ply
+```
+
+The format tests also cover SH/position association after sorting, covariance
+preservation before PRAS quantization, opacity, constant attributes, single-point
+models, padding, ordinary reference-style YAML, and rejection of corrupt assets.
+The CLI RPC fixture tests cover waiting for asynchronous exports, returning
+their errors, and ignoring unrelated historical export failures when waiting
+for a training operation.
+
+### General validation
+
 Set `PHOTARA_LOG_LEVEL` to `error`, `warning`, `info`, `debug`, `trace`, or
 `off`. For development builds, enable `PHOTARA_BUILD_TESTS` and use CTest.
 Benchmark and diagnostic executables are available behind

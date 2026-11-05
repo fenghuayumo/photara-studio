@@ -560,7 +560,7 @@ void print_usage() {
         "  photara-ctl project set-dataset <path>\n"
         "  photara-ctl project save [path] [--overwrite]\n"
         "  photara-ctl view set key=value...\n"
-        "  photara-ctl export model --out PATH [--format ply|sog|spz|glb] [--sh-degree N] [--overwrite]\n"
+        "  photara-ctl export model --out PATH [--format ply|sog|sog-xt|spz|glb] [--sh-degree N] [--overwrite]\n"
         "  photara-ctl export mesh --out PATH [--format ply|obj|glb] [--include-texture] [--overwrite]\n"
         "  photara-ctl edit select_all|clear_selection|invert_selection|delete_selected|undo|redo\n"
         "  photara-ctl quality\n"
@@ -712,13 +712,18 @@ int main(const int argc, char** argv) {
             if (timeout_seconds < 1) return k_exit_usage;
             const auto begin = std::chrono::steady_clock::now();
             json last = json::object();
+            bool waiting_export = false;
             while (true) {
                 last = call("studio.job.status", params)["job"];
+                const auto export_state = last.value("splat_export", json::object());
+                if (!params.contains("op_id") && export_state.value("running", false)) waiting_export = true;
                 // Bind to the first observed operation; never follow a newer job.
-                if (!params.contains("op_id") && last.contains("op_id") && last["op_id"].is_string())
+                if (!waiting_export &&
+                    !params.contains("op_id") && last.contains("op_id") && last["op_id"].is_string())
                     params["op_id"] = last["op_id"];
-                const bool active = last.value("running", false) ||
-                                    last.value("preparing", false) || last.value("finishing", false);
+                const bool active = waiting_export ? export_state.value("running", false) : last.value("running", false) ||
+                                    last.value("preparing", false) || last.value("finishing", false) ||
+                                    last.value("splat_export", json::object()).value("running", false);
                 if (!active) break;
                 if (std::chrono::steady_clock::now() - begin >
                     std::chrono::seconds(std::max(1, timeout_seconds))) {
@@ -727,9 +732,16 @@ int main(const int argc, char** argv) {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
+            if (waiting_export && !last.value("timed_out", false)) {
+                last["last_error"] = last.value("splat_export", json::object()).value("error", std::string{});
+                last["status"] = last["last_error"].get<std::string>().empty() ? "succeeded" : "failed";
+                last["exit_code"] = last["status"] == "succeeded" ? 0 : 1;
+            }
             if (options.json_output) print_json(last, true);
             else print_job_human(last);
             if (last.value("timed_out", false)) return k_exit_timeout;
+            if (!params.contains("op_id") && !last.value("splat_export", json::object()).value("error", std::string{}).empty())
+                return k_exit_command;
             const std::string status = last.value("status", "idle");
             if (status == "failed" || status == "cancelled" ||
                 (!last["exit_code"].is_null() && last["exit_code"].get<int>() != 0) ||

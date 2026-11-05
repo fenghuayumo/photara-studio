@@ -19,6 +19,7 @@ enum class GaussianFormat {
     spz,
     glb,
     usdc,
+    sog_xt,
 };
 
 GaussianFormat parse_gaussian_format(std::string_view value);

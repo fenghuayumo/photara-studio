@@ -111,10 +111,12 @@ bool pick_file(
             {L"Point cloud (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC splat_model_filters[] = {
-            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb;*.usdc)", L"*.ply;*.sog;*.spz;*.glb;*.usdc"},
+            {L"Gaussian splat (*.ply;*.sog;*.sog-xt;*.spz;*.glb;*.usdc)", L"*.ply;*.sog;*.sog-xt;*.spz;*.glb;*.usdc"},
             {L"All files (*.*)", L"*.*"}};
         if (kind == FilePickKind::splat_model && default_extension != nullptr) {
-            if (std::wcscmp(default_extension, L"sog") == 0) {
+            if (std::wcscmp(default_extension, L"sog-xt") == 0) {
+                splat_model_filters[0] = {L"SOG-XT (*.sog-xt)", L"*.sog-xt"};
+            } else if (std::wcscmp(default_extension, L"sog") == 0) {
                 splat_model_filters[0] = {L"PlayCanvas SOG (*.sog)", L"*.sog"};
             } else if (std::wcscmp(default_extension, L"spz") == 0) {
                 splat_model_filters[0] = {L"Niantic SPZ (*.spz)", L"*.spz"};
@@ -225,8 +227,8 @@ bool pick_splat_model_files(
             FOS_ALLOWMULTISELECT);
         dialog->SetTitle(title);
         COMDLG_FILTERSPEC filters[] = {
-            {L"Mesh / Gaussian splat (*.obj;*.ply;*.sog;*.spz;*.glb;*.usdc)",
-             L"*.obj;*.ply;*.sog;*.spz;*.glb;*.usdc"},
+            {L"Mesh / Gaussian splat (*.obj;*.ply;*.sog;*.sog-xt;*.spz;*.glb;*.usdc)",
+             L"*.obj;*.ply;*.sog;*.sog-xt;*.spz;*.glb;*.usdc"},
             {L"All files (*.*)", L"*.*"}};
         dialog->SetFileTypes(2, filters);
         if (SUCCEEDED(dialog->Show(nullptr))) {
@@ -396,6 +398,8 @@ Filter filters_for(
     const FilePickKind kind, const wchar_t* default_extension) {
     const std::string extension = wide_to_utf8(default_extension);
     if (kind == FilePickKind::splat_model) {
+        if (extension == "sog-xt")
+            return {"SOG-XT (*.sog-xt)", "*.sog-xt"};
         if (extension == "sog")
             return {"PlayCanvas SOG (*.sog)", "*.sog"};
         if (extension == "spz") return {"Niantic SPZ (*.spz)", "*.spz"};
@@ -404,8 +408,8 @@ Filter filters_for(
             return {"Khronos Gaussian GLB (*.glb)", "*.glb"};
         if (extension == "ply") return {"Gaussian PLY (*.ply)", "*.ply"};
         return {
-            "Gaussian splat (*.ply *.sog *.spz *.glb *.usdc)",
-            "*.ply *.sog *.spz *.glb *.usdc"};
+            "Gaussian splat (*.ply *.sog *.sog-xt *.spz *.glb *.usdc)",
+            "*.ply *.sog *.sog-xt *.spz *.glb *.usdc"};
     }
     if (kind == FilePickKind::mesh) {
         if (extension == "obj") return {"Wavefront OBJ (*.obj)", "*.obj"};
@@ -564,7 +568,7 @@ bool pick_splat_model_files(
     const Captured captured = run_capture(
         {"zenity", "--file-selection", "--multiple", "--separator=\n",
          "--title=" + title_utf8,
-         "--file-filter=Gaussian splat | *.ply *.sog *.spz *.glb *.usdc",
+         "--file-filter=Gaussian splat | *.ply *.sog *.sog-xt *.spz *.glb *.usdc",
          "--file-filter=All files | *"});
     if (captured.status != 0) return false;
     std::string remainder = captured.output;

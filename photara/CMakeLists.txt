@@ -649,6 +649,7 @@ if(PHOTARA_ENABLE_FEATURES)
             POSITION_INDEPENDENT_CODE ON)
 
         find_package(nlohmann_json CONFIG REQUIRED)
+        find_package(yaml-cpp CONFIG REQUIRED)
         add_library(photara_splat
             src/splat/colmap.cpp
             src/splat/dataset.cpp
@@ -661,6 +662,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_adc_plus.cpp
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
+            src/splat/formats_sog_xt.cpp
             src/splat/formats_glb.cpp
             src/splat/formats_usdc.cpp
             src/splat/simplify.cpp
@@ -686,6 +688,11 @@ if(PHOTARA_ENABLE_FEATURES)
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
         target_compile_features(photara_splat PUBLIC cxx_std_20)
         target_link_libraries(photara_splat PRIVATE nlohmann_json::nlohmann_json)
+        if(TARGET yaml-cpp::yaml-cpp)
+            target_link_libraries(photara_splat PRIVATE yaml-cpp::yaml-cpp)
+        else()
+            target_link_libraries(photara_splat PRIVATE yaml-cpp)
+        endif()
         target_link_libraries(photara_splat PUBLIC
             Photara::MVS
             photara_splat_cuda

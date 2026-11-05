@@ -251,6 +251,7 @@ NB_MODULE(photara, module) {
         .value("AUTO", splat::GaussianFormat::auto_detect)
         .value("PLY", splat::GaussianFormat::ply)
         .value("SOG", splat::GaussianFormat::sog)
+        .value("SOG_XT", splat::GaussianFormat::sog_xt)
         .value("SPZ", splat::GaussianFormat::spz)
         .value("GLB", splat::GaussianFormat::glb)
         .value("USDC", splat::GaussianFormat::usdc);

@@ -278,7 +278,7 @@ void draw_splat_export_modal(App& app) {
     auto& state = app.splat_export;
     const bool running = state.job.valid();
     ImGui::BeginDisabled(running);
-    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming"), tr("Collision Mesh")
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB", tr("LOD Streaming"), tr("Collision Mesh"), "SOG-XT"
 #ifdef PHOTARA_HAS_USDC
         , "USDC (OpenUSD 3DGS)"
 #endif
@@ -297,6 +297,8 @@ void draw_splat_export_modal(App& app) {
     else if (state.format == 5)
         theme::caption("Gaussian voxelization, sparse octree, and collision GLB.");
     else if (state.format == 6)
+        theme::caption("SOG-XT compressed Gaussians (.sog-xt).");
+    else if (state.format == 7)
         theme::caption("OpenUSD ParticleField3DGaussianSplat with full SH data.");
     else
         theme::caption("Standard 3DGS PLY.");

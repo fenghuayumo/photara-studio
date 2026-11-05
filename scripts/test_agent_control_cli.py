@@ -80,6 +80,28 @@ class CliContracts(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.server.requests[-1]['params'], {'op_id': 'op_10'})
 
+    def test_previous_export_failure_does_not_fail_training_wait(self):
+        code, _ = self.run_cli(['job', 'wait', '--op', 'new_train'], lambda _: {
+            'ok': True, 'job': {'op_id': 'new_train', 'running': False,
+                'status': 'succeeded', 'exit_code': 0,
+                'splat_export': {'running': False, 'error': 'old export failure'}}})
+        self.assertEqual(code, 0)
+
+    def test_wait_for_background_export(self):
+        for error, expected in [('', 0), ('Cannot write export', 2)]:
+            with self.subTest(error=error):
+                self.server.requests = []
+                def respond(request):
+                    self.assertEqual(request['params'], {})
+                    running = len(self.server.requests) == 1
+                    return {'ok': True, 'job': {'op_id': 'old_training', 'running': False,
+                        'status': 'idle', 'exit_code': None,
+                        'splat_export': {'running': running, 'error': '' if running else error}}}
+                code, body = self.run_cli(['job', 'wait'], respond)
+                self.assertEqual(code, expected)
+                self.assertGreaterEqual(len(self.server.requests), 2)
+                self.assertFalse(body['splat_export']['running'])
+
     def test_unknown_operation(self):
         code, body = self.run_cli(['job', 'wait', '--op', 'missing'], lambda _: {
             'ok': False, 'error': {'code': 'NOT_FOUND', 'message': 'Unknown operation'}})

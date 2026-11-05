@@ -1072,7 +1072,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         (aligning || !app.has_sparse || app.suppress_scene_auto_load)) {
         const char* headline = tr("Drop photos, a video, 3DGS, or a mesh");
         const char* hint = tr(
-            "Drop photos, video, 3DGS (PLY/SOG/SPZ/GLB/USDC), mesh (PLY/OBJ), .asfm, or .ascan");
+            "Drop photos, video, 3DGS (PLY/SOG/SOG-XT/SPZ/GLB/USDC), mesh (PLY/OBJ), .asfm, or .ascan");
         if (aligning) {
             const Stage stage = app.monitor.stage();
             if (stage == Stage::preparing) {

@@ -170,9 +170,9 @@ std::filesystem::path existing_splat_model(const App& app) {
     const auto imported = path_from_utf8_field(app.settings.splat_model_source.data());
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
-    const std::array<std::filesystem::path, 7> candidates = {
+    const std::array<std::filesystem::path, 8> candidates = {
         app.layout.working_splat, app.layout.splat_model, app.layout.splat_ply,
-        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc};
+        app.layout.splat_sog, app.layout.splat_sog_xt, app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc};
     for (const auto& candidate : candidates)
         if (std::filesystem::exists(candidate, error)) return candidate;
     return {};
@@ -464,7 +464,8 @@ photara::project::Settings collect_project_settings(const App& app) {
             ? "sog"
             : app.settings.splat_format == 3 ? "spz"
             : app.settings.splat_format == 4 ? "glb"
-            : app.settings.splat_format == 5 ? "usdc" : "auto";
+            : app.settings.splat_format == 5 ? "usdc"
+            : app.settings.splat_format == 6 ? "sog-xt" : "auto";
     settings.camera_model = app.settings.camera_model;
     settings.alignment_quality = app.settings.alignment_quality;
     settings.alignment_capture_type = app.settings.alignment_capture_type;
@@ -592,6 +593,8 @@ void apply_project_settings(
         app.settings.splat_format = 4;
     else if (settings.splat_output_format == "usdc")
         app.settings.splat_format = 5;
+    else if (settings.splat_output_format == "sog-xt")
+        app.settings.splat_format = 6;
     else
         app.settings.splat_format = 0;
     app.settings.camera_model = settings.camera_model;
@@ -974,6 +977,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                      splat == app.layout.splat_ply ||
                      splat == app.layout.splat_model ||
                      splat == app.layout.splat_sog ||
+                     splat == app.layout.splat_sog_xt ||
                      splat == app.layout.splat_spz ||
                      splat == app.layout.splat_glb || splat == app.layout.splat_usdc);
                 if (project_owned)
@@ -2143,7 +2147,8 @@ photara::splat::GaussianFormat splat_export_format(const App& app) {
         case 1: return photara::splat::GaussianFormat::sog;
         case 2: return photara::splat::GaussianFormat::spz;
         case 3: return photara::splat::GaussianFormat::glb;
-        case 6: return photara::splat::GaussianFormat::usdc;
+        case 6: return photara::splat::GaussianFormat::sog_xt;
+        case 7: return photara::splat::GaussianFormat::usdc;
         default: return photara::splat::GaussianFormat::ply;
     }
 }
@@ -2153,7 +2158,8 @@ const wchar_t* splat_export_extension_wide(const App& app) {
         case 1: return L"sog";
         case 2: return L"spz";
         case 3: return L"glb";
-        case 6: return L"usdc";
+        case 6: return L"sog-xt";
+        case 7: return L"usdc";
         default: return L"ply";
     }
 }
@@ -2163,9 +2169,10 @@ int splat_export_format_from_settings(const int settings_format) {
         case 2: return 1;
         case 3: return 2;
         case 4: return 3;
+        case 6: return 6;
         case 5:
 #ifdef PHOTARA_HAS_USDC
-            return 6;
+            return 7;
 #else
             return 0;
 #endif
@@ -2178,7 +2185,8 @@ int splat_settings_format_from_export(const int export_format) {
         case 1: return 2;
         case 2: return 3;
         case 3: return 4;
-        case 6: return 5;
+        case 6: return 6;
+        case 7: return 5;
         default: return 1;
     }
 }
@@ -2196,7 +2204,8 @@ std::filesystem::path suggested_splat_export_path(
         case 3: path += ".glb"; break;
         case 4: path += "_lod"; break;
         case 5: path += "_collision"; break;
-        case 6: path += ".usdc"; break;
+        case 6: path += ".sog-xt"; break;
+        case 7: path += ".usdc"; break;
         default: path += ".ply"; break;
     }
     return path;
@@ -2667,6 +2676,19 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
             return true;
         }
         photara::splat::restrict_sh_degree(model, export_degree);
+        if (format == photara::splat::GaussianFormat::sog_xt) {
+            app.splat_export.output = std::filesystem::absolute(out);
+            app.splat_export.error.clear();
+            app.splat_export.cancel.reset();
+            app.splat_export.progress.reset();
+            app.splat_export.job = std::async(std::launch::async,
+                [model = std::move(model), out = app.splat_export.output] {
+                    photara::splat::save_gaussians(model, out, photara::splat::GaussianFormat::sog_xt);
+                });
+            app.settings.splat_format = splat_settings_format_from_export(app.splat_export.format);
+            set_message(app, "Encoding SOG-XT...", theme::success);
+            return true;
+        }
         photara::splat::save_gaussians(model, out, format);
         app.settings.splat_format =
             splat_settings_format_from_export(app.splat_export.format);
@@ -3446,9 +3468,9 @@ void delete_reconstruction_results(App& app) {
 
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 25> generated_files = {
+    const std::array<std::filesystem::path, 26> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
-        app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
+        app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog, app.layout.splat_sog_xt,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.splat_usdc, app.layout.mesh_ply,
         app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
         app.layout.dense_ply, app.layout.working_splat, app.layout.working_mesh,

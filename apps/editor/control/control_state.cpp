@@ -338,6 +338,8 @@ std::string state_revision_key(const App& app) {
         {"has_mesh", app.has_mesh},
         {"has_texture", app.has_texture},
         {"dirty", app.project_results_dirty},
+        {"splat_export", {{"running", app.splat_export.job.valid()},
+                          {"error", app.splat_export.error}}},
         {"job", {
             {"kind", static_cast<int>(app.active_job)},
             {"running", app.job.running()},
@@ -395,6 +397,8 @@ json snapshot_job(const App& app, const ControlBus& bus) {
     job["client"] = bus.active_client().empty()
         ? json(nullptr) : json(bus.active_client());
     job["last_error"] = last_error;
+    job["splat_export"] = {{"running", app.splat_export.job.valid()},
+        {"path", path_to_utf8(app.splat_export.output)}, {"error", app.splat_export.error}};
     json training_json = json::object();
     training_json["iteration"] = training.iteration;
     training_json["total_iterations"] = training.total_iterations;
@@ -619,7 +623,7 @@ json describe_schema() {
         fields.push_back(setting_spec(
             "splat_format", "enum", "Gaussian export format.",
             nullptr, nullptr, 0,
-            json::array({"auto", "ply", "sog", "spz", "glb", "usdc"})));
+            json::array({"auto", "ply", "sog", "spz", "glb", "usdc", "sog-xt"})));
         groups.push_back({
             {"id", "export"},
             {"label", "Export"},
@@ -1112,7 +1116,7 @@ json apply_parameter_patch(App& app, const json& patch) {
         int value{};
         if (!read_choice(
                 patch["splat_format"], "splat_format",
-                {"auto", "ply", "sog", "spz", "glb", "usdc"}, value, message))
+                {"auto", "ply", "sog", "spz", "glb", "usdc", "sog-xt"}, value, message))
             return invalid(message);
         settings.splat_format = value;
         note("splat_format");

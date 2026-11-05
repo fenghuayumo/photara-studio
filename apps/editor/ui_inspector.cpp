@@ -816,7 +816,7 @@ Action draw_inspector(App& app) {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Load an existing PLY, SOG, SPZ, or GLB model for preview. "
+                "Load an existing PLY, SOG, SOG-XT, SPZ, or GLB model for preview. "
                 "When set, it takes precedence over the trained working copy.");
         ImGui::EndDisabled();
         ImGui::Spacing();
@@ -1101,7 +1101,7 @@ Action draw_inspector(App& app) {
             open_splat_export_panel(app);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
-                "Save the trained Gaussians. Choose PLY, SOG, SPZ, or GLB\n"
+                "Save the trained Gaussians. Choose PLY, SOG, SOG-XT, SPZ, or GLB\n"
                 "and the spherical-harmonics degree."));
         ImGui::Spacing();
     }

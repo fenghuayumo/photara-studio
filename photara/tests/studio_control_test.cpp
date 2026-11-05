@@ -142,6 +142,17 @@ int main() {
         require(photara::splat::load_gaussians(exported, tinytensor::Device::CPU).size() == 1, "exported model invalid");
         require(error_code(call("studio.export.model", {{"path", editor::path_to_utf8(exported)}})) == "ALREADY_EXISTS", "export overwrote without request");
         require(ok(call("studio.export.model", {{"path", editor::path_to_utf8(exported)}, {"overwrite", true}})), "explicit overwrite failed");
+        const auto xt = folder / "model.sog-xt";
+        const auto result = call("studio.export.model", {{"path", editor::path_to_utf8(xt)}, {"format", "sog-xt"}, {"sh_degree", 0}});
+        require(ok(result) && app.splat_export.job.valid(), "SOG-XT export did not start in background");
+        require(snapshot_job(app, bus).at("splat_export").at("running").get<bool>(), "SOG-XT export status unavailable");
+        app.splat_export.job.wait();
+        editor::poll_splat_export(app);
+        require(app.splat_export.error.empty() && !app.splat_export.job.valid() &&
+                photara::splat::load_gaussians(xt, tinytensor::Device::CPU).size() == 1,
+                "Background SOG-XT export failed");
+        require(ok(call("studio.params.patch", {{"patch", {{"splat_format", "sog-xt"}}}})) &&
+                app.settings.splat_format == 6, "SOG-XT settings patch failed");
         const auto project = folder / "session.ascan";
         require(ok(call("studio.project.save", {{"path", editor::path_to_utf8(project)}})), "project save failed");
         const auto archive = photara::project::Archive::open(project);

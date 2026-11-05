@@ -20,7 +20,7 @@ inline ModelImportKind model_import_kind(const std::filesystem::path& path) {
     std::transform(extension.begin(), extension.end(), extension.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (extension == ".obj") return ModelImportKind::mesh;
-    if (extension == ".sog" || extension == ".spz" ||
+    if (extension == ".sog" || extension == ".sog-xt" || extension == ".spz" ||
         extension == ".glb" || extension == ".usdc")
         return ModelImportKind::gaussians;
     if (extension != ".ply") return ModelImportKind::none;

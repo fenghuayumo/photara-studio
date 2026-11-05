@@ -2,6 +2,12 @@
 #include "splat/deployment.hpp"
 #include "../src/splat/sog_quantization.hpp"
 #include "../src/splat/sog_vulkan.hpp"
+#include "../src/splat/formats_sog_xt.hpp"
+#include "splat/rasterizer.hpp"
+#include "sfm/asfm.hpp"
+#include "io/image.hpp"
+#include <Eigen/Geometry>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -259,6 +265,233 @@ void roundtrip(const std::filesystem::path& folder, unsigned n, unsigned degree,
               << " seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
               << " bytes=" << std::filesystem::file_size(file) << '\n';
 }
+Eigen::Matrix3f covariance(const std::vector<float>& q, const std::vector<float>& s, std::size_t i) {
+    Eigen::Quaternionf rotation(q[i * 4], q[i * 4 + 1], q[i * 4 + 2], q[i * 4 + 3]);
+    rotation.normalize();
+    Eigen::Vector3f variance;
+    for (unsigned d = 0; d < 3; ++d) variance[d] = std::exp(2 * s[i * 3 + d]);
+    return rotation.toRotationMatrix() * variance.asDiagonal() * rotation.toRotationMatrix().transpose();
+}
+
+void sog_xt(const std::filesystem::path& folder, unsigned n = 17) {
+    require(parse_gaussian_format("SOG-XT") == GaussianFormat::sog_xt &&
+            gaussian_format_from_path("test.SOG-XT") == GaussianFormat::sog_xt &&
+            std::string(gaussian_format_name(GaussianFormat::sog_xt)) == "sog-xt" &&
+            std::string(gaussian_format_extension(GaussianFormat::sog_xt)) == "sog-xt",
+            "SOG-XT format dispatch failed");
+    for (unsigned degree = 0; degree <= 3; ++degree) {
+        auto model = fixture(n, degree);
+        const unsigned bases = (degree + 1) * (degree + 1);
+        auto positions = model.means.to_vector(), scales = model.log_scales.to_vector();
+        auto rotations = model.quaternions.to_vector(), sh = model.sh.to_vector();
+        std::vector<float> logits(n);
+        for (unsigned i = 0; i < n; ++i) {
+            // Stable row IDs recover attribute correspondence after arbitrary sorting.
+            positions[i * 3] = float(i) * .01F;
+            positions[i * 3 + 1] = -1.F;
+            rotations[i * 4] = std::cos(float(i % 13) * .1F);
+            rotations[i * 4 + 1] = std::sin(float(i % 13) * .1F);
+            if (i % 2) for (unsigned d = 0; d < 4; ++d) rotations[i * 4 + d] *= -1;
+            scales[i * 3] = -2.2F;
+            scales[i * 3 + 1] = -1.6F;
+            scales[i * 3 + 2] = -3.F;
+            logits[i] = float(i % 7) - 3;
+            for (unsigned b = 0; b < bases; ++b) for (unsigned c = 0; c < 3; ++c)
+                sh[(std::size_t(i) * bases + b) * 3 + c] = .03F * float(b * 3 + c) + (i % 2 ? -.2F : .2F);
+        }
+        constexpr auto cpu = tinytensor::Device::CPU;
+        model.means = tinytensor::Tensor::from_vector(positions, {n, 3}, cpu);
+        model.log_scales = tinytensor::Tensor::from_vector(scales, {n, 3}, cpu);
+        model.quaternions = tinytensor::Tensor::from_vector(rotations, {n, 4}, cpu);
+        model.opacity_logits = tinytensor::Tensor::from_vector(logits, {n, 1}, cpu);
+        model.sh = tinytensor::Tensor::from_vector(sh, {n, bases, 3}, cpu);
+        model.filter_mode = degree % 2 ? SplatFilterMode::mip_2d : SplatFilterMode::classic;
+        const auto path = folder / ("roundtrip-" + std::to_string(degree) + ".sog-xt");
+        const auto start = std::chrono::steady_clock::now();
+        save_gaussians(model, path);
+        const auto restored = load_gaussians(path, cpu);
+        require(restored.size() == n && restored.sh_degree == degree &&
+                restored.filter_mode == model.filter_mode, "SOG-XT changed shape or metadata");
+        const auto p = restored.means.to_vector(), s = restored.log_scales.to_vector();
+        const auto q = restored.quaternions.to_vector(), h = restored.sh.to_vector();
+        const auto a = restored.opacity_logits.to_vector();
+        float log_min = std::numeric_limits<float>::max(), log_max = std::numeric_limits<float>::lowest();
+        for (float value : positions) {
+            const float encoded = std::copysign(std::log1p(std::abs(value)), value);
+            log_min = std::min(log_min, encoded); log_max = std::max(log_max, encoded);
+        }
+        const double half_step = (double(log_max) - log_min) / (2 * 65535);
+        std::vector<bool> seen(n);
+        for (unsigned row = 0; row < n; ++row) {
+            const auto original = unsigned(std::lround(p[row * 3] / .01F));
+            require(original < n && !seen[original], "SOG-XT lost, duplicated or misplaced a Gaussian");
+            seen[original] = true;
+            for (unsigned d = 0; d < 3; ++d) {
+                const float value = positions[original * 3 + d];
+                const double bound = (1 + std::abs(value)) * std::expm1(half_step) * 1.01 + 2e-6;
+                require(std::abs(p[row * 3 + d] - value) <= bound, "SOG-XT position quantization exceeds half-step bound");
+            }
+            require((covariance(q, s, row) - covariance(rotations, scales, original)).norm() /
+                    covariance(rotations, scales, original).norm() < .055F, "SOG-XT changed Gaussian covariance");
+            require(std::abs(a[row] - logits[original]) < .025F, "SOG-XT detached opacity");
+            for (unsigned b = 0; b < bases * 3; ++b)
+                require(std::abs(h[std::size_t(row) * bases * 3 + b] - sh[std::size_t(original) * bases * 3 + b]) < .006F,
+                        "SOG-XT detached or corrupted SH coefficients");
+        }
+        std::cout << "sog-xt n=" << n << " degree=" << degree << " bytes=" << std::filesystem::file_size(path)
+                  << " seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << '\n';
+        if (n <= 17) {
+            const auto assets = detail::encode_sog_xt(model);
+            if (degree == 3) {
+                auto external = assets;
+                auto meta = nlohmann::json::parse(assets.at("container_meta.yaml"));
+                meta.erase("format"); meta.erase("version");
+                meta["meta"].erase("count"); meta["meta"].erase("sh_degree");
+                for (auto& op : meta["ops"]) for (auto& transform : op["transforms"])
+                    if (transform.contains("simple_quantize")) transform["simple_quantize"].erase("levels");
+                const std::string yaml = "meta:\n  grid_side: " + meta["meta"]["grid_side"].dump() +
+                    "\n  f_rest_centroids_side: " + meta["meta"]["f_rest_centroids_side"].dump() +
+                    "\n  image_codec: webp\nops: " + meta["ops"].dump() + "\n";
+                external["container_meta.yaml"].assign(yaml.begin(), yaml.end());
+                const auto expected = detail::decode_sog_xt(assets);
+                const auto actual = detail::decode_sog_xt(external);
+                require(actual.count == n && actual.degree == 3, "Reference YAML inference failed");
+                for (std::size_t i = 0; i < actual.sh.size(); ++i)
+                    require(std::abs(actual.sh[i] - expected.sh[i]) < 1e-5F, "Reference SH ordering differs");
+                for (std::size_t i = 0; i < actual.means.size(); ++i)
+                    require(std::abs(actual.means[i] - expected.means[i]) < 1e-5F, "Reference means differ");
+                const auto directory = folder / ("external-" + std::to_string(n));
+                std::filesystem::create_directories(directory);
+                for (const auto& [name, bytes] : external) {
+                    std::ofstream out(directory / name, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                }
+                require(load_gaussians(directory, cpu).size() == n &&
+                        load_gaussians(directory / "container_meta.yaml", cpu).size() == n,
+                        "Reference SOG-XT directory detection failed");
+            }
+            const auto rejects = [&](detail::SogXtFiles invalid) {
+                bool rejected = false;
+                try { (void)detail::decode_sog_xt(invalid); } catch (const std::exception&) { rejected = true; }
+                require(rejected, "SOG-XT accepted corrupt assets");
+            };
+            auto invalid = assets;
+            invalid.erase("active_mask.webp"); rejects(std::move(invalid));
+            invalid = assets;
+            invalid["scales.webp"] = {0, 1, 2}; rejects(std::move(invalid));
+            invalid = assets;
+            auto& text = invalid["container_meta.yaml"];
+            std::string json(text.begin(), text.end());
+            const auto key = json.find("\"count\":17");
+            if (n == 17) {
+                require(key != std::string::npos, "SOG-XT metadata omitted count");
+                json.replace(key, 10, "\"count\":18");
+                text.assign(json.begin(), json.end()); rejects(std::move(invalid));
+            }
+        }
+    }
+}
+
+void sog_xt_covariance_symmetry() {
+    constexpr unsigned side = 8, n = side * side;
+    std::vector<float> q(n * 4), scales(n * 3), features(n * 3);
+    std::vector<std::uint8_t> active(n, 1);
+    for (unsigned i = 0; i < n; ++i) {
+        const Eigen::Quaternionf rotation(Eigen::AngleAxisf(float(i) * .21F, Eigen::Vector3f(1, 2, 3).normalized()));
+        q[i * 4] = rotation.w(); q[i * 4 + 1] = rotation.x(); q[i * 4 + 2] = rotation.y(); q[i * 4 + 3] = rotation.z();
+        for (unsigned d = 0; d < 3; ++d) { scales[i * 3 + d] = -float((i + d) % 5) * .7F; features[i * 3 + d] = float((i * 17 + d) % 19); }
+    }
+    const auto before_q = q, before_scales = scales;
+    detail::sog_xt_pras(q, scales, active, side);
+    for (unsigned i = 0; i < n; ++i)
+        require((covariance(q, scales, i) - covariance(before_q, before_scales, i)).norm() < 2e-6F,
+                "PRAS changed covariance before quantization");
+    auto order = detail::sog_xt_layout(features, side, 3);
+    std::sort(order.begin(), order.end());
+    for (unsigned i = 0; i < n; ++i) require(order[i] == i, "SOG-XT layout is not a permutation");
+}
+
+void sog_xt_benchmark(const std::filesystem::path& folder, const std::filesystem::path& source) {
+    std::filesystem::create_directories(folder);
+    auto model = load_gaussians(source, tinytensor::Device::CPU);
+    bake_gaussian_3d_filter(model);
+    std::vector<Camera> cameras;
+    const auto sfm_path = source.parent_path() / "sfm.bin";
+    if (std::filesystem::exists(sfm_path)) {
+        const auto scene = photara::sfm::load_asfm(sfm_path);
+        std::vector<unsigned> registered;
+        for (unsigned i = 0; i < scene.images.size(); ++i) if (scene.images[i].registered) registered.push_back(i);
+        for (unsigned v = 0; v < std::min<std::size_t>(8, registered.size()); ++v) {
+            const auto& image = scene.images[registered[std::size_t(v) * registered.size() / std::min<std::size_t>(8, registered.size())]];
+            const auto& intrinsic = scene.camera_of(image);
+            const double factor = std::min(1.0, 800.0 / std::max(intrinsic.width, intrinsic.height));
+            Camera camera;
+            camera.width = unsigned(std::lround(intrinsic.width * factor));
+            camera.height = unsigned(std::lround(intrinsic.height * factor));
+            camera.fx = float(intrinsic.fx * factor); camera.fy = float(intrinsic.fy * factor);
+            camera.cx = float(intrinsic.cx * factor); camera.cy = float(intrinsic.cy * factor);
+            camera.model = intrinsic.model;
+            camera.k1 = float(intrinsic.k1); camera.k2 = float(intrinsic.k2);
+            camera.k3 = float(intrinsic.p1); camera.k4 = float(intrinsic.p2);
+            const photara::sfm::Vec3 translation = image.pose.translation();
+            for (unsigned r = 0; r < 4; ++r) for (unsigned c = 0; c < 4; ++c)
+                camera.world_to_camera[c * 4 + r] = r < 3 ? float(c < 3 ? image.pose.R(r,c) : translation[r]) : float(c == 3);
+            for (unsigned d = 0; d < 3; ++d) camera.position[d] = float(image.pose.C[d]);
+            cameras.push_back(camera);
+        }
+    }
+    const auto render = [&](GaussianModel gpu, const std::string& name) {
+        for (auto* tensor : {&gpu.means, &gpu.log_scales, &gpu.quaternions, &gpu.opacity_logits, &gpu.sh, &gpu.normal_features})
+            if (tensor->is_valid()) *tensor = tensor->to(tinytensor::Device::CUDA);
+        std::vector<std::vector<float>> images;
+        RasterizeOptions options;
+        options.active_sh_degree = gpu.sh_degree; options.require_depth = false; options.record_backward_state = false;
+        options.kernel_size = gpu.filter_mode == SplatFilterMode::mip_2d ? .1F : .3F;
+        options.rasterization.compensate_2d = gpu.filter_mode == SplatFilterMode::mip_2d;
+        for (unsigned v = 0; v < cameras.size(); ++v) {
+            const auto& camera = cameras[v];
+            auto rgb = Rasterizer{}.forward(gpu, camera, options).color.to_vector();
+            const auto pixels = std::size_t(camera.width) * camera.height;
+            photara::io::RgbImage image{camera.width, camera.height, std::vector<std::uint8_t>(pixels * 3)};
+            for (std::size_t i = 0; i < pixels; ++i) for (unsigned c = 0; c < 3; ++c)
+                image.pixels[i * 3 + c] = std::uint8_t(std::lround(std::clamp(rgb[c * pixels + i], 0.F, 1.F) * 255));
+            photara::io::save_rgb_png(image, folder / (name + "-view-" + std::to_string(v) + ".png"));
+            images.push_back(std::move(rgb));
+        }
+        return images;
+    };
+    const auto reference_images = cameras.empty() ? std::vector<std::vector<float>>{} : render(model, "original");
+    std::cout << "Encoding benchmark n=" << model.size() << " degree=" << model.sh_degree << std::endl;
+    for (auto format : {GaussianFormat::ply, GaussianFormat::sog, GaussianFormat::sog_xt}) {
+        const auto path = folder / (std::string("benchmark.") + gaussian_format_extension(format));
+        const auto start = std::chrono::steady_clock::now();
+        save_gaussians(model, path);
+        const auto encoded = std::chrono::steady_clock::now();
+        const auto restored = load_gaussians(path, tinytensor::Device::CPU);
+        require(restored.size() == model.size() && restored.sh_degree == model.sh_degree,
+                "Encoding benchmark changed model shape");
+        std::cout << gaussian_format_name(format) << " bytes=" << std::filesystem::file_size(path)
+                  << " encode_seconds=" << std::chrono::duration<double>(encoded - start).count()
+                  << " decode_seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - encoded).count()
+                  << std::endl;
+        if (format == GaussianFormat::sog_xt) save_gaussians(restored, folder / "decoded-sog-xt.ply");
+        if (!cameras.empty() && format != GaussianFormat::ply) {
+            const auto images = render(restored, gaussian_format_name(format));
+            double mean_psnr = 0;
+            for (unsigned v = 0; v < images.size(); ++v) {
+                double mse = 0;
+                for (std::size_t i = 0; i < images[v].size(); ++i) {
+                    const double delta = double(images[v][i]) - reference_images[v][i]; mse += delta * delta;
+                }
+                mse /= images[v].size();
+                const double psnr = -10 * std::log10(std::max(mse, 1e-15)); mean_psnr += psnr;
+                std::cout << gaussian_format_name(format) << " view=" << v << " psnr_vs_original=" << psnr << " mse=" << mse << std::endl;
+            }
+            std::cout << gaussian_format_name(format) << " mean_psnr_vs_original=" << mean_psnr / images.size() << std::endl;
+        }
+    }
+}
+
 #if defined(TINYTENSOR_HAS_VULKAN)
 void gpu_clustering(unsigned n, unsigned budget) {
     constexpr unsigned dims = 45;
@@ -340,19 +573,38 @@ void streamed_palette(const std::filesystem::path& folder) {
 }
 #endif
 } // namespace
-int main(int argc, char** argv) {
+int run_tests(int argc, char** argv) {
     try {
         const bool gpu = argc > 1 && std::string(argv[1]) == "--vulkan";
         const auto folder = std::filesystem::temp_directory_path() / ("photara-formats-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(folder);
         struct Cleanup { std::filesystem::path p; ~Cleanup() { std::error_code e; std::filesystem::remove_all(p, e); } } cleanup{folder};
+        if (argc > 3 && std::string(argv[1]) == "--sog-xt-compare") {
+            const auto actual = load_gaussians(std::filesystem::u8path(argv[2]), tinytensor::Device::CPU);
+            const auto expected = load_gaussians(std::filesystem::u8path(argv[3]), tinytensor::Device::CPU);
+            require(actual.size() == expected.size() && actual.sh_degree == expected.sh_degree, "External container shape mismatch");
+            const tinytensor::Tensor* a[] = {&actual.means, &actual.log_scales, &actual.quaternions, &actual.opacity_logits, &actual.sh};
+            const tinytensor::Tensor* b[] = {&expected.means, &expected.log_scales, &expected.quaternions, &expected.opacity_logits, &expected.sh};
+            for (unsigned t = 0; t < 5; ++t) {
+                const auto av = a[t]->to_vector(), bv = b[t]->to_vector();
+                for (std::size_t i = 0; i < av.size(); ++i)
+                    require(std::abs(av[i] - bv[i]) <= 2e-5F * (1 + std::abs(bv[i])), "External YAML decoded attributes differ");
+            }
+            std::cout << "External YAML comparison passed n=" << actual.size() << '\n';
+            return 0;
+        }
+        if (argc > 2 && std::string(argv[1]) == "--sog-xt-benchmark") {
+            sog_xt_benchmark(argc > 3 ? std::filesystem::u8path(argv[3]) : folder, std::filesystem::u8path(argv[2]));
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--ply-load-benchmark") {
             ply_load_benchmark(folder);
             return 0;
         }
         if (gpu) {
 #if defined(TINYTENSOR_HAS_VULKAN)
+            sog_xt(folder, 2049);
             gpu_clustering(2049, 64);
             gpu_clustering(262145, 1024); // GPU upload-batch boundary and degree-3 SH.
             gpu_clustering_quality();
@@ -363,6 +615,9 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Vulkan test requires Vulkan build");
 #endif
         } else {
+            sog_xt_covariance_symmetry();
+            sog_xt(folder);
+            sog_xt(folder, 1);
             ply_loading(folder);
             antialias_metadata(folder);
             gut_exports(folder);
@@ -378,3 +633,18 @@ int main(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    std::vector<std::string> storage;
+    for (int i = 0; i < argc; ++i) {
+        const auto utf8 = std::filesystem::path(argv[i]).u8string();
+        storage.emplace_back(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+    }
+    std::vector<char*> args;
+    for (auto& arg : storage) args.push_back(arg.data());
+    return run_tests(argc, args.data());
+}
+#else
+int main(int argc, char** argv) { return run_tests(argc, argv); }
+#endif

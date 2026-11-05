@@ -2,6 +2,7 @@
 
 #include "formats_glb.hpp"
 #include "formats_usdc.hpp"
+#include "formats_sog_xt.hpp"
 #include "format_coordinates.hpp"
 #include "sog_quantization.hpp"
 #include "sog_vulkan.hpp"
@@ -1415,6 +1416,8 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
         return GaussianFormat::ply;
     if (normalized == "sog")
         return GaussianFormat::sog;
+    if (normalized == "sog-xt")
+        return GaussianFormat::sog_xt;
     if (normalized == "spz")
         return GaussianFormat::spz;
     if (normalized == "glb")
@@ -1423,13 +1426,15 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
         return GaussianFormat::usdc;
     throw std::invalid_argument(
         "Unknown splat output format '" + std::string(value) +
-        "' (expected auto, ply, sog, spz, glb, or usdc)");
+        "' (expected auto, ply, sog, sog-xt, spz, glb, or usdc)");
 }
 
 GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noexcept {
     const auto extension = lower(path.extension().string());
     if (extension == ".sog")
         return GaussianFormat::sog;
+    if (extension == ".sog-xt")
+        return GaussianFormat::sog_xt;
     if (extension == ".spz")
         return GaussianFormat::spz;
     if (extension == ".glb")
@@ -1441,6 +1446,8 @@ GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noex
 
 const char* gaussian_format_name(const GaussianFormat format) noexcept {
     switch (format) {
+    case GaussianFormat::sog_xt:
+        return "sog-xt";
     case GaussianFormat::auto_detect:
         return "auto";
     case GaussianFormat::ply:
@@ -1459,6 +1466,8 @@ const char* gaussian_format_name(const GaussianFormat format) noexcept {
 
 const char* gaussian_format_extension(const GaussianFormat format) noexcept {
     switch (format) {
+    case GaussianFormat::sog_xt:
+        return "sog-xt";
     case GaussianFormat::auto_detect:
         return "";
     case GaussianFormat::ply:
@@ -1809,6 +1818,16 @@ void save_gaussians(
     case GaussianFormat::sog:
         write_file(path, save_sog(model));
         return;
+    case GaussianFormat::sog_xt: {
+        std::size_t count = 0, bases = 0;
+        validate_model_shape(model, count, bases);
+        auto assets = detail::encode_sog_xt(model);
+        std::vector<ZipEntry> entries;
+        for (auto& [name, bytes] : assets)
+            entries.push_back({name, std::move(bytes)});
+        write_file(path, make_sog_zip(entries));
+        return;
+    }
     case GaussianFormat::spz:
         write_file(path, save_spz_v4(model));
         return;
@@ -1829,7 +1848,10 @@ GaussianModel load_gaussians(
     GaussianFormat format,
     const tinytensor::Device device) {
     if (format == GaussianFormat::auto_detect) {
-        format = (std::filesystem::is_directory(path) || path.filename() == "meta.json")
+        if (path.filename() == "container_meta.yaml" ||
+            (std::filesystem::is_directory(path) && std::filesystem::exists(path / "container_meta.yaml")))
+            format = GaussianFormat::sog_xt;
+        else format = (std::filesystem::is_directory(path) || path.filename() == "meta.json")
                      ? GaussianFormat::sog
                      : gaussian_format_from_path(path);
     }
@@ -1838,6 +1860,21 @@ GaussianModel load_gaussians(
         return load_gaussians_ply(path, device);
     case GaussianFormat::sog:
         return load_sog(path, device);
+    case GaussianFormat::sog_xt: {
+        detail::SogXtFiles files;
+        if (std::filesystem::is_directory(path) || path.filename() == "container_meta.yaml") {
+            const auto directory = std::filesystem::is_directory(path) ? path : path.parent_path();
+            for (const auto* name : {"container_meta.yaml", "active_mask.webp", "means_bytes_0.webp",
+                "means_bytes_1.webp", "scales.webp", "quaternions.webp", "opacities.webp", "f_dc.webp",
+                "f_rest_centroids.webp", "f_rest_labels.webp"})
+                if (std::filesystem::exists(directory / name)) files[name] = read_file(directory / name);
+        } else files = read_sog_zip(read_file(path));
+        auto decoded = detail::decode_sog_xt(files);
+        auto model = make_model(decoded.count, decoded.degree, decoded.means,
+            decoded.log_scales, decoded.rotations, decoded.opacity_logits, decoded.sh, device);
+        if (decoded.antialiased) model.filter_mode = SplatFilterMode::mip_2d;
+        return model;
+    }
     case GaussianFormat::spz:
         return load_spz(path, device);
     case GaussianFormat::glb: {
