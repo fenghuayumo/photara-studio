@@ -14,6 +14,7 @@ and textured assets through **Photara Studio** or the `photara` CLI.
 <p align="center">
   <a href="https://github.com/fenghuayumo/photara-studio/releases/latest"><b>Download latest release</b></a>
   · <a href="https://github.com/fenghuayumo/photara-studio/releases">All releases</a>
+  · <a href="https://fenghuayumo.github.io/photara-webgs/">Online 3DGS viewer</a>
   · <a href="https://github.com/fenghuayumo/photara-studio/issues">Report an issue</a>
 </p>
 
@@ -71,6 +72,13 @@ Run `build/photara/Release/photara_studio.exe` to open Studio, or use the CLI:
 
 For Linux, other build configurations, and more CLI examples, see the
 [build and usage reference](docs/BUILD_AND_USAGE.md).
+
+## View trained Gaussians online
+
+Gaussian models trained with Photara can also be viewed in your browser using
+[Photara WebGS](https://fenghuayumo.github.io/photara-webgs/).
+Export your trained Gaussian model from Photara, then open it in the online viewer
+to inspect the scene.
 
 ## Documentation
 
