@@ -535,7 +535,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.ai_priors = app.settings.ai_priors;
     settings.ai_prior_source = app.settings.ai_prior_source;
     settings.ai_prior_model = path_from_utf8_field(app.settings.ai_prior_model.data());
-    settings.ai_prior_directory = path_from_utf8_field(app.settings.ai_prior_directory.data());
+    settings.ai_prior_directory = saved_prior_directory(app.settings, app.layout);
     settings.ai_depth_weight = app.settings.ai_depth_weight;
     settings.ai_normal_weight = app.settings.ai_normal_weight;
     settings.ai_prior_tokens = app.settings.ai_prior_tokens;
@@ -1064,6 +1064,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             archive.set_chunk(photara::project::ChunkType::training_model_info,
                 photara::splat::training_checkpoint_info_bytes(*progress));
         archive.save(path);
+        store_path_field(app.settings.ai_prior_directory, settings.ai_prior_directory);
         remember_recent_project(app, path);
         store_path_field(app.settings.project_dir, path);
         refresh_artifacts(app);
@@ -4702,6 +4703,7 @@ void on_job_finished(App& app) {
     const int code = app.job.exit_code();
     app.monitor.mark_finished(code);
     const JobKind kind = app.active_job;
+    if (kind == JobKind::train) remember_generated_prior_directory(app.settings, app.layout);
     if (kind != JobKind::none && kind != JobKind::export_sfm) app.project_results_dirty = true;
     app.active_job = JobKind::none;
     if (kind == JobKind::train && code != 0 && !app.final_splat_ready) {

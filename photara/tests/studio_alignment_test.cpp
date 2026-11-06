@@ -705,6 +705,39 @@ int main(int argc, char** argv) {
         require(command.find("--splat-prior-") == std::string::npos,
             "zero weights skip prior paths and generation");
         prior_settings.ai_prior_source = 0; prior_settings.ai_depth_weight = .01F;
+        {
+            auto generated = prior_settings;
+            editor::ProjectLayout generated_layout;
+            generated_layout.cache = task_root / "generated-cache";
+            const auto directory = generated_layout.cache / "ai_priors";
+            require(editor::saved_prior_directory(generated, generated_layout).empty(),
+                "missing generation must not pin an empty task directory");
+            std::filesystem::create_directories(directory);
+            require(!editor::remember_generated_prior_directory(generated, generated_layout),
+                "empty prior directory must remain automatic");
+            std::ofstream(directory / "view_0.prior").put('x');
+            photara::project::Settings saved;
+            saved.ai_priors = true; saved.ai_prior_source = generated.ai_prior_source;
+            saved.ai_prior_directory = editor::saved_prior_directory(generated, generated_layout);
+            const auto project_path = task_root / "generated.ascan";
+            auto archive = photara::project::Archive::create();
+            photara::project::write_settings(archive, saved, project_path);
+            archive.save(project_path);
+            const auto reopened = photara::project::read_settings(photara::project::Archive::open(project_path));
+            require(reopened.ai_prior_directory == directory && reopened.ai_prior_source == 0,
+                "generated prior location must survive saving and reopening the project");
+            require(editor::remember_generated_prior_directory(generated, generated_layout) &&
+                editor::path_from_utf8_field(generated.ai_prior_directory.data()) == directory,
+                "generation completion must fill the visible cache directory");
+            generated_layout.cache = task_root / "opened-new-cache";
+            require(editor::saved_prior_directory(generated, generated_layout) == directory &&
+                !editor::remember_generated_prior_directory(generated, generated_layout),
+                "reopening with a new runtime cache must retain the generated prior directory");
+            put_path(generated.ai_prior_directory, task_root / "aligned priors");
+            require(!editor::remember_generated_prior_directory(generated, generated_layout) &&
+                editor::saved_prior_directory(generated, generated_layout) == task_root / "aligned priors",
+                "automatic prior persistence must preserve explicit directories");
+        }
         const auto model_file = task_root / "moge normal.gguf";
         std::ofstream(model_file).put('x'); put_path(prior_settings.ai_prior_model,model_file);
         command = editor::build_train_command("photara.exe",prior_settings,layout,{});

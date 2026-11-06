@@ -1358,6 +1358,32 @@ bool ProcessJob::consume_completion() {
 // ---------------------------------------------------------------------------
 // Project layout and command construction
 
+std::filesystem::path saved_prior_directory(const ProjectSettings& settings, const ProjectLayout& layout) {
+    if (settings.ai_prior_directory[0])
+        return path_from_utf8_field(settings.ai_prior_directory.data());
+    if (!settings.ai_priors || settings.ai_prior_source != 0 || layout.cache.empty()) return {};
+    const auto directory = layout.cache / "ai_priors";
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
+        if (it->path().extension() == ".prior" && it->is_regular_file(error)) {
+            auto absolute = std::filesystem::absolute(directory, error);
+            return error ? directory : absolute.lexically_normal();
+        }
+    }
+    return {};
+}
+
+bool remember_generated_prior_directory(ProjectSettings& settings, const ProjectLayout& layout) {
+    if (settings.ai_prior_directory[0]) return false;
+    const auto directory = saved_prior_directory(settings, layout);
+    if (directory.empty()) return false;
+    const auto text = path_to_utf8(directory);
+    if (text.size() >= settings.ai_prior_directory.size()) return false;
+    std::copy(text.begin(), text.end(), settings.ai_prior_directory.begin());
+    settings.ai_prior_directory[text.size()] = '\0';
+    return true;
+}
+
 ProjectLayout resolve_layout(const ProjectSettings& settings) {
     ProjectLayout layout;
     const std::filesystem::path stored =

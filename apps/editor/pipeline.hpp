@@ -521,6 +521,9 @@ inline bool studio_sam_vulkan() {
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
 
+std::filesystem::path saved_prior_directory(const ProjectSettings& settings, const ProjectLayout& layout);
+bool remember_generated_prior_directory(ProjectSettings& settings, const ProjectLayout& layout);
+
 bool is_video_source(const ProjectSettings& settings);
 
 inline bool mesh_from_gaussians(const ProjectSettings& settings) {

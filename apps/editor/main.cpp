@@ -255,8 +255,11 @@ int main(const int argc, char** argv) {
         editor::poll_project_save(app);
         app.preview.poll();
         app.log.poll(app.fresh_lines);
-        for (const std::string& line : app.fresh_lines)
+        for (const std::string& line : app.fresh_lines) {
             app.monitor.consume(line);
+            if (line.find("AI priors ready:") != std::string::npos)
+                editor::remember_generated_prior_directory(app.settings, app.layout);
+        }
         editor::poll_splat_model_load(app);
         editor::poll_mesh_load(app);
         if (app.job.consume_completion()) editor::on_job_finished(app);
