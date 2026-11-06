@@ -1145,6 +1145,7 @@ Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {
         options_.popspa_finetune_iterations == 0 || options_.popspa_sparsify_every == 0 ||
         !std::isfinite(options_.popspa_penalty) || options_.popspa_penalty <= 0.F ||
         options_.popspa_prune_cycles == 0 ||
+        !std::isfinite(options_.popspa_reference_weight) || options_.popspa_reference_weight < 0.F ||
         !std::isfinite(options_.popspa_geometry_lr_scale) ||
         options_.popspa_geometry_lr_scale <= 0.F || options_.popspa_geometry_lr_scale > 1.F ||
         !std::isfinite(options_.popspa_finetune_lr_scale) ||
@@ -1328,7 +1329,8 @@ GaussianModel Trainer::compact_popspa(
     stage_options.iterations = options_.popspa_refine_iterations;
     Trainer refinement(stage_options);
     model = refinement.train_impl(refine_scene,
-        [&](TrainingProgress p) { return report(p, 0); }, {}, preview, device_preview, &model, target);
+        [&](TrainingProgress p) { return report(p, 0); }, {}, preview, device_preview, &model, target,
+        options_.popspa_reference_weight > 0.F ? &input : nullptr);
     if (stopped || !prune(target, options_.popspa_refine_iterations)) return model;
     stage_options.iterations = options_.popspa_finetune_iterations;
     // Continue at the terminal position rate instead of restarting its decay.
@@ -1352,7 +1354,8 @@ GaussianModel Trainer::compact_popspa(
     };
     return finetuning.train_impl(refine_scene,
         [&](TrainingProgress p) { return report(p, options_.popspa_refine_iterations); },
-        {}, preview ? fine_preview : PreviewCallback{}, device_preview ? fine_device_preview : DevicePreviewCallback{}, &model);
+        {}, preview ? fine_preview : PreviewCallback{}, device_preview ? fine_device_preview : DevicePreviewCallback{}, &model, 0,
+        options_.popspa_reference_weight > 0.F ? &input : nullptr);
 }
 
 GaussianModel Trainer::train_impl(
@@ -1361,7 +1364,7 @@ GaussianModel Trainer::train_impl(
     EvaluationCallback evaluate,
     PreviewCallback preview,
     DevicePreviewCallback device_preview, const GaussianModel* initial,
-    const std::size_t sparsity_budget) const {
+    const std::size_t sparsity_budget, const GaussianModel* reference) const {
     struct AllocationProfiling {
         bool previous = tinytensor::VramProfiler::instance().enabled();
         explicit AllocationProfiling(bool enable) {
@@ -1376,6 +1379,7 @@ GaussianModel Trainer::train_impl(
     if (scene.views.empty())
         throw std::invalid_argument("Splat training requires at least one MVS view");
     const bool vulkan_backend = options_.backend == TrainingBackend::vulkan;
+    Rasterizer reference_rasterizer;
     const bool use_ai_prior = options_.lambda_d > 0.F || options_.lambda_n > 0.F;
     if (!std::isfinite(options_.lambda_d) || options_.lambda_d < 0.F ||
         !std::isfinite(options_.lambda_n) || options_.lambda_n < 0.F)
@@ -2051,8 +2055,8 @@ GaussianModel Trainer::train_impl(
         // Vulkan previews render their own requested camera below; they never
         // consume the current training view's copied RGB/alpha tensors. Keep
         // the fused-loss frame backend-resident even when live preview is on.
-        raster_options.copy_attachments = !vulkan_backend || ppisp_enabled || bilagrid_enabled;
-        raster_options.copy_color_only = vulkan_backend && (ppisp_enabled || bilagrid_enabled);
+        raster_options.copy_attachments = !vulkan_backend || ppisp_enabled || bilagrid_enabled || reference;
+        raster_options.copy_color_only = vulkan_backend && (ppisp_enabled || bilagrid_enabled || reference);
         raster_options.copy_alpha =
             vulkan_backend && options_.use_mask && target.has_mask && !target.mask_is_validity &&
             options_.alpha_mode == AlphaMode::transparent && options_.match_alpha_weight > 0.F;
@@ -2251,12 +2255,12 @@ GaussianModel Trainer::train_impl(
         if (vulkan_backend) {
             const bool mask_enabled =
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
-            if (ppisp_enabled || bilagrid_enabled)
+            if (ppisp_enabled || bilagrid_enabled || reference)
                 loss.color = *photo_color;
             loss.total = loss.rgb = rasterizer.photometric_loss(
                 loss_render, target.rgb, target.mask, mask_enabled, options_.ssim_weight,
                 options_.photometric_weight, report_progress,
-                ppisp_enabled || bilagrid_enabled ? &loss.color : nullptr);
+                ppisp_enabled || bilagrid_enabled || reference ? &loss.color : nullptr);
             loss.alpha = rendered.alpha.is_valid() ? tinytensor::Tensor::zeros_like(rendered.alpha)
                                                    : tinytensor::Tensor{};
             detail::add_alpha_mask_loss_vulkan(rendered, target, options_, loss, report_progress);
@@ -2380,6 +2384,30 @@ GaussianModel Trainer::train_impl(
         // correction backward and its optimizer step; what follows the next
         // mark is the rasterizer's own backward.
         cuda_profiler.mark(CudaTrainingStage::colour_backward);
+        tinytensor::Tensor reference_combined_gradient;
+        if (reference && options_.popspa_reference_weight > 0.F) {
+            auto reference_options = raster_options;
+            reference_options.active_sh_degree = reference->sh_degree;
+            reference_options.record_backward_state = false;
+            reference_options.require_depth = false;
+            reference_options.copy_attachments = true;
+            auto teacher = reference_rasterizer.forward(*reference, target.camera, reference_options);
+            tinytensor::Tensor gradient;
+            if (vulkan_backend) {
+                rasterizer.photometric_loss(rendered, teacher.color, target.mask,
+                    target.has_mask && (options_.use_mask || target.mask_is_validity),
+                    options_.ssim_weight, options_.photometric_weight, false, &gradient);
+            } else {
+                auto teacher_target = target;
+                teacher_target.rgb = teacher.color;
+                auto canonical_render = rendered;
+                canonical_render.context.impl.reset();
+                gradient = detail::compute_training_loss(canonical_render, teacher_target,
+                    options_, false, false, false, false).color;
+            }
+            reference_combined_gradient = photo_grad->add(gradient.mul(options_.popspa_reference_weight));
+            photo_grad = &reference_combined_gradient;
+        }
         // Dense MVS already provides accurate surface positions. Decaying the
         // position LR across the full 10k run keeps large geometric updates
         // active for too long and destroys that initialization. Match the

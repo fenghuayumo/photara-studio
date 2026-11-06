@@ -116,6 +116,8 @@ struct TrainingOptions {
     float popspa_geometry_lr_scale{1.F};
     // Final appearance/shape Adam rates relative to optimize-sparsify rates.
     float popspa_finetune_lr_scale{0.2F};
+    // Canonical input-render preservation during post-training fitting.
+    float popspa_reference_weight{0.F};
     // Separate codec-in-the-loop adaptation, never enabled by plain export.
     unsigned sog_xt_finetune_iterations{4'000};
     unsigned sog_xt_batch_size{8};

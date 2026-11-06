@@ -200,7 +200,7 @@ class Trainer {
         const mvs::MvsScene& scene, ProgressCallback progress,
         EvaluationCallback evaluate, PreviewCallback preview,
         DevicePreviewCallback device_preview, const GaussianModel* initial = nullptr,
-        std::size_t sparsity_budget = 0) const;
+        std::size_t sparsity_budget = 0, const GaussianModel* reference = nullptr) const;
     TrainingOptions options_;
 };
 

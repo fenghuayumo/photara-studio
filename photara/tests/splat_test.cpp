@@ -8234,6 +8234,7 @@ void test_popspa(photara::splat::TrainingBackend backend) {
     result.normal_features = {};
     const auto before = result.means.to_vector();
     options.popspa_keep_ratio = 0.5F;
+    options.popspa_reference_weight = 2.F;
     options.filter_mode = SplatFilterMode::classic; // Imported metadata must win.
     const auto compacted = Trainer(options).compact_popspa(result, scene);
     require(compacted.size() == 1 && result.means.to_vector() == before &&
