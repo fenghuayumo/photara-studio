@@ -251,6 +251,12 @@ struct ReconstructCli {
         unsigned speedy_start{0}, speedy_every{3000}, speedy_stop{30000}, speedy_score_views{0};
         float speedy_soft_ratio{0.3F}, speedy_hard_ratio{0.2F};
     } speedy_options;
+    bool splat_popspa{false};
+    float splat_popspa_keep_ratio{0.2F};
+    unsigned splat_popspa_refine_steps{5000}, splat_popspa_finetune_steps{5000};
+    unsigned splat_popspa_prune_cycles{4};
+    float splat_popspa_geometry_lr_scale{1.F};
+    float splat_popspa_finetune_lr_scale{0.2F};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{3'000'000};
@@ -523,6 +529,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-speedy-pruning=BOOL  opt-in sensitivity pruning (all modes default false)\n"
+              << "  --splat-popspa=BOOL  post-training compaction with two pruning passes and 10,000 refinement steps\n"
+              << "  --splat-popspa-keep-ratio F  fraction of trained Gaussians to retain (default 0.2)\n"
               << "  --splat-speedy-start N  0 = two soft/two hard events; nonzero uses periodic schedule\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  override preset growth ceiling (standard 3000000)\n"
@@ -1057,6 +1065,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("42"))
         ("splat-speedy-pruning", "Enable CUDA/Vulkan Speedy-Splat sensitivity pruning",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-popspa", "Post-training POPSpa compaction (3DGS only)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-popspa-keep-ratio", "Final fraction of trained Gaussians to keep", cxxopts::value<float>()->default_value("0.2"))
+        ("splat-popspa-refine-steps", "POPSpa optimize-sparsify iterations", cxxopts::value<unsigned>()->default_value("5000"))
+        ("splat-popspa-finetune-steps", "POPSpa final fine-tuning iterations", cxxopts::value<unsigned>()->default_value("5000"))
+        ("splat-popspa-prune-cycles", "GaussianPOP re-scoring cycles per pruning stage", cxxopts::value<unsigned>()->default_value("4"))
+        ("splat-popspa-geometry-lr-scale", "POPSpa scale/rotation learning-rate multiplier", cxxopts::value<float>()->default_value("1"))
+        ("splat-popspa-finetune-lr-scale", "Final appearance/shape learning-rate multiplier", cxxopts::value<float>()->default_value("0.2"))
         ("splat-speedy-start", "First periodic pruning iteration (0 = automatic two soft/two hard)", cxxopts::value<unsigned>()->default_value("0"))
         ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))
         ("splat-speedy-stop", "Exclusive pruning stop", cxxopts::value<unsigned>()->default_value("30000"))
@@ -1726,6 +1742,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
     cli.splat_eval_checkpoints = result["splat-eval-checkpoints"].as<bool>();
+    cli.splat_popspa = result["splat-popspa"].as<bool>();
+    cli.splat_popspa_keep_ratio = result["splat-popspa-keep-ratio"].as<float>();
+    cli.splat_popspa_refine_steps = result["splat-popspa-refine-steps"].as<unsigned>();
+    cli.splat_popspa_finetune_steps = result["splat-popspa-finetune-steps"].as<unsigned>();
+    cli.splat_popspa_prune_cycles = result["splat-popspa-prune-cycles"].as<unsigned>();
+    cli.splat_popspa_geometry_lr_scale = result["splat-popspa-geometry-lr-scale"].as<float>();
+    cli.splat_popspa_finetune_lr_scale = result["splat-popspa-finetune-lr-scale"].as<float>();
     cli.speedy_options.speedy_pruning = result.count("splat-speedy-pruning")
         ? result["splat-speedy-pruning"].as<bool>() : splat_preset.speedy_pruning;
     cli.speedy_options.speedy_start = result["splat-speedy-start"].as<unsigned>();
@@ -2683,6 +2706,8 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.densification_cap = static_cast<int>(cli.splat_densification_cap);
     settings.training_mode = static_cast<int>(cli.splat_mode);
     settings.speedy_pruning = cli.speedy_options.speedy_pruning;
+    settings.popspa = cli.splat_popspa;
+    settings.popspa_keep_ratio = cli.splat_popspa_keep_ratio;
     settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
     settings.render_method = cli.splat_render_method == "3dgut" ? 1 : 0;
     if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
@@ -3734,6 +3759,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
     options.speedy_pruning = cli.speedy_options.speedy_pruning;
+    options.popspa = cli.splat_popspa;
+    options.popspa_keep_ratio = cli.splat_popspa_keep_ratio;
+    options.popspa_refine_iterations = cli.splat_popspa_refine_steps;
+    options.popspa_finetune_iterations = cli.splat_popspa_finetune_steps;
+    options.popspa_prune_cycles = cli.splat_popspa_prune_cycles;
+    options.popspa_geometry_lr_scale = cli.splat_popspa_geometry_lr_scale;
+    options.popspa_finetune_lr_scale = cli.splat_popspa_finetune_lr_scale;
     options.speedy_start = cli.speedy_options.speedy_start;
     options.speedy_every = cli.speedy_options.speedy_every;
     options.speedy_stop = cli.speedy_options.speedy_stop;
@@ -3926,6 +3958,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     photara::core::Logger::instance().info(
         "splat training: iterations=", options.iterations,
         " mode=", static_cast<int>(cli.splat_mode),
+        " popspa=", options.popspa, " popspa_keep_ratio=", options.popspa_keep_ratio,
         " speedy_pruning=", options.speedy_pruning,
         " speedy_start=", options.speedy_start,
         " speedy_schedule=", options.speedy_start == 0 ? "two_soft_two_hard" : "periodic",
@@ -4269,7 +4302,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     training_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - training_started).count();
     photara::core::Logger::instance().info(
-        "splat_training_completed iterations=", options.iterations,
+        "splat_training_completed iterations=", options.iterations + (options.popspa ? options.popspa_refine_iterations + options.popspa_finetune_iterations : 0),
         " training_s=", training_seconds,
         " checkpoint_evaluations=", options.evaluation_iterations.size());
     const std::filesystem::path model_path = splat_file_path(cli);

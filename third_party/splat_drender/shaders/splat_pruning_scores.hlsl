@@ -20,7 +20,7 @@ float op_atomic_f_add([[vk::ext_reference]] float destination,
 groupshared uint sid[256];
 groupshared float2 smean[256];
 groupshared float4 sconic[256];
-groupshared float scolour[256];
+groupshared float3 scolour[256];
 #if !defined(SPLAT_PRUNING_SUBGROUP)
 groupshared float reduction[256];
 #endif
@@ -60,6 +60,7 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
     // leaves the weighted colour behind the current accepted contributor.
     float residual =
         inside ? out_f[pixel] + out_f[pixels + pixel] + out_f[2u * pixels + pixel] : 0.0f;
+    float3 residual_rgb = inside ? float3(out_f[pixel], out_f[pixels + pixel], out_f[2u * pixels + pixel]) : 0.0f;
     float transmittance = 1.0f;
     [loop] for (uint base = 0u; base < limit; base += 256u) {
         // Stage each primitive once per tile, coalescing the draw-list reads.
@@ -70,7 +71,7 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
             smean[rank] = gauss_f[g * slots].xy;
             sconic[rank] = gauss_f[g * slots + 1u];
             float3 rgb = gauss_f[g * slots + 2u].xyz;
-            scolour[rank] = rgb.x + rgb.y + rgb.z;
+            scolour[rank] = rgb;
         }
         GroupMemoryBarrierWithGroupSync();
         [loop] for (uint j = 0u; j < min(256u, limit - base); ++j) {
@@ -84,11 +85,17 @@ void main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uint 
                 if (power <= 0.0f) {
                     float alpha = min(kAlphaClip, conic.w * exp(power));
                     if (alpha >= kAlphaFloor) {
-                        float colour = scolour[j];
+                        float3 rgb = scolour[j];
+                        float colour = rgb.x + rgb.y + rgb.z;
                         residual -= transmittance * alpha * colour;
                         float derivative =
                             conic.w * (transmittance * colour - residual / (1.0f - alpha));
                         value = derivative * derivative;
+                        if (pc.u8 != 0u) {
+                            residual_rgb -= transmittance * alpha * rgb;
+                            float3 delta_colour = alpha * (transmittance * rgb - residual_rgb / (1.0f - alpha));
+                            value = dot(delta_colour, delta_colour);
+                        }
                         transmittance *= 1.0f - alpha;
                     }
                 }

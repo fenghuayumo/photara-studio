@@ -102,6 +102,20 @@ struct TrainingOptions {
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
+    // Optional post-reconstruction POPSpa compaction (two pruning stages and
+    // optimize-sparsify + fine-tuning). Ratios refer to the input trained model.
+    bool popspa{false};
+    float popspa_keep_ratio{0.2F};
+    unsigned popspa_refine_iterations{5'000};
+    unsigned popspa_finetune_iterations{5'000};
+    unsigned popspa_sparsify_every{50};
+    float popspa_penalty{0.0005F};
+    // Re-score after each partial removal; one cycle selects a single batch.
+    unsigned popspa_prune_cycles{4};
+    // Limit covariance drift while redistributing a finished reconstruction.
+    float popspa_geometry_lr_scale{1.F};
+    // Final appearance/shape Adam rates relative to optimize-sparsify rates.
+    float popspa_finetune_lr_scale{0.2F};
     // Speedy-Splat sensitivity pruning (CUDA/Vulkan), opt-in in every mode.
     // start=0 selects two soft and two hard events scaled to the growth/tail
     // phases. A nonzero start selects the explicit periodic CLI schedule.

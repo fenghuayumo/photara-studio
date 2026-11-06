@@ -447,7 +447,7 @@ class SplatRasterizer {
     // Uses canonical rendered colour/background and never updates model/Adam
     // state. The caller owns the destination on this Context's device and
     // must keep it alive until the submitted GPU work completes.
-    void pruning_scores_device(const SplatBufferView& scores);
+    void pruning_scores_device(const SplatBufferView& scores, bool gaussian_pop = false);
     // Consumes the most recent render() made with pixel_snapshots=true.
     // Loss images are channel-major: color/normal [3,H,W], alpha/depth [H,W].
     // The geometry losses may be empty only when the matching forward used

@@ -22,7 +22,7 @@ tinytensor::Tensor vulkan_pruning_scores(
     std::shared_ptr<void>& backend,
     const GaussianModel& model,
     const Camera& camera,
-    RasterizeOptions options);
+    RasterizeOptions options, bool gaussian_pop);
 
 float vulkan_photometric_loss(
     const RenderResult& rendered,

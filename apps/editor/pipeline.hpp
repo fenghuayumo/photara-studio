@@ -335,6 +335,8 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
     bool speedy_pruning = false;
+    bool popspa = false;
+    float popspa_keep_ratio = 0.2F;
     int sh_degree = 3;
     int preview_interval = 50;
     int render_method = 0; // 0=3dgs, 1=3dgut (training backend checked separately)

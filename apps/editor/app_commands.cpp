@@ -491,6 +491,8 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.densification_cap = app.settings.densification_cap;
     settings.training_mode = app.settings.training_mode;
     settings.speedy_pruning = app.settings.speedy_pruning;
+    settings.popspa = app.settings.popspa;
+    settings.popspa_keep_ratio = app.settings.popspa_keep_ratio;
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
@@ -620,6 +622,8 @@ void apply_project_settings(
     app.settings.densification_cap = settings.densification_cap;
     app.settings.training_mode = settings.training_mode;
     app.settings.speedy_pruning = settings.speedy_pruning;
+    app.settings.popspa = settings.popspa;
+    app.settings.popspa_keep_ratio = settings.popspa_keep_ratio;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
@@ -2264,6 +2268,10 @@ bool browse_splat_export_path(App& app) {
 void start_splat_simplify(App& app) {
     if (app.splat_simplify.running || app.job.running()) return;
     if (!ensure_splat_renderer(app)) return;
+    if (app.settings.popspa && !std::filesystem::is_regular_file(app.layout.working_sfm)) {
+        set_message(app, tr("POPSpa requires the registered reconstruction and its training images."), theme::warning);
+        return;
+    }
     prepare_gaussian_editing(app);
     if (!app.splat_simplify.has_baseline) {
         if (!app.splat_edit.copy_model(app.splat_simplify.baseline) ||
@@ -2292,10 +2300,62 @@ void start_splat_simplify(App& app) {
     options.cancelled = [cancel]() {
         return cancel->load(std::memory_order_relaxed);
     };
+    const bool popspa = app.settings.popspa;
+    const auto sfm = app.layout.working_sfm;
+    const auto images = path_from_utf8_field(app.settings.images_dir.data());
+    photara::splat::TrainingOptions training;
+    for (const auto& field : photara::splat::k_training_loss_fields)
+        if (field.group == photara::splat::LossGroup::image ||
+            field.group == photara::splat::LossGroup::colour)
+            training.*field.training_value = app.settings.*field.value;
+    training.use_ppisp = app.settings.ppisp_layout != 0;
+    training.ppisp_type = static_cast<photara::splat::PpispParamType>(
+        std::clamp(app.settings.ppisp_model, 0, 2));
+    training.use_bilateral_grid = app.settings.bilateral_grid;
+    training.popspa = popspa;
+    training.popspa_keep_ratio = options.keep_ratio;
+    training.backend = app.settings.training_backend == 1
+        ? photara::splat::TrainingBackend::vulkan : photara::splat::TrainingBackend::cuda;
+    training.render_method = model.render_method;
+    training.max_image_dimension = std::max(app.settings.max_resolution, 1);
+    training.use_mask = app.settings.use_mask;
+    training.alpha_mode = app.settings.mask_mode == 1 ? photara::splat::AlphaMode::transparent : photara::splat::AlphaMode::masked;
+    training.mask_dir = masks_directory(app.settings);
     app.splat_simplify.job = std::async(
         std::launch::async,
-        [model = std::move(model), options = std::move(options)]() mutable {
-            return photara::splat::simplify_gaussians(model, options);
+        [model = std::move(model), options = std::move(options), popspa, sfm, images,
+         training, progress, cancel]() mutable {
+            if (!popspa) return photara::splat::simplify_gaussians(model, options);
+            const auto device = training.backend == photara::splat::TrainingBackend::vulkan
+                ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
+            model.means = model.means.to(device);
+            model.log_scales = model.log_scales.to(device);
+            model.quaternions = model.quaternions.to(device);
+            model.opacity_logits = model.opacity_logits.to(device);
+            model.sh = model.sh.to(device);
+            if (model.normal_features.is_valid()) model.normal_features = model.normal_features.to(device);
+            if (model.filter_3d.is_valid()) model.filter_3d = model.filter_3d.to(device);
+            const auto source = load_working_sfm(sfm, images);
+            photara::mvs::MvsScene scene;
+            for (const auto& image : source.images) if (image.registered) {
+                const auto& intr = source.camera_of(image);
+                photara::mvs::MvsView view;
+                view.id = static_cast<photara::mvs::Index>(scene.views.size());
+                view.path = image.path;
+                if (!std::filesystem::is_regular_file(view.path))
+                    throw std::runtime_error("POPSpa training image is missing: " + path_to_utf8(view.path));
+                view.pose = image.pose; view.source_model = intr.model;
+                view.width = view.src_width = intr.width; view.height = view.src_height = intr.height;
+                view.fx = view.src_fx = intr.fx; view.fy = view.src_fy = intr.fy;
+                view.cx = view.src_cx = intr.cx; view.cy = view.src_cy = intr.cy;
+                view.k1 = intr.k1; view.k2 = intr.k2; view.p1 = intr.p1; view.p2 = intr.p2;
+                scene.views.push_back(std::move(view));
+            }
+            return photara::splat::Trainer(training).compact_popspa(model, scene,
+                [progress, cancel](const photara::splat::TrainingProgress& p) {
+                    progress->store(float(p.iteration) / std::max(1U, p.total_iterations), std::memory_order_relaxed);
+                    return !cancel->load(std::memory_order_relaxed);
+                });
         });
 }
 

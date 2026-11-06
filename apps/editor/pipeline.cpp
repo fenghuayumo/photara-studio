@@ -1697,6 +1697,10 @@ std::string build_train_command(
             << std::max(1, settings.densification_cap);
     command << " --splat-speedy-pruning="
             << (settings.speedy_pruning ? "true" : "false");
+    command << " --splat-popspa=" << (settings.popspa ? "true" : "false")
+            << " --splat-popspa-keep-ratio " << settings.popspa_keep_ratio;
+    if (settings.popspa && settings.render_method != 0)
+        throw std::invalid_argument("POPSpa requires the 3DGS rendering method.");
     // Use the trainer's conservative two-soft/two-hard schedule when enabled.
     settings.validate();
     if (settings.ai_priors && settings.training_mode != 0) {

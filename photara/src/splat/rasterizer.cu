@@ -101,7 +101,7 @@ __global__ void sensitivity_scores(
     const unsigned* contributors,
     const float* image,
     float* scores,
-    float alpha_clip) {
+    float alpha_clip, bool gaussian_pop) {
     const int x = blockIdx.x * 16 + threadIdx.x;
     const int y = blockIdx.y * 16 + threadIdx.y;
     if (x >= width || y >= height)
@@ -111,6 +111,7 @@ __global__ void sensitivity_scores(
     // Includes the final background contribution; subtracting the prefix
     // leaves exactly the colour behind the current primitive.
     float residual = image[p] + image[p + pixels] + image[p + 2 * pixels];
+    float3 residual_rgb = make_float3(image[p], image[p + pixels], image[p + 2 * pixels]);
     float transmittance = 1.F;
     const unsigned limit = min(range.y - range.x, contributors[p]);
     for (unsigned j = 0; j < limit; ++j) {
@@ -130,7 +131,17 @@ __global__ void sensitivity_scores(
         const float colour = rgb.x + rgb.y + rgb.z;
         residual -= transmittance * alpha * colour;
         const float derivative = co.w * (transmittance * colour - residual / (1.F - alpha));
-        atomicAdd(scores + g, derivative * derivative);
+        float value = derivative * derivative;
+        if (gaussian_pop) {
+            residual_rgb.x -= transmittance * alpha * rgb.x;
+            residual_rgb.y -= transmittance * alpha * rgb.y;
+            residual_rgb.z -= transmittance * alpha * rgb.z;
+            const float dx = alpha * (transmittance * rgb.x - residual_rgb.x / (1.F - alpha));
+            const float dy = alpha * (transmittance * rgb.y - residual_rgb.y / (1.F - alpha));
+            const float dz = alpha * (transmittance * rgb.z - residual_rgb.z / (1.F - alpha));
+            value = dx * dx + dy * dy + dz * dz;
+        }
+        atomicAdd(scores + g, value);
         transmittance *= 1.F - alpha;
     }
 }
@@ -442,11 +453,11 @@ RenderResult Rasterizer::forward_colors(
 tinytensor::Tensor Rasterizer::pruning_scores(
     const GaussianModel& model,
     const Camera& camera,
-    RasterizeOptions options) const {
+    RasterizeOptions options, const bool gaussian_pop) const {
     if (model.render_method == RenderMethod::gaussian_3dgut)
         throw std::invalid_argument("3DGUT Speedy pruning is not implemented");
     if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_pruning_scores(backend_, model, camera, options);
+        return detail::vulkan_pruning_scores(backend_, model, camera, options, gaussian_pop);
     if (model.means.device() != tinytensor::Device::CUDA)
         throw std::invalid_argument("Speedy-Splat pruning requires a CUDA or Vulkan model");
     options.require_depth = false;
@@ -477,7 +488,7 @@ tinytensor::Tensor Rasterizer::pruning_scores(
         camera.width, camera.height,
         camera.model == CameraModel::equirectangular ? int(camera.width) : 0, gs, ids, ts.range,
         contributors, rendered.color.ptr<float>(), scores.ptr<float>(),
-        options.rasterization.alpha_clip);
+        options.rasterization.alpha_clip, gaussian_pop);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess)
         throw std::runtime_error(cudaGetErrorString(error));

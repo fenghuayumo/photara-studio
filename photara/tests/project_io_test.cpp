@@ -34,6 +34,7 @@ std::vector<std::uint8_t> encode_settings_v12(
     settings.sam_detector_model.clear();
     settings.camera_keyframes.clear();
     auto bytes = encode_settings(settings, project);
+    bytes.resize(bytes.size() - sizeof(std::uint8_t) - sizeof(float)); // v33 POPSpa.
     bytes.resize(bytes.size() - k_effect_bytes);
     bytes.resize(bytes.size() - sizeof(std::uint32_t)); // v23 camera keyframes.
     bytes.resize(bytes.size() - sizeof(std::int32_t)); // v22 filter mode.
@@ -286,6 +287,11 @@ int main() {
            "asfm pinhole default");
 
     Settings settings;
+    expect(!settings.popspa && settings.popspa_keep_ratio == 0.2F, "POPSpa is opt-in");
+    settings.popspa = true; settings.popspa_keep_ratio = 0.15F;
+    const auto popspa_saved = decode_settings(encode_settings(settings, ascan_path), ascan_path);
+    expect(popspa_saved.popspa && popspa_saved.popspa_keep_ratio == 0.15F, "POPSpa project settings roundtrip");
+    settings.popspa = false; settings.popspa_keep_ratio = 0.2F;
     expect(!settings.focus_region, "new projects default focus region off");
     expect(settings.iterations == 30'000 && settings.densification_cap == 3'000'000 &&
            settings.training_mode == 1 && !settings.speedy_pruning,

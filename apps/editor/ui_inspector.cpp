@@ -964,6 +964,21 @@ Action draw_inspector(App& app) {
                     "30,000 steps: soft at 9,000/12,000; hard at 18,000/24,000.\n"
                     "Other run lengths scale with the growth and fine-tuning phases.\n"
                     "Requires full training resolution."));
+            inspector_field("POPSpa");
+            ImGui::BeginDisabled(app.settings.render_method != 0);
+            ImGui::Checkbox("##popspa", &app.settings.popspa);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr("Post-training compaction: two GaussianPOP pruning passes,\n"
+                    "5,000 optimize-sparsify steps and 5,000 fine-tuning steps.\n"
+                    "Requires training images and cameras. 3DGS only; off by default."));
+            if (app.settings.popspa) {
+                inspector_field("POPSpa keep");
+                ImGui::SetNextItemWidth(-1.F);
+                float keep = app.settings.popspa_keep_ratio * 100.F;
+                if (ImGui::SliderFloat("##popspa_keep", &keep, 5.F, 100.F, "%.0f%%"))
+                    app.settings.popspa_keep_ratio = keep / 100.F;
+            }
+            ImGui::EndDisabled();
             ImGui::EndTable();
         }
         if (app.settings.render_method == 1)
@@ -1049,7 +1064,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
                 "Reduce Gaussian count after training. Nearby splats are merged.\n"
-                "Does not retrain. Undo restores the previous model."));
+                "Enable POPSpa for image-guided compaction and fine-tuning.\n"
+                "Undo restores the previous model."));
         if (app.splat_simplify.show && can_export_model(app)) {
             ImGui::Spacing();
             const bool simplifying = app.splat_simplify.running;
@@ -1063,11 +1079,17 @@ Action draw_inspector(App& app) {
             if (ImGui::SliderFloat(
                     "##simplify_keep", &keep_percent, 10.F, 100.F, "%.0f%%"))
                 app.splat_simplify.keep_ratio = keep_percent / 100.F;
+            ImGui::Checkbox("POPSpa##simplify", &app.settings.popspa);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Use registered cameras and training images for two pruning passes\n"
+                    "and 10,000 refinement steps. Off: training-free merge simplification."));
+            ImGui::BeginDisabled(app.settings.popspa);
             theme::caption("Opacity floor");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::SliderFloat(
                 "##simplify_opacity", &app.splat_simplify.min_opacity,
                 0.F, 0.3F, "%.2f");
+            ImGui::EndDisabled();
             ImGui::EndDisabled();
             const auto target = static_cast<std::uint32_t>(std::llround(
                 static_cast<double>(source) *

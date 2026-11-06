@@ -106,7 +106,7 @@ std::vector<std::uint8_t> encode_settings(
     });
     const bool modern_camera = settings.camera_effect.clip_start>=0.F || !settings.camera_effect_clips.empty() ||
         std::any_of(settings.camera_keyframes.begin(),settings.camera_keyframes.end(),[](const auto& key){return key.interpolation==3;});
-    writer.value(modern_camera ? 32U : settings.camera_effect.kind == 2 ? 31U : settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 30U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
+    writer.value(settings.popspa ? 33U : modern_camera ? 32U : settings.camera_effect.kind == 2 ? 31U : settings.camera_effect.enabled ? (settings.camera_effect.kind == 1 ? 30U : 28U) : has_rotation ? 25U : !settings.camera_keyframes.empty() ? 24U : settings.filter_mode != 0 ? 22U : settings.render_method == 1 ? 21U : k_settings_min_reader);
     writer.string(settings.name);
     writer.string(store_path(settings.image_directory, base));
     writer.value(static_cast<std::int32_t>(settings.sfm_mode));
@@ -259,6 +259,8 @@ std::vector<std::uint8_t> encode_settings(
     if (settings.camera_effect_clips.size()>10000) throw std::invalid_argument("Too many camera effect clips");
     writer.value(static_cast<std::uint32_t>(settings.camera_effect_clips.size()));
     for (const auto& clip:settings.camera_effect_clips) write_effect(writer,clip);
+    writer.value(static_cast<std::uint8_t>(settings.popspa));
+    writer.value(settings.popspa_keep_ratio);
     return writer.take();
 }
 
@@ -632,6 +634,12 @@ Settings decode_settings(
         const auto count=reader.value<std::uint32_t>();
         if (count>10000) throw std::invalid_argument("Too many camera effect clips");
         for (std::uint32_t i=0;i<count;++i) settings.camera_effect_clips.push_back(read_effect(reader));
+    }
+    if (version >= 33) {
+        settings.popspa = reader.value<std::uint8_t>() != 0;
+        settings.popspa_keep_ratio = reader.value<float>();
+        if (!std::isfinite(settings.popspa_keep_ratio) || settings.popspa_keep_ratio <= 0.F || settings.popspa_keep_ratio > 1.F)
+            throw std::invalid_argument("Invalid POPSpa keep ratio");
     }
     std::stable_sort(settings.camera_keyframes.begin(), settings.camera_keyframes.end(),
         [](const auto& a, const auto& b) { return a.time < b.time; });

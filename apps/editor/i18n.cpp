@@ -29,6 +29,10 @@ struct Entry {
 };
 
 constexpr Entry k_entries[] = {
+    {"POPSpa keep", "POPSpa 保留比例", "POPSpa keep", "POPSpa keep"},
+    {"POPSpa requires the registered reconstruction and its training images.", "POPSpa 需要已配准的重建结果和对应的训练图片。", "POPSpa requires the registered reconstruction and its training images.", "POPSpa requires the registered reconstruction and its training images."},
+    {"Post-training compaction: two GaussianPOP pruning passes,\n5,000 optimize-sparsify steps and 5,000 fine-tuning steps.\nRequires training images and cameras. 3DGS only; off by default.", "训练后压缩：两轮 GaussianPOP 剪枝，\n5,000 步稀疏化优化和 5,000 步微调。\n需要训练图片和相机，仅支持 3DGS，默认关闭。", "Post-training compaction: two GaussianPOP pruning passes,\n5,000 optimize-sparsify steps and 5,000 fine-tuning steps.\nRequires training images and cameras. 3DGS only; off by default.", "Post-training compaction: two GaussianPOP pruning passes,\n5,000 optimize-sparsify steps and 5,000 fine-tuning steps.\nRequires training images and cameras. 3DGS only; off by default."},
+    {"Use registered cameras and training images for two pruning passes\nand 10,000 refinement steps. Off: training-free merge simplification.", "使用已配准相机和训练图片，执行两轮剪枝和 10,000 步优化。\n关闭时使用免训练的合并简化。", "Use registered cameras and training images for two pruning passes\nand 10,000 refinement steps. Off: training-free merge simplification.", "Use registered cameras and training images for two pruning passes\nand 10,000 refinement steps. Off: training-free merge simplification."},
     {"Open 3DGS view", "切换至 3DGS 视图", "Open 3DGS view", "Open 3DGS view"},
     {"Pause to generate preview", "暂停后生成预览", "Pause to generate preview", "Pause to generate preview"},
     {"Generating preview...", "正在生成预览…", "Generating preview...", "Generating preview..."},

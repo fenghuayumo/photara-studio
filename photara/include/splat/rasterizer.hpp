@@ -120,10 +120,11 @@ class Rasterizer {
     // Sum over pixels of (opacity * d(sum RGB)/d alpha)^2, as in
     // Faster-GS / Speedy-Splat. Evaluates canonical colours, independent of
     // training residuals, and does not update parameters or Adam moments.
+    // GaussianPOP sums the squared per-channel counterfactual deletion change.
     tinytensor::Tensor pruning_scores(
         const GaussianModel& model,
         const Camera& camera,
-        RasterizeOptions options = {}) const;
+        RasterizeOptions options = {}, bool gaussian_pop = false) const;
     RenderResult forward(
         const GaussianModel& model,
         const Camera& camera,

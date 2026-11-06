@@ -1310,7 +1310,7 @@ class SplatRasterizer::Impl {
         flush_batch();
     }
 
-    void pruning_scores_device(const SplatBufferView& scores) {
+    void pruning_scores_device(const SplatBufferView& scores, bool gaussian_pop) {
         require(last_primitive_ == SplatPrimitive::gaussian_3dgs,
                 "3DGUT pruning scores are not implemented");
         require(last_frame_has_stats_,
@@ -1342,6 +1342,7 @@ class SplatRasterizer::Impl {
         push.u[5] = count_;
         push.u[6] = last_pixels_;
         push.u[7] = last_frame_has_geometry_ ? k_gauss_slots_geometry : k_gauss_slots_color;
+        push.u[8] = gaussian_pop ? 1U : 0U;
         const ComputePipeline& pipeline = pruning_scores_atomic_.valid() ? pruning_scores_atomic_
                                           : pruning_scores_subgroup_.valid()
                                               ? pruning_scores_subgroup_
@@ -3760,8 +3761,8 @@ SplatDeviceFrame SplatRasterizer::render_device(const SplatCamera& camera,
     return impl_->render_device(camera, settings);
 }
 
-void SplatRasterizer::pruning_scores_device(const SplatBufferView& scores) {
-    impl_->pruning_scores_device(scores);
+void SplatRasterizer::pruning_scores_device(const SplatBufferView& scores, bool gaussian_pop) {
+    impl_->pruning_scores_device(scores, gaussian_pop);
 }
 
 SplatDeviceFrame SplatRasterizer::render_device_copy(const SplatCamera& camera,

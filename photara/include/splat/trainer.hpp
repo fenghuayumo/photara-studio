@@ -183,7 +183,19 @@ class Trainer {
         PreviewCallback preview = {},
         DevicePreviewCallback device_preview = {}) const;
 
+    // Compact an existing trained model using registered views and source images.
+    // The input model is never modified. No initialization or densification occurs.
+    GaussianModel compact_popspa(
+        const GaussianModel& model, const mvs::MvsScene& scene,
+        ProgressCallback progress = {}, PreviewCallback preview = {},
+        DevicePreviewCallback device_preview = {}) const;
+
   private:
+    GaussianModel train_impl(
+        const mvs::MvsScene& scene, ProgressCallback progress,
+        EvaluationCallback evaluate, PreviewCallback preview,
+        DevicePreviewCallback device_preview, const GaussianModel* initial = nullptr,
+        std::size_t sparsity_budget = 0) const;
     TrainingOptions options_;
 };
 

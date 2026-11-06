@@ -1,5 +1,6 @@
 #include "core/camera_projection.hpp"
 #include "core/vram_profiler.hpp"
+#include "core/logging.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 #include "splat/colmap.hpp"
@@ -8078,7 +8079,8 @@ void test_focus_view_mask_cuda() {
 // calculation without duplicating our projection or draw-list implementation.
 void test_speedy_reverse_compositing_oracle(
     tinytensor::Device device = tinytensor::Device::CUDA,
-    photara::CameraModel mode = photara::CameraModel::pinhole) {
+    photara::CameraModel mode = photara::CameraModel::pinhole,
+    bool gaussian_pop = false) {
     using namespace photara::splat;
     constexpr std::size_t count = 32;
     constexpr float sh0 = 0.2820947918F;
@@ -8149,25 +8151,103 @@ void test_speedy_reverse_compositing_oracle(
             const auto g = *it;
             const double a = alpha[g][p];
             t /= 1.-a;
-            double derivative = 0.;
+            double derivative = 0., deletion_error = 0.;
             for (unsigned ch = 0; ch < 3; ++ch) {
                 behind[ch] = last_alpha*last_colour[ch]+(1.-last_alpha)*behind[ch];
-                derivative += t*(colours[g][ch]-behind[ch])-final_t/(1.-a)*options.background[ch];
+                const double dc = t*(colours[g][ch]-behind[ch])-final_t/(1.-a)*options.background[ch];
+                derivative += dc;
+                deletion_error += a*a*dc*dc;
                 last_colour[ch] = colours[g][ch];
             }
             last_alpha = a;
             derivative *= opacity[g];
-            expected[g] += derivative*derivative;
+            expected[g] += gaussian_pop ? deletion_error : derivative*derivative;
         }
     }
     require(early_stops > 0, "Reverse score oracle did not exercise transmittance early stopping");
     for (bool compact : {false,true}) {
         options.compact_instance_storage = compact;
-        const auto actual = raster.pruning_scores(model,camera,options).to_vector();
+        const auto actual = raster.pruning_scores(model,camera,options,gaussian_pop).to_vector();
         for (std::size_t g = 0; g < count; ++g)
             require(std::abs(actual[g]-expected[g]) < 2e-4+expected[g]*3e-3,
                 "Speedy-Splat score differs from independent reverse compositing oracle");
     }
+}
+
+
+void test_popspa(photara::splat::TrainingBackend backend) {
+    using namespace photara::splat;
+    const auto device = backend == TrainingBackend::vulkan ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
+    std::cout << "POPSpa testing backend=" << int(backend) << std::endl;
+    for (auto projection : {photara::CameraModel::pinhole, photara::CameraModel::opencv_fisheye,
+                           photara::CameraModel::equirectangular})
+        test_speedy_reverse_compositing_oracle(device, projection, true);
+    const auto root = std::filesystem::temp_directory_path() / "photara_popspa_test";
+    std::filesystem::create_directories(root);
+    const auto image = root / "frame.png";
+    photara::io::save_rgb_png(photara::io::RgbImage{32,32,std::vector<std::uint8_t>(32*32*3,128)}, image);
+    photara::mvs::MvsScene scene;
+    for (int i = 0; i < 4; ++i) {
+        photara::mvs::MvsView view;
+        view.id = i;
+        // Held-out images must never be loaded by either scoring or refinement.
+        view.path = i % 2 == 0 ? root / "missing-held-out.png" : image;
+        view.width = view.src_width = view.height = view.src_height = 32;
+        view.fx = view.fy = view.src_fx = view.src_fy = 20.F;
+        view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
+        view.pose.C.x() = i * 0.02;
+        scene.views.push_back(view);
+    }
+    for (int i = 0; i < 8; ++i) {
+        photara::mvs::DensePoint point;
+        point.position = photara::mvs::Vec3f((i-4)*0.1F, 0.F, 2.F);
+        point.normal = photara::mvs::Vec3f::UnitZ();
+        point.color = photara::mvs::Vec3f::Constant(0.5F);
+        point.views = {1,3};
+        scene.dense_cloud.points.push_back(point);
+    }
+    TrainingOptions options;
+    options.backend = backend; options.iterations = 4;
+    options.popspa = true; options.popspa_keep_ratio = 0.25F;
+    options.popspa_refine_iterations = options.popspa_finetune_iterations = 4;
+    options.popspa_sparsify_every = 1;
+    options.enable_densification = false; options.sh_degree = 0;
+    options.filter_mode = SplatFilterMode::mip_2d;
+    options.use_mask = options.use_normal_field = options.use_depth_normal_loss = false;
+    options.use_mvs_depth = options.use_mvs_normals = false;
+    options.multi_view_geo_weight = options.multi_view_ncc_weight = 0.F;
+    options.lambda_d = options.lambda_n = 0.F;
+    options.evaluation_split_every = 2; options.log_interval = 1;
+    options.use_ppisp = options.use_bilateral_grid = true;
+    unsigned last = 0;
+    auto result = Trainer(options).train(scene, [&](const TrainingProgress& p) {
+        require(p.total_iterations == 12 && p.iteration >= last, "POPSpa overall progress is inconsistent");
+        require(std::isfinite(p.loss), "Non-finite POPSpa training loss");
+        last = p.iteration;
+        return true;
+    });
+    require(last == 12 && result.size() == 2, "POPSpa failed to complete both optimization stages at exact target count");
+    require_finite(result.means, "Non-finite POPSpa means");
+    require_finite(result.opacity_logits, "Non-finite POPSpa opacities");
+    require_finite(result.sh, "Non-finite POPSpa colors");
+    // Independently compact an imported model without normal-field attributes.
+    result.normal_features = {};
+    const auto before = result.means.to_vector();
+    options.popspa_keep_ratio = 0.5F;
+    options.filter_mode = SplatFilterMode::classic; // Imported metadata must win.
+    const auto compacted = Trainer(options).compact_popspa(result, scene);
+    require(compacted.size() == 1 && result.means.to_vector() == before &&
+            compacted.filter_mode == result.filter_mode,
+        "Independent POPSpa compaction modified the source model or missed its target");
+    const auto cancelled = Trainer(options).compact_popspa(result, scene,
+        [](const TrainingProgress&) { return false; });
+    require(cancelled.size() == result.size(), "Cancelled POPSpa performed pruning");
+    auto invalid = options; invalid.popspa_keep_ratio = 0.F;
+    bool rejected = false;
+    try { Trainer bad(invalid); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "POPSpa accepted an invalid target");
+    std::filesystem::remove(image); std::filesystem::remove(root);
+    std::cout << "POPSpa score oracle, two stages, exact count, held-out split and cancellation passed\n";
 }
 
 void test_speedy_vulkan() {
@@ -8506,6 +8586,109 @@ void benchmark_speedy_native(const char* ply, const char* sfm_path, unsigned rep
     }
 }
 
+
+void benchmark_popspa(const char* ply, const char* sfm_path, const char* images,
+                      const char* output_path, unsigned steps, float keep_ratio = 0.2F) {
+    using namespace photara;
+    using namespace photara::splat;
+    const auto source = sfm::load_asfm(sfm_path);
+    mvs::MvsScene scene;
+    for (const auto& image : source.images) if (image.registered) {
+        const auto& intr = source.camera_of(image);
+        mvs::MvsView view;
+        view.id = static_cast<mvs::Index>(scene.views.size());
+        view.path = std::filesystem::path(images) / image.path.filename();
+        require(std::filesystem::is_regular_file(view.path), "POPSpa benchmark image missing");
+        view.pose = image.pose; view.source_model = intr.model;
+        view.width = view.src_width = intr.width; view.height = view.src_height = intr.height;
+        view.fx = view.src_fx = intr.fx; view.fy = view.src_fy = intr.fy;
+        view.cx = view.src_cx = intr.cx; view.cy = view.src_cy = intr.cy;
+        view.k1 = intr.k1; view.k2 = intr.k2; view.p1 = intr.p1; view.p2 = intr.p2;
+        scene.views.push_back(std::move(view));
+    }
+    require(scene.views.size() >= 16, "POPSpa benchmark needs at least 16 cameras");
+    const auto model = load_gaussians(ply);
+    TrainingOptions options;
+    options.popspa = true; options.popspa_keep_ratio = keep_ratio;
+    options.filter_mode = model.filter_mode;
+    options.render_method = model.render_method;
+    options.max_image_dimension = 960;
+    options.popspa_refine_iterations = options.popspa_finetune_iterations = steps;
+    options.use_mask = options.use_mvs_depth = options.use_mvs_normals = false;
+    options.use_normal_field = options.use_depth_normal_loss = false;
+    options.lambda_d = options.lambda_n = options.multi_view_geo_weight = options.multi_view_ncc_weight = 0.F;
+    options.evaluation_split_every = 0;
+    options.log_interval = 100;
+    const auto output = std::filesystem::path(output_path);
+    std::filesystem::create_directories(output);
+    photara::core::Logger::instance().configure(output, "popspa", photara::core::LogLevel::warning);
+    std::vector<RenderMetrics> baseline;
+    std::vector<std::size_t> evaluation_views(scene.views.size());
+    std::iota(evaluation_views.begin(), evaluation_views.end(), 0);
+    std::mt19937 evaluation_random(42);
+    std::shuffle(evaluation_views.begin(), evaluation_views.end(), evaluation_random);
+    evaluation_views.resize(8);
+    // Also keep the previously regressed view as an explicit diagnostic.
+    if (scene.views.size() > 368 && std::find(evaluation_views.begin(), evaluation_views.end(), 368) == evaluation_views.end())
+        evaluation_views.push_back(368);
+    for (unsigned k = 0; k < evaluation_views.size(); ++k) {
+        const auto v = evaluation_views[k];
+        baseline.push_back(render_evaluation_png(model, scene.views[v], output / ("before-" + std::to_string(k) + ".png"), options));
+    }
+    std::cout << "popspa_benchmark_start gaussians=" << model.size() << " views=" << scene.views.size()
+              << " steps=" << steps << '+' << steps << std::endl;
+    const auto start = std::chrono::steady_clock::now();
+    const auto compacted = [&] {
+        if (steps == 0) {
+            // Diagnostic control: one-shot GaussianPOP only, without any fitting.
+            training_data::TrainingDataLoader cameras(scene.views, options);
+            Rasterizer raster;
+            RasterizeOptions score_options;
+            configure_rasterization(score_options, options);
+            score_options.require_depth = false;
+            score_options.active_sh_degree = model.sh_degree;
+            auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
+            for (std::size_t v = 0; v < scene.views.size(); ++v) {
+                if (options.evaluation_split_every && v % options.evaluation_split_every == 0) continue;
+                scores = scores.add(raster.pruning_scores(model, cameras.get_camera(v), score_options, true));
+            }
+            const auto values = scores.to_vector();
+            std::vector<int> rows(model.size()); std::iota(rows.begin(), rows.end(), 0);
+            const auto keep = std::clamp<std::size_t>(std::llround(model.size() * double(keep_ratio)), 1, model.size());
+            std::partial_sort(rows.begin(), rows.begin() + keep, rows.end(), [&](int a, int b) {
+                return values[a] != values[b] ? values[a] > values[b] : a < b;
+            });
+            rows.resize(keep); std::sort(rows.begin(), rows.end());
+            return densification::gpu_detail::select_model_rows(model,
+                tinytensor::Tensor::from_vector(rows, {rows.size()}, model.means.device()));
+        }
+        return Trainer(options).compact_popspa(model, scene, [](const TrainingProgress& p) {
+        std::cout << "popspa_progress iteration=" << p.iteration << '/' << p.total_iterations
+                  << " gaussians=" << p.gaussian_count << " loss=" << p.loss << std::endl;
+        return true;
+    });
+    }();
+    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::ofstream json(output / "result.json");
+    json << "{\"input_count\":" << model.size() << ",\"output_count\":" << compacted.size()
+         << ",\"registered_views\":" << scene.views.size() << ",\"steps_per_stage\":" << steps
+         << ",\"seconds\":" << seconds << ",\"views\":[";
+    double psnr_before = 0., psnr_after = 0.;
+    for (unsigned k = 0; k < evaluation_views.size(); ++k) {
+        const auto v = evaluation_views[k];
+        const auto metric = render_evaluation_png(compacted, scene.views[v], output / ("after-" + std::to_string(k) + ".png"), options);
+        if (k) json << ',';
+        json << "{\"view\":" << v << ",\"psnr_before\":" << baseline[k].psnr << ",\"psnr_after\":" << metric.psnr
+             << ",\"ssim_before\":" << baseline[k].ssim << ",\"ssim_after\":" << metric.ssim << '}';
+        psnr_before += baseline[k].psnr; psnr_after += metric.psnr;
+    }
+    json << "],\"mean_psnr_before\":" << psnr_before / evaluation_views.size() << ",\"mean_psnr_after\":" << psnr_after / evaluation_views.size() << "}";
+    save_gaussians_ply(compacted, output / "compacted.ply");
+    std::cout << "popspa_benchmark_done input=" << model.size() << " output=" << compacted.size()
+              << " seconds=" << seconds << " mean_psnr_before=" << psnr_before / evaluation_views.size()
+              << " mean_psnr_after=" << psnr_after / evaluation_views.size() << std::endl;
+}
+
 void benchmark_speedy_image_pass(const char* ply, const char* sfm_path, const char* images) {
     using namespace photara;
     using namespace photara::splat;
@@ -8741,6 +8924,17 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--transparent-vulkan-only") {
             test_vulkan_transparent_loss();
             test_vulkan_transparent_trainer();
+            return 0;
+        }
+        if ((argc == 7 || argc == 8) && std::string(argv[1]) == "--popspa-benchmark") {
+            benchmark_popspa(argv[2], argv[3], argv[4], argv[5], unsigned(std::stoul(argv[6])), argc == 8 ? std::stof(argv[7]) : 0.2F);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--popspa-only") {
+            test_popspa(photara::splat::TrainingBackend::cuda);
+#ifdef TINYTENSOR_HAS_VULKAN
+            test_popspa(photara::splat::TrainingBackend::vulkan);
+#endif
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--speedy-schedule-only") {

@@ -1138,6 +1138,20 @@ Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {
           std::isfinite(raster.pixel_center_offset) && raster.pixel_center_offset >= 0.F &&
           raster.pixel_center_offset <= 0.5F))
         throw std::invalid_argument("Invalid rasterization policy");
+    if (options_.popspa && (
+        options_.render_method != RenderMethod::gaussian_3dgs ||
+        !std::isfinite(options_.popspa_keep_ratio) || options_.popspa_keep_ratio <= 0.F ||
+        options_.popspa_keep_ratio > 1.F || options_.popspa_refine_iterations == 0 ||
+        options_.popspa_finetune_iterations == 0 || options_.popspa_sparsify_every == 0 ||
+        !std::isfinite(options_.popspa_penalty) || options_.popspa_penalty <= 0.F ||
+        options_.popspa_prune_cycles == 0 ||
+        !std::isfinite(options_.popspa_geometry_lr_scale) ||
+        options_.popspa_geometry_lr_scale <= 0.F || options_.popspa_geometry_lr_scale > 1.F ||
+        !std::isfinite(options_.popspa_finetune_lr_scale) ||
+        options_.popspa_finetune_lr_scale <= 0.F || options_.popspa_finetune_lr_scale > 1.F ||
+        std::uint64_t(options_.iterations) + options_.popspa_refine_iterations +
+            options_.popspa_finetune_iterations > std::numeric_limits<unsigned>::max()))
+        throw std::invalid_argument("Invalid POPSpa settings; requires 3DGS, keep ratio (0,1], positive steps/penalty");
     enforce_render_method_constraints(options_);
     if (options_.render_method == RenderMethod::gaussian_3dgut && options_.speedy_pruning)
         throw std::invalid_argument("3DGUT does not yet support Speedy pruning");
@@ -1160,12 +1174,194 @@ Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {
     }
 }
 
+
 GaussianModel Trainer::train(
+    const mvs::MvsScene& scene, ProgressCallback progress, EvaluationCallback evaluate,
+    PreviewCallback preview, DevicePreviewCallback device_preview) const {
+    if (!options_.popspa) return train_impl(scene, progress, evaluate, preview, device_preview);
+    bool stopped = false;
+    const unsigned extra = options_.popspa ? options_.popspa_refine_iterations + options_.popspa_finetune_iterations : 0;
+    auto report = [&](TrainingProgress p) {
+        p.total_iterations += extra;
+        const bool keep_going = !progress || progress(p);
+        stopped |= !keep_going;
+        return keep_going;
+    };
+    auto model = train_impl(scene, report, evaluate, preview, device_preview);
+    if (!options_.popspa || stopped) return model;
+    auto compact_progress = [&](TrainingProgress p) {
+        p.iteration += options_.iterations;
+        p.total_iterations += options_.iterations;
+        return !progress || progress(p);
+    };
+    auto compact_preview = [&](TrainingPreview p) {
+        p.iteration += options_.iterations;
+        if (preview) preview(std::move(p));
+    };
+    auto compact_device_preview = [&](unsigned i, std::size_t v, const Camera& c, const tinytensor::Tensor& colour) {
+        if (device_preview) device_preview(i + options_.iterations, v, c, colour);
+    };
+    model = compact_popspa(model, scene, [&](TrainingProgress p) {
+        const bool result = compact_progress(p); stopped |= !result; return result;
+    }, preview ? compact_preview : PreviewCallback{}, device_preview ? compact_device_preview : DevicePreviewCallback{});
+    if (evaluate && !stopped) evaluate(options_.iterations + extra, model);
+    return model;
+}
+
+GaussianModel Trainer::compact_popspa(
+    const GaussianModel& input, const mvs::MvsScene& scene, ProgressCallback progress,
+    PreviewCallback preview, DevicePreviewCallback device_preview) const {
+    // Validate compaction even when invoked independently of train().
+    auto validated = options_;
+    validated.popspa = true;
+    validated.render_method = input.render_method;
+    Trainer validation(validated);
+    if (input.size() == 0 || input.means.device() != training_device(options_) || scene.views.empty())
+        throw std::invalid_argument("POPSpa requires a non-empty model on the training device and registered images");
+    GaussianModel model = refine::clone_model(input);
+    const auto target = std::max<std::size_t>(1, static_cast<std::size_t>(
+        std::llround(double(input.size()) * options_.popspa_keep_ratio)));
+    const auto first_target = std::min(input.size(), target > input.size() / 2 ? input.size() : target * 2);
+    const unsigned total = options_.popspa_refine_iterations + options_.popspa_finetune_iterations;
+    bool stopped = false;
+    auto report = [&](TrainingProgress p, unsigned offset) {
+        p.iteration += offset; p.total_iterations = total;
+        const bool result = !progress || progress(p);
+        stopped |= !result;
+        return result;
+    };
+    auto stage_options = options_;
+    stage_options.popspa = stage_options.speedy_pruning = false;
+    stage_options.resume_checkpoint = false;
+    // Keep the reconstruction checkpoint intact. Interrupted compaction restarts
+    // from that checkpoint rather than pretending its ADMM state was persisted.
+    stage_options.checkpoint_path.clear();
+    stage_options.checkpoint_control_file.clear();
+    stage_options.live_subject_bounds_file.clear();
+    stage_options.enable_densification = false;
+    stage_options.input_is_dense = false;
+    stage_options.structure_freeze_iter = stage_options.dense_structure_freeze_iter = 0;
+    stage_options.sh_degree = input.sh_degree;
+    stage_options.sh_degree_interval = 0;
+    stage_options.render_method = input.render_method;
+    stage_options.filter_mode = input.filter_mode;
+    stage_options.evaluation_iterations.clear();
+    stage_options.progressive_resolution = false;
+    stage_options.use_mvs_depth = stage_options.use_mvs_normals = false;
+    stage_options.lambda_d = stage_options.lambda_n = 0.F;
+    stage_options.depth_weight = stage_options.normal_weight = 0.F;
+    stage_options.multi_view_geo_weight = stage_options.multi_view_ncc_weight = 0.F;
+    stage_options.normal_field_weight = 0.F;
+    stage_options.use_normal_field = stage_options.use_depth_normal_loss = false;
+    stage_options.constrain_scale_range = false;
+    stage_options.opacity_regularization_weight = stage_options.scale_regularization_weight = 0.F;
+    stage_options.sh_regularization_weight = 0.F;
+    stage_options.shape_erank_reg = 0.001F;
+    stage_options.shape_erank_s3_reg = 0.001F;
+    stage_options.background_noise_strength = 0.F;
+    // Continue with a small position LR rather than restarting reconstruction motion.
+    stage_options.means_lr *= 0.01F;
+    stage_options.scales_lr *= options_.popspa_geometry_lr_scale;
+    stage_options.quaternions_lr *= options_.popspa_geometry_lr_scale;
+    core::Logger::instance().info("POPSpa settings ppisp=", stage_options.use_ppisp,
+        " bilateral_grid=", stage_options.use_bilateral_grid,
+        " prune_cycles=", options_.popspa_prune_cycles,
+        " geometry_lr_scale=", options_.popspa_geometry_lr_scale,
+        " finetune_lr_scale=", options_.popspa_finetune_lr_scale);
+    data::TrainingDataLoader cameras(scene.views, stage_options, 1.F);
+    Rasterizer raster;
+    RasterizeOptions score_options;
+    configure_rasterization(score_options, stage_options);
+    score_options.active_sh_degree = input.sh_degree;
+    score_options.scale_modifier = stage_options.scale_modifier;
+    auto prune = [&](std::size_t keep_count, unsigned offset) {
+        if (!report({0, total, model.size()}, offset))
+            return false;
+        keep_count = std::min(model.size(), keep_count);
+        const auto initial_count = model.size();
+        const auto remove_count = initial_count - keep_count;
+        const auto cycles = std::min<std::size_t>(options_.popspa_prune_cycles, remove_count);
+        for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
+            auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
+            std::size_t used_views = 0;
+            for (std::size_t v = 0; v < scene.views.size(); ++v) {
+                if (options_.evaluation_split_every && v % options_.evaluation_split_every == 0)
+                    continue;
+                scores = scores.add(
+                    raster.pruning_scores(model, cameras.get_camera(v), score_options, true));
+                ++used_views;
+                if (used_views % 16 == 0 && !report({0, total, model.size()}, offset))
+                    return false;
+            }
+            if (!used_views)
+                throw std::invalid_argument("POPSpa evaluation split left no training cameras");
+            const auto values = scores.to_vector();
+            if (!std::all_of(values.begin(), values.end(), [](float x) {
+                    return std::isfinite(x) && x >= 0.F;
+                }))
+                throw std::runtime_error("Non-finite GaussianPOP deletion scores");
+            std::vector<int> order(model.size());
+            std::iota(order.begin(), order.end(), 0);
+            // Divide removal evenly and reach the exact target on the final cycle.
+            // Re-evaluation captures changes in occlusion caused by previous removals.
+            const auto cycle_keep = initial_count - (remove_count / cycles * (cycle + 1) +
+                                                     remove_count % cycles * (cycle + 1) / cycles);
+            std::partial_sort(
+                order.begin(), order.begin() + cycle_keep, order.end(), [&](int a, int b) {
+                    return values[a] != values[b] ? values[a] > values[b] : a < b;
+                });
+            order.resize(cycle_keep);
+            std::sort(order.begin(), order.end());
+            model = refine::gpu_detail::select_model_rows(
+                model,
+                tinytensor::Tensor::from_vector(order, {order.size()}, model.means.device()));
+            core::Logger::instance().info(
+                "POPSpa GaussianPOP stage=", offset ? 2 : 1, " cycle=", cycle + 1, "/", cycles,
+                " views=", used_views, " remaining=", model.size(), " target=", target);
+        }
+        return true;
+    };
+    if (!prune(first_target, 0)) return model;
+    // No topology/focus edits during ADMM: each auxiliary row tracks one primitive.
+    mvs::MvsScene refine_scene;
+    refine_scene.views = scene.views;
+    stage_options.iterations = options_.popspa_refine_iterations;
+    Trainer refinement(stage_options);
+    model = refinement.train_impl(refine_scene,
+        [&](TrainingProgress p) { return report(p, 0); }, {}, preview, device_preview, &model, target);
+    if (stopped || !prune(target, options_.popspa_refine_iterations)) return model;
+    stage_options.iterations = options_.popspa_finetune_iterations;
+    // Continue at the terminal position rate instead of restarting its decay.
+    // Shape regularization belongs to optimize-sparsify; final fitting recovers RGB.
+    stage_options.means_lr *= 0.01F;
+    stage_options.scales_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.quaternions_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.opacities_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.sh0_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.sh_rest_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.ppisp_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.bilateral_grid_lr *= options_.popspa_finetune_lr_scale;
+    stage_options.shape_erank_reg = stage_options.shape_erank_s3_reg = 0.F;
+    Trainer finetuning(stage_options);
+    auto fine_preview = [&](TrainingPreview p) {
+        p.iteration += options_.popspa_refine_iterations;
+        if (preview) preview(std::move(p));
+    };
+    auto fine_device_preview = [&](unsigned i, std::size_t v, const Camera& c, const tinytensor::Tensor& colour) {
+        if (device_preview) device_preview(i + options_.popspa_refine_iterations, v, c, colour);
+    };
+    return finetuning.train_impl(refine_scene,
+        [&](TrainingProgress p) { return report(p, options_.popspa_refine_iterations); },
+        {}, preview ? fine_preview : PreviewCallback{}, device_preview ? fine_device_preview : DevicePreviewCallback{}, &model);
+}
+
+GaussianModel Trainer::train_impl(
     const mvs::MvsScene& scene,
     ProgressCallback progress,
     EvaluationCallback evaluate,
     PreviewCallback preview,
-    DevicePreviewCallback device_preview) const {
+    DevicePreviewCallback device_preview, const GaussianModel* initial,
+    const std::size_t sparsity_budget) const {
     struct AllocationProfiling {
         bool previous = tinytensor::VramProfiler::instance().enabled();
         explicit AllocationProfiling(bool enable) {
@@ -1225,6 +1421,7 @@ GaussianModel Trainer::train(
                 "No supported PLY checkpoint found. Start a new training run.");
     }
     GaussianModel model = [&] {
+        if (initial) return refine::clone_model(*initial);
         if (warm_start) {
             auto loaded = load_gaussians(warm_start->model_path, training_device(options_));
             if (loaded.size() != warm_start->gaussian_count ||
@@ -1239,6 +1436,11 @@ GaussianModel Trainer::train(
         throw std::runtime_error("Checkpoint rendering method does not match requested method");
     model.render_method = options_.render_method;
     model.filter_mode = options_.filter_mode;
+    if (!model.normal_features.is_valid())
+        model.normal_features = tinytensor::Tensor::zeros({model.size(), std::size_t{4}}, model.means.device());
+    auto spa_z = sparsity_budget ? model.opacity_logits.sigmoid() : tinytensor::Tensor{};
+    auto spa_dual = sparsity_budget ? tinytensor::Tensor::zeros_like(model.opacity_logits) : tinytensor::Tensor{};
+    if (sparsity_budget && !vulkan_backend) (void)spa_z.data_ptr();
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1505,7 +1707,8 @@ GaussianModel Trainer::train(
     std::uint64_t last_preview_vis_revision = std::numeric_limits<std::uint64_t>::max();
     refine::SceneGeometry scene_geometry =
         focus_bounds.valid ? focus_scene_geometry(focus_bounds)
-                           : refine::training_scene_geometry(scene, options_.input_is_dense);
+                           : initial ? refine::splat_scene_geometry_device(model.means)
+                                     : refine::training_scene_geometry(scene, options_.input_is_dense);
     float scene_extent = scene_geometry.scale;
     mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
@@ -2208,7 +2411,7 @@ GaussianModel Trainer::train(
             (!vulkan_backend ||
              (fused_sh && options_.shape_erank_reg <= 0.F && options_.shape_erank_s3_reg <= 0.F &&
               options_.shape_quat_norm_reg <= 0.F && options_.shape_axis_ratio_reg <= 0.F)) &&
-            !normal_field_active && !has_multi_view_sample_gradients && update_structure &&
+            !sparsity_budget && !normal_field_active && !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
         sh_update.lr = options_.sh0_lr;
@@ -2329,6 +2532,14 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
         if (update_structure && !fused_structure) {
+            if (sparsity_budget && iteration % options_.popspa_sparsify_every == 0) {
+                const auto a = model.opacity_logits.sigmoid();
+                // GaussianSpa Eq. 12, chained through the opacity sigmoid.
+                // Apply at the same sparse cadence as the reference optimizer.
+                const auto penalty = a.sub(spa_z).add(spa_dual).mul(options_.popspa_penalty)
+                    .mul(a).mul(a.mul(-1.F).add(1.F));
+                gradients.opacity_logits.copy_from(gradients.opacity_logits.add(penalty));
+            }
             detail::add_geometry_regularization(
                 model, gradients, options_.opacity_regularization_weight * remaining,
                 options_.scale_regularization_weight * std::pow(remaining, 0.4F));
@@ -2382,6 +2593,25 @@ GaussianModel Trainer::train(
                 model.normal_features, normal_field_gradients.normal_features,
                 normal_features_state, options_.normal_features_lr, normal_features_updates,
                 options_);
+        }
+        if (sparsity_budget && iteration % options_.popspa_sparsify_every == 0) {
+            const auto a = model.opacity_logits.sigmoid();
+            const auto candidate = a.add(spa_dual);
+            const auto values = candidate.to_vector();
+            std::vector<std::size_t> order(values.size());
+            std::iota(order.begin(), order.end(), 0);
+            const auto budget = std::min(sparsity_budget, values.size());
+            if (!std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); }))
+                throw std::runtime_error("Non-finite GaussianSpa auxiliary variable");
+            // Euclidean projection onto the L0 ball keeps largest magnitudes,
+            // with deterministic row order for equal magnitudes.
+            std::partial_sort(order.begin(), order.begin() + budget, order.end(),
+                [&](auto x, auto y) { return std::abs(values[x]) != std::abs(values[y])
+                    ? std::abs(values[x]) > std::abs(values[y]) : x < y; });
+            std::vector<float> z(values.size(), 0.F);
+            for (std::size_t k = 0; k < budget; ++k) z[order[k]] = values[order[k]];
+            spa_z = tinytensor::Tensor::from_vector(z, model.opacity_logits.shape(), model.means.device());
+            spa_dual = candidate.sub(spa_z);
         }
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 

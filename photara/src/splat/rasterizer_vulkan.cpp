@@ -325,7 +325,7 @@ tinytensor::Tensor vulkan_pruning_scores(
     std::shared_ptr<void>& backend_value,
     const GaussianModel& model,
     const Camera& camera,
-    RasterizeOptions options) {
+    RasterizeOptions options, const bool gaussian_pop) {
     options.require_depth = false;
     // Only final colour and contributor limits are needed; omit the large
     // per-bucket backward snapshots and their prefix scan during scoring.
@@ -341,7 +341,7 @@ tinytensor::Tensor vulkan_pruning_scores(
     const auto frame =
         backend->rasterizer.render_device(camera_view(camera), raster_settings(model, options));
     (void)frame;
-    backend->rasterizer.pruning_scores_device(buffer_view(scores));
+    backend->rasterizer.pruning_scores_device(buffer_view(scores), gaussian_pop);
     return scores;
 }
 

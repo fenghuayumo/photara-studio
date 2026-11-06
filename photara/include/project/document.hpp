@@ -16,7 +16,7 @@
 
 namespace photara::project {
 
-inline constexpr std::uint32_t k_settings_version = 32;
+inline constexpr std::uint32_t k_settings_version = 33;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct GaussianSource {
@@ -90,6 +90,8 @@ struct Settings : photara::splat::TrainingLossSettings {
     int densification_cap = 3'000'000;
     int training_mode = 1; // 0 Fast, 1 Standard, 2 High quality.
     bool speedy_pruning = false;
+    bool popspa = false;
+    float popspa_keep_ratio = 0.2F;
     int sh_degree = 3;
     int preview_interval = 50;
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.

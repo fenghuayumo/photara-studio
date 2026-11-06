@@ -617,6 +617,49 @@ the reference conventions, not the authors' unreleased encoder. The CPU sorter
 and hierarchical clustering remain independent implementations. POPSpa pruning
 and encoding-aware fine-tuning are not performed by this export.
 
+POPSpa compaction is a separate opt-in operation. Studio exposes a `POPSpa`
+checkbox in training settings and in the model simplification panel. The latter
+requires the project's registered SfM reconstruction and its source images;
+with POPSpa disabled the existing training-free NanoGS merge remains available.
+CLI training accepts `--splat-popspa=true --splat-popspa-keep-ratio 0.2`.
+The default retains 20% of the trained input count, rounded to a whole primitive.
+Speedy-Splat remains an independent training-time option.
+
+The native implementation builds on KISS-GS Section 3.2: GaussianPOP RGB deletion
+scores across training cameras, first pruning, 5,000 optimize-sparsify steps
+with GaussianSpa auxiliary opacity/dual variables and effective-rank shape
+regularization, a new scoring/pruning stage, and 5,000 fine-tuning steps. Held-out
+cameras are excluded from both scoring and optimization. Scoring loads camera
+metadata only. The first pass keeps up to twice the final target; this budget
+split is an implementation choice because the paper does not specify it.
+The GaussianSpa penalty is 0.0005 and its projection/penalty cadence is 50 steps;
+projection keeps the largest auxiliary magnitudes with deterministic tie breaks.
+Each pruning stage now uses four partial removals with fresh scores between
+them, addressing GaussianPOP's batch-removal approximation. Use
+`--splat-popspa-prune-cycles 1` for a single removal per stage. The existing
+normalized minimum-eigenvalue shape term is retained; it differs from the
+paper's physical minimum-scale term and remains an independent choice.
+Scale/rotation learning rates keep their original multiplier of 1. The optional
+`--splat-popspa-geometry-lr-scale` can reduce them, but the indoor iPhone sweep
+did not support changing the default to 0.2: some close-ups improved while
+aggregate quality declined.
+Final fine-tuning drops the shape prior,
+continues the terminal position rate, and scales the other Gaussian learning
+rates by 0.2 (`--splat-popspa-finetune-lr-scale`). Compaction honors the selected
+bilateral-grid and PPISP settings; these remain training-only corrections and
+are excluded from the exported canonical RGB and SOG-XT decoder.
+This is an independent implementation, not a claim to reproduce the authors'
+rate-distortion results. The standalone C++ entry point is
+`Trainer::compact_popspa(model, scene, progress)`.
+
+Compaction does not densify or initialize from the point cloud. It uses the
+existing RGB/SSIM optimizer with all SH bands active, no progressive resolution,
+and a reduced position learning rate. The reconstruction checkpoint remains
+intact; interrupted compaction restarts from that checkpoint rather than
+resuming partially saved ADMM state. CLI stage lengths can be overridden with
+`--splat-popspa-refine-steps` and `--splat-popspa-finetune-steps` for diagnostics.
+SOG-XT encoding-aware adaptation remains unimplemented.
+
 A check on the supplied indoor iPhone scene, with 1,738,589 degree-3 Gaussians,
 gave the following results (decimal MB, same count, no pruning):
 
