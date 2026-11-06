@@ -1248,7 +1248,12 @@ GaussianModel Trainer::train(
         throw std::invalid_argument("Splat evaluation split left no training views");
     float active_resolution_scale = data::progressive_resolution_scale(
         warm_start ? std::max(1U, warm_start->iteration) : 1, options_);
-    data::TrainingDataLoader view_cache(scene.views, options_, active_resolution_scale);
+    bool load_ai_priors = use_ai_prior &&
+        (warm_start ? warm_start->iteration + 1 : 1) >= options_.depth_normal_from_iter;
+    auto data_options = options_;
+    if (!load_ai_priors)
+        data_options.lambda_d = data_options.lambda_n = 0.F;
+    data::TrainingDataLoader view_cache(scene.views, data_options, active_resolution_scale);
     if (options_.use_mask) {
         for (const std::size_t index : view_indices)
             if (!view_cache.has_mask(index))
@@ -1717,6 +1722,16 @@ GaussianModel Trainer::train(
                 model.filter_3d =
                     detail::compute_3d_filter(model.means, filter_cameras, filter_3d_factor);
             }
+        }
+        if (use_ai_prior && !load_ai_priors && iteration >= options_.depth_normal_from_iter) {
+            const auto before = view_cache.stats();
+            log_data_diagnostics(before, previous_cache_stats, iteration, "before_priors", vulkan_backend);
+            // Warmup caches only RGB. Rebuild the reconstructable view cache
+            // once when supervision starts, using the current resolution.
+            view_cache = data::TrainingDataLoader(scene.views, options_, active_resolution_scale);
+            previous_cache_stats = view_cache.stats();
+            load_ai_priors = true;
+            core::Logger::instance().info("splat_data_priors_activated iteration=", iteration);
         }
         const bool report_progress =
             progress &&

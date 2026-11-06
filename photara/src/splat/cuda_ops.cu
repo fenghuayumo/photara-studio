@@ -189,6 +189,24 @@ __global__ void unpack_training_pixels_kernel(
         mask[pixel] = static_cast<float>((value >> 24U) & 0xffU) * inverse_255;
 }
 
+__global__ void unpack_training_normals_kernel(const unsigned* packed, float* normal, std::size_t pixels) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= pixels) return;
+    const unsigned value = packed[i];
+    float x = 0.F, y = 0.F, z = 0.F;
+    if (value != 0x80008000U) {
+        x = float(short(value & 0xffffU)) / 32767.F;
+        y = float(short(value >> 16)) / 32767.F;
+        z = 1.F - fabsf(x) - fabsf(y);
+        const float fold = fmaxf(-z, 0.F);
+        x += x < 0.F ? fold : -fold;
+        y += y < 0.F ? fold : -fold;
+        const float inverse = rsqrtf(x * x + y * y + z * z);
+        x *= inverse; y *= inverse; z *= inverse;
+    }
+    normal[i] = x; normal[pixels + i] = y; normal[2 * pixels + i] = z;
+}
+
 __global__ void activate_kernel(
     const float* log_scales,
     const float* raw_quaternions,
@@ -2208,6 +2226,20 @@ DecodedTrainingPixels decode_packed_training_pixels(
         decode_gray ? result.gray.ptr<float>() : nullptr,
         decode_mask ? result.mask.ptr<float>() : nullptr, pixels);
     check_cuda(cudaGetLastError(), "unpack GGGS training pixels");
+    return result;
+}
+
+tinytensor::Tensor decode_packed_training_normals(
+    const tinytensor::Tensor& packed, std::uint32_t width, std::uint32_t height) {
+    const std::size_t pixels = std::size_t(width) * height;
+    if (packed.device() != tinytensor::Device::CUDA ||
+        packed.dtype() != tinytensor::DataType::Int32 || !packed.is_contiguous() || packed.numel() != pixels)
+        throw std::invalid_argument("Invalid CUDA packed normal image");
+    auto result = tinytensor::Tensor::empty({std::size_t{3}, height, width}, tinytensor::Device::CUDA);
+    if (pixels)
+        unpack_training_normals_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
+            reinterpret_cast<const unsigned*>(packed.ptr<int>()), result.ptr<float>(), pixels);
+    check_cuda(cudaGetLastError(), "unpack GGGS normal pixels");
     return result;
 }
 

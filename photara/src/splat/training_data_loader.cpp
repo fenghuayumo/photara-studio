@@ -59,6 +59,7 @@ constexpr std::size_t k_min_device_growth = std::size_t{256} * k_mib;
 constexpr double k_device_hit_rate_target = 0.5;
 constexpr double k_device_cache_max_share = 0.4;
 constexpr std::size_t k_max_pending_device_uploads = 2;
+constexpr std::size_t k_max_pending_host_compressions = 2;
 // Training visits views in a per-epoch random order, so a resident view is
 // reused only when the shuffle walks back to it before the LRU evicts it. The
 // expected hit rate is therefore bounded by the fraction of the epoch the
@@ -530,10 +531,19 @@ struct HostTrainingView {
     std::vector<float> normal;
     bool has_mask{false};
     bool mask_is_validity{false};
+    std::vector<int> packed_normal; // CUDA AI normals, oct16, one word per pixel.
+
+    std::size_t normal_bytes() const {
+        return normal.size() * sizeof(float) + packed_normal.size() * sizeof(int);
+    }
+    const void* normal_data() const {
+        return packed_normal.empty() ? static_cast<const void*>(normal.data()) : packed_normal.data();
+    }
+    bool has_normal() const { return !normal.empty() || !packed_normal.empty(); }
 
     [[nodiscard]] std::size_t bytes() const noexcept {
         return sizeof(*this) + sizeof(int) * rgba.capacity() +
-               sizeof(float) * (depth.capacity() + normal.capacity());
+               sizeof(float) * (depth.capacity() + normal.capacity()) + sizeof(int) * packed_normal.capacity();
     }
 };
 
@@ -542,12 +552,13 @@ struct HostTrainingView {
 // and floating-point priors, are restored bit for bit.
 struct CompressedHostTrainingView {
     Camera camera;
-    std::vector<std::uint8_t> rgba, depth, normal;
+    std::vector<std::uint8_t> rgba, depth, normal, packed_normal;
     std::size_t rgba_count{}, depth_count{}, normal_count{};
+    std::size_t packed_normal_count{};
     bool has_mask{}, mask_is_validity{};
 
     [[nodiscard]] std::size_t bytes() const noexcept {
-        return sizeof(*this) + rgba.capacity() + depth.capacity() + normal.capacity();
+        return sizeof(*this) + rgba.capacity() + depth.capacity() + normal.capacity() + packed_normal.capacity();
     }
 };
 
@@ -585,11 +596,13 @@ std::shared_ptr<const CompressedHostTrainingView> compress_host_view(
     result->rgba_count = source.rgba.size();
     result->depth_count = source.depth.size();
     result->normal_count = source.normal.size();
+    result->packed_normal_count = source.packed_normal.size();
     result->has_mask = source.has_mask;
     result->mask_is_validity = source.mask_is_validity;
     result->rgba = compress_host_channel(source.rgba);
     result->depth = compress_host_channel(source.depth);
     result->normal = compress_host_channel(source.normal);
+    result->packed_normal = compress_host_channel(source.packed_normal);
     // Compression must recover a meaningful amount of RAM to justify its
     // CPU work and the smaller decoded hot set.
     if (result->bytes() >= source.bytes() - source.bytes() / 4)
@@ -606,6 +619,7 @@ std::shared_ptr<HostTrainingView> decompress_host_view(
     result->rgba = decompress_host_channel<int>(source.rgba, source.rgba_count);
     result->depth = decompress_host_channel<float>(source.depth, source.depth_count);
     result->normal = decompress_host_channel<float>(source.normal, source.normal_count);
+    result->packed_normal = decompress_host_channel<int>(source.packed_normal, source.packed_normal_count);
     return result;
 }
 
@@ -848,7 +862,8 @@ std::size_t packed_training_view_bytes(
     if (options.lambda_d > 0.F)
         bytes = saturate_add(bytes, saturate_multiply(pixels, sizeof(float)));
     if (options.lambda_n > 0.F)
-        bytes = saturate_add(bytes, saturate_multiply(pixels, 3 * sizeof(float)));
+        bytes = saturate_add(bytes, saturate_multiply(pixels,
+            options.backend == TrainingBackend::cuda ? sizeof(int) : 3 * sizeof(float)));
     if (can_use_mvs_maps && options.use_mvs_depth &&
         view.depth_map.depth.size() ==
             saturate_multiply(
@@ -999,17 +1014,26 @@ HostTrainingView load_host_training_view(
     stage_started = LoadClock::now();
     std::vector<float> depth;
     std::vector<float> normals;
+    std::vector<int> packed_normals;
     if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
         const auto full_camera = training_data::training_camera(view, options, 1.F);
-        auto prior = load_training_prior(
-            training_prior_path(options.prior_directory, view.id), view.path, full_camera,
-            options.lambda_d > 0.F, options.lambda_n > 0.F);
-        if (camera.width != full_camera.width || camera.height != full_camera.height)
-            prior = resize_training_prior(prior, camera);
-        if (options.lambda_d > 0.F)
+        if (options.backend == TrainingBackend::cuda) {
+            auto prior = load_packed_training_prior(
+                training_prior_path(options.prior_directory, view.id), view.path, full_camera, camera,
+                options.lambda_d > 0.F, options.lambda_n > 0.F);
             depth = std::move(prior.depth);
-        if (options.lambda_n > 0.F)
-            normals = std::move(prior.normals);
+            packed_normals = std::move(prior.normals);
+        } else {
+            auto prior = load_training_prior(
+                training_prior_path(options.prior_directory, view.id), view.path, full_camera,
+                options.lambda_d > 0.F, options.lambda_n > 0.F);
+            if (camera.width != full_camera.width || camera.height != full_camera.height)
+                prior = resize_training_prior(prior, camera);
+            if (options.lambda_d > 0.F)
+                depth = std::move(prior.depth);
+            if (options.lambda_n > 0.F)
+                normals = std::move(prior.normals);
+        }
     }
     if (!uses_native_splat_projection(camera.model) && options.use_mvs_depth &&
         camera.width == view.width && camera.height == view.height &&
@@ -1028,7 +1052,7 @@ HostTrainingView load_host_training_view(
     const bool has_mask = has_source_mask || has_projected_mask || validity_only || native_fisheye;
 
     if (times) times->prior += elapsed_ms(stage_started);
-    return {camera, std::move(rgba), std::move(depth), std::move(normals), has_mask, validity_only};
+    return {camera, std::move(rgba), std::move(depth), std::move(normals), has_mask, validity_only, std::move(packed_normals)};
 }
 
 TrainingView upload_training_view(const HostTrainingView& host, const TrainingOptions& options,
@@ -1088,6 +1112,11 @@ TrainingView upload_training_view(const HostTrainingView& host, const TrainingOp
                         ? tinytensor::Tensor::zeros({1}, device)
                         : tinytensor::Tensor::from_vector(
                               host.normal, {3, host.camera.height, host.camera.width}, device);
+    if (!host.packed_normal.empty()) {
+        auto packed = tinytensor::Tensor::from_vector(host.packed_normal,
+            {host.camera.height, host.camera.width}, device);
+        result.normal = detail::decode_packed_training_normals(packed, host.camera.width, host.camera.height);
+    }
     result.has_mask = host.has_mask;
     result.mask_is_validity = host.mask_is_validity;
     return result;
@@ -1165,6 +1194,7 @@ struct TrainingDataLoader::Impl {
 
     ~Impl() {
         prefetches_.clear();
+        compressions_.clear();
         clear_pending_device_uploads();
         staging_pool_.clear();
         device_ring_.clear();
@@ -1263,7 +1293,7 @@ struct TrainingDataLoader::Impl {
         if (host_resident)
             ++host_hits_;
         const std::size_t bytes = sizeof(int) * host.rgba.size() +
-                                  sizeof(float) * (host.depth.size() + host.normal.size());
+                                  sizeof(float) * host.depth.size() + host.normal_bytes();
         uploaded_bytes_ += bytes;
         if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_)
             return upload_view(host);
@@ -1271,7 +1301,7 @@ struct TrainingDataLoader::Impl {
             return upload_view(host);
         DeviceEntry entry = allocate_device_entry(
             index, host.camera, host.has_mask, host.mask_is_validity, !host.depth.empty(),
-            !host.normal.empty());
+            host.has_normal(), !host.packed_normal.empty());
         copy_device_entry_with_pinned_staging(host, entry);
         insert_device_entry(std::move(entry));
         return decode_device_view(device_entries_.front());
@@ -1300,9 +1330,8 @@ struct TrainingDataLoader::Impl {
             return;
         const float scale = resolution_scale_;
         const auto compressed = cached_compressed_view(index);
-        const bool compress = compressed_capacity_bytes_ != 0;
         prefetches_.emplace(
-            index, std::async(std::launch::async, [this, index, scale, compressed, compress] {
+            index, std::async(std::launch::async, [this, index, scale, compressed] {
                 HostTrainingLoad load;
                 const auto start = std::chrono::steady_clock::now();
                 load.compressed_hit = compressed != nullptr;
@@ -1315,11 +1344,9 @@ struct TrainingDataLoader::Impl {
                     // OpenMP team per short-lived async task oversubscribes
                     // the CPU and competes with the training submit thread.
                     load_host_training_view(source_[index], options_, scale, false, &load.times));
-                if (!compressed && compress) {
-                    load.compression_attempted = true;
-                    WallTimer timer{load.times.compress};
-                    load.compressed = compress_host_view(*load.view);
-                }
+                // Publish decoded supervision as soon as it is usable. Cache
+                // compression is scheduled separately after accepting it; a
+                // training get() must not wait for Zstd to finish first.
                 load.host_load_ms = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - start)
                                         .count();
@@ -1370,6 +1397,16 @@ struct TrainingDataLoader::Impl {
             }
         }
         prefetches_.clear();
+        for (auto& [index, future] : compressions_) {
+            try {
+                compress_ms_ += future.get().times.compress;
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "splat_data_cache discarded_compression_failed index=", index,
+                    " error=", error.what());
+            }
+        }
+        compressions_.clear();
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
@@ -1522,6 +1559,7 @@ struct TrainingDataLoader::Impl {
         bool mask_is_validity{};
         bool has_depth{};
         bool has_normal{};
+        bool packed_normal{};
         // Loader-owned device staging the copy engine is allowed to write.
         DeviceUploadRing::Slot* slot{};
         std::unique_ptr<PinnedStagingBuffer> staging;
@@ -1533,7 +1571,7 @@ struct TrainingDataLoader::Impl {
 
     [[nodiscard]] static std::size_t packed_host_bytes(const HostTrainingView& host) {
         return sizeof(int) * host.rgba.size() +
-               sizeof(float) * (host.depth.size() + host.normal.size());
+               sizeof(float) * host.depth.size() + host.normal_bytes();
     }
 
     [[nodiscard]] static std::size_t vulkan_view_bytes(const TrainingView& view) {
@@ -1587,14 +1625,14 @@ struct TrainingDataLoader::Impl {
         const bool has_mask,
         const bool mask_is_validity,
         const bool has_depth,
-        const bool has_normal) {
+        const bool has_normal, const bool packed_normal) {
         DeviceEntry entry;
         entry.index = index;
         entry.bytes = sizeof(int) * camera.width * camera.height;
         if (has_depth)
             entry.bytes += sizeof(float) * camera.width * camera.height;
         if (has_normal)
-            entry.bytes += sizeof(float) * 3 * camera.width * camera.height;
+            entry.bytes += sizeof(float) * (packed_normal ? 1 : 3) * camera.width * camera.height;
         entry.camera = camera;
         entry.has_mask = has_mask;
         entry.mask_is_validity = mask_is_validity;
@@ -1603,9 +1641,14 @@ struct TrainingDataLoader::Impl {
         if (has_depth)
             entry.depth =
                 tinytensor::Tensor::empty({camera.height, camera.width}, tinytensor::Device::CUDA);
-        if (has_normal)
-            entry.normal = tinytensor::Tensor::empty(
-                {std::size_t{3}, camera.height, camera.width}, tinytensor::Device::CUDA);
+        if (has_normal) {
+            if (packed_normal)
+                entry.normal = tinytensor::Tensor::empty(
+                    {camera.height, camera.width}, tinytensor::Device::CUDA, tinytensor::DataType::Int32);
+            else
+                entry.normal = tinytensor::Tensor::empty(
+                    {std::size_t{3}, camera.height, camera.width}, tinytensor::Device::CUDA);
+        }
         memory_.track(entry.rgba); memory_.track(entry.depth); memory_.track(entry.normal);
         memory_.sample(device_ring_.capacity());
         return entry;
@@ -1614,7 +1657,7 @@ struct TrainingDataLoader::Impl {
     static void pack_device_staging(const HostTrainingView& host, PinnedStagingBuffer& staging) {
         const std::size_t rgba_bytes = sizeof(int) * host.rgba.size();
         const std::size_t depth_bytes = sizeof(float) * host.depth.size();
-        const std::size_t normal_bytes = sizeof(float) * host.normal.size();
+        const std::size_t normal_bytes = host.normal_bytes();
         staging.ensure(rgba_bytes + depth_bytes + normal_bytes);
         std::uint8_t* rgba_destination = staging.data();
         std::uint8_t* depth_destination = rgba_destination + rgba_bytes;
@@ -1623,14 +1666,14 @@ struct TrainingDataLoader::Impl {
         if (depth_bytes != 0)
             std::memcpy(depth_destination, host.depth.data(), depth_bytes);
         if (normal_bytes != 0)
-            std::memcpy(normal_destination, host.normal.data(), normal_bytes);
+            std::memcpy(normal_destination, host.normal_data(), normal_bytes);
     }
 
     void copy_device_entry_with_pinned_staging(const HostTrainingView& host, DeviceEntry& entry) {
         WallTimer timer{upload_submit_ms_};
         const std::size_t rgba_bytes = sizeof(int) * host.rgba.size();
         const std::size_t depth_bytes = sizeof(float) * host.depth.size();
-        const std::size_t normal_bytes = sizeof(float) * host.normal.size();
+        const std::size_t normal_bytes = host.normal_bytes();
         const std::size_t total_bytes = rgba_bytes + depth_bytes + normal_bytes;
         staging_.ensure(total_bytes);
         std::uint8_t* destination = staging_.data();
@@ -1643,7 +1686,7 @@ struct TrainingDataLoader::Impl {
             if (depth_bytes != 0)
                 std::memcpy(depth_source, host.depth.data(), depth_bytes);
             if (normal_bytes != 0)
-                std::memcpy(normal_source, host.normal.data(), normal_bytes);
+                std::memcpy(normal_source, host.normal_data(), normal_bytes);
         }
         tinytensor::TraceScope copy_scope("data.h2d_copy");
 
@@ -1692,7 +1735,8 @@ struct TrainingDataLoader::Impl {
         upload.has_mask = host.has_mask;
         upload.mask_is_validity = host.mask_is_validity;
         upload.has_depth = !host.depth.empty();
-        upload.has_normal = !host.normal.empty();
+        upload.has_normal = host.has_normal();
+        upload.packed_normal = !host.packed_normal.empty();
         const auto check = [](const cudaError_t error, const char* action) {
             if (error != cudaSuccess)
                 throw std::runtime_error(std::string(action) + ": " + cudaGetErrorString(error));
@@ -1791,12 +1835,12 @@ struct TrainingDataLoader::Impl {
         const cudaStream_t compute_stream = tinytensor::getCurrentCUDAStream();
         entry = allocate_device_entry(
             index, upload.camera, upload.has_mask, upload.mask_is_validity, upload.has_depth,
-            upload.has_normal);
+            upload.has_normal, upload.packed_normal);
         const std::size_t rgba_bytes = sizeof(int) * entry.camera.width * entry.camera.height;
         const std::size_t depth_bytes =
             upload.has_depth ? sizeof(float) * entry.camera.width * entry.camera.height : 0;
         const std::size_t normal_bytes =
-            upload.has_normal ? sizeof(float) * 3 * entry.camera.width * entry.camera.height : 0;
+            upload.has_normal ? sizeof(float) * (upload.packed_normal ? 1 : 3) * entry.camera.width * entry.camera.height : 0;
         const auto hop = [&](void* target, const std::size_t count, const std::size_t offset) {
             if (count == 0)
                 return;
@@ -1873,6 +1917,8 @@ struct TrainingDataLoader::Impl {
             entry.depth.is_valid() ? entry.depth : tinytensor::Tensor::zeros({1}, device);
         result.normal =
             entry.normal.is_valid() ? entry.normal : tinytensor::Tensor::zeros({1}, device);
+        if (entry.normal.is_valid() && entry.normal.dtype() == tinytensor::DataType::Int32)
+            result.normal = detail::decode_packed_training_normals(entry.normal, entry.camera.width, entry.camera.height);
         return result;
     }
 
@@ -1934,6 +1980,27 @@ struct TrainingDataLoader::Impl {
         note_host_load(load.host_load_ms);
         if (load.compressed_hit)
             ++compressed_hits_;
+        if (!load.compressed_hit && !load.compression_attempted &&
+            compressed_capacity_bytes_ != 0 && !compressions_.contains(index) &&
+            compressions_.size() < k_max_pending_host_compressions) {
+            // Bound both CPU contention and extra decoded views held by the
+            // compression workers. All cache mutations stay on this thread.
+            compressions_.emplace(index, std::async(std::launch::async, [view = load.view] {
+                HostTrainingLoad result;
+                result.view = view;
+                result.compression_attempted = true;
+                {
+                    WallTimer timer{result.times.compress};
+                    result.compressed = compress_host_view(*view);
+                }
+                return result;
+            }));
+        }
+        accept_compression(index, load);
+        store_host_view(index, std::move(load.view));
+    }
+
+    void accept_compression(const std::size_t index, const HostTrainingLoad& load) {
         if (load.compression_attempted && !load.compressed && compressed_capacity_bytes_ != 0) {
             // Noise-like images can be expensive to compress without saving
             // enough RAM. Revert to the ordinary decoded cache for this scale;
@@ -1947,8 +2014,7 @@ struct TrainingDataLoader::Impl {
                 "splat_host_cache compression_disabled reason=insufficient_savings view=", index,
                 " raw_bytes=", load.view->bytes());
         }
-        store_compressed_view(index, std::move(load.compressed));
-        store_host_view(index, std::move(load.view));
+        store_compressed_view(index, load.compressed);
     }
 
     const HostTrainingView& host_view(const std::size_t index) {
@@ -2008,6 +2074,16 @@ struct TrainingDataLoader::Impl {
     }
 
     void collect_ready_host_prefetches() {
+        for (auto it = compressions_.begin(); it != compressions_.end();) {
+            if (it->second.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+                ++it;
+                continue;
+            }
+            auto result = it->second.get();
+            compress_ms_ += result.times.compress;
+            accept_compression(it->first, result);
+            it = compressions_.erase(it);
+        }
         for (auto it = prefetches_.begin(); it != prefetches_.end();) {
             if (it->second.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
                 ++it;
@@ -2091,6 +2167,7 @@ struct TrainingDataLoader::Impl {
     CompressedEntries compressed_entries_;
     std::unordered_map<std::size_t, CompressedEntries::iterator> compressed_lookup_;
     std::unordered_map<std::size_t, std::future<HostTrainingLoad>> prefetches_;
+    std::unordered_map<std::size_t, std::future<HostTrainingLoad>> compressions_;
     // Epoch access plan. Positions index the trainer's shuffled order; entries
     // outside the plan (for example held-out views) are evicted first.
     static constexpr std::uint32_t k_absent_plan_position =

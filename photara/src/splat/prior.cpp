@@ -1,5 +1,8 @@
 #include "splat/prior.hpp"
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -245,6 +248,116 @@ TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& ca
                 for (int c = 0; c < 3; ++c)
                     result.normals[c * count + dst] = prior.normals[c * original_count + src];
         }
+    return result;
+}
+PackedTrainingPrior load_packed_training_prior(
+    const std::filesystem::path& path, const std::filesystem::path& source_image,
+    const Camera& full_camera, const Camera& camera, bool require_depth, bool require_normals) {
+    const auto count = std::size_t(camera.width) * camera.height;
+    const unsigned maps = unsigned(require_depth) | (unsigned(require_normals) << 1);
+    if (!count || count > 100'000'000 || !maps)
+        throw std::invalid_argument("Invalid packed training prior request");
+    // Derived caches never replace the source priors. Include both source
+    // identities; pose/intrinsics checks below also reject stale geometry.
+    const std::array<std::uint64_t, 4> identity{
+        std::filesystem::file_size(path),
+        std::uint64_t(std::filesystem::last_write_time(path).time_since_epoch().count()),
+        std::filesystem::file_size(source_image),
+        std::uint64_t(std::filesystem::last_write_time(source_image).time_since_epoch().count())};
+    auto cache = path;
+    cache += ".cuda-oct16-" + std::to_string(camera.width) + "x" +
+             std::to_string(camera.height) + "-" + std::to_string(maps);
+    const auto payload_bytes = count * sizeof(float) * (unsigned(require_depth) + unsigned(require_normals));
+    PackedTrainingPrior result;
+    const auto allocate = [&] {
+        if (require_depth) result.depth.resize(count);
+        if (require_normals) result.normals.resize(count);
+    };
+    try {
+        std::ifstream input(cache, std::ios::binary);
+        char magic[8]{};
+        input.read(magic, 8);
+        if (std::string(magic, 8) == "PHOCT001") {
+            std::array<std::uint64_t, 4> stored{};
+            for (auto& value : stored) read(input, value);
+            const auto read_full_camera = [&] {
+                auto c = read_camera(input);
+                std::uint32_t model;
+                read(input, model); c.model = static_cast<CameraModel>(model);
+                read(input, c.k1); read(input, c.k2); read(input, c.k3); read(input, c.k4);
+                return c;
+            };
+            check_camera(read_full_camera(), full_camera);
+            check_camera(read_full_camera(), camera);
+            std::uint32_t length;
+            read(input, length);
+            if (length > 32768) throw std::runtime_error("Invalid packed prior source");
+            std::string name(length, '\0'); input.read(name.data(), length);
+            if (input && stored == identity && name == source_name(source_image) &&
+                std::filesystem::file_size(cache) == std::uint64_t(input.tellg()) + payload_bytes) {
+                allocate();
+                input.read(reinterpret_cast<char*>(result.depth.data()), result.depth.size() * sizeof(float));
+                input.read(reinterpret_cast<char*>(result.normals.data()), result.normals.size() * sizeof(int));
+                if (input) return result;
+            }
+        }
+    } catch (const std::exception&) {
+        // Missing, stale or incomplete derived data is reconstructable. The
+        // authoritative loader below still rejects an invalid original prior.
+    }
+    auto prior = load_training_prior(path, source_image, full_camera, require_depth, require_normals);
+    if (camera.width != full_camera.width || camera.height != full_camera.height)
+        prior = resize_training_prior(prior, camera);
+    result.depth = std::move(prior.depth);
+    if (require_normals) {
+        result.normals.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            float x = prior.normals[i], y = prior.normals[count + i], z = prior.normals[2 * count + i];
+            const float length = std::abs(x) + std::abs(y) + std::abs(z);
+            std::uint32_t packed = 0x80008000U;
+            if (x * x + y * y + z * z > .25F) {
+                x /= length; y /= length; z /= length;
+                if (z < 0.F) {
+                    const float old_x = x;
+                    x = (1.F - std::abs(y)) * (x < 0.F ? -1.F : 1.F);
+                    y = (1.F - std::abs(old_x)) * (y < 0.F ? -1.F : 1.F);
+                }
+                const auto u = std::uint16_t(std::int16_t(std::lround(std::clamp(x, -1.F, 1.F) * 32767.F)));
+                const auto v = std::uint16_t(std::int16_t(std::lround(std::clamp(y, -1.F, 1.F) * 32767.F)));
+                packed = std::uint32_t(u) | (std::uint32_t(v) << 16);
+            }
+            result.normals[i] = std::bit_cast<int>(packed);
+        }
+    }
+    // Atomic publication permits simultaneous loaders and interrupted runs.
+    auto temporary = cache;
+    temporary += ".tmp-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    try {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output.write("PHOCT001", 8);
+        for (auto value : identity) write(output, value);
+        const auto write_full_camera = [&](const Camera& c) {
+            write_camera(output, c); write(output, std::uint32_t(c.model));
+            write(output, c.k1); write(output, c.k2); write(output, c.k3); write(output, c.k4);
+        };
+        write_full_camera(full_camera); write_full_camera(camera);
+        const auto name = source_name(source_image);
+        write(output, std::uint32_t(name.size())); output.write(name.data(), name.size());
+        output.write(reinterpret_cast<const char*>(result.depth.data()), result.depth.size() * sizeof(float));
+        output.write(reinterpret_cast<const char*>(result.normals.data()), result.normals.size() * sizeof(int));
+        output.close();
+        if (output) {
+            std::error_code error;
+            std::filesystem::remove(cache, error);
+            error.clear();
+            std::filesystem::rename(temporary, cache, error);
+            if (error) std::filesystem::remove(temporary, error);
+        } else {
+            std::error_code error; std::filesystem::remove(temporary, error);
+        }
+    } catch (const std::exception&) {
+        std::error_code error; std::filesystem::remove(temporary, error);
+    }
     return result;
 }
 } // namespace photara::splat

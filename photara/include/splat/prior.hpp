@@ -28,4 +28,14 @@ void save_training_prior(
     bool require_depth = true,
     bool require_normals = true);
 [[nodiscard]] TrainingPrior resize_training_prior(const TrainingPrior& prior, const Camera& camera);
+
+// CUDA runtime representation: octahedral signed 16-bit coordinates packed
+// into one word per normal. 0x80008000 denotes an unavailable normal.
+struct PackedTrainingPrior {
+    std::vector<float> depth;
+    std::vector<int> normals;
+};
+[[nodiscard]] PackedTrainingPrior load_packed_training_prior(
+    const std::filesystem::path& path, const std::filesystem::path& source_image,
+    const Camera& full_camera, const Camera& camera, bool require_depth, bool require_normals);
 } // namespace photara::splat

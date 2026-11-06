@@ -16,6 +16,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 
 using namespace photara::splat;
 using tinytensor::Tensor;
@@ -274,6 +275,80 @@ void prefetch_image_parity() {
         "Background packing changed RGB or mask pixels");
 }
 
+void packed_priors() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("photara-packed-prior-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const auto source = directory / "image.png", path = training_prior_path(directory, 0);
+    photara::io::save_rgb_png({33, 17, std::vector<std::uint8_t>(33 * 17 * 3, 127)}, source);
+    TrainingPrior prior;
+    photara::mvs::MvsView view;
+    view.path = source; view.id = 0;
+    view.width = view.src_width = 33; view.height = view.src_height = 17;
+    view.fx = view.fy = view.src_fx = view.src_fy = 25;
+    TrainingOptions options;
+    prior.camera = training_data::training_camera(view, options);
+    const std::size_t count = 33 * 17;
+    prior.normals.resize(3 * count);
+    prior.depth.assign(count, 2.F);
+    for (std::size_t i = 1; i < count; ++i) {
+        const double z = -1. + 2. * double(i - 1) / double(count - 2);
+        const double radius = std::sqrt(std::max(0., 1. - z * z)), angle = i * 2.399963229728653;
+        prior.normals[i] = float(radius * std::cos(angle));
+        prior.normals[count + i] = float(radius * std::sin(angle));
+        prior.normals[2 * count + i] = float(z);
+    }
+    save_training_prior(path, source, prior);
+    const auto packed = load_packed_training_prior(path, source, prior.camera, prior.camera, true, true);
+    check(packed.depth == prior.depth && packed.normals.size() == count, "Packed prior shape/depth");
+    auto words = Tensor::from_vector(packed.normals, {17, 33}, tinytensor::Device::CUDA);
+    const auto decoded = detail::decode_packed_training_normals(words, 33, 17).to_vector();
+    for (std::size_t i = 0; i < count; ++i) {
+        double error = 0, length = 0;
+        for (std::size_t ch = 0; ch < 3; ++ch) {
+            const auto j = ch * count + i;
+            error += std::pow(double(decoded[j]) - prior.normals[j], 2);
+            length += double(decoded[j]) * decoded[j];
+        }
+        check(error < 1e-8 && (i == 0 ? length == 0 : std::abs(length - 1) < 1e-6),
+              "Packed normal exceeds error bound or changed invalid/unit semantics");
+    }
+    const auto reused = load_packed_training_prior(path, source, prior.camera, prior.camera, true, true);
+    check(reused.normals == packed.normals && reused.depth == packed.depth, "Packed cache reuse changed data");
+    const auto encoded_path = std::filesystem::path(path.string() + ".cuda-oct16-33x17-3");
+    check(std::filesystem::file_size(encoded_path) < std::filesystem::file_size(path), "Packed cache did not shrink");
+    {
+        options.lambda_d = options.lambda_n = .01F;
+        options.prior_directory = directory;
+        options.adaptive_training_cache = false;
+        options.training_device_cache_bytes = 1024 * 1024;
+        options.training_view_cache_bytes = 1024 * 1024;
+        options.training_prefetch_views = 1;
+        std::vector<photara::mvs::MvsView> views{view, view};
+        training_data::TrainingDataLoader loader(views, options);
+        check(loader.get(0).normal.to_vector() == decoded, "Packed resident normal decode changed");
+        check(loader.get(0).normal.to_vector() == decoded && loader.stats().device_hits > 0,
+              "Packed device cache did not retain the encoded normals");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        do {
+            loader.prefetch(1);
+            if (loader.stats().async_upload_issued) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        check(loader.stats().async_upload_issued > 0, "Packed normal async upload not issued");
+        check(loader.get(1).normal.to_vector() == decoded && loader.stats().async_upload_hits > 0 &&
+              loader.stats().async_upload_failures == 0, "Packed async normal upload changed supervision");
+    }
+    { std::ofstream file(encoded_path, std::ios::binary | std::ios::trunc); file << "truncated"; }
+    check(load_packed_training_prior(path, source, prior.camera, prior.camera, true, true).normals == packed.normals,
+          "Incomplete derived cache was not rebuilt");
+    auto wrong = prior.camera; wrong.world_to_camera[12] += 1;
+    fails([&] { (void)load_packed_training_prior(path, source, wrong, wrong, true, true); });
+    { std::ofstream file(source, std::ios::app); file << "changed"; }
+    fails([&] { (void)load_packed_training_prior(path, source, prior.camera, prior.camera, true, true); });
+    std::filesystem::remove_all(directory);
+}
+
 void cache() {
     const auto directory=std::filesystem::temp_directory_path()/("photara-prior-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
@@ -352,6 +427,30 @@ void cache() {
       check(!target.has_mask,"Prior validity incorrectly masked RGB"); }
     { training_data::TrainingDataLoader loader(views,options,.5F); auto target=loader.get(0);
       check(target.depth.numel()==16 && target.normal.numel()==48,"Progressive prior target shape"); }
+    {
+        auto warmup = options;
+        warmup.iterations = 2; warmup.depth_normal_from_iter = 3;
+        warmup.enable_densification = false; warmup.use_mask = false;
+        warmup.log_interval = 1; warmup.preview_interval = 0;
+        warmup.prior_directory = directory / "not-loaded-during-warmup";
+        photara::mvs::DensePoint point;
+        point.position = {0, 0, 4}; point.normal = {0, 0, -1}; point.color = {.5F, .5F, .5F};
+        scene.dense_cloud.points = {point};
+        (void)Trainer(warmup).train(scene, [](const TrainingProgress& p) {
+            check(p.depth_loss == 0 && p.normal_loss == 0, "Warmup applied prior supervision");
+            return true;
+        });
+        warmup.iterations = 3; warmup.depth_normal_from_iter = 2;
+        warmup.prior_directory = directory;
+        bool activated = false;
+        (void)Trainer(warmup).train(scene, [&](const TrainingProgress& p) {
+            if (p.iteration == 1)
+                check(p.depth_loss == 0 && p.normal_loss == 0, "Prior enabled before activation");
+            if (p.iteration >= 2 && p.depth_loss + p.normal_loss > 0) activated = true;
+            return true;
+        });
+        check(activated, "Deferred prior data was not activated at the loss boundary");
+    }
     // A held-out image deliberately has no prior. Evaluation must still work
     // with the same options as the supervised training run.
     options.prior_directory=directory/"missing-held-out-cache";
@@ -371,7 +470,7 @@ void cache() {
 int main(int argc, char** argv) {
     try {
         if (argc == 1) {
-            prefetch_image_parity(); native_priors(); cache(); losses(tinytensor::Device::CUDA);
+            prefetch_image_parity(); native_priors(); cache(); packed_priors(); losses(tinytensor::Device::CUDA);
             losses(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);
             losses(tinytensor::Device::CUDA,photara::CameraModel::equirectangular); parameter_gradients(tinytensor::Device::CUDA);
             parameter_gradients(tinytensor::Device::CUDA,photara::CameraModel::opencv_fisheye);

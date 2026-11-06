@@ -106,6 +106,9 @@ DecodedTrainingPixels decode_packed_training_pixels(
     bool decode_mask,
     bool decode_gray);
 
+tinytensor::Tensor decode_packed_training_normals(
+    const tinytensor::Tensor& packed, std::uint32_t width, std::uint32_t height);
+
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
 // parameters and clear model.filter_3d. This is available for explicit model
 // conversion; ADC+ training keeps the filter separate from canonical values.

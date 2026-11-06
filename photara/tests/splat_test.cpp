@@ -5319,6 +5319,22 @@ void test_compressed_training_cache(
     require(resized.camera.width == 128 && resized.camera.height == 128,
             "Resolution transition restored a stale compressed view");
 
+    // A cold prefetch delivers the decoded channels before its independent
+    // compression job completes. A scale change must drain that job without
+    // inserting an old-resolution entry into the new cache.
+    {
+        splat::training_data::TrainingDataLoader pipeline(views, options);
+        pipeline.prefetch(0);
+        compare(pipeline.get(0));
+        pipeline.set_resolution_scale(0.5F);
+        require(pipeline.stats().host_resident_bytes == 0 &&
+                pipeline.stats().host_compressed_bytes == 0,
+                "Deferred compression survived a resolution transition");
+        const auto half = pipeline.get(0);
+        require(half.camera.width == 128 && half.rgb.numel() == 3 * 128 * 128,
+                "Deferred compression changed resized supervision");
+    }
+
     // Incompressible supervision must fall back to the full decoded budget,
     // rather than repeatedly recompressing it in a tiny hot set.
     std::uint32_t random_state = 0x12345678;
