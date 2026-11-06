@@ -623,6 +623,7 @@ if(PHOTARA_ENABLE_FEATURES)
             "${CMAKE_CURRENT_BINARY_DIR}/splat_drender")
 
         add_library(photara_splat_cuda STATIC
+            src/splat/sog_xt_training.cu
             src/splat/rasterizer.cu
             src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
@@ -673,6 +674,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_sog_xt.cpp
+            src/splat/sog_xt_finetune.cpp
             src/splat/formats_glb.cpp
             src/splat/formats_usdc.cpp
             src/splat/simplify.cpp
@@ -1679,6 +1681,9 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
         add_executable(photara_splat_popspa_review EXCLUDE_FROM_ALL ../experiments/popspa_review.cpp)
         target_link_libraries(photara_splat_popspa_review PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
+        add_test(NAME photara.splat.sog_xt_adaptation COMMAND photara_splat_formats_test --sog-xt-training-only)
+        add_executable(photara_splat_sog_xt_field_audit EXCLUDE_FROM_ALL ../experiments/sog_xt_field_audit.cpp)
+        target_link_libraries(photara_splat_sog_xt_field_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
         add_executable(photara_splat_training_throughput EXCLUDE_FROM_ALL ../experiments/splat_training_throughput.cpp)
         target_link_libraries(photara_splat_training_throughput PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)

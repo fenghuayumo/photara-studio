@@ -658,7 +658,72 @@ and a reduced position learning rate. The reconstruction checkpoint remains
 intact; interrupted compaction restarts from that checkpoint rather than
 resuming partially saved ADMM state. CLI stage lengths can be overridden with
 `--splat-popspa-refine-steps` and `--splat-popspa-finetune-steps` for diagnostics.
-SOG-XT encoding-aware adaptation remains unimplemented.
+SOG-XT encoding-aware adaptation is a separate CUDA-only opt-in stage. For a
+`.sog-xt` output, pass `--splat-sog-xt-finetune=true`; the default is 4,000
+optimizer steps with eight views accumulated per step. Override with
+`--splat-sog-xt-finetune-steps` and `--splat-sog-xt-batch`. It preserves the
+selected PPISP/bilateral-grid settings, excludes evaluation-split cameras,
+freezes the image order and SH assignments, renders the quantized model, and
+propagates STE gradients through the codec. PRAS runs at initialization and at
+60%/80%, resetting covariance moments and updating only covariance ranges.
+Export writes the trained assets directly without a second clustering pass.
+`Trainer::finetune_sog_xt(model, scene, output, progress)` exposes the same
+operation for an existing model; Python exposes `finetune_sog_xt` as well.
+
+The native adaptation additionally uses a canonical input-render preservation
+loss (weight 2) and conservative Gaussian learning-rate multiplier 0.02; these
+are quality-oriented implementation choices, not the paper's exact training
+recipe. CLI controls are `--splat-sog-xt-reference-weight` and
+`--splat-sog-xt-lr-scale`. Twelve fixed **training** cameras select the best
+canonical-MSE snapshot every 500 steps, including the unadapted baseline.
+Held-out RGB does not participate in optimization or snapshot selection.
+Cancellation returns the input model without writing a partially adapted file.
+Plain export and Studio's existing export action remain training-free.
+
+SH clustering now spends the exact requested codebook budget, including
+non-power-of-two budgets, then performs three global Lloyd updates across all
+initialization batches. The bounded GPU point batches share the same final
+centers; no N-by-K distance matrix is allocated. Empty codewords are filled
+from non-singleton clusters and their means are recomputed. Constant/repeated
+SH vectors retain deterministic tie membership. This corrects the former
+power-of-two truncation and batch-local-only optimization.
+
+On the indoor iPhone POPSpa output (347,718 degree-3 Gaussians), the former
+encoder used 30,837 codewords instead of the requested 43,264. The new encoder
+uses all 43,264. A fixed-model sweep over all 739 registered cameras, at a
+960-pixel maximum dimension with Mip2D rendering, measured:
+
+| Stage | Mean PSNR | Mean SSIM | Compaction-holdout PSNR | SOG-XT size |
+| --- | ---: | ---: | ---: | ---: |
+| Input PLY | 23.6808 dB | 0.957596 | 23.1082 dB | — |
+| Former encoder | 23.2682 dB | 0.952129 | 22.7835 dB | 5.797 MB |
+| Exact budget + global Lloyd | 23.4161 dB | 0.953797 | 22.9260 dB | 6.135 MB |
+| Encoding-aware adaptation | 23.5948 dB | 0.956209 | 23.0532 dB | 6.120 MB |
+
+The final row uses 4,000 steps, eight views per step, both PPISP and the
+bilateral grid, and selects step 4,000. All 93 compaction-holdout cameras are
+excluded from adaptation and snapshot choice. Average encoding loss relative
+to the same input PLY falls from 0.413 dB to 0.086 dB; views losing more than
+0.5 dB decrease from 293 to 2, and the worst decrease improves from 1.822 dB to
+0.561 dB. The final file grows about 5.6%. These figures isolate encoding;
+they do not undo earlier POPSpa errors or establish a multi-scene guarantee.
+The first adaptation experiment with higher rates and no input-render anchor
+improved SSIM but reduced PSNR; it is not the selected recipe.
+
+Measured on an RTX 5090 D v2, the former/new encoding passes took about
+25.2/32.8 seconds, and the quality-preserving adaptation including codec setup,
+selection and export took about 315 seconds. Evaluation renders are additional.
+Use `photara_splat_popspa_review ... OUTPUT codec` for a fixed-model encode and
+`photara_splat_popspa_review ... OUTPUT adapt 4000` for adaptation. Compare the
+four sweeps with `scripts/analyze_sog_xt_refinement.py`.
+
+Fixed training ranges can lose an observed code endpoint during adaptation.
+The frozen export algebraically rebases codes and metadata ranges, without
+introducing a new quantization, to match the paper decoder's observed-range
+normalization. Native and independent NumPy reference decoding were compared
+across all 347,718 rows and 59 PLY fields; the external-style YAML reader was
+also checked. The decoder accepts explicit precisions up to the format's field
+limit, including smaller effective code ranges from this rebasing.
 
 A check on the supplied indoor iPhone scene, with 1,738,589 degree-3 Gaussians,
 gave the following results (decimal MB, same count, no pruning):

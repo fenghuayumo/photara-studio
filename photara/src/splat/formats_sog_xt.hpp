@@ -12,6 +12,18 @@ namespace photara::splat::detail {
 
 using SogXtFiles = std::map<std::string, std::vector<std::uint8_t>>;
 
+// Frozen discrete structure for encoding-aware optimization. Rows in latent
+// are the active image pixels in raster order, after covariance symmetry.
+struct SogXtTrainingCodec {
+    GaussianModel latent;
+    SogXtFiles files;
+    std::vector<unsigned> pixels;
+    tinytensor::Tensor low, high, sh_low, sh_high, labels, counts, neighbors;
+    tinytensor::Tensor centers;
+    tinytensor::Tensor raw_centers;
+    unsigned side{}, center_side{}, dimensions{};
+};
+
 struct DecodedSogXt {
     std::size_t count{};
     unsigned degree{};
@@ -20,7 +32,17 @@ struct DecodedSogXt {
 };
 
 // SOG-XT image payloads; packaging is handled by the existing ZIP layer.
-SogXtFiles encode_sog_xt(const GaussianModel& model);
+SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training = nullptr);
+GaussianModel sog_xt_training_forward(SogXtTrainingCodec& codec);
+void sog_xt_training_backward(
+    SogXtTrainingCodec& codec,
+    const GaussianModel& decoded,
+    ModelGradients& gradients,
+    float tv_weight,
+    float quaternion_tv_weight);
+SogXtFiles encode_sog_xt_frozen(const SogXtTrainingCodec& codec, const GaussianModel& decoded);
+void save_sog_xt_assets(const SogXtFiles& files, const std::filesystem::path& path);
+void refresh_sog_xt_pras(SogXtTrainingCodec& codec);
 DecodedSogXt decode_sog_xt(const SogXtFiles& files);
 
 // Offline, coarse-to-fine local assignment / covariance representative search.

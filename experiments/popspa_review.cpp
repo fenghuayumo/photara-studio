@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         const auto original = load_gaussians(argv[1]);
         const std::string mode(argv[5]);
         if (mode != "baseline" && mode != "prune20" && mode != "popspa20" && mode != "popspa40" &&
-            mode != "unpruned" && mode != "codec" && mode != "speckles" && mode != "s3pair20")
+            mode != "unpruned" && mode != "codec" && mode != "speckles" && mode != "s3pair20" && mode != "adapt")
             throw std::runtime_error("Unknown MODE");
         TrainingOptions options;
         options.sh_degree = original.sh_degree;
@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
         options.lambda_d = options.lambda_n = options.multi_view_geo_weight =
             options.multi_view_ncc_weight = 0.F;
         options.log_interval = 500;
+        options.sog_xt_finetune_iterations = argc == 7 ? unsigned(std::stoul(argv[6])) : 4000U;
         if (mode == "s3pair20")
             options.popspa_geometry_lr_scale = 1.F;
         if (mode == "speckles") {
@@ -140,6 +141,10 @@ int main(int argc, char** argv) {
             result = densification::gpu_detail::select_model_rows(
                 original,
                 tinytensor::Tensor::from_vector(rows, {rows.size()}, original.means.device()));
+        } else if (mode == "adapt") {
+            result=Trainer(options).finetune_sog_xt(original,scene,output/"model.sog-xt",[&](const TrainingProgress& p){
+                std::cout<<"adapt step="<<p.iteration<<"/"<<p.total_iterations<<" loss="<<p.loss<<std::endl;return true;
+            });
         } else if (mode == "codec") {
             save_gaussians(result, output / "model.sog-xt");
             result = load_gaussians(output / "model.sog-xt");
@@ -174,6 +179,10 @@ int main(int argc, char** argv) {
             {"seed", options.seed},
             {"finetune_lr_scale", options.popspa_finetune_lr_scale},
             {"optimization_seconds", seconds},
+            {"codec_adaptation_steps", mode == "adapt" ? options.sog_xt_finetune_iterations : 0U},
+            {"codec_adaptation_batch", mode == "adapt" ? options.sog_xt_batch_size : 0U},
+            {"codec_reference_weight", options.sog_xt_reference_weight},
+            {"codec_learning_rate_scale", options.sog_xt_learning_rate_scale},
             {"metrics", nlohmann::ordered_json::array()}};
         // Retain every view so regressions cannot be hidden by a selected subset.
         for (std::size_t v = 0; v < scene.views.size(); ++v) {
@@ -188,7 +197,7 @@ int main(int argc, char** argv) {
                 std::cout << mode << " evaluated=" << v + 1 << "/" << scene.views.size()
                           << std::endl;
         }
-        if (mode == "codec")
+        if (mode == "codec" || mode == "adapt")
             report["encoded_bytes"] = std::filesystem::file_size(output / "model.sog-xt");
         else if (mode != "baseline")
             save_gaussians_ply(result, output / "model.ply");

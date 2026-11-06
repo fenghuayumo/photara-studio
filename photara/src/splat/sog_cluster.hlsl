@@ -106,7 +106,29 @@ void main(uint3 tid:SV_DispatchThreadID, uint3 gid:SV_GroupID, uint lane:SV_Grou
             InterlockedAdd(cursors[label], 1, slot);
             indices[offsets[label] + slot] = i;
         }
-    } else if (pc.mode == 9) { // One workgroup per center, lanes cover SH channels.
+    } else if (pc.mode == 10) { // Global assignment, including cross-batch codewords.
+        i += pc.iteration; // Bounded dispatch chunks keep Windows watchdog latency low.
+        if (i >= pc.count) return;
+        float value[45];
+        for (uint d = 0; d < pc.dims; ++d) value[d] = points[i * pc.dims + d];
+        uint selected = labels[i];
+        float best = 0;
+        for (uint d = 0; d < pc.dims; ++d) {
+            float delta = value[d] - centers[selected * pc.dims + d];
+            best += delta * delta;
+        }
+        for (uint c = 0; c < pc.clusters; ++c) {
+            float distance = 0;
+            for (uint d = 0; d < pc.dims && distance < best; ++d) {
+                float delta = value[d] - centers[c * pc.dims + d];
+                distance += delta * delta;
+            }
+            // Retain the current member on equal distances, avoiding empty
+            // codewords for repeated/constant SH vectors.
+            if (distance < best) {best = distance; selected = c;}
+        }
+        labels[i] = selected;
+    } else if (pc.mode == 9 || pc.mode == 11) { // Segmented centroid mean.
         uint c = group;
         if (c >= pc.clusters || lane >= pc.dims)
             return;
@@ -117,7 +139,7 @@ void main(uint3 tid:SV_DispatchThreadID, uint3 gid:SV_GroupID, uint lane:SV_Grou
             float inv = 1.0f / float(end - begin);
             for (uint at = begin; at < end; ++at)
                 mean += points[indices[at] * pc.dims + lane] * inv;
-        } else {
+        } else if (pc.mode == 9) {
             mean = points[sample(c, pc.iteration + 2) * pc.dims + lane];
         }
         centers[c * pc.dims + lane] = mean;

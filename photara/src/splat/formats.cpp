@@ -1532,6 +1532,12 @@ void save_sog_unbundled(const GaussianModel& model, const std::filesystem::path&
         write_file(directory / name, bytes);
 }
 
+void detail::save_sog_xt_assets(const detail::SogXtFiles& files,const std::filesystem::path& path) {
+    std::vector<ZipEntry> entries;
+    for(const auto& [name,bytes]:files) entries.push_back({name,bytes});
+    write_file(path,make_sog_zip(entries));
+}
+
 void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
     if (degree > 3U)
         throw std::runtime_error("SH degree must be between 0 and 3");

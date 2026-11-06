@@ -1,5 +1,6 @@
 #include "formats_sog_xt.hpp"
 #include "sog_vulkan.hpp"
+#include "sog_palette.hpp"
 
 #include <Eigen/Geometry>
 #include <nlohmann/json.hpp>
@@ -268,6 +269,7 @@ SogPalette cpu_palette(
         self(self, mid, end, leaves - leaves / 2);
     };
     split(split, 0, n, std::min(n, budget));
+    refine_sog_palette_cpu(points, n, dims, budget, out);
     return out;
 }
 } // namespace
@@ -412,7 +414,7 @@ void sog_xt_pras(
     }
 }
 
-SogXtFiles encode_sog_xt(const GaussianModel& model) {
+SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training) {
     const auto n = model.size();
     const unsigned degree = model.sh_degree;
     const unsigned bases = (degree + 1) * (degree + 1), dims = (bases - 1) * 3;
@@ -479,6 +481,44 @@ SogXtFiles encode_sog_xt(const GaussianModel& model) {
     for (std::size_t i = 0; i < pixels; ++i)
         active[i] = order[i] < n;
     sog_xt_pras(q, scales, active, side);
+    if (training) {
+        training->side = side;
+        training->dimensions = dims;
+        training->pixels.clear();
+        for (unsigned i = 0; i < pixels; ++i)
+            if (active[i])
+                training->pixels.push_back(i);
+        const auto tensor = [&](const std::vector<float>& src, unsigned channels) {
+            std::vector<float> dst(n * channels);
+            for (std::size_t i = 0; i < n; ++i)
+                std::copy_n(
+                    src.data() + std::size_t(training->pixels[i]) * channels, channels,
+                    dst.data() + i * channels);
+            return tinytensor::Tensor::from_vector(
+                dst, {n, std::size_t(channels)}, model.means.device());
+        };
+        auto world = means;
+        for (float& v : world)
+            v = std::copysign(std::expm1(std::abs(v)), v);
+        training->latent = model;
+        training->latent.means = tensor(world, 3);
+        training->latent.log_scales = tensor(scales, 3);
+        training->latent.quaternions = tensor(q, 4);
+        training->latent.opacity_logits = tensor(opacity, 1);
+        std::vector<float> full(n * bases * 3);
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto pixel = training->pixels[i];
+            std::copy_n(dc.data() + std::size_t(pixel) * 3, 3, full.data() + i * bases * 3);
+            if (dims)
+                std::copy_n(
+                    ac.data() + std::size_t(order[pixel]) * dims, dims,
+                    full.data() + i * bases * 3 + 3);
+        }
+        training->latent.sh =
+            tinytensor::Tensor::from_vector(full, {n, std::size_t(bases), 3}, model.means.device());
+        training->latent.normal_features = {};
+        training->latent.filter_3d = {};
+    }
     SogXtFiles files;
     Json metadata = {
         {"format", "SOG-XT"},
@@ -586,11 +626,231 @@ SogXtFiles encode_sog_xt(const GaussianModel& model) {
             labels[i * 4 + 1] = std::uint8_t(label / cs);
         }
         files["f_rest_labels.webp"] = write_image(labels, side, side);
+        if (training) {
+            training->center_side = cs;
+            std::vector<int> ids(n), counts(std::size_t(cs) * cs);
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto p = training->pixels[i];
+                ids[i] = int(unsigned(labels[p * 4 + 1]) * cs + labels[p * 4]);
+                ++counts[ids[i]];
+            }
+            training->labels = tinytensor::Tensor::from_vector(ids, {n}, model.means.device());
+            training->counts =
+                tinytensor::Tensor::from_vector(counts, {counts.size()}, model.means.device());
+            training->sh_low = tinytensor::Tensor::from_vector(
+                quant.low, {std::size_t(dims)}, model.means.device());
+            training->sh_high = tinytensor::Tensor::from_vector(
+                quant.high, {std::size_t(dims)}, model.means.device());
+        }
     }
     // JSON is a YAML 1.2 subset: paper-style metadata without a YAML dependency.
     const auto text = metadata.dump();
     files["container_meta.yaml"] = Bytes(text.begin(), text.end());
+    if (training) {
+        if (!dims)
+            throw std::invalid_argument("SOG-XT adaptation requires non-DC SH bands");
+        std::vector<float> low, high;
+        for (const auto& field : {"means", "scales", "quaternions", "opacities", "f_dc"}) {
+            const unsigned channels = std::string(field) == "quaternions" ? 4
+                                      : std::string(field) == "opacities" ? 1
+                                                                          : 3;
+            for (const auto& op : metadata["ops"])
+                if (op["input_fields"][0] == field) {
+                    Quantizer quant(op["transforms"][0]["simple_quantize"]);
+                    for (unsigned d = 0; d < channels; ++d) {
+                        low.push_back(quant.low[quant.low.size() == 1 ? 0 : d]);
+                        high.push_back(quant.high[quant.high.size() == 1 ? 0 : d]);
+                    }
+                }
+        }
+        training->low = tinytensor::Tensor::from_vector(low, {low.size()}, model.means.device());
+        training->high = tinytensor::Tensor::from_vector(high, {high.size()}, model.means.device());
+        std::vector<int> reverse(pixels, -1), neighbors(n * 2, -1);
+        for (std::size_t i = 0; i < n; ++i)
+            reverse[training->pixels[i]] = int(i);
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto p = training->pixels[i];
+            if (p % side + 1 < side)
+                neighbors[i * 2] = reverse[p + 1];
+            if (p + side < pixels)
+                neighbors[i * 2 + 1] = reverse[p + side];
+        }
+        training->neighbors =
+            tinytensor::Tensor::from_vector(neighbors, {n, 2}, model.means.device());
+        training->files = files;
+    }
     return files;
+}
+
+SogXtFiles encode_sog_xt_frozen(const SogXtTrainingCodec& codec, const GaussianModel& decoded) {
+    auto files = codec.files;
+    const auto& bytes = files.at("container_meta.yaml");
+    auto metadata = Json::parse(bytes.begin(), bytes.end());
+    const auto n = decoded.size();
+    const auto pixels = std::size_t(codec.side) * codec.side;
+    const auto sh = decoded.sh.to_vector();
+    const auto stride = decoded.sh.shape()[1] * 3;
+    std::vector<float> dc(n * 3);
+    for (std::size_t i = 0; i < n; ++i)
+        std::copy_n(sh.data() + i * stride, 3, dc.data() + i * 3);
+    auto means = decoded.means.to_vector();
+    for (float& v : means)
+        v = std::copysign(std::log1p(std::abs(v)), v);
+    const std::array<std::vector<float>, 5> values{
+        means, decoded.log_scales.to_vector(), decoded.quaternions.to_vector(),
+        decoded.opacity_logits.to_vector(), dc};
+    unsigned field_index = 0;
+    for (const auto& field : {"means", "scales", "quaternions", "opacities", "f_dc"}) {
+        const unsigned channels = std::string(field) == "quaternions" ? 4
+                                  : std::string(field) == "opacities" ? 1
+                                                                      : 3;
+        for (const auto& op : metadata["ops"])
+            if (op["input_fields"][0] == field) {
+                Quantizer quant(op["transforms"][0]["simple_quantize"]);
+                Bytes image(pixels * 4, 255), high(pixels * 4, 255);
+                for (std::size_t i = 0; i < pixels; ++i)
+                    for (unsigned d = 0; d < channels; ++d) {
+                        image[i * 4 + d] = 0;
+                        high[i * 4 + d] = 0;
+                    }
+                for (std::size_t i = 0; i < n; ++i)
+                    for (unsigned d = 0; d < channels; ++d) {
+                        const auto code = quant.encode(
+                            values[field_index][i * channels + d], quant.low.size() == 1 ? 0 : d);
+                        image[std::size_t(codec.pixels[i]) * 4 + d] = std::uint8_t(code & 255);
+                        high[std::size_t(codec.pixels[i]) * 4 + d] = std::uint8_t(code >> 8);
+                    }
+                files
+                    [std::string(field) +
+                     (channels == 3 && std::string(field) == "means" ? "_bytes_0.webp" : ".webp")] =
+                        write_image(image, codec.side, codec.side);
+                if (std::string(field) == "means")
+                    files["means_bytes_1.webp"] = write_image(high, codec.side, codec.side);
+            }
+        ++field_index;
+    }
+    const auto centers = codec.centers.to_vector(), lo = codec.sh_low.to_vector(),
+               hi = codec.sh_high.to_vector();
+    Bytes image(std::size_t(codec.center_side) * codec.center_side * 15 * 4, 255);
+    for (unsigned i = 0; i < codec.center_side * codec.center_side; ++i)
+        for (unsigned b = 0; b < 15; ++b)
+            for (unsigned c = 0; c < 3; ++c) {
+                const auto p = std::size_t((b / 5) * codec.center_side + i / codec.center_side) *
+                                   (codec.center_side * 5) +
+                               (b % 5) * codec.center_side + i % codec.center_side;
+                unsigned code = 0;
+                const unsigned d = b * 3 + c;
+                if (d < codec.dimensions && hi[d] > lo[d])
+                    code = unsigned(std::lround(
+                        std::clamp(
+                            (double(centers[std::size_t(i) * codec.dimensions + d]) - lo[d]) /
+                                (hi[d] - lo[d]),
+                            0.0, 1.0) *
+                        99));
+                image[p * 4 + c] = std::uint8_t(code);
+            }
+    files["f_rest_centroids.webp"] =
+        write_image(image, codec.center_side * 5, codec.center_side * 3);
+    // The paper's reference decoder normalizes by the observed code extrema.
+    // Fixed training ranges can lose an endpoint as parameters move. Rebase
+    // codes and ranges algebraically (no new quantization) so both readers
+    // reconstruct the same values, even for a fully occupied image grid.
+    for (auto& op : metadata["ops"]) {
+        const auto field = op["input_fields"][0].get<std::string>();
+        auto& config = op["transforms"][0]["simple_quantize"];
+        const unsigned levels = config["levels"].get<unsigned>();
+        const bool wide = field == "means";
+        auto plane = read_image(files, field + (wide ? "_bytes_0.webp" : ".webp"));
+        Image upper;
+        if (wide)
+            upper = read_image(files, "means_bytes_1.webp");
+        const unsigned channels = field == "quaternions" ? 4 : field == "opacities" ? 1 : 3;
+        unsigned first = 65535, last = 0;
+        for (std::size_t p = 0; p < plane.rgba.size() / 4; ++p)
+            for (unsigned d = 0; d < channels; ++d) {
+                const unsigned code =
+                    plane.rgba[p * 4 + d] | (wide ? unsigned(upper.rgba[p * 4 + d]) << 8 : 0);
+                first = std::min(first, code);
+                last = std::max(last, code);
+            }
+        if (first == 0 && last == levels - 1)
+            continue;
+        Quantizer old(config);
+        for (unsigned d = 0; d < old.low.size(); ++d) {
+            const double a = old.low[d], range = double(old.high[d]) - a;
+            old.low[d] = float(a + range * first / (levels - 1));
+            old.high[d] = float(a + range * last / (levels - 1));
+        }
+        old.levels = std::max(2U, last - first + 1);
+        config = old.json();
+        for (std::size_t p = 0; p < plane.rgba.size() / 4; ++p)
+            for (unsigned d = 0; d < channels; ++d) {
+                const unsigned code =
+                    (plane.rgba[p * 4 + d] | (wide ? unsigned(upper.rgba[p * 4 + d]) << 8 : 0)) -
+                    first;
+                plane.rgba[p * 4 + d] = std::uint8_t(code & 255);
+                if (wide)
+                    upper.rgba[p * 4 + d] = std::uint8_t(code >> 8);
+            }
+        files[field + (wide ? "_bytes_0.webp" : ".webp")] =
+            write_image(plane.rgba, plane.width, plane.height);
+        if (wide)
+            files["means_bytes_1.webp"] = write_image(upper.rgba, upper.width, upper.height);
+    }
+    const auto text = metadata.dump();
+    files["container_meta.yaml"] = Bytes(text.begin(), text.end());
+    return files;
+}
+
+void refresh_sog_xt_pras(SogXtTrainingCodec& codec) {
+    const auto n = codec.latent.size(), pixels = std::size_t(codec.side) * codec.side;
+    auto q = codec.latent.quaternions.to_vector(), s = codec.latent.log_scales.to_vector();
+    std::vector<float> pq(pixels * 4), ps(pixels * 3);
+    Bytes active(pixels);
+    for (std::size_t i = 0; i < n; ++i) {
+        Eigen::Quaternionf rotation(q[i * 4], q[i * 4 + 1], q[i * 4 + 2], q[i * 4 + 3]);
+        if (rotation.norm() < 1e-12F)
+            rotation = Eigen::Quaternionf::Identity();
+        else
+            rotation.normalize();
+        const auto p = codec.pixels[i];
+        active[p] = 1;
+        pq[p * 4] = rotation.w();
+        pq[p * 4 + 1] = rotation.x();
+        pq[p * 4 + 2] = rotation.y();
+        pq[p * 4 + 3] = rotation.z();
+        std::copy_n(s.data() + i * 3, 3, ps.data() + std::size_t(p) * 3);
+    }
+    sog_xt_pras(pq, ps, active, codec.side);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::copy_n(pq.data() + std::size_t(codec.pixels[i]) * 4, 4, q.data() + i * 4);
+        std::copy_n(ps.data() + std::size_t(codec.pixels[i]) * 3, 3, s.data() + i * 3);
+    }
+    codec.latent.quaternions = tinytensor::Tensor::from_vector(
+        q, codec.latent.quaternions.shape(), codec.latent.means.device());
+    codec.latent.log_scales = tinytensor::Tensor::from_vector(
+        s, codec.latent.log_scales.shape(), codec.latent.means.device());
+    auto low = codec.low.to_vector(), high = codec.high.to_vector();
+    const auto& bytes = codec.files.at("container_meta.yaml");
+    auto meta = Json::parse(bytes.begin(), bytes.end());
+    for (auto& op : meta["ops"]) {
+        const auto field = op["input_fields"][0].get<std::string>();
+        if (field != "scales" && field != "quaternions")
+            continue;
+        const unsigned start = field == "scales" ? 3 : 6, channels = field == "scales" ? 3 : 4;
+        Quantizer quant(field == "scales" ? s : q, channels, field == "scales" ? 256 : 100);
+        for (unsigned d = 0; d < channels; ++d) {
+            low[start + d] = quant.low[d];
+            high[start + d] = quant.high[d];
+        }
+        op["transforms"][0]["simple_quantize"] = quant.json();
+    }
+    codec.low =
+        tinytensor::Tensor::from_vector(low, codec.low.shape(), codec.latent.means.device());
+    codec.high =
+        tinytensor::Tensor::from_vector(high, codec.high.shape(), codec.latent.means.device());
+    const auto text = meta.dump();
+    codec.files["container_meta.yaml"] = Bytes(text.begin(), text.end());
 }
 
 DecodedSogXt decode_sog_xt(const SogXtFiles& files) {
@@ -643,7 +903,7 @@ DecodedSogXt decode_sog_xt(const SogXtFiles& files) {
     };
     const auto read = [&](const std::string& field, unsigned channels, unsigned expected_levels) {
         const auto quant = quantizer(field, channels);
-        if (!reference && quant.levels != expected_levels)
+        if (!reference && quant.levels > expected_levels)
             throw std::runtime_error("Unsupported SOG-XT quantization precision");
         const bool wide = field == "means";
         const auto low = image(field + (wide ? "_bytes_0" : ""));
@@ -708,7 +968,7 @@ DecodedSogXt decode_sog_xt(const SogXtFiles& files) {
             throw std::runtime_error("Invalid SOG-XT centroid image");
         const bool channel_major = reference || version >= 2;
         const auto quant = quantizer("f_rest_centroids", channel_major ? 45 : dims);
-        if (!reference && quant.levels != 100)
+        if (!reference && quant.levels > 100)
             throw std::runtime_error("Unsupported SOG-XT SH precision");
         unsigned min_code = 255, max_code = 0;
         if (reference)

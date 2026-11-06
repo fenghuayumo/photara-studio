@@ -2,8 +2,10 @@
 #include "splat/deployment.hpp"
 #include "../src/splat/sog_quantization.hpp"
 #include "../src/splat/sog_vulkan.hpp"
+#include "../src/splat/sog_palette.hpp"
 #include "../src/splat/formats_sog_xt.hpp"
 #include "splat/rasterizer.hpp"
+#include "splat/trainer.hpp"
 #include "sfm/asfm.hpp"
 #include "io/image.hpp"
 #include <Eigen/Geometry>
@@ -573,13 +575,116 @@ void streamed_palette(const std::filesystem::path& folder) {
 }
 #endif
 } // namespace
+void sog_xt_training_test(const std::filesystem::path& folder) {
+    using tinytensor::Tensor;using tinytensor::Device;
+    auto model=fixture(129,3);
+    std::vector<float> opacity_values(model.size());
+    for(std::size_t i=0;i<model.size();++i)opacity_values[i]=float(int(i%11)-5)*.1F;
+    model.opacity_logits=Tensor::from_vector(opacity_values,model.opacity_logits.shape(),Device::CPU);
+    for(auto* t:{&model.means,&model.log_scales,&model.quaternions,&model.opacity_logits,&model.sh})*t=t->to(Device::CUDA);
+    detail::SogXtTrainingCodec codec;
+    detail::encode_sog_xt(model,&codec);
+    auto quantized=detail::sog_xt_training_forward(codec);
+    const auto files=detail::encode_sog_xt_frozen(codec,quantized);
+    const auto decoded=detail::decode_sog_xt(files);
+    for(const auto& pair:{std::pair{quantized.means.to_vector(),decoded.means},
+        std::pair{quantized.log_scales.to_vector(),decoded.log_scales},
+        std::pair{quantized.opacity_logits.to_vector(),decoded.opacity_logits},
+        std::pair{quantized.sh.to_vector(),decoded.sh}}) {
+        require(pair.first.size()==pair.second.size(),"Frozen codec shape mismatch");
+        for(std::size_t i=0;i<pair.first.size();++i)
+            require(std::abs(pair.first[i]-pair.second[i])<3e-5F*(1+std::abs(pair.first[i])),"Training/export codec disagreement");
+    }
+    const auto q=quantized.quaternions.to_vector();
+    for(std::size_t i=0;i<model.size();++i){float norm=0;for(unsigned d=0;d<4;++d)norm+=q[i*4+d]*q[i*4+d];
+        for(unsigned d=0;d<4;++d)require(std::abs(q[i*4+d]/std::sqrt(norm)-decoded.rotations[i*4+d])<2e-5F,"Frozen quaternion normalization mismatch");}
+    require(files.at("f_rest_labels.webp")==codec.files.at("f_rest_labels.webp")&&
+        files.at("active_mask.webp")==codec.files.at("active_mask.webp"),"Training changed discrete codec layout");
+    codec.latent.opacity_logits=Tensor::zeros_like(codec.latent.opacity_logits);
+    auto rebased_forward=detail::sog_xt_training_forward(codec);
+    const auto rebased=detail::decode_sog_xt(detail::encode_sog_xt_frozen(codec,rebased_forward));
+    const auto opacity_expected=rebased_forward.opacity_logits.to_vector();
+    for(std::size_t i=0;i<model.size();++i)
+        require(std::abs(opacity_expected[i]-rebased.opacity_logits[i])<1e-5F,"Frozen range rebasing changed opacity");
+    // The following gradient check uses the most recent forward's centers.
+    quantized=rebased_forward;
+    ModelGradients g;
+    g.means=Tensor::ones_like(quantized.means);g.log_scales=Tensor::ones_like(quantized.log_scales);
+    g.quaternions=Tensor::ones_like(quantized.quaternions);g.opacity_logits=Tensor::ones_like(quantized.opacity_logits);g.sh=Tensor::ones_like(quantized.sh);
+    auto incoming=g.sh.to_vector();
+    const auto sh_stride=model.sh.shape()[1]*3;
+    for(std::size_t i=0;i<model.size();++i)for(std::size_t d=3;d<sh_stride;++d)incoming[i*sh_stride+d]=float(i%7+1);
+    g.sh=Tensor::from_vector(incoming,g.sh.shape(),Device::CUDA);
+    detail::sog_xt_training_backward(codec,quantized,g,0,0);
+    const auto grads=g.sh.to_vector(),raw=codec.raw_centers.to_vector(),lo=codec.sh_low.to_vector(),hi=codec.sh_high.to_vector();
+    const auto labels=codec.labels.to_vector_int();
+    const auto counts=codec.counts.to_vector_int();
+    const unsigned dims=codec.dimensions,stride=dims+3;
+    std::vector<double> sums(counts.size()*dims);
+    for(std::size_t i=0;i<model.size();++i)for(unsigned d=0;d<dims;++d)sums[std::size_t(labels[i])*dims+d]+=incoming[i*stride+3+d];
+    for(std::size_t i=0;i<model.size();++i)for(unsigned d=0;d<dims;++d){const auto c=std::size_t(labels[i])*dims+d;
+        const float expected=raw[c]>=lo[d]&&raw[c]<=hi[d]&&hi[d]>lo[d]?float(sums[c]/counts[labels[i]]):0.F;
+        require(std::abs(grads[i*stride+3+d]-expected)<1e-5F,"SH centroid STE did not conserve the shared gradient");}
+    const auto image=folder/"adapt-frame.png";
+    photara::io::save_rgb_png({32,32,std::vector<std::uint8_t>(32*32*3,128)},image);
+    photara::mvs::MvsScene scene;
+    for(unsigned i=0;i<4;++i){photara::mvs::MvsView view;view.id=i;view.path=i%2?image:folder/"heldout-missing.png";
+        view.width=view.src_width=view.height=view.src_height=32;view.fx=view.fy=view.src_fx=view.src_fy=20;
+        view.cx=view.cy=view.src_cx=view.src_cy=15.5F;scene.views.push_back(view);}
+    TrainingOptions options;options.sog_xt_finetune_iterations=4;options.sog_xt_batch_size=2;
+    options.evaluation_split_every=2;options.use_ppisp=options.use_bilateral_grid=true;
+    options.use_mvs_depth=options.use_mvs_normals=options.use_normal_field=options.use_depth_normal_loss=false;
+    const auto path=folder/"adapted.sog-xt";
+    auto result=Trainer(options).finetune_sog_xt(model,scene,path,[](const TrainingProgress& p){
+        require(std::isfinite(p.loss),"Non-finite encoding-aware loss");return true;});
+    require(result.size()==model.size()&&std::filesystem::is_regular_file(path),"Adaptation failed to export its final codec");
+    const auto cancelled=folder/"cancelled.sog-xt";
+    Trainer(options).finetune_sog_xt(model,scene,cancelled,[](const TrainingProgress&){return false;});
+    require(!std::filesystem::exists(cancelled),"Cancelled codec adaptation wrote an output");
+    std::cout<<"SOG-XT training/export parity, shared gradients, holdout and cancellation passed\n";
+}
+
 int run_tests(int argc, char** argv) {
     try {
         const bool gpu = argc > 1 && std::string(argv[1]) == "--vulkan";
+        {
+            constexpr unsigned n=65,dims=3,budget=23;
+            std::vector<float> points(n*dims);
+            for(unsigned i=0;i<n;++i)for(unsigned d=0;d<dims;++d)
+                points[i*dims+d]=float((i*13+d*7)%29)/29;
+            detail::SogPalette p;p.labels.assign(n,0);p.centroids.assign(dims,0);
+            double before=0;
+            detail::complete_sog_palette(points,n,dims,1,p);
+            for(unsigned i=0;i<n;++i)for(unsigned d=0;d<dims;++d)before+=std::pow(double(points[i*dims+d])-p.centroids[d],2);
+            if(gpu) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+                p=detail::cluster_sog_vulkan(points,n,dims,budget);
+#endif
+            } else detail::refine_sog_palette_cpu(points,n,dims,budget,p);
+            require(p.centroids.size()==budget*dims,"Non-power-of-two SOG budget was truncated");
+            std::vector<unsigned> counts(budget);double after=0;
+            for(unsigned i=0;i<n;++i){require(p.labels[i]<budget,"Invalid global SOG label");++counts[p.labels[i]];
+                for(unsigned d=0;d<dims;++d)after+=std::pow(double(points[i*dims+d])-p.centroids[p.labels[i]*dims+d],2);}
+            require(std::all_of(counts.begin(),counts.end(),[](auto v){return v>0;}),"Empty requested SOG codeword");
+            require(after<=before,"Global SOG refinement increased SSE");
+            std::fill(points.begin(),points.end(),.25F);
+            if(gpu) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+                p=detail::cluster_sog_vulkan(points,n,dims,budget);
+#endif
+            } else detail::refine_sog_palette_cpu(points,n,dims,budget,p);
+            std::fill(counts.begin(),counts.end(),0);
+            for(auto label:p.labels){require(label<budget,"Invalid constant SOG label");++counts[label];}
+            require(p.centroids.size()==budget*dims&&std::all_of(counts.begin(),counts.end(),[](auto v){return v>0;}),"Constant SH collapsed the SOG budget");
+        }
         const auto folder = std::filesystem::temp_directory_path() / ("photara-formats-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(folder);
         struct Cleanup { std::filesystem::path p; ~Cleanup() { std::error_code e; std::filesystem::remove_all(p, e); } } cleanup{folder};
+        if(argc>1&&std::string(argv[1])=="--sog-xt-training-only"){sog_xt_training_test(folder);return 0;}
+        if(argc==4&&std::string(argv[1])=="--decode-sog-xt") {
+            save_gaussians_ply(load_gaussians(std::filesystem::u8path(argv[2]),tinytensor::Device::CPU),std::filesystem::u8path(argv[3]));return 0;
+        }
         if (argc > 3 && std::string(argv[1]) == "--sog-xt-compare") {
             const auto actual = load_gaussians(std::filesystem::u8path(argv[2]), tinytensor::Device::CPU);
             const auto expected = load_gaussians(std::filesystem::u8path(argv[3]), tinytensor::Device::CPU);

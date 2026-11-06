@@ -257,6 +257,9 @@ struct ReconstructCli {
     unsigned splat_popspa_prune_cycles{4};
     float splat_popspa_geometry_lr_scale{1.F};
     float splat_popspa_finetune_lr_scale{0.2F};
+    bool splat_sog_xt_finetune{false};
+    unsigned splat_sog_xt_finetune_steps{4000},splat_sog_xt_batch{8};
+    float splat_sog_xt_reference_weight{2.F},splat_sog_xt_learning_rate_scale{0.02F};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{3'000'000};
@@ -1073,6 +1076,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-popspa-prune-cycles", "GaussianPOP re-scoring cycles per pruning stage", cxxopts::value<unsigned>()->default_value("4"))
         ("splat-popspa-geometry-lr-scale", "POPSpa scale/rotation learning-rate multiplier", cxxopts::value<float>()->default_value("1"))
         ("splat-popspa-finetune-lr-scale", "Final appearance/shape learning-rate multiplier", cxxopts::value<float>()->default_value("0.2"))
+        ("splat-sog-xt-finetune", "CUDA encoding-aware adaptation before SOG-XT export", cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-sog-xt-finetune-steps", "SOG-XT encoding-aware optimizer steps", cxxopts::value<unsigned>()->default_value("4000"))
+        ("splat-sog-xt-batch", "Views per SOG-XT adaptation optimizer step", cxxopts::value<unsigned>()->default_value("8"))
+        ("splat-sog-xt-reference-weight", "Canonical input-render preservation loss weight", cxxopts::value<float>()->default_value("2"))
+        ("splat-sog-xt-lr-scale", "Encoding-aware Gaussian learning-rate multiplier", cxxopts::value<float>()->default_value("0.02"))
         ("splat-speedy-start", "First periodic pruning iteration (0 = automatic two soft/two hard)", cxxopts::value<unsigned>()->default_value("0"))
         ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))
         ("splat-speedy-stop", "Exclusive pruning stop", cxxopts::value<unsigned>()->default_value("30000"))
@@ -1749,6 +1757,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_popspa_prune_cycles = result["splat-popspa-prune-cycles"].as<unsigned>();
     cli.splat_popspa_geometry_lr_scale = result["splat-popspa-geometry-lr-scale"].as<float>();
     cli.splat_popspa_finetune_lr_scale = result["splat-popspa-finetune-lr-scale"].as<float>();
+    cli.splat_sog_xt_finetune = result["splat-sog-xt-finetune"].as<bool>();
+    cli.splat_sog_xt_finetune_steps = result["splat-sog-xt-finetune-steps"].as<unsigned>();
+    cli.splat_sog_xt_batch = result["splat-sog-xt-batch"].as<unsigned>();
+    cli.splat_sog_xt_reference_weight = result["splat-sog-xt-reference-weight"].as<float>();
+    cli.splat_sog_xt_learning_rate_scale = result["splat-sog-xt-lr-scale"].as<float>();
     cli.speedy_options.speedy_pruning = result.count("splat-speedy-pruning")
         ? result["splat-speedy-pruning"].as<bool>() : splat_preset.speedy_pruning;
     cli.speedy_options.speedy_start = result["splat-speedy-start"].as<unsigned>();
@@ -3766,6 +3779,22 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.popspa_prune_cycles = cli.splat_popspa_prune_cycles;
     options.popspa_geometry_lr_scale = cli.splat_popspa_geometry_lr_scale;
     options.popspa_finetune_lr_scale = cli.splat_popspa_finetune_lr_scale;
+    options.sog_xt_finetune_iterations = cli.splat_sog_xt_finetune_steps;
+    options.sog_xt_batch_size = cli.splat_sog_xt_batch;
+    options.sog_xt_reference_weight = cli.splat_sog_xt_reference_weight;
+    options.sog_xt_learning_rate_scale = cli.splat_sog_xt_learning_rate_scale;
+    if(cli.splat_sog_xt_finetune &&
+        (options.backend!=photara::splat::TrainingBackend::cuda ||
+         options.render_method!=photara::splat::RenderMethod::gaussian_3dgs ||
+         photara::splat::gaussian_format_from_path(splat_file_path(cli))!=photara::splat::GaussianFormat::sog_xt ||
+         !options.sh_degree || !options.sog_xt_finetune_iterations ||
+         !options.sog_xt_batch_size || options.sog_xt_batch_size>64 ||
+         !std::isfinite(options.sog_xt_reference_weight) || options.sog_xt_reference_weight<0 ||
+         !std::isfinite(options.sog_xt_learning_rate_scale) || options.sog_xt_learning_rate_scale<=0 ||
+         options.sog_xt_learning_rate_scale>1 ||
+         (options.filter_mode!=photara::splat::SplatFilterMode::classic &&
+          options.filter_mode!=photara::splat::SplatFilterMode::mip_2d)))
+        throw std::invalid_argument("SOG-XT adaptation requires CUDA 3DGS, SH degree > 0, positive steps, batch 1..64 and .sog-xt output");
     options.speedy_start = cli.speedy_options.speedy_start;
     options.speedy_every = cli.speedy_options.speedy_every;
     options.speedy_stop = cli.speedy_options.speedy_stop;
@@ -4306,6 +4335,14 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " training_s=", training_seconds,
         " checkpoint_evaluations=", options.evaluation_iterations.size());
     const std::filesystem::path model_path = splat_file_path(cli);
+    if(cli.splat_sog_xt_finetune) {
+        ensure_artifact_parent(model_path);
+        gaussians=photara::splat::Trainer(options).finetune_sog_xt(gaussians,scene,model_path,
+            [](const photara::splat::TrainingProgress& p){
+                photara::core::Logger::instance().info("sog_xt_adaptation iteration=",p.iteration,"/",p.total_iterations," loss=",p.loss);
+                return true;
+            });
+    }
     std::unique_ptr<photara::splat::ModelHandoff> handoff;
     if (cli.gui && !cli.final_model_handoff.empty()) {
         const auto handoff_started = std::chrono::steady_clock::now();
@@ -4322,7 +4359,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (!model_path.empty()) {
         const auto save_started = std::chrono::steady_clock::now();
         ensure_artifact_parent(model_path);
-        photara::splat::save_gaussians(handoff ? handoff->model() : gaussians, model_path);
+        if(!cli.splat_sog_xt_finetune)
+            photara::splat::save_gaussians(handoff ? handoff->model() : gaussians, model_path);
         photara::core::Logger::instance().info("splat_final_save_seconds=",
             std::chrono::duration<double>(std::chrono::steady_clock::now() - save_started).count());
     }

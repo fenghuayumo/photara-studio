@@ -1167,6 +1167,10 @@ NB_MODULE(photara, module) {
         .def_rw("popspa_keep_ratio", &splat::TrainingOptions::popspa_keep_ratio)
         .def_rw("popspa_refine_iterations", &splat::TrainingOptions::popspa_refine_iterations)
         .def_rw("popspa_finetune_iterations", &splat::TrainingOptions::popspa_finetune_iterations)
+        .def_rw("sog_xt_finetune_iterations", &splat::TrainingOptions::sog_xt_finetune_iterations)
+        .def_rw("sog_xt_batch_size", &splat::TrainingOptions::sog_xt_batch_size)
+        .def_rw("sog_xt_reference_weight", &splat::TrainingOptions::sog_xt_reference_weight)
+        .def_rw("sog_xt_learning_rate_scale", &splat::TrainingOptions::sog_xt_learning_rate_scale)
         .def_rw("popspa_prune_cycles", &splat::TrainingOptions::popspa_prune_cycles)
         .def_rw("popspa_geometry_lr_scale", &splat::TrainingOptions::popspa_geometry_lr_scale)
         .def_rw("popspa_finetune_lr_scale", &splat::TrainingOptions::popspa_finetune_lr_scale)
@@ -1710,6 +1714,13 @@ NB_MODULE(photara, module) {
     module.def(
         "load_3dgs", &load_3dgs, nb::arg("path"),
         nb::call_guard<nb::gil_scoped_release>());
+    module.def("finetune_sog_xt",[](const GaussianModelHandle& model,const MvsSceneHandle& scene,
+        const std::filesystem::path& output,const splat::TrainingOptions& options,nb::object progress){
+        auto result=std::make_shared<GaussianModelHandle>();
+        if(progress.is_none()){nb::gil_scoped_release release;result->model=splat::Trainer(options).finetune_sog_xt(model.model,scene.scene,output);}
+        else result->model=splat::Trainer(options).finetune_sog_xt(model.model,scene.scene,output,make_progress_callback(progress));
+        return result;
+    },nb::arg("model"),nb::arg("scene"),nb::arg("output"),nb::arg("options")=splat::TrainingOptions{},nb::arg("progress")=nb::none());
     module.def(
         "extract_tsdf", &extract_tsdf, nb::arg("model"),
         nb::arg("scene"),

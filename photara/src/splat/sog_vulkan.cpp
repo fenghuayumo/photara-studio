@@ -1,4 +1,5 @@
 #include "sog_vulkan.hpp"
+#include "sog_palette.hpp"
 #include "sog_cluster.hlsl.embedded.hpp"
 #include "photara_vk/photara_vk.hpp"
 #include <algorithm>
@@ -188,6 +189,83 @@ SogPalette cluster_batch(
     }
     return result;
 }
+
+// Assign one bounded point batch against the entire shared codebook. All
+// batches see the same centers; aggregate their sufficient statistics before
+// updating centers, so a batch boundary never limits cluster membership.
+void global_batch(
+    Backend& backend,
+    const std::vector<float>& values,
+    unsigned first,
+    unsigned n,
+    unsigned dims,
+    SogPalette& palette,
+    std::vector<double>& sums,
+    std::vector<std::uint64_t>& totals) {
+    using photara::vk::MemoryKind;
+    const unsigned k = unsigned(palette.centroids.size() / dims);
+    const auto buffer = [&](std::size_t words) {
+        return backend.device.create_buffer(words * 4, MemoryKind::device_local);
+    };
+    auto points = buffer(std::size_t(n) * dims), centers = buffer(std::size_t(k) * dims);
+    auto labels = buffer(n), counts = buffer(k), offsets = buffer(k + 1), cursors = buffer(k);
+    auto indices = buffer(n), blocks = buffer(2 * ((k + 63) / 64));
+    auto upload = backend.device.create_buffer(
+        points.size() + centers.size() + labels.size(), MemoryKind::host_visible);
+    upload.upload(values.data() + std::size_t(first) * dims, points.size());
+    upload.upload(palette.centroids.data(), centers.size(), points.size());
+    upload.upload(palette.labels.data() + first, labels.size(), points.size() + centers.size());
+    const std::array buffers{photara::vk::binding(points),  photara::vk::binding(centers),
+                             photara::vk::binding(labels),  photara::vk::binding(counts),
+                             photara::vk::binding(offsets), photara::vk::binding(cursors),
+                             photara::vk::binding(indices), photara::vk::binding(offsets),
+                             photara::vk::binding(indices), photara::vk::binding(blocks)};
+    Push push{10, n, dims, k, 1, 0};
+    auto& encoder = backend.ring.acquire();
+    encoder.copy(points, 0, upload, 0, points.size());
+    encoder.copy(centers, 0, upload, points.size(), centers.size());
+    encoder.copy(labels, 0, upload, points.size() + centers.size(), labels.size());
+    const auto dispatch = [&](unsigned mode, unsigned threads) {
+        push.mode = mode;
+        const unsigned groups = (threads + 63) / 64;
+        encoder.dispatch(
+            backend.pipeline, buffers, &push, sizeof(push), std::min(groups, 65535U),
+            (groups + 65534) / 65535);
+    };
+    for (unsigned at = 0; at < n; at += 8192) {
+        push.iteration = at;
+        dispatch(10, std::min(8192U, n - at));
+    }
+    push.iteration = 0;
+    dispatch(3, k);
+    dispatch(4, n);
+    dispatch(5, k);
+    dispatch(6, (k + 63) / 64);
+    dispatch(7, k);
+    dispatch(8, n);
+    dispatch(11, k * 64);
+    auto readback = backend.device.create_buffer(
+        counts.size() + centers.size() + labels.size(), MemoryKind::host_cached);
+    encoder.barrier(
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    encoder.copy(readback, 0, counts, 0, counts.size());
+    encoder.copy(readback, counts.size(), centers, 0, centers.size());
+    encoder.copy(readback, counts.size() + centers.size(), labels, 0, labels.size());
+    backend.ring.submit();
+    encoder.wait();
+    std::vector<unsigned> host_counts(k);
+    std::vector<float> host_centers(std::size_t(k) * dims);
+    readback.download(host_counts.data(), counts.size());
+    readback.download(host_centers.data(), centers.size(), counts.size());
+    readback.download(palette.labels.data() + first, labels.size(), counts.size() + centers.size());
+    for (unsigned c = 0; c < k; ++c) {
+        totals[c] += host_counts[c];
+        for (unsigned d = 0; d < dims; ++d)
+            sums[std::size_t(c) * dims + d] +=
+                double(host_centers[std::size_t(c) * dims + d]) * host_counts[c];
+    }
+}
 } // namespace
 
 SogPalette cluster_sog_vulkan(
@@ -203,7 +281,7 @@ SogPalette cluster_sog_vulkan(
     // proportional share of the 16-bit palette; there is no CPU K-means path.
     constexpr unsigned batch_limit = 262144;
     const unsigned batches = std::bit_ceil((n - 1) / batch_limit + 1);
-    const unsigned palette_budget = std::bit_floor(budget);
+    const unsigned palette_budget = std::bit_floor(std::min(n, budget));
     if (batches > palette_budget)
         throw std::runtime_error("SOG scene exceeds the bounded Vulkan clustering budget");
     // Reuse the device across batches, and release it before returning from
@@ -223,6 +301,24 @@ SogPalette cluster_sog_vulkan(
             result.centroids.end(), chunk.centroids.begin(), chunk.centroids.end());
         for (auto label : chunk.labels)
             result.labels.push_back(base + label);
+    }
+    // Hierarchical batches are only an initialization. Spend the exact
+    // requested budget, then run global Lloyd updates with no N*K allocation.
+    complete_sog_palette(values, n, dims, budget, result);
+    const unsigned k = unsigned(result.centroids.size() / dims);
+    for (unsigned iteration = 0; iteration < 3; ++iteration) {
+        std::vector<double> sums(std::size_t(k) * dims);
+        std::vector<std::uint64_t> counts(k);
+        for (unsigned first = 0; first < n; first += batch_limit)
+            global_batch(
+                backend, values, first, std::min(batch_limit, n - first), dims, result, sums,
+                counts);
+        for (unsigned c = 0; c < k; ++c)
+            if (counts[c])
+                for (unsigned d = 0; d < dims; ++d)
+                    result.centroids[std::size_t(c) * dims + d] =
+                        float(sums[std::size_t(c) * dims + d] / counts[c]);
+        complete_sog_palette(values, n, dims, budget, result);
     }
     return result;
 }

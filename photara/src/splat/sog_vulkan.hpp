@@ -8,8 +8,8 @@ struct SogPalette {
     std::vector<std::uint32_t> labels;
 };
 
-// Hierarchical Lloyd clustering, including assignment and segmented centroid
-// reduction, runs on Vulkan. Host code only compacts the final occupied palette.
+// Hierarchical initialization followed by global Lloyd reassignment on Vulkan.
+// The exact requested budget is preserved; bounded point batches share centers.
 SogPalette cluster_sog_vulkan(
     const std::vector<float>& points,
     unsigned count,

@@ -190,6 +190,11 @@ class Trainer {
         ProgressCallback progress = {}, PreviewCallback preview = {},
         DevicePreviewCallback device_preview = {}) const;
 
+    // CUDA encoding-aware adaptation. Writes the fixed-layout SOG-XT assets,
+    // without re-clustering on export; returns the actual decoded model.
+    GaussianModel finetune_sog_xt(const GaussianModel& model, const mvs::MvsScene& scene,
+        const std::filesystem::path& output, ProgressCallback progress = {}) const;
+
   private:
     GaussianModel train_impl(
         const mvs::MvsScene& scene, ProgressCallback progress,
