@@ -403,8 +403,8 @@ void download(const Tensor& src, void* data, std::size_t bytes) {
     Context::get().download(buffer_of(src), byte_offset(src), data, bytes);
 }
 
-void unpack_training_pixels(
-    const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask) {
+static void unpack_training_channels(
+    const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask, bool normals) {
     const std::size_t pixels = packed.numel();
     if (pixels == 0) {
         return;
@@ -423,6 +423,7 @@ void unpack_training_pixels(
     // not ask for them; the flag keeps the kernel from writing there.
     if (gray != nullptr) push.flags |= 1U;
     if (mask != nullptr) push.flags |= 2U;
+    if (normals) push.flags |= 4U;
     push.packed_offset = u32(byte_offset(packed));
     push.rgb_offset = u32(byte_offset(rgb));
     if (gray != nullptr) push.gray_offset = u32(byte_offset(*gray));
@@ -435,6 +436,18 @@ void unpack_training_pixels(
     };
     Context::get().dispatch(
         ShaderId::UnpackRgba, bindings, &push, sizeof(push), groups_for(pixels));
+}
+
+void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask) {
+    unpack_training_channels(packed, rgb, gray, mask, false);
+}
+
+void unpack_training_normals(const Tensor& packed, Tensor& normals) {
+    if (packed.device() != Device::Vulkan || normals.device() != Device::Vulkan ||
+        packed.dtype() != DataType::Int32 || normals.dtype() != DataType::Float32 ||
+        !packed.is_contiguous() || !normals.is_contiguous() || normals.numel() != 3 * packed.numel())
+        throw std::invalid_argument("Invalid Vulkan packed normal image");
+    unpack_training_channels(packed, normals, nullptr, nullptr, true);
 }
 
 Tensor convert(const Tensor& src, DataType dtype) {

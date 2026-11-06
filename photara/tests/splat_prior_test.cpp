@@ -6,6 +6,7 @@
 #include "checkpoint.hpp"
 #if defined(TINYTENSOR_HAS_VULKAN)
 #include "geometry_vulkan.hpp"
+#include "vulkan/ops.hpp"
 #endif
 #include "io/image.hpp"
 #include <chrono>
@@ -275,7 +276,7 @@ void prefetch_image_parity() {
         "Background packing changed RGB or mask pixels");
 }
 
-void packed_priors() {
+void packed_priors(tinytensor::Device device = tinytensor::Device::CUDA) {
     const auto directory = std::filesystem::temp_directory_path() /
         ("photara-packed-prior-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
@@ -301,8 +302,17 @@ void packed_priors() {
     save_training_prior(path, source, prior);
     const auto packed = load_packed_training_prior(path, source, prior.camera, prior.camera, true, true);
     check(packed.depth == prior.depth && packed.normals.size() == count, "Packed prior shape/depth");
-    auto words = Tensor::from_vector(packed.normals, {17, 33}, tinytensor::Device::CUDA);
-    const auto decoded = detail::decode_packed_training_normals(words, 33, 17).to_vector();
+    auto words = Tensor::from_vector(packed.normals, {17, 33}, device);
+    Tensor normal_image;
+    if (device == tinytensor::Device::CUDA)
+        normal_image = detail::decode_packed_training_normals(words, 33, 17);
+#if defined(TINYTENSOR_HAS_VULKAN)
+    else {
+        normal_image = Tensor::empty({3, 17, 33}, device);
+        tinytensor::vulkan::unpack_training_normals(words, normal_image);
+    }
+#endif
+    const auto decoded = normal_image.to_vector();
     for (std::size_t i = 0; i < count; ++i) {
         double error = 0, length = 0;
         for (std::size_t ch = 0; ch < 3; ++ch) {
@@ -319,6 +329,7 @@ void packed_priors() {
     check(std::filesystem::file_size(encoded_path) < std::filesystem::file_size(path), "Packed cache did not shrink");
     {
         options.lambda_d = options.lambda_n = .01F;
+        options.backend = device == tinytensor::Device::CUDA ? TrainingBackend::cuda : TrainingBackend::vulkan;
         options.prior_directory = directory;
         options.adaptive_training_cache = false;
         options.training_device_cache_bytes = 1024 * 1024;
@@ -329,6 +340,7 @@ void packed_priors() {
         check(loader.get(0).normal.to_vector() == decoded, "Packed resident normal decode changed");
         check(loader.get(0).normal.to_vector() == decoded && loader.stats().device_hits > 0,
               "Packed device cache did not retain the encoded normals");
+        if (device == tinytensor::Device::CUDA) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         do {
             loader.prefetch(1);
@@ -338,6 +350,14 @@ void packed_priors() {
         check(loader.stats().async_upload_issued > 0, "Packed normal async upload not issued");
         check(loader.get(1).normal.to_vector() == decoded && loader.stats().async_upload_hits > 0 &&
               loader.stats().async_upload_failures == 0, "Packed async normal upload changed supervision");
+        } else {
+            loader.prefetch(1);
+            check(loader.get(1).normal.to_vector() == decoded, "Vulkan packed prefetch changed normals");
+            loader.set_resolution_scale(.5F);
+            const auto half = loader.get(1);
+            check(half.normal.numel() == 3 * half.camera.width * half.camera.height,
+                  "Vulkan packed prior resolution transition changed shape");
+        }
     }
     { std::ofstream file(encoded_path, std::ios::binary | std::ios::trunc); file << "truncated"; }
     check(load_packed_training_prior(path, source, prior.camera, prior.camera, true, true).normals == packed.normals,
@@ -477,6 +497,7 @@ int main(int argc, char** argv) {
             parameter_gradients(tinytensor::Device::CUDA,photara::CameraModel::equirectangular);
         } else if (argc == 2 && std::string_view(argv[1]) == "--vulkan") {
 #if defined(TINYTENSOR_HAS_VULKAN)
+            packed_priors(tinytensor::Device::Vulkan);
             losses(tinytensor::Device::Vulkan,photara::CameraModel::opencv_fisheye);
             losses(tinytensor::Device::Vulkan,photara::CameraModel::equirectangular);
             losses(tinytensor::Device::Vulkan); parameter_gradients(tinytensor::Device::Vulkan);

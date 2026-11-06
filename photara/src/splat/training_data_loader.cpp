@@ -862,8 +862,7 @@ std::size_t packed_training_view_bytes(
     if (options.lambda_d > 0.F)
         bytes = saturate_add(bytes, saturate_multiply(pixels, sizeof(float)));
     if (options.lambda_n > 0.F)
-        bytes = saturate_add(bytes, saturate_multiply(pixels,
-            options.backend == TrainingBackend::cuda ? sizeof(int) : 3 * sizeof(float)));
+        bytes = saturate_add(bytes, saturate_multiply(pixels, sizeof(int)));
     if (can_use_mvs_maps && options.use_mvs_depth &&
         view.depth_map.depth.size() ==
             saturate_multiply(
@@ -1017,22 +1016,12 @@ HostTrainingView load_host_training_view(
     std::vector<int> packed_normals;
     if (options.lambda_d > 0.F || options.lambda_n > 0.F) {
         const auto full_camera = training_data::training_camera(view, options, 1.F);
-        if (options.backend == TrainingBackend::cuda) {
+        {
             auto prior = load_packed_training_prior(
                 training_prior_path(options.prior_directory, view.id), view.path, full_camera, camera,
                 options.lambda_d > 0.F, options.lambda_n > 0.F);
             depth = std::move(prior.depth);
             packed_normals = std::move(prior.normals);
-        } else {
-            auto prior = load_training_prior(
-                training_prior_path(options.prior_directory, view.id), view.path, full_camera,
-                options.lambda_d > 0.F, options.lambda_n > 0.F);
-            if (camera.width != full_camera.width || camera.height != full_camera.height)
-                prior = resize_training_prior(prior, camera);
-            if (options.lambda_d > 0.F)
-                depth = std::move(prior.depth);
-            if (options.lambda_n > 0.F)
-                normals = std::move(prior.normals);
         }
     }
     if (!uses_native_splat_projection(camera.model) && options.use_mvs_depth &&
@@ -1113,9 +1102,22 @@ TrainingView upload_training_view(const HostTrainingView& host, const TrainingOp
                         : tinytensor::Tensor::from_vector(
                               host.normal, {3, host.camera.height, host.camera.width}, device);
     if (!host.packed_normal.empty()) {
-        auto packed = tinytensor::Tensor::from_vector(host.packed_normal,
-            {host.camera.height, host.camera.width}, device);
-        result.normal = detail::decode_packed_training_normals(packed, host.camera.width, host.camera.height);
+        if (options.backend == TrainingBackend::vulkan) {
+            auto packed = tinytensor::Tensor::empty({host.camera.height, host.camera.width}, device,
+                tinytensor::DataType::Int32);
+            if (options.training_async_upload)
+                tinytensor::vulkan::upload_async(packed, host.packed_normal.data(), packed.bytes());
+            else
+                tinytensor::vulkan::upload(packed, host.packed_normal.data(), packed.bytes());
+            result.normal = tinytensor::Tensor::empty(
+                {std::size_t{3}, host.camera.height, host.camera.width}, device);
+            tinytensor::vulkan::unpack_training_normals(packed, result.normal);
+            if (ledger) { ledger->track(packed); ledger->track(result.normal); ledger->sample(ring_bytes); }
+        } else {
+            auto packed = tinytensor::Tensor::from_vector(host.packed_normal,
+                {host.camera.height, host.camera.width}, device);
+            result.normal = detail::decode_packed_training_normals(packed, host.camera.width, host.camera.height);
+        }
     }
     result.has_mask = host.has_mask;
     result.mask_is_validity = host.mask_is_validity;

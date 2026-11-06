@@ -17,7 +17,7 @@
 struct PushConstants
 {
     uint pixels;
-    uint flags;             // bit0: write gray, bit1: write mask
+    uint flags;             // bit0: gray, bit1: mask, bit2: oct16 normal instead of RGBA
     uint packed_offset;
     uint rgb_offset;
     uint gray_offset;
@@ -43,6 +43,23 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     const uint value = packed.Load(pc.packed_offset + index * 4u);
+    if ((pc.flags & 4u) != 0u)
+    {
+        float3 n = 0.0;
+        if (value != 0x80008000u)
+        {
+            n.xy = float2(asint(value << 16u) >> 16, asint(value) >> 16) / 32767.0;
+            n.z = 1.0 - abs(n.x) - abs(n.y);
+            const float fold = max(-n.z, 0.0);
+            n.x += n.x < 0.0 ? fold : -fold;
+            n.y += n.y < 0.0 ? fold : -fold;
+            n *= rsqrt(dot(n, n));
+        }
+        rgb.Store(pc.rgb_offset + index * 4u, asuint(n.x));
+        rgb.Store(pc.rgb_offset + (pc.pixels + index) * 4u, asuint(n.y));
+        rgb.Store(pc.rgb_offset + (2u * pc.pixels + index) * 4u, asuint(n.z));
+        return;
+    }
     const float inverse_255 = 1.0 / 255.0;
     const float red = float(value & 0xFFu) * inverse_255;
     const float green = float((value >> 8u) & 0xFFu) * inverse_255;

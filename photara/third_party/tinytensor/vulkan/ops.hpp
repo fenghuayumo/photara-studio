@@ -106,6 +106,8 @@ void fill(Tensor& tensor, float value);
 // the luma plane and `mask` the alpha plane when the pointers are non-null.
 void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray,
                             Tensor* mask);
+// Expand one oct16 normal word per pixel to Float32 CHW unit normals.
+void unpack_training_normals(const Tensor& packed, Tensor& normals);
 void copy_same_layout(Tensor& dst, const Tensor& src);
 void upload(Tensor& dst, const void* data, std::size_t bytes);
 // Immediate non-blocking upload for a newly allocated tensor. Its first GPU
