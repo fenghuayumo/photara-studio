@@ -1317,7 +1317,11 @@ if(PHOTARA_BUILD_BENCHMARKS)
 endif()
 
 if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
+    get_property(_photara_targets_before_tests DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
     add_custom_target(photara_tests)
+    if(TARGET photara_vk_test)
+        add_dependencies(photara_tests photara_vk_test)
+    endif()
     add_executable(photara_model_import_test tests/model_import_test.cpp)
     target_include_directories(photara_model_import_test PRIVATE ../apps/editor)
     target_compile_features(photara_model_import_test PRIVATE cxx_std_20)
@@ -1396,9 +1400,11 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     photara_exclude_from_default(photara_sam_model_cache_test)
     add_dependencies(photara_tests photara_sam_model_cache_test)
     if(PHOTARA_HAS_SAM AND TARGET photara_inference)
-        add_executable(photara_sam_masks_smoke tests/sam_masks_smoke.cpp)
-        target_link_libraries(photara_sam_masks_smoke PRIVATE Photara::SAM Photara::SfM)
-        photara_exclude_from_default(photara_sam_masks_smoke)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            add_executable(photara_sam_masks_smoke tests/sam_masks_smoke.cpp)
+            target_link_libraries(photara_sam_masks_smoke PRIVATE Photara::SAM Photara::SfM)
+            photara_exclude_from_default(photara_sam_masks_smoke)
+        endif()
     endif()
     if(TARGET photara_inference)
         add_executable(photara_inference_test tests/inference/inference_test.cpp)
@@ -1418,54 +1424,52 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_exclude_from_default(photara_inference_test)
         add_dependencies(photara_tests photara_inference_test)
 
-        add_executable(photara_grounding_dino_smoke
-            tests/inference/grounding_dino_smoke.cpp)
-        target_link_libraries(photara_grounding_dino_smoke PRIVATE
-            Photara::Inference ggml)
-        target_compile_features(
-            photara_grounding_dino_smoke PRIVATE cxx_std_20)
-        photara_exclude_from_default(photara_grounding_dino_smoke)
-        add_dependencies(photara_tests photara_grounding_dino_smoke)
-        # Manual real-checkpoint gate; never downloads model files via ctest.
-        add_executable(photara_moge_weights_test tests/inference/moge_weights_test.cpp)
-        target_include_directories(photara_moge_weights_test PRIVATE src/inference)
-        target_link_libraries(photara_moge_weights_test PRIVATE Photara::Inference ggml)
-        if(WIN32)
-            add_custom_command(TARGET photara_moge_weights_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND}
-                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_weights_test>,|>"
-                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_weights_test>"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
-                VERBATIM)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            add_executable(photara_grounding_dino_smoke
+                tests/inference/grounding_dino_smoke.cpp)
+            target_link_libraries(photara_grounding_dino_smoke PRIVATE
+                Photara::Inference ggml)
+            target_compile_features(
+                photara_grounding_dino_smoke PRIVATE cxx_std_20)
+            photara_exclude_from_default(photara_grounding_dino_smoke)
+            # Manual real-checkpoint gate; never downloads model files via ctest.
+            add_executable(photara_moge_weights_test tests/inference/moge_weights_test.cpp)
+            target_include_directories(photara_moge_weights_test PRIVATE src/inference)
+            target_link_libraries(photara_moge_weights_test PRIVATE Photara::Inference ggml)
+            if(WIN32)
+                add_custom_command(TARGET photara_moge_weights_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND}
+                        "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_weights_test>,|>"
+                        "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_weights_test>"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                    VERBATIM)
+            endif()
+            photara_exclude_from_default(photara_moge_weights_test)
+            add_executable(photara_moge_encoder_test tests/inference/moge_encoder_test.cpp)
+            target_include_directories(photara_moge_encoder_test PRIVATE src/inference)
+            target_link_libraries(photara_moge_encoder_test PRIVATE Photara::Inference ggml)
+            if(WIN32)
+                add_custom_command(TARGET photara_moge_encoder_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND}
+                        "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_encoder_test>,|>"
+                        "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_encoder_test>"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                    VERBATIM)
+            endif()
+            photara_exclude_from_default(photara_moge_encoder_test)
+            add_executable(photara_moge_decoder_test tests/inference/moge_decoder_test.cpp)
+            target_include_directories(photara_moge_decoder_test PRIVATE src/inference)
+            target_link_libraries(photara_moge_decoder_test PRIVATE Photara::Inference ggml)
+            if(WIN32)
+                add_custom_command(TARGET photara_moge_decoder_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND}
+                        "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_decoder_test>,|>"
+                        "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_decoder_test>"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                    VERBATIM)
+            endif()
+            photara_exclude_from_default(photara_moge_decoder_test)
         endif()
-        photara_exclude_from_default(photara_moge_weights_test)
-        add_dependencies(photara_tests photara_moge_weights_test)
-        add_executable(photara_moge_encoder_test tests/inference/moge_encoder_test.cpp)
-        target_include_directories(photara_moge_encoder_test PRIVATE src/inference)
-        target_link_libraries(photara_moge_encoder_test PRIVATE Photara::Inference ggml)
-        if(WIN32)
-            add_custom_command(TARGET photara_moge_encoder_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND}
-                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_encoder_test>,|>"
-                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_encoder_test>"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
-                VERBATIM)
-        endif()
-        photara_exclude_from_default(photara_moge_encoder_test)
-        add_dependencies(photara_tests photara_moge_encoder_test)
-        add_executable(photara_moge_decoder_test tests/inference/moge_decoder_test.cpp)
-        target_include_directories(photara_moge_decoder_test PRIVATE src/inference)
-        target_link_libraries(photara_moge_decoder_test PRIVATE Photara::Inference ggml)
-        if(WIN32)
-            add_custom_command(TARGET photara_moge_decoder_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND}
-                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_decoder_test>,|>"
-                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_decoder_test>"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
-                VERBATIM)
-        endif()
-        photara_exclude_from_default(photara_moge_decoder_test)
-        add_dependencies(photara_tests photara_moge_decoder_test)
         add_executable(photara_moge_geometry_test tests/inference/moge_geometry_test.cpp)
         target_include_directories(photara_moge_geometry_test PRIVATE src/inference)
         target_link_libraries(photara_moge_geometry_test PRIVATE Photara::Inference ggml)
@@ -1483,19 +1487,20 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         endif()
         photara_exclude_from_default(photara_moge_geometry_test)
         add_dependencies(photara_tests photara_moge_geometry_test)
-        add_executable(photara_moge_postprocess_compare tests/inference/moge_postprocess_compare.cpp)
-        target_include_directories(photara_moge_postprocess_compare PRIVATE src/inference)
-        target_link_libraries(photara_moge_postprocess_compare PRIVATE Photara::Inference ggml)
-        if(WIN32)
-            add_custom_command(TARGET photara_moge_postprocess_compare POST_BUILD
-                COMMAND ${CMAKE_COMMAND}
-                    "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_postprocess_compare>,|>"
-                    "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_postprocess_compare>"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
-                VERBATIM)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            add_executable(photara_moge_postprocess_compare tests/inference/moge_postprocess_compare.cpp)
+            target_include_directories(photara_moge_postprocess_compare PRIVATE src/inference)
+            target_link_libraries(photara_moge_postprocess_compare PRIVATE Photara::Inference ggml)
+            if(WIN32)
+                add_custom_command(TARGET photara_moge_postprocess_compare POST_BUILD
+                    COMMAND ${CMAKE_COMMAND}
+                        "-DPHOTARA_RUNTIME_DLLS=$<JOIN:$<TARGET_RUNTIME_DLLS:photara_moge_postprocess_compare>,|>"
+                        "-DPHOTARA_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:photara_moge_postprocess_compare>"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake"
+                    VERBATIM)
+            endif()
+            photara_exclude_from_default(photara_moge_postprocess_compare)
         endif()
-        photara_exclude_from_default(photara_moge_postprocess_compare)
-        add_dependencies(photara_tests photara_moge_postprocess_compare)
         add_executable(photara_moge_predict_test tests/inference/moge_predict_test.cpp)
         target_include_directories(photara_moge_predict_test PRIVATE src/inference)
         target_link_libraries(photara_moge_predict_test PRIVATE Photara::Inference ggml)
@@ -1579,15 +1584,6 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         endif()
         if(PHOTARA_ENABLE_VULKAN_COMPUTE)
             add_test(NAME photara.splat.checkpoint_vulkan COMMAND photara_splat_checkpoint_test --vulkan)
-        endif()
-        add_executable(photara_nerfstudio_dataset_test tests/nerfstudio_dataset_test.cpp)
-        target_link_libraries(photara_nerfstudio_dataset_test PRIVATE Photara::Splat)
-        add_test(NAME photara.splat.nerfstudio_dataset COMMAND photara_nerfstudio_dataset_test)
-        if(WIN32)
-            add_custom_command(TARGET photara_nerfstudio_dataset_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:photara_nerfstudio_dataset_test>
-                    $<TARGET_FILE_DIR:photara_nerfstudio_dataset_test> COMMAND_EXPAND_LISTS)
         endif()
         add_executable(photara_splat_gut_test tests/splat_gut_test.cpp)
         target_link_libraries(photara_splat_gut_test PRIVATE Photara::Splat)
@@ -1678,29 +1674,32 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_RUNTIME_DLLS:photara_splat_merge_test>
                     $<TARGET_FILE_DIR:photara_splat_merge_test> COMMAND_EXPAND_LISTS)
         endif()
-        add_executable(photara_splat_quality_eval src/tools/splat_quality_eval.cpp)
-        add_executable(photara_splat_popspa_review EXCLUDE_FROM_ALL ../experiments/popspa_review.cpp)
-        target_link_libraries(photara_splat_popspa_review PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
-        add_test(NAME photara.splat.sog_xt_adaptation COMMAND photara_splat_formats_test --sog-xt-training-only)
-        add_executable(photara_splat_sog_xt_field_audit EXCLUDE_FROM_ALL ../experiments/sog_xt_field_audit.cpp)
-        target_link_libraries(photara_splat_sog_xt_field_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
-        add_executable(photara_splat_training_throughput EXCLUDE_FROM_ALL ../experiments/splat_training_throughput.cpp)
-        target_link_libraries(photara_splat_training_throughput PRIVATE Photara::Splat)
-        target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
-        add_executable(photara_splat_raster_audit src/tools/splat_raster_audit.cpp)
-        target_link_libraries(photara_splat_raster_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json CUDA::cudart)
-        photara_exclude_from_default(photara_splat_raster_audit)
-        add_executable(photara_splat_forward_benchmark src/tools/splat_forward_benchmark.cpp)
-        target_link_libraries(photara_splat_forward_benchmark PRIVATE Photara::Splat nlohmann_json::nlohmann_json CUDA::cudart)
-        photara_exclude_from_default(photara_splat_forward_benchmark)
-        add_executable(photara_splat_multiscale_audit src/tools/splat_multiscale_audit.cpp)
-        target_link_libraries(photara_splat_multiscale_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
-        photara_exclude_from_default(photara_splat_multiscale_audit)
-        if(TARGET Photara::Texture)
-            add_executable(photara_splat_mesh_preview_audit src/tools/splat_mesh_preview_audit.cpp)
-            target_link_libraries(photara_splat_mesh_preview_audit PRIVATE Photara::Texture nlohmann_json::nlohmann_json)
-            photara_exclude_from_default(photara_splat_mesh_preview_audit)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            add_executable(photara_splat_quality_eval EXCLUDE_FROM_ALL src/tools/splat_quality_eval.cpp)
+            photara_exclude_from_default(photara_splat_quality_eval)
+            add_executable(photara_splat_popspa_review EXCLUDE_FROM_ALL ../experiments/popspa_review.cpp)
+            target_link_libraries(photara_splat_popspa_review PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
+            add_executable(photara_splat_sog_xt_field_audit EXCLUDE_FROM_ALL ../experiments/sog_xt_field_audit.cpp)
+            target_link_libraries(photara_splat_sog_xt_field_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
+            add_executable(photara_splat_training_throughput EXCLUDE_FROM_ALL ../experiments/splat_training_throughput.cpp)
+            target_link_libraries(photara_splat_training_throughput PRIVATE Photara::Splat)
+            target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
+            add_executable(photara_splat_raster_audit src/tools/splat_raster_audit.cpp)
+            target_link_libraries(photara_splat_raster_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json CUDA::cudart)
+            photara_exclude_from_default(photara_splat_raster_audit)
+            add_executable(photara_splat_forward_benchmark src/tools/splat_forward_benchmark.cpp)
+            target_link_libraries(photara_splat_forward_benchmark PRIVATE Photara::Splat nlohmann_json::nlohmann_json CUDA::cudart)
+            photara_exclude_from_default(photara_splat_forward_benchmark)
+            add_executable(photara_splat_multiscale_audit src/tools/splat_multiscale_audit.cpp)
+            target_link_libraries(photara_splat_multiscale_audit PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
+            photara_exclude_from_default(photara_splat_multiscale_audit)
+            if(TARGET Photara::Texture)
+                add_executable(photara_splat_mesh_preview_audit src/tools/splat_mesh_preview_audit.cpp)
+                target_link_libraries(photara_splat_mesh_preview_audit PRIVATE Photara::Texture nlohmann_json::nlohmann_json)
+                photara_exclude_from_default(photara_splat_mesh_preview_audit)
+            endif()
         endif()
+        add_test(NAME photara.splat.sog_xt_adaptation COMMAND photara_splat_formats_test --sog-xt-training-only)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
         add_test(NAME photara.splat.native_geometry COMMAND photara_splat_test --native-geometry-only)
@@ -1736,18 +1735,21 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     COMMAND_EXPAND_LISTS)
             endif()
             add_test(NAME photara.splat.vulkan_forward COMMAND photara_splat_vulkan_forward_test)
-            # Manual verification tool (not a ctest entry): renders a trained
-            # model through both forward rasterizers and reports the per-channel
-            # deltas plus side-by-side images.
-            add_executable(photara_splat_vulkan_parity src/tools/splat_vulkan_parity.cpp)
-            target_link_libraries(photara_splat_vulkan_parity PRIVATE Photara::Splat splat_drender::vulkan)
-            if(WIN32)
-                add_custom_command(TARGET photara_splat_vulkan_parity POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        $<TARGET_RUNTIME_DLLS:photara_splat_vulkan_parity>
-                        $<TARGET_FILE_DIR:photara_splat_vulkan_parity>
-                    COMMAND_EXPAND_LISTS)
-            endif()
+        if(PHOTARA_BUILD_BENCHMARKS)
+                # Manual verification tool (not a ctest entry): renders a trained
+                # model through both forward rasterizers and reports the per-channel
+                # deltas plus side-by-side images.
+                add_executable(photara_splat_vulkan_parity EXCLUDE_FROM_ALL src/tools/splat_vulkan_parity.cpp)
+                photara_exclude_from_default(photara_splat_vulkan_parity)
+                target_link_libraries(photara_splat_vulkan_parity PRIVATE Photara::Splat splat_drender::vulkan)
+                if(WIN32)
+                    add_custom_command(TARGET photara_splat_vulkan_parity POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            $<TARGET_RUNTIME_DLLS:photara_splat_vulkan_parity>
+                            $<TARGET_FILE_DIR:photara_splat_vulkan_parity>
+                        COMMAND_EXPAND_LISTS)
+                endif()
+        endif()
         endif()
     endif()
     if(TARGET tinytensor AND TINYTENSOR_HAS_VULKAN_BACKEND)
@@ -1756,12 +1758,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_include_directories(photara_tinytensor_vulkan_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
         add_test(NAME photara.tinytensor.vulkan COMMAND photara_tinytensor_vulkan_test)
-        # Manual verification tool (not a ctest entry): per-op cost of the
-        # tinytensor Vulkan backend.
-        add_executable(photara_tinytensor_vulkan_bench src/tools/tinytensor_vulkan_bench.cpp)
-        target_link_libraries(photara_tinytensor_vulkan_bench PRIVATE tinytensor::tinytensor)
-        target_include_directories(photara_tinytensor_vulkan_bench PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            # Manual verification tool (not a ctest entry): per-op cost of the
+            # tinytensor Vulkan backend.
+            add_executable(photara_tinytensor_vulkan_bench src/tools/tinytensor_vulkan_bench.cpp)
+            photara_exclude_from_default(photara_tinytensor_vulkan_bench)
+            target_link_libraries(photara_tinytensor_vulkan_bench PRIVATE tinytensor::tinytensor)
+            target_include_directories(photara_tinytensor_vulkan_bench PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
+        endif()
         # The radix selection against a host sort of the same masked rows: the
         # IGS refinement replaced a sort with it, so this is what pins the two
         # to the same answer.
@@ -1798,18 +1803,22 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_executable(photara_equirect_test tests/equirect_test.cpp)
         target_link_libraries(photara_equirect_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.equirect COMMAND photara_equirect_test)
-        # Manual verification tool (not a ctest entry): aligns a folder of
-        # equirectangular panoramas and exports COLMAP text for external checking.
-        add_executable(photara_equirect_dataset_check
-            tests/equirect_dataset_check.cpp)
-        target_link_libraries(photara_equirect_dataset_check PRIVATE Photara::SfM)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            # Manual verification tool (not a ctest entry): aligns a folder of
+            # equirectangular panoramas and exports COLMAP text for external checking.
+            add_executable(photara_equirect_dataset_check
+                tests/equirect_dataset_check.cpp)
+            target_link_libraries(photara_equirect_dataset_check PRIVATE Photara::SfM)
+        endif()
         add_executable(photara_mapping_test tests/mapping_test.cpp)
-        add_executable(photara_sfm_refine_probe ../experiments/sfm_refine_probe.cpp)
-        target_link_libraries(photara_sfm_refine_probe PRIVATE Photara::SfM)
-        add_executable(photara_sfm_retrieval_audit src/tools/sfm_retrieval_audit.cpp)
-        target_link_libraries(photara_sfm_retrieval_audit PRIVATE Photara::SfM)
-        add_executable(photara_sfm_extend src/tools/sfm_extend_reconstruction.cpp)
-        target_link_libraries(photara_sfm_extend PRIVATE Photara::SfM)
+        if(PHOTARA_BUILD_BENCHMARKS)
+            add_executable(photara_sfm_refine_probe ../experiments/sfm_refine_probe.cpp)
+            target_link_libraries(photara_sfm_refine_probe PRIVATE Photara::SfM)
+            add_executable(photara_sfm_retrieval_audit src/tools/sfm_retrieval_audit.cpp)
+            target_link_libraries(photara_sfm_retrieval_audit PRIVATE Photara::SfM)
+            add_executable(photara_sfm_extend src/tools/sfm_extend_reconstruction.cpp)
+            target_link_libraries(photara_sfm_extend PRIVATE Photara::SfM)
+        endif()
         target_link_libraries(photara_mapping_test PRIVATE Photara::SfM)
         add_test(NAME photara.sfm.mapping COMMAND photara_mapping_test)
         add_executable(photara_vocabulary_test tests/vocabulary_test.cpp)
@@ -1893,6 +1902,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_ba_test
         photara_thread_pool_test
         photara_logging_test
+        photara_splat_prior_test
+        photara_splat_gut_test
+        photara_model_handoff_test
+        photara_prior_preview_test
+        photara_model_download_test
+        photara_select_check
         photara_splat_checkpoint_test
         photara_splat_test
         photara_splat_formats_test
@@ -1901,19 +1916,13 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_splat_usdc_test
         photara_splat_deployment_test
         photara_splat_merge_test
-        photara_splat_quality_eval
         photara_splat_vulkan_forward_test
-        photara_splat_vulkan_parity
         photara_tinytensor_vulkan_test
         photara_features_test
         photara_video_frames_test
         photara_two_view_test
         photara_equirect_test
-        photara_equirect_dataset_check
         photara_mapping_test
-        photara_sfm_refine_probe
-        photara_sfm_retrieval_audit
-        photara_sfm_extend
         photara_vocabulary_test
         photara_checkpoint_test
         photara_hierarchical_test
@@ -1928,4 +1937,15 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_dependencies(photara_tests "${_photara_test_target}")
         endif()
     endforeach()
+    # Every executable declared in this section is built only on request,
+    # including newly added tests and manual diagnostics.
+    get_property(_photara_targets_after_tests DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    list(REMOVE_ITEM _photara_targets_after_tests ${_photara_targets_before_tests})
+    foreach(_target IN LISTS _photara_targets_after_tests)
+        get_target_property(_type "${_target}" TYPE)
+        if(_type STREQUAL "EXECUTABLE")
+            photara_exclude_from_default("${_target}")
+        endif()
+    endforeach()
+
 endif()
