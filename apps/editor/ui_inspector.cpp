@@ -1119,7 +1119,9 @@ Action draw_inspector(App& app) {
     if (section == InspectorSection::mesh) {
         ImGui::Spacing();
         ImGui::BeginDisabled(busy || app.pending_train_prepare.valid());
-        ImGui::Checkbox(tr("Build mesh"), &app.settings.build_mesh);
+        if (ImGui::Checkbox(tr("Build mesh"), &app.settings.build_mesh) &&
+            mesh_from_gaussians(app.settings))
+            app.settings.filter_mode = 2; // Mip3D for Gaussian mesh training.
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
                 "Also extract a surface automatically at the end of 3DGS training.\n"
@@ -1130,8 +1132,12 @@ Action draw_inspector(App& app) {
             ImGui::Spacing();
             theme::caption("Method");
             if (ImGui::RadioButton(
-                    tr("From Gaussians"), app.settings.mesh_source == 0))
+                    tr("From Gaussians"), app.settings.mesh_source == 0) &&
+                app.settings.mesh_source != 0) {
                 app.settings.mesh_source = 0;
+                if (app.settings.build_mesh)
+                    app.settings.filter_mode = 2;
+            }
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
                 "Train 3DGS with depth and normal losses, then extract a "

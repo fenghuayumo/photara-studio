@@ -939,7 +939,9 @@ Action draw_toolbar(App& app) {
 
     ImGui::AlignTextToFramePadding();
     ImGui::BeginDisabled(busy);
-    ImGui::Checkbox(tr("Build Mesh"), &app.settings.build_mesh);
+    if (ImGui::Checkbox(tr("Build Mesh"), &app.settings.build_mesh) &&
+        mesh_from_gaussians(app.settings))
+        app.settings.filter_mode = 2; // Mip3D for Gaussian mesh training.
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         const char* mesh_tip = busy
