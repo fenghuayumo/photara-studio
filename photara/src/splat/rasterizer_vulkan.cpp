@@ -94,6 +94,8 @@ struct VulkanRasterBackend {
               // extension on the shared device when the hardware has it.
               options.external_device.buffer_float32_atomic_add =
                   tinytensor::vulkan::device_info().buffer_atomic_f32;
+              options.external_device.compute_subgroup_size32 =
+                  tinytensor::vulkan::device_info().compute_subgroup_size32;
               return options;
           }()),
           rasterizer(context), profile_stages(environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {
@@ -381,7 +383,7 @@ float vulkan_photometric_loss(
         rendered.color.is_valid() ? buffer_view(rendered.color) : context->frame.color,
         buffer_view(target), context->frame.width, context->frame.height, ssim_weight,
         photometric_weight, mask_enabled ? buffer_view(mask) : SplatBufferView{},
-        color_gradient != nullptr ? buffer_view(*color_gradient) : SplatBufferView{});
+        color_gradient != nullptr ? buffer_view(*color_gradient) : SplatBufferView{}, read_loss_value);
     context->has_photometric = true;
     float value = 0.0F;
     if (read_loss_value)

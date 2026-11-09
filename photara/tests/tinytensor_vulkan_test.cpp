@@ -579,6 +579,7 @@ int main() {
         std::cout << "tinytensor vulkan device=" << info.name
                   << " subgroup=" << info.subgroup_size
                   << " atomic_f32=" << (info.buffer_atomic_f32 ? "yes" : "no")
+                  << " subgroup32_control=" << (info.compute_subgroup_size32 ? "yes" : "no")
                   << "\n";
         const auto run = [](const char* name, auto&& test) {
             std::cout << "  " << name << "\n";

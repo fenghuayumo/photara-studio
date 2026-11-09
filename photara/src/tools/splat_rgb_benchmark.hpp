@@ -72,18 +72,27 @@ int run_rgb_benchmark(int argc, char** argv) {
     require(index < views.size(), "RGB benchmark view outside dataset");
     const char* capture_env = std::getenv("PHOTARA_RGB_BENCH_CAPTURE_SAMPLES");
     const bool capture_samples = capture_env != nullptr && capture_env[0] == '1';
+    const char* freeze_env = std::getenv("PHOTARA_RGB_BENCH_FREEZE");
+    const bool freeze_model = freeze_env != nullptr && freeze_env[0] == '1';
+    const char* no_adc_env = std::getenv("PHOTARA_RGB_BENCH_NO_ADC");
+    const bool no_adc = no_adc_env != nullptr && no_adc_env[0] == '1';
     std::ofstream csv(output / ("rgb_view_" + std::to_string(index) + ".csv"));
-    csv << "backend,iteration,forward_ms,loss_ms,backward_adam_ms,adc_stats_ms,noise_ms,total_ms\n";
+    csv << "backend,iteration,forward_ms,loss_ms,backward_adam_ms,adc_stats_ms,noise_ms,total_ms,forward_api_ms,loss_api_ms,backward_api_ms\n";
     std::ofstream summary(output / ("rgb_summary_view_" + std::to_string(index) + ".csv"));
     summary << "backend,timing,order,cuda_snapshots,cuda_optimizer,cuda_pool,iterations,loop_average_ms\n";
     require(bool(csv) && bool(summary), "Cannot open RGB benchmark output files");
     const Device devices[]{order == "cuda-first" ? Device::CUDA : Device::Vulkan,
                            order == "cuda-first" ? Device::Vulkan : Device::CUDA};
+    std::array<std::vector<float>, 5> common_frozen_parameters;
+    bool have_common_frozen_parameters = false;
+    std::array<std::vector<float>, 2> common_render;
+    bool have_common_render = false;
     for (const auto device : devices) {
         const bool vk = device == Device::Vulkan;
         if (vk && backends == "cuda") continue;
         const char* name = vk ? "Vulkan" : "CUDA";
         auto model = load_gaussians(argv[2], device);
+        std::array<std::vector<float>, 5> frozen_parameters;
         if (method == "3dgut") model.render_method = RenderMethod::gaussian_3dgut;
         TrainingOptions o;
         o.backend = vk ? TrainingBackend::vulkan : TrainingBackend::cuda;
@@ -91,6 +100,9 @@ int run_rgb_benchmark(int argc, char** argv) {
         o.max_image_dimension = resolution; o.ignore_undistortion_border = true;
         o.progressive_resolution = false; o.use_depth_normal_loss = false;
         o.use_normal_field = false; o.multi_view_geo_weight = o.multi_view_ncc_weight = 0.F;
+        if (freeze_model)
+            o.means_lr = o.scales_lr = o.quaternions_lr = o.opacities_lr =
+                o.sh0_lr = o.sh_rest_lr = 0.F;
         const auto view = make_training_view(views[index], o);
         auto means = detail::make_adam_state(model.means);
         auto scales = detail::make_adam_state(model.log_scales);
@@ -100,6 +112,7 @@ int run_rgb_benchmark(int argc, char** argv) {
         auto stats = detail::make_densification_stats(model.size(), device);
         Rasterizer rasterizer;
         RasterizeOptions ro;
+        configure_rasterization(ro, o);
         ro.active_sh_degree = model.sh_degree; ro.require_depth = false;
         ro.copy_attachments = !vk; ro.defer_visibility = vk;
         ro.compact_pixel_snapshots = snapshots == "compact";
@@ -144,12 +157,45 @@ int run_rgb_benchmark(int argc, char** argv) {
                   << " timing=" << timing << " order=" << order
                   << " cuda_snapshots=" << snapshots << " cuda_optimizer=fused"
                   << " cuda_pool=" << pool_policy << std::endl;
+        std::cout << "fixed_model=" << freeze_model << " adc_enabled=" << !no_adc
+                  << " kernel_size=" << ro.kernel_size << std::endl;
         std::chrono::steady_clock::time_point measured_loop_start;
         const auto& pool_stats = tinytensor::SizeBucketedPool::instance().stats();
         std::uint64_t initial_pool_hits = 0, initial_pool_misses = 0;
         for (unsigned step = 1; step <= iterations + 3; ++step) {
             if (step == 4) {
                 if (streamed) sync(); // Drain warmup before measuring sustained throughput.
+                if (freeze_model) {
+                    // Zero learning rates still apply the optimizer's safety
+                    // clamps on the first step. Freeze/check the common state
+                    // after warmup, before starting the measured interval.
+                    const Tensor* parameters[]{&model.means, &model.log_scales, &model.quaternions,
+                                               &model.opacity_logits, &model.sh};
+                    for (unsigned p = 0; p < 5; ++p) {
+                        frozen_parameters[p] = parameters[p]->to_vector();
+                        if (have_common_frozen_parameters)
+                            require(frozen_parameters[p] == common_frozen_parameters[p],
+                                    "Backend benchmarks started from different model parameters");
+                    }
+                    if (!have_common_frozen_parameters) {
+                        common_frozen_parameters = frozen_parameters;
+                        have_common_frozen_parameters = true;
+                    }
+                    auto check_options = ro;
+                    check_options.copy_attachments = true;
+                    const auto check_frame = rasterizer.forward(model, view.camera, check_options);
+                    const std::array<std::vector<float>, 2> actual{
+                        check_frame.color.to_vector(), check_frame.alpha.to_vector()};
+                    for (unsigned c = 0; c < 2; ++c) {
+                        if (have_common_render) {
+                            const double error = relative_l2(actual[c], common_render[c]);
+                            std::cout << name << " fixed_render_channel=" << c
+                                      << " relative_l2=" << error << std::endl;
+                            require(error < 3e-4, "Fixed benchmark render differs across backends");
+                        }
+                    }
+                    if (!have_common_render) { common_render = actual; have_common_render = true; }
+                }
                 initial_pool_hits = pool_stats.cache_hits.load();
                 initial_pool_misses = pool_stats.cache_misses.load();
                 measured_loop_start = std::chrono::steady_clock::now();
@@ -169,6 +215,7 @@ int run_rgb_benchmark(int argc, char** argv) {
             if (!streamed) sync();
             const auto start = std::chrono::steady_clock::now();
             auto rendered = rasterizer.forward(model, view.camera, ro);
+            const auto forward_submitted = std::chrono::steady_clock::now();
             if (phase_sync) sync();
             const auto after_forward = std::chrono::steady_clock::now();
             detail::LossGradients loss;
@@ -176,21 +223,25 @@ int run_rgb_benchmark(int argc, char** argv) {
                 view.has_mask && (o.use_mask || view.mask_is_validity),
                 o.ssim_weight, o.photometric_weight, false);
             else loss = detail::compute_training_loss(rendered, view, o, false, false, false);
+            const auto loss_submitted = std::chrono::steady_clock::now();
             if (phase_sync) sync();
             const auto after_loss = std::chrono::steady_clock::now();
             const auto gradients = rasterizer.backward(model, rendered, loss.color,
                 loss.alpha, {}, {}, {}, &su, &st);
+            const auto backward_submitted = std::chrono::steady_clock::now();
             if (phase_sync) sync();
             const auto after_backward = std::chrono::steady_clock::now();
-            rasterizer.materialize_visibility(rendered);
-            detail::accumulate_densification_stats(
+            if (!no_adc) {
+                rasterizer.materialize_visibility(rendered);
+                detail::accumulate_densification_stats(
                 gradients.refine_weight, rendered.visibility, rendered.radii,
                 stats, view.camera.width, view.camera.height, true, true,
                 1.F, o.densify_screen_threshold, gradients.refine_weight,
                 static_cast<int>(index));
+            }
             if (phase_sync) sync();
             const auto after_stats = std::chrono::steady_clock::now();
-            detail::inject_adc_noise(model, rendered.visibility,
+            if (!no_adc) detail::inject_adc_noise(model, rendered.visibility,
                 o.means_lr * o.mean_noise_weight, 1.F, o.seed + step,
                 rendered.radii, false);
             if (!streamed) sync();
@@ -208,6 +259,9 @@ int run_rgb_benchmark(int argc, char** argv) {
             if (step > 3) {
                 csv << name << ',' << step-4;
                 for (unsigned i=0; i<6; ++i) { times[i].push_back(row[i]); csv << ',' << row[i]; }
+                csv << ',' << std::chrono::duration<double,std::milli>(forward_submitted-start).count()
+                    << ',' << std::chrono::duration<double,std::milli>(loss_submitted-after_forward).count()
+                    << ',' << std::chrono::duration<double,std::milli>(backward_submitted-after_loss).count();
                 csv << '\n';
             }
         }
@@ -254,6 +308,8 @@ int run_rgb_benchmark(int argc, char** argv) {
         for (unsigned parameter = 0; parameter < 5; ++parameter) {
             const auto* tensor = parameters[parameter];
             const auto values = tensor->to_vector();
+            if (freeze_model)
+                require(values == frozen_parameters[parameter], "Fixed benchmark changed model parameters");
             require(std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); }),
                 "RGB benchmark produced non-finite parameters");
             if (!vk && capture_samples) {

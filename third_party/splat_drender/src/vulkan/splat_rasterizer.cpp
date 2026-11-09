@@ -143,6 +143,7 @@ class SplatRasterizer::Impl {
           indirect_control_(
               context.create_pipeline("splat_indirect_control.hlsl.spv", 3, sizeof(Push))),
           emit_indirect_(context.create_pipeline("splat_emit_indirect.hlsl.spv", 8, sizeof(Push))),
+          emit_cooperative_(context.create_pipeline("splat_emit_cooperative.hlsl.spv", 8, sizeof(Push))),
           hist_(context.create_pipeline("splat_radix_hist.hlsl.spv", 3, sizeof(Push))),
           hist_indirect_(
               context.create_pipeline("splat_radix_hist_indirect.hlsl.spv", 4, sizeof(Push))),
@@ -169,8 +170,6 @@ class SplatRasterizer::Impl {
               context.create_pipeline("splat_blend_gut_backward.hlsl.spv", 12, sizeof(Push))),
           blend_backward_no_geometry_(context.create_pipeline(
               "splat_blend_backward_no_geometry.hlsl.spv", 12, sizeof(Push))),
-          blend_backward_no_geometry_subgroup_(context.create_pipeline(
-              "splat_blend_backward_no_geometry_subgroup.hlsl.spv", 12, sizeof(Push))),
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
           occupancy_(context.create_pipeline("splat_occupancy.hlsl.spv", 7, sizeof(Push))),
           sample_depth_group_(
@@ -180,7 +179,8 @@ class SplatRasterizer::Impl {
           sample_depth_backward_(
               context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
-          ssim_(context.create_pipeline("splat_ssim.hlsl.spv", 12, sizeof(Push))),
+          ssim_forward_(context.create_pipeline("splat_ssim_fused_forward.hlsl.spv", 7, sizeof(Push))),
+          ssim_backward_(context.create_pipeline("splat_ssim_fused_backward.hlsl.spv", 7, sizeof(Push))),
           loss_reduce_(context.create_pipeline("splat_loss_reduce.hlsl.spv", 2, sizeof(Push))),
           color_correction_(
               context.create_pipeline("splat_color_correction.hlsl.spv", 6, sizeof(Push))),
@@ -206,9 +206,12 @@ class SplatRasterizer::Impl {
         if (subgroup_vote_supported_ && subgroup_backward_supported_)
             blend_gut_rgba_ =
                 context.create_pipeline("splat_blend_gut_rgba.hlsl.spv", 8, sizeof(Push));
-        if (subgroup_backward_supported_ && subgroup_size_ == 32u)
+        if (subgroup_blend_supported_) {
+            blend_backward_no_geometry_subgroup_ = context.create_pipeline(
+                "splat_blend_backward_no_geometry_subgroup.hlsl.spv", 12, sizeof(Push), blend_required_subgroup_size_);
             blend_backward_geometry_subgroup_ = context.create_pipeline(
-                "splat_blend_backward_geometry_subgroup.hlsl.spv", 12, sizeof(Push));
+                "splat_blend_backward_geometry_subgroup.hlsl.spv", 12, sizeof(Push), blend_required_subgroup_size_);
+        }
         if (context_.buffer_float32_atomic_add &&
             !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
             color_correction_atomic_ =
@@ -217,13 +220,14 @@ class SplatRasterizer::Impl {
                 subgroup_size_ == 32u)
                 blend_gut_backward_atomic_ = context.create_pipeline(
                     "splat_blend_gut_backward_atomic.hlsl.spv", 12, sizeof(Push));
-            blend_backward_no_geometry_atomic_ = context.create_pipeline(
-                "splat_blend_backward_no_geometry_atomic.hlsl.spv", 12, sizeof(Push));
             sample_depth_backward_atomic_ = context.create_pipeline(
                 "splat_sample_depth_backward_atomic.hlsl.spv", 10, sizeof(Push));
-            if (subgroup_backward_supported_ && subgroup_size_ == 32u)
+            if (subgroup_blend_supported_) {
+                blend_backward_no_geometry_atomic_ = context.create_pipeline(
+                    "splat_blend_backward_no_geometry_atomic.hlsl.spv", 12, sizeof(Push), blend_required_subgroup_size_);
                 blend_backward_geometry_atomic_ = context.create_pipeline(
-                    "splat_blend_backward_geometry_atomic.hlsl.spv", 12, sizeof(Push));
+                    "splat_blend_backward_geometry_atomic.hlsl.spv", 12, sizeof(Push), blend_required_subgroup_size_);
+            }
         }
         if (subgroup_backward_supported_ && subgroup_size_ == 32u && subgroup_vote_supported_) {
             sample_depth_backward_tiled_ = context.create_pipeline(
@@ -234,6 +238,10 @@ class SplatRasterizer::Impl {
         }
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
+        loss_profile_enabled_ = environment_flag("SPLAT_DRENDER_PROFILE_LOSS");
+        if (loss_profile_enabled_)
+            loss_profile_enabled_ = create_timestamp_query_pool(
+                loss_timestamp_pool_, "splat_vulkan_loss_profile");
         if (subgroup_backward_supported_) {
             pruning_scores_subgroup_ =
                 context.create_pipeline("splat_pruning_scores_subgroup.hlsl.spv", 6, sizeof(Push));
@@ -244,6 +252,9 @@ class SplatRasterizer::Impl {
         }
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        emit_group_limit_ = std::max(1u, std::min(properties.limits.maxComputeWorkGroupCount[0],
+            environment_interval("SPLAT_DRENDER_EMIT_MAX_GROUPS",
+                                 properties.limits.maxComputeWorkGroupCount[0])));
         phase_alignment_ =
             std::max<VkDeviceSize>(256, properties.limits.minStorageBufferOffsetAlignment);
     }
@@ -268,6 +279,8 @@ class SplatRasterizer::Impl {
         if (forward_timestamp_pool_ != VK_NULL_HANDLE) {
             vkDestroyQueryPool(context_.device, forward_timestamp_pool_, nullptr);
         }
+        if (loss_timestamp_pool_ != VK_NULL_HANDLE)
+            vkDestroyQueryPool(context_.device, loss_timestamp_pool_, nullptr);
     }
 
     void upload_model(const SplatGaussians& gaussians) {
@@ -532,12 +545,12 @@ class SplatRasterizer::Impl {
             return blend_gut_backward_;
         }
         if (last_frame_has_geometry_) {
-            if (subgroup_backward_supported_ && subgroup_size_ == 32u)
+            if (subgroup_blend_supported_)
                 return blend_backward_geometry_atomic_.valid() ? blend_backward_geometry_atomic_
                                                                : blend_backward_geometry_subgroup_;
             return blend_backward_;
         }
-        if (subgroup_backward_supported_ && subgroup_size_ == 32u) {
+        if (subgroup_blend_supported_) {
             return blend_backward_no_geometry_atomic_.valid()
                        ? blend_backward_no_geometry_atomic_
                        : blend_backward_no_geometry_subgroup_;
@@ -811,7 +824,7 @@ class SplatRasterizer::Impl {
                 instance_capacity_ = 0;
             bool use_gpu_driven = instance_capacity_ != 0;
             Buffer& frame_counts =
-                grow(frame_counts_, 19 * sizeof(std::uint32_t), BufferMemory::host_visible,
+                grow(frame_counts_, 22 * sizeof(std::uint32_t), BufferMemory::host_visible,
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
             Buffer& count_mirrors =
                 grow(count_mirrors_, k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
@@ -821,6 +834,7 @@ class SplatRasterizer::Impl {
                 control_push.u[0] = count;
                 control_push.u[1] = instance_capacity_;
                 control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
+                control_push.u[3] = emit_group_limit_;
                 dispatch(indirect_control_, {&gauss_u, &frame_counts, &count_mirrors}, control_push,
                          1);
                 // The control shader publishes this frame's counts into the
@@ -851,6 +865,7 @@ class SplatRasterizer::Impl {
                     control_push.u[0] = count;
                     control_push.u[1] = instance_capacity_;
                     control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
+                    control_push.u[3] = emit_group_limit_;
                     dispatch(indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
                              control_push, 1);
                     mirror_recorded_ = true;
@@ -922,13 +937,16 @@ class SplatRasterizer::Impl {
                                       {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
                                        &dummy_, &frame_counts},
                                       gather_push, frame_counts, 4u * sizeof(std::uint32_t));
+                    write_forward_timestamp(6, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     inclusive_scan(compact, 0, 0, count, count);
+                    write_forward_timestamp(7, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     Push tile_push =
                         emit_constants(count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                    const bool cooperative = !gut && wrap_width == 0;
                     dispatch_indirect(
-                        emit_indirect_,
+                        cooperative ? emit_cooperative_ : emit_indirect_,
                         {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact, &frame_counts},
-                        tile_push, frame_counts, 7u * sizeof(std::uint32_t));
+                        tile_push, frame_counts, (cooperative ? 19u : 7u) * sizeof(std::uint32_t));
                     write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     const std::uint32_t tile_hist_n = 256 * div_up(instances, 1024);
                     radix_sort_indirect(false, instances, 0u, 13u * sizeof(std::uint32_t), lo1, hi1,
@@ -958,7 +976,9 @@ class SplatRasterizer::Impl {
                     dispatch(emit_,
                              {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
                              gather_push, div_up(visible, 256));
+                    write_forward_timestamp(6, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     inclusive_scan(compact, 0, 0, visible, visible);
+                    write_forward_timestamp(7, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                     Push tile_push =
                         emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
                     dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
@@ -2242,49 +2262,28 @@ class SplatRasterizer::Impl {
     SplatDevicePhotometricOutput dispatch_photometric_locked(
         const VkDescriptorBufferInfo& prediction, const VkDescriptorBufferInfo& target,
         const VkDescriptorBufferInfo& mask, const bool mask_enabled, const std::uint32_t width,
-        const std::uint32_t height, const float ssim_weight, const float photometric_weight) {
+        const std::uint32_t height, const float ssim_weight, const float photometric_weight,
+        const bool compute_loss_value = true) {
         const std::size_t pixels = static_cast<std::size_t>(width) * height;
         const std::size_t count = 3 * pixels;
-        // The seven per-plane SSIM scratch buffers only live between the
-        // forward and the backward; share them with the forward sort scratch
-        // through the phase arena instead of summing both footprints.
+        // Reuse the forward sort arena for the three derivative planes.
         const std::size_t work_bytes = count * sizeof(float);
         const std::size_t work_aligned =
             (work_bytes + static_cast<std::size_t>(phase_alignment_) - 1) &
             ~(static_cast<std::size_t>(phase_alignment_) - 1);
-        phase_begin(7 * work_aligned);
-        Buffer& work0 = phase_slot(ssim_work0_, work_bytes);
-        Buffer& work1 = phase_slot(ssim_work1_, work_bytes);
-        Buffer& work2 = phase_slot(ssim_work2_, work_bytes);
-        Buffer& work3 = phase_slot(ssim_work3_, work_bytes);
+        phase_begin(3 * work_aligned);
         Buffer& dmu = phase_slot(ssim_dmu_, work_bytes);
         Buffer& dvariance = phase_slot(ssim_dvariance_, work_bytes);
         Buffer& dcovariance = phase_slot(ssim_dcovariance_, work_bytes);
-        Buffer& output = grow(ssim_output_, 2 * count * sizeof(float));
-        // Passes 0/1 use work4 only until the loss map is written. The
-        // gradient half of output is first written by pass 3, so it can hold
-        // work4 without any overlapping read/write within a dispatch.
-        const VkDescriptorBufferInfo work4_view{output.handle, 0, count * sizeof(float)};
+        Buffer& output = grow(ssim_output_, (compute_loss_value ? 2 : 1) * count * sizeof(float));
         const std::uint32_t reduction_groups = div_up(static_cast<std::uint32_t>(count), 256);
-        Buffer& reduction =
-            grow(ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float));
-        // The loss output is consumed by the following compute dispatches, so
-        // record its clear in their batch instead of paying a standalone
-        // transfer submission and queue wait every training step.
+        Buffer& reduction = compute_loss_value
+            ? grow(ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float))
+            : dummy_;
+        // Each output element is overwritten before use: no full-image clear
+        // is needed. The phase arena already orders its lifetime transitions.
         begin_batch();
-        const VkDeviceSize output_bytes = 2 * count * sizeof(float);
-        vkCmdFillBuffer(command_, output.handle, 0, output_bytes, 0u);
-        VkBufferMemoryBarrier output_fill_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        output_fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        output_fill_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        output_fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        output_fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        output_fill_barrier.buffer = output.handle;
-        output_fill_barrier.offset = 0;
-        output_fill_barrier.size = output_bytes;
-        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
-                             &output_fill_barrier, 0, nullptr);
+        write_loss_timestamp(0);
 
         Push push{};
         push.u[0] = width;
@@ -2294,41 +2293,33 @@ class SplatRasterizer::Impl {
         const float normalization =
             photometric_weight / static_cast<float>(3U * (width - 10U) * (height - 10U));
         set_float(push, 4, normalization);
-        push.u[5] = 0u;
-        const std::vector<VkDescriptorBufferInfo> buffers{prediction,
-                                                          target,
-                                                          mask,
-                                                          descriptor(work0),
-                                                          descriptor(work1),
-                                                          descriptor(work2),
-                                                          descriptor(work3),
-                                                          work4_view,
-                                                          descriptor(dmu),
-                                                          descriptor(dvariance),
-                                                          descriptor(dcovariance),
-                                                          descriptor(output)};
-        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
-        push.u[5] = 1u;
-        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
-        push.u[5] = 2u;
-        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
-        push.u[5] = 3u;
-        dispatch_infos(ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
-        Push reduce_push{};
-        reduce_push.u[0] = width;
-        reduce_push.u[1] = height;
-        reduce_push.u[2] = 0u;
-        reduce_push.u[3] = reduction_groups;
-        set_float(reduce_push, 4, normalization);
-        const std::vector<VkDescriptorBufferInfo> reduce_buffers{descriptor(output),
-                                                                 descriptor(reduction)};
-        dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, reduction_groups);
-        reduce_push.u[2] = 1u;
-        dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, 1);
+        push.u[6] = compute_loss_value ? 1u : 0u;
+        const std::vector<VkDescriptorBufferInfo> buffers{
+            prediction, target, mask, descriptor(dmu), descriptor(dvariance),
+            descriptor(dcovariance), descriptor(output)};
+        dispatch_infos(ssim_forward_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        write_loss_timestamp(1);
+        dispatch_infos(ssim_backward_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        write_loss_timestamp(2);
+        if (compute_loss_value) {
+            Push reduce_push{};
+            reduce_push.u[0] = width;
+            reduce_push.u[1] = height;
+            reduce_push.u[2] = 0u;
+            reduce_push.u[3] = reduction_groups;
+            set_float(reduce_push, 4, normalization);
+            const std::vector<VkDescriptorBufferInfo> reduce_buffers{descriptor(output),
+                                                                     descriptor(reduction)};
+            dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, reduction_groups);
+            reduce_push.u[2] = 1u;
+            dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, 1);
+        }
+        write_loss_timestamp(3);
 
         return {{output.handle, 0, count * sizeof(float)},
-                {output.handle, count * sizeof(float), count * sizeof(float)},
-                {reduction.handle, 0, sizeof(float)}};
+                compute_loss_value ? SplatBufferView{output.handle, count * sizeof(float), count * sizeof(float)}
+                                   : SplatBufferView{},
+                compute_loss_value ? SplatBufferView{reduction.handle, 0, sizeof(float)} : SplatBufferView{}};
     }
 
     SplatPhotometricOutput photometric_loss(const std::span<const float> prediction,
@@ -2358,6 +2349,7 @@ class SplatRasterizer::Impl {
             mask.empty() ? descriptor(dummy_) : descriptor(mask_buffer), !mask.empty(), width,
             height, ssim_weight, photometric_weight);
         flush_batch();
+        collect_loss_timestamps();
         SplatPhotometricOutput result;
         result.gradient = download_vector<float>(context_, ssim_output_, count);
         context_.read_buffer(ssim_reduction_, &result.loss, sizeof(float));
@@ -2368,7 +2360,8 @@ class SplatRasterizer::Impl {
     fused_l1_ssim_device(const SplatBufferView& prediction, const SplatBufferView& target,
                          const std::uint32_t width, const std::uint32_t height,
                          const float ssim_weight, const float photometric_weight,
-                         const SplatBufferView& mask, const SplatBufferView& gradient_destination) {
+                         const SplatBufferView& mask, const SplatBufferView& gradient_destination,
+                         const bool compute_loss_value) {
         require(width > 10 && height > 10, "fused_l1_ssim_device requires width and height > 10");
         const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height;
         const std::uint64_t image_bytes = 3 * pixels * sizeof(float);
@@ -2395,7 +2388,8 @@ class SplatRasterizer::Impl {
             mask.buffer == VK_NULL_HANDLE
                 ? descriptor(dummy_)
                 : VkDescriptorBufferInfo{mask.buffer, mask.offset, mask_bytes},
-            mask.buffer != VK_NULL_HANDLE, width, height, ssim_weight, photometric_weight);
+            mask.buffer != VK_NULL_HANDLE, width, height, ssim_weight, photometric_weight,
+            compute_loss_value);
         if (gradient_destination.buffer != VK_NULL_HANDLE) {
             require(gradient_destination.bytes >= image_bytes,
                     "photometric gradient destination is too small");
@@ -2418,7 +2412,8 @@ class SplatRasterizer::Impl {
         // The color gradient is consumed by the backward on the same queue, and
         // read_photometric_loss drains through the context's read path before it
         // touches the host, so the loss stage does not have to stop here either.
-        submit_batch(false);
+        submit_batch(loss_profile_enabled_);
+        collect_loss_timestamps();
         return result;
     }
 
@@ -2821,15 +2816,50 @@ class SplatRasterizer::Impl {
                                                &subgroup};
         vkGetPhysicalDeviceProperties2(context_.physical_device, &properties);
         subgroup_size_ = subgroup.subgroupSize;
-        subgroup_vote_supported_ =
+        const bool compute_subgroups =
+            (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+        subgroup_vote_supported_ = compute_subgroups &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) != 0;
-        subgroup_backward_supported_ =
+        subgroup_backward_supported_ = compute_subgroups &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
-        subgroup_shuffle_supported_ =
+        subgroup_shuffle_supported_ = compute_subgroups &&
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
         subgroup_backward_supported_ &=
             !environment_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD");
+        blend_required_subgroup_size_ = subgroup_size_ != 32u && context_.compute_subgroup_size32 &&
+            !environment_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_SIZE_CONTROL") ? 32u : 0u;
+        subgroup_blend_supported_ = subgroup_backward_supported_ && subgroup_shuffle_supported_ &&
+            (subgroup_size_ == 32u || blend_required_subgroup_size_ == 32u);
+    }
+
+    void write_loss_timestamp(const std::uint32_t index) {
+        if (!loss_profile_enabled_) return;
+        if (index == 0) vkCmdResetQueryPool(command_, loss_timestamp_pool_, 0, 4);
+        vkCmdWriteTimestamp(command_, index == 0 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                                : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            loss_timestamp_pool_, index);
+    }
+
+    void collect_loss_timestamps() {
+        if (!loss_profile_enabled_) return;
+        std::array<std::uint64_t, 4> stamps{};
+        if (vkGetQueryPoolResults(context_.device, loss_timestamp_pool_, 0, 4,
+                sizeof(stamps), stamps.data(), sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+        for (std::size_t i = 0; i < 3; ++i)
+            loss_total_ms_[i] += static_cast<double>(timestamp_delta(
+                stamps[i], stamps[i + 1], timestamp_valid_bits_)) * timestamp_period_ / 1.0e6;
+        if (++loss_profile_samples_ < 100) return;
+        double total = 0;
+        for (double ms : loss_total_ms_) total += ms;
+        std::fprintf(stderr, "splat_vulkan_loss_profile samples=%u "
+            "forward_avg_ms=%.4f backward_avg_ms=%.4f reduce_avg_ms=%.4f total_avg_ms=%.4f\n",
+            loss_profile_samples_, loss_total_ms_[0] / loss_profile_samples_,
+            loss_total_ms_[1] / loss_profile_samples_, loss_total_ms_[2] / loss_profile_samples_,
+            total / loss_profile_samples_);
+        loss_profile_samples_ = 0;
+        loss_total_ms_.fill(0);
     }
 
     void create_backward_timestamp_profiler() {
@@ -2879,7 +2909,7 @@ class SplatRasterizer::Impl {
             return true;
         VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = 6;
+        info.queryCount = 8;
         if (vkCreateQueryPool(context_.device, &info, nullptr, &pool) != VK_SUCCESS)
             throw std::runtime_error("vkCreateQueryPool failed for stage profiling");
         return true;
@@ -2890,8 +2920,10 @@ class SplatRasterizer::Impl {
             return;
         begin_batch();
         if (index == 0) {
-            vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 6);
+            vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 8);
+            forward_has_expand_detail_ = false;
         }
+        if (index == 6) forward_has_expand_detail_ = true;
         vkCmdWriteTimestamp(command_, stage, forward_timestamp_pool_, index);
     }
 
@@ -2904,6 +2936,20 @@ class SplatRasterizer::Impl {
                                   VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
             return;
         const double ticks_to_ms = static_cast<double>(timestamp_period_) / 1.0e6;
+        if (forward_has_expand_detail_) {
+            std::array<std::uint64_t, 2> extra{};
+            if (vkGetQueryPoolResults(context_.device, forward_timestamp_pool_, 6, 2,
+                    sizeof(extra), extra.data(), sizeof(std::uint64_t),
+                    VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                forward_expand_detail_ms_[0] += timestamp_delta(
+                    timestamps[2], extra[0], timestamp_valid_bits_) * ticks_to_ms;
+                forward_expand_detail_ms_[1] += timestamp_delta(
+                    extra[0], extra[1], timestamp_valid_bits_) * ticks_to_ms;
+                forward_expand_detail_ms_[2] += timestamp_delta(
+                    extra[1], timestamps[3], timestamp_valid_bits_) * ticks_to_ms;
+                ++forward_expand_detail_samples_;
+            }
+        }
         const double counts_ms = static_cast<double>(timestamp_delta(timestamps[0], timestamps[1],
                                                                      timestamp_valid_bits_)) *
                                  ticks_to_ms;
@@ -2928,19 +2974,29 @@ class SplatRasterizer::Impl {
         if (forward_profile_samples_ < forward_profile_interval_)
             return;
         const double samples = static_cast<double>(forward_profile_samples_);
+        std::array<std::uint32_t, 2> actual_counts{};
+        if (frame_counts_.host_visible() && frame_counts_.size >= sizeof(actual_counts))
+            frame_counts_.download(actual_counts.data(), sizeof(actual_counts));
         std::fprintf(
             stderr,
             "splat_vulkan_forward_profile samples=%u gaussians=%u instances=%u "
             "counts_avg_ms=%.4f depth_sort_avg_ms=%.4f expand_avg_ms=%.4f "
             "tile_sort_avg_ms=%.4f blend_avg_ms=%.4f "
-            "total_avg_ms=%.4f\n",
+            "total_avg_ms=%.4f gather_avg_ms=%.4f scan_avg_ms=%.4f emit_avg_ms=%.4f "
+            "actual_instances=%u actual_visible=%u\n",
             forward_profile_samples_, count_, last_instances_, forward_counts_total_ms_ / samples,
             forward_depth_sort_total_ms_ / samples, forward_expand_total_ms_ / samples,
             forward_tile_sort_total_ms_ / samples, forward_blend_total_ms_ / samples,
             (forward_counts_total_ms_ + forward_depth_sort_total_ms_ + forward_expand_total_ms_ +
              forward_tile_sort_total_ms_ + forward_blend_total_ms_) /
-                samples);
+                samples,
+            forward_expand_detail_ms_[0] / std::max(1u, forward_expand_detail_samples_),
+            forward_expand_detail_ms_[1] / std::max(1u, forward_expand_detail_samples_),
+            forward_expand_detail_ms_[2] / std::max(1u, forward_expand_detail_samples_),
+            actual_counts[0], actual_counts[1]);
         forward_profile_samples_ = 0;
+        forward_expand_detail_samples_ = 0;
+        forward_expand_detail_ms_.fill(0);
         forward_counts_total_ms_ = 0.0;
         forward_depth_sort_total_ms_ = 0.0;
         forward_expand_total_ms_ = 0.0;
@@ -3493,6 +3549,8 @@ class SplatRasterizer::Impl {
     ComputePipeline emit_;
     ComputePipeline indirect_control_;
     ComputePipeline emit_indirect_;
+    ComputePipeline emit_cooperative_;
+    std::uint32_t emit_group_limit_{1};
     ComputePipeline hist_;
     ComputePipeline hist_indirect_;
     ComputePipeline scatter_;
@@ -3534,7 +3592,7 @@ class SplatRasterizer::Impl {
     ComputePipeline sample_depth_backward_;
     ComputePipeline sample_depth_backward_atomic_;
     ComputePipeline multi_view_;
-    ComputePipeline ssim_;
+    ComputePipeline ssim_forward_, ssim_backward_;
     ComputePipeline loss_reduce_;
     ComputePipeline color_correction_;
     ComputePipeline color_correction_atomic_;
@@ -3547,9 +3605,15 @@ class SplatRasterizer::Impl {
     photara::vk::EncoderRing encoder_ring_;
     VkCommandBuffer command_{};
     VkQueryPool backward_timestamp_pool_{};
+    VkQueryPool loss_timestamp_pool_{};
+    bool loss_profile_enabled_{};
+    std::uint32_t loss_profile_samples_{};
+    std::array<double, 3> loss_total_ms_{};
     bool backward_profile_enabled_{};
     bool subgroup_vote_supported_{};
     bool subgroup_backward_supported_{};
+    bool subgroup_blend_supported_{};
+    std::uint32_t blend_required_subgroup_size_{};
     bool subgroup_shuffle_supported_{};
     std::uint32_t subgroup_size_{};
     std::uint32_t backward_profile_interval_{100};
@@ -3562,6 +3626,9 @@ class SplatRasterizer::Impl {
     bool forward_profile_enabled_{};
     std::uint32_t forward_profile_interval_{100};
     std::uint32_t forward_profile_samples_{};
+    bool forward_has_expand_detail_{};
+    std::uint32_t forward_expand_detail_samples_{};
+    std::array<double, 3> forward_expand_detail_ms_{};
     double forward_counts_total_ms_{};
     double forward_depth_sort_total_ms_{};
     double forward_expand_total_ms_{};
@@ -3622,10 +3689,6 @@ class SplatRasterizer::Impl {
     Buffer ssim_prediction_;
     Buffer ssim_target_;
     Buffer ssim_mask_;
-    Buffer ssim_work0_;
-    Buffer ssim_work1_;
-    Buffer ssim_work2_;
-    Buffer ssim_work3_;
     Buffer ssim_dmu_;
     Buffer ssim_dvariance_;
     Buffer ssim_dcovariance_;
@@ -3865,9 +3928,10 @@ SplatPhotometricOutput SplatRasterizer::photometric_loss(
 SplatDevicePhotometricOutput SplatRasterizer::fused_l1_ssim_device(
     const SplatBufferView& prediction, const SplatBufferView& target, const std::uint32_t width,
     const std::uint32_t height, const float ssim_weight, const float photometric_weight,
-    const SplatBufferView& mask, const SplatBufferView& gradient_destination) {
+    const SplatBufferView& mask, const SplatBufferView& gradient_destination,
+    const bool compute_loss_value) {
     return impl_->fused_l1_ssim_device(prediction, target, width, height, ssim_weight,
-                                       photometric_weight, mask, gradient_destination);
+                                       photometric_weight, mask, gradient_destination, compute_loss_value);
 }
 
 void SplatRasterizer::color_correction_device(const std::array<SplatBufferView, 6>& buffers,

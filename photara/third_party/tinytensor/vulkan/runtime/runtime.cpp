@@ -65,7 +65,7 @@ constexpr std::uint32_t kMaxCommandsPerBatch = 4096;
 // SizeBucketedPool cache (total/96 clamped to [64 MiB, 256 MiB]) with a
 // somewhat larger allowance: vkAllocateMemory churn is paid on the host, so
 // the hot per-step intermediates deserve more headroom than CUDA needs.
-constexpr std::size_t kDefaultPoolBudgetBytes = 256ULL << 20;
+constexpr std::size_t kDefaultPoolBudgetBytes = 64ULL << 20;
 // Upper bound for the adaptive budget. The previous heap/8 policy (up to
 // 8 GiB) held ~3 GiB of freed device buffers in steady state on a 24 GiB card
 // and showed up as Vulkan using 1-3 GiB more VRAM than the CUDA backend.
@@ -627,6 +627,9 @@ void Context::pick_device() {
     properties2.pNext = &subgroup;
     vkGetPhysicalDeviceProperties2(physical_, &properties2);
     info_.subgroup_size = subgroup.subgroupSize;
+    info_.compute_subgroup_size32 = info_.subgroup_size != 32u &&
+        !env_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_SIZE_CONTROL") &&
+        photara::vk::supports_compute_subgroup_size(physical_, 32u, 256u);
 
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     vkGetPhysicalDeviceFeatures2(physical_, &features);
@@ -714,6 +717,14 @@ void Context::create_device() {
         create.pNext = &atomic_float_enable;
     }
 #endif
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+    if (info_.compute_subgroup_size32) {
+        extensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+        subgroup_size_enable.subgroupSizeControl = VK_TRUE;
+        subgroup_size_enable.pNext = const_cast<void*>(create.pNext);
+        create.pNext = &subgroup_size_enable;
+    }
     create.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     create.ppEnabledExtensionNames = extensions.data();
     check(vkCreateDevice(physical_, &create, nullptr, &device_), "vkCreateDevice");

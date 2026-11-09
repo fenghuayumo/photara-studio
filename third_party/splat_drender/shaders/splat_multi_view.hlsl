@@ -15,6 +15,16 @@ float push_float(uint bits) {
     return asfloat(bits);
 }
 
+// A projection close to an integer pixel amplifies a one-ULP division error
+// through the normalized round-trip gradient. Refine the ordinary quotient
+// with its fused residual, without requiring float64 arithmetic.
+float projection_quotient(float numerator, float denominator) {
+    precise float quotient = numerator / denominator;
+    precise float residual = mad(-quotient, denominator, numerator);
+    precise float corrected = mad(residual, 1.0f / denominator, quotient);
+    return corrected;
+}
+
 void store_float(uint index, float value) {
     output_buffer.Store(4u * index, asuint(value));
 }
@@ -274,8 +284,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID,
         return;
     store_float(terms_base + 5u + 5u * pixel + 4u, 1.0f);
     // Match CUDA's separately rounded projection near zero residual.
-    precise float projected_x = reference_fx * round_trip.x / round_trip.z + reference_cx;
-    precise float projected_y = reference_fy * round_trip.y / round_trip.z + reference_cy;
+    precise float projected_x = projection_quotient(reference_fx * round_trip.x, round_trip.z) + reference_cx;
+    precise float projected_y = projection_quotient(reference_fy * round_trip.y, round_trip.z) + reference_cy;
     float du = projected_x - (float)x;
     float dv = projected_y - (float)y;
     float noise = sqrt(du * du + dv * dv + 1.0e-12f);

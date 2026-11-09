@@ -109,7 +109,8 @@ class Context::Impl {
     [[nodiscard]]
     ComputePipeline create_pipeline(const std::string& shader_name,
                                     std::uint32_t storage_buffer_count,
-                                    std::uint32_t push_constant_size) const;
+                                    std::uint32_t push_constant_size,
+                                    std::uint32_t required_subgroup_size = 0) const;
 
     // Host transfers for buffers that are not mapped. Both go through one
     // staging buffer and one submit; callers must hold dispatch_mutex.
@@ -139,6 +140,7 @@ class Context::Impl {
     // VK_EXT_shader_atomic_float is enabled with shaderBufferFloat32AtomicAdd,
     // so the backward blend can commit float gradients with OpAtomicFAddEXT.
     bool buffer_float32_atomic_add = false;
+    bool compute_subgroup_size32 = false;
     PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor = nullptr;
     // An adopted instance/device belongs to the caller and must survive us.
     bool owns_instance = false;

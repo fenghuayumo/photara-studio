@@ -10,6 +10,8 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -138,6 +140,41 @@ bool gaussian_workspace_geometry(const RenderSettings& s, bool geometry) {
 // Preprocessing + FasterGS double sort shared by render and point-query
 // passes. Instances are emitted in depth order so the subsequent stable
 // tile sort preserves the GGGS 64-bit (tile | depth) order, including ties.
+// Diagnostic-only GPU interval, intentionally synchronous when enabled. Use
+// it to compare the instance emitter, not to measure sustained throughput.
+struct EmitProfiler {
+    bool enabled{};
+    cudaEvent_t start{}, end{};
+    double total_ms{};
+    unsigned samples{};
+    EmitProfiler() {
+        const char* flag = std::getenv("SPLAT_DRENDER_PROFILE_CUDA_EMIT");
+        enabled = flag && flag[0] == '1';
+        if (enabled) {
+            check_cuda(cudaEventCreate(&start), "create emit start event");
+            check_cuda(cudaEventCreate(&end), "create emit end event");
+        }
+    }
+    ~EmitProfiler() {
+        if (start) cudaEventDestroy(start);
+        if (end) cudaEventDestroy(end);
+    }
+    void begin() { if (enabled) check_cuda(cudaEventRecord(start), "record emit start"); }
+    void finish(int instances) {
+        if (!enabled) return;
+        check_cuda(cudaEventRecord(end), "record emit end");
+        check_cuda(cudaEventSynchronize(end), "wait emit interval");
+        float ms{};
+        check_cuda(cudaEventElapsedTime(&ms, start, end), "read emit interval");
+        total_ms += ms;
+        if (++samples == 100) {
+            std::fprintf(stderr, "splat_cuda_emit_profile samples=%u instances=%d emit_avg_ms=%.4f\n",
+                         samples, instances, total_ms / samples);
+            samples = 0; total_ms = 0;
+        }
+    }
+};
+
 SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
                             const RenderSettings& s, int grid_x, int grid_y, int tiles,
                             int wrap_width, bool geometry, GaussianState& gst, TileState& tst,
@@ -245,6 +282,8 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g, con
                    "compact tile scan");
     }
 
+    static thread_local EmitProfiler emit_profiler;
+    emit_profiler.begin();
     if (counts.visible > 0)
         launch::emit_instances(counts.visible, ist.depth_value[depth_selector], gst.mean2d,
                                gst.conic_opacity, ist.compact_offset, grid_x, grid_y, wrap_width,
@@ -255,6 +294,7 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g, con
                                    ? gst.screen_bounds
                                    : nullptr);
     check_cuda(cudaGetLastError(), "emit_instances");
+    emit_profiler.finish(counts.instances);
 
     if (counts.instances > 0) {
         cub::DoubleBuffer<unsigned> keys(ist.tile_key[0], ist.tile_key[1]);

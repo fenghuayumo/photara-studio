@@ -144,6 +144,16 @@ uint walk_tiles(float2 center, int grid_x, int grid_y, float a, float b, float c
             v_min = max(v_min, iterate_x ? gut_tile_bounds.y : gut_tile_bounds.x);
             v_max = min(v_max, iterate_x ? gut_tile_bounds.w : gut_tile_bounds.z);
         }
+#ifdef SPLAT_EMIT_COOPERATIVE
+        [loop] for (int tv = v_min + int(emit_lane); tv < v_max; tv += 32) {
+            int tx = iterate_x ? tu : tv;
+            int ty = iterate_x ? tv : tu;
+            uint slot = offset + count + uint(tv - v_min);
+            key_lo[slot] = uint(ty) * uint(grid_x) + uint(tx);
+            values[slot] = gaussian_id;
+        }
+        count += uint(max(0, v_max - v_min));
+#else
         [loop] for (int tv = v_min; tv < v_max; ++tv) {
             int tx = iterate_x ? tu : tv;
             int ty = iterate_x ? tv : tu;
@@ -162,6 +172,7 @@ uint walk_tiles(float2 center, int grid_x, int grid_y, float a, float b, float c
             }
             ++count;
         }
+#endif
     }
     return count;
 }

@@ -34,6 +34,7 @@
 #include "splat_clear.hlsl.embedded.hpp"
 #include "splat_emit.hlsl.embedded.hpp"
 #include "splat_emit_indirect.hlsl.embedded.hpp"
+#include "splat_emit_cooperative.hlsl.embedded.hpp"
 #include "splat_indirect_control.hlsl.embedded.hpp"
 #include "splat_pack_rgba.hlsl.embedded.hpp"
 #include "splat_project_backward.hlsl.embedded.hpp"
@@ -56,7 +57,8 @@
 #include "splat_sample_depth_backward_tiled_atomic.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward_atomic.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
-#include "splat_ssim.hlsl.embedded.hpp"
+#include "splat_ssim_fused_forward.hlsl.embedded.hpp"
+#include "splat_ssim_fused_backward.hlsl.embedded.hpp"
 #include "splat_loss_reduce.hlsl.embedded.hpp"
 #include "splat_color_correction.hlsl.embedded.hpp"
 #include "splat_color_correction_atomic.hlsl.embedded.hpp"
@@ -171,6 +173,8 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_emit_indirect.hlsl.spv") {
         return std::as_bytes(std::span{splat_emit_indirect_hlsl_spv});
     }
+    if (shader_name == "splat_emit_cooperative.hlsl.spv")
+        return std::as_bytes(std::span{splat_emit_cooperative_hlsl_spv});
     if (shader_name == "splat_indirect_control.hlsl.spv") {
         return std::as_bytes(std::span{splat_indirect_control_hlsl_spv});
     }
@@ -264,9 +268,10 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_multi_view.hlsl.spv") {
         return std::as_bytes(std::span{splat_multi_view_hlsl_spv});
     }
-    if (shader_name == "splat_ssim.hlsl.spv") {
-        return std::as_bytes(std::span{splat_ssim_hlsl_spv});
-    }
+    if (shader_name == "splat_ssim_fused_forward.hlsl.spv")
+        return std::as_bytes(std::span{splat_ssim_fused_forward_hlsl_spv});
+    if (shader_name == "splat_ssim_fused_backward.hlsl.spv")
+        return std::as_bytes(std::span{splat_ssim_fused_backward_hlsl_spv});
     if (shader_name == "splat_loss_reduce.hlsl.spv") {
         return std::as_bytes(std::span{splat_loss_reduce_hlsl_spv});
     }
@@ -561,6 +566,7 @@ void Context::Impl::adopt_external_device(const ExternalDevice& external) {
     queue_family_index = external.queue_family;
     push_descriptors = external.push_descriptors;
     buffer_float32_atomic_add = external.buffer_float32_atomic_add;
+    compute_subgroup_size32 = external.compute_subgroup_size32;
     device_info = make_device_info(physical_device);
 }
 
@@ -673,6 +679,15 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
         }
     }
 #endif
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+    if (photara::vk::supports_compute_subgroup_size(physical_device, 32u, 256u)) {
+        device_extensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+        subgroup_size_enable.subgroupSizeControl = VK_TRUE;
+        subgroup_size_enable.pNext = const_cast<void*>(device_create_info.pNext);
+        device_create_info.pNext = &subgroup_size_enable;
+        compute_subgroup_size32 = true;
+    }
     device_create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());
     device_create_info.ppEnabledExtensionNames = device_extensions.data();
     check_vk(vkCreateDevice(physical_device, &device_create_info, nullptr, &device),
@@ -854,13 +869,22 @@ void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t v
 
 ComputePipeline Context::Impl::create_pipeline(const std::string& shader_name,
                                                std::uint32_t storage_buffer_count,
-                                               std::uint32_t push_constant_size) const {
+                                               std::uint32_t push_constant_size,
+                                               std::uint32_t required_subgroup_size) const {
+    if (required_subgroup_size != 0 &&
+        (required_subgroup_size != 32u || !compute_subgroup_size32))
+        throw std::invalid_argument("Required compute subgroup size was not enabled");
+    const auto create = [&](std::span<const std::byte> bytes) {
+        if (required_subgroup_size != 0)
+            return ComputePipeline(device, bytes, storage_buffer_count,
+                                   push_constant_size, push_descriptors, required_subgroup_size);
+        return runtime.create_compute(bytes, storage_buffer_count, push_constant_size);
+    };
     if (const auto override_directory = shader_directory_override()) {
         const auto bytes = read_spir_v(*override_directory / shader_name);
-        return runtime.create_compute(bytes, storage_buffer_count, push_constant_size);
+        return create(bytes);
     }
-    return runtime.create_compute(embedded_shader(shader_name), storage_buffer_count,
-                                  push_constant_size);
+    return create(embedded_shader(shader_name));
 }
 
 Context::Context(const ContextOptions& options) : impl_(std::make_unique<Impl>(options)) {

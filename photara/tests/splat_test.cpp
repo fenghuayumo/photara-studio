@@ -8893,6 +8893,17 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 
 int main(int argc, char** argv) {
 #ifdef TINYTENSOR_HAS_VULKAN
+    if (argc > 1 && std::string(argv[1]) == "--vulkan-photo-only") {
+        try {
+            test_vulkan_corrected_photometric_loss();
+            test_vulkan_colour_steps_match_cuda();
+            std::cout << "Vulkan corrected photometric tests passed\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Vulkan corrected photometric test failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc > 1 && std::string(argv[1]) == "--data-cache-vulkan-only") {
         try {
             test_training_device_cache(photara::splat::TrainingBackend::vulkan);

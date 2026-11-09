@@ -284,7 +284,15 @@ void compare_case(const Scene& scene) {
 
     splat_drender::vulkan::Context context;
     splat_drender::vulkan::SplatRasterizer rasterizer(context);
-    const auto vulkan = rasterizer.forward(gaussians, camera, settings);
+    const auto seeded = rasterizer.forward(gaussians, camera, settings);
+    // The second frame uses device-driven compaction and instance emission.
+    // Check it as well as the synchronous capacity-seeding frame.
+    const auto vulkan = rasterizer.render(camera, settings);
+    require(rel_l2(seeded.color, vulkan.color) < 1e-7 &&
+                rel_l2(seeded.alpha, vulkan.alpha) < 1e-7 &&
+                seeded.instance_count == vulkan.instance_count &&
+                seeded.visible_count == vulkan.visible_count,
+            scene.name + " device-driven frame differs from its seed");
 
     CudaBuffer means, color, opacity, scales, rotations, covariance, view_dev, center_dev;
     CudaBuffer out_color, out_alpha, out_depth, out_normal, out_visibility, out_radii;
@@ -919,6 +927,90 @@ void ssim_loss_case() {
     }
 }
 
+void ssim_device_reporting_case() {
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    const auto handles = tinytensor::vulkan::device_handles();
+    splat_drender::vulkan::ContextOptions options;
+    options.external_device = {handles.instance, handles.physical_device, handles.device,
+                               handles.queue, handles.queue_family};
+    splat_drender::vulkan::Context context(options);
+    splat_drender::vulkan::SplatRasterizer rasterizer(context);
+    const auto view = [](const Tensor& tensor) {
+        const auto b = tinytensor::vulkan::buffer_view(tensor);
+        return splat_drender::vulkan::SplatBufferView{b.buffer, b.offset, b.bytes};
+    };
+    Rng random{0x4e6a9u};
+    for (const auto [width, height] : {std::pair{11u, 11u}, {37u, 29u}, {64u, 48u}, {193u, 121u}}) {
+        const auto pixels = width * height;
+        std::vector<float> prediction(3 * pixels), target(3 * pixels), mask(pixels);
+        for (std::size_t i = 0; i < prediction.size(); ++i) {
+            prediction[i] = random.next(); target[i] = random.next();
+        }
+        for (std::size_t i = 0; i < mask.size(); ++i)
+            mask[i] = i % 7 == 0 ? 0.F : random.next();
+        const auto cp = Tensor::from_vector(prediction, {3u, height, width}, Device::CUDA);
+        const auto ct = Tensor::from_vector(target, {3u, height, width}, Device::CUDA);
+        const auto cm = Tensor::from_vector(mask, {height, width}, Device::CUDA);
+        const auto vp = Tensor::from_vector(prediction, {3u, height, width}, Device::Vulkan);
+        const auto vt = Tensor::from_vector(target, {3u, height, width}, Device::Vulkan);
+        const auto vm = Tensor::from_vector(mask, {height, width}, Device::Vulkan);
+        for (bool masked : {false, true}) for (float weight : {0.F, 0.2F, 1.F}) {
+            auto expected = Tensor::zeros({3u, height, width}, Device::CUDA);
+            auto scalar = Tensor::zeros({1}, Device::CUDA);
+            photara::splat::detail::photometric_loss(cp, ct, cm, masked, expected,
+                scalar.ptr<float>(), width, height, {weight, 0.7F});
+            const auto expected_values = expected.to_vector();
+            const float expected_scalar = scalar.to_vector()[0];
+            // Alternate scalar reporting against a reused allocation, and use
+            // an uninitialized destination so stale borders cannot pass.
+            for (bool report : {false, true, false}) {
+                auto gradient = Tensor::empty({3u, height, width}, Device::Vulkan);
+                tinytensor::vulkan::submit_async();
+                const auto output = rasterizer.fused_l1_ssim_device(view(vp), view(vt),
+                    width, height, weight, 0.7F, masked ? view(vm) :
+                        splat_drender::vulkan::SplatBufferView{}, view(gradient), report);
+                const auto observed = gradient.to_vector();
+                const auto error = rel_l2(observed, expected_values);
+                if (!(error < 3e-4))
+                    std::cerr << "SSIM size=" << width << 'x' << height << " masked=" << masked
+                              << " weight=" << weight << " report=" << report << " error=" << error << '\n';
+                require(error < 3e-4,
+                        "Tiled SSIM device gradient differs from CUDA");
+                if (report) {
+                    const float loss = rasterizer.read_photometric_loss(output);
+                    require(std::abs(loss - expected_scalar) < 3e-5F + 3e-4F * std::abs(expected_scalar),
+                            "Tiled SSIM scalar differs from CUDA");
+                } else require(output.loss_map.buffer == VK_NULL_HANDLE &&
+                               output.loss_scalar.buffer == VK_NULL_HANDLE,
+                               "Gradient-only SSIM retained scalar outputs");
+            }
+        }
+    }
+    std::cout << "SSIM device gradient/scalar/soft-mask parity passed\n";
+}
+
+void ssim_flat_image_case() {
+    constexpr unsigned width = 37, height = 29;
+    splat_drender::vulkan::Context context;
+    splat_drender::vulkan::SplatRasterizer rasterizer(context);
+    for (float value : {0.F, 0.5F, 1.F}) {
+        const std::vector<float> image(3u * width * height, value);
+        const auto input = tinytensor::Tensor::from_vector(
+            image, {3u, height, width}, tinytensor::Device::CUDA);
+        auto expected = tinytensor::Tensor::zeros({3u, height, width}, tinytensor::Device::CUDA);
+        photara::splat::detail::photometric_loss(input, input, {}, false, expected,
+                                               nullptr, width, height);
+        const auto reference = expected.to_vector();
+        const auto actual = rasterizer.photometric_loss(image, image, width, height);
+        require(std::abs(actual.loss) < 3e-5, "Identical flat images have nonzero SSIM loss");
+        for (std::size_t i = 0; i < reference.size(); ++i)
+            require(std::isfinite(actual.gradient[i]) &&
+                    std::abs(actual.gradient[i] - reference[i]) < 2e-6F,
+                    "Flat-image SSIM gradient differs from CUDA");
+    }
+}
+
 void geometry_gradient_descent_case() {
     SingleGaussianScene scene;
     scene.settings.need_depth = true;
@@ -1331,13 +1423,19 @@ void adopted_device_case() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
         check_cuda(cudaSetDevice(0), "cudaSetDevice");
+        if (argc > 1 && std::string(argv[1]) == "--ssim-only") {
+            ssim_loss_case(); ssim_device_reporting_case(); ssim_flat_image_case();
+            return 0;
+        }
         smoke_case();
         sample_depth_case();
         multi_view_loss_case();
         ssim_loss_case();
+        ssim_device_reporting_case();
+        ssim_flat_image_case();
         geometry_gradient_descent_case();
         optimizer_parity_case();
         tinytensor_interop_case();

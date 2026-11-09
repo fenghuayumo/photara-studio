@@ -78,6 +78,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_emit.hlsl
             shaders/splat_indirect_control.hlsl
             shaders/splat_emit_indirect.hlsl
+            shaders/splat_emit_cooperative.hlsl
             shaders/splat_radix_hist.hlsl
             shaders/splat_radix_hist_indirect.hlsl
             shaders/splat_radix_scatter.hlsl
@@ -125,7 +126,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             "${CMAKE_CURRENT_LIST_DIR}/../../photara/src/splat"
             CACHE PATH "Photara splat training shader directory")
         list(APPEND SPLAT_DRENDER_VULKAN_SHADERS
-            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim_fused_forward.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim_fused_backward.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_loss_reduce.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction_atomic.hlsl"
@@ -170,9 +172,11 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_pruning_scores.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward_geometry_subgroup.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward_no_geometry_subgroup.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sample_depth_backward.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sample_depth_backward_tiled.hlsl"
-                "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
+                "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl"
+                "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim_common.hlsli")
 
         target_include_directories(splat_drender_vulkan
             PRIVATE

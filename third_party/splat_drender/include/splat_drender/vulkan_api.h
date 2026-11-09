@@ -317,6 +317,9 @@ struct ExternalDevice {
     // and shaderBufferFloat32AtomicAdd enabled, so the backward can commit
     // gradients with hardware float atomics instead of a CAS retry loop.
     bool buffer_float32_atomic_add = false;
+    // The caller enabled VK_EXT_subgroup_size_control/subgroupSizeControl and
+    // verified that compute stages support a required size of 32 at 256 threads.
+    bool compute_subgroup_size32 = false;
 
     [[nodiscard]]
     bool valid() const noexcept {
@@ -542,13 +545,15 @@ class SplatRasterizer {
                      float photometric_weight = 1.0F, std::span<const float> mask = {});
     // Low-level device primitive used by photara/splat/photometric_loss. All
     // views must belong to this Context's VkDevice. No image or gradient is
-    // copied to the host.
+    // copied to the host. compute_loss_value=false writes only the gradient;
+    // the returned loss_map and loss_scalar views are empty in that mode.
     [[nodiscard]]
     SplatDevicePhotometricOutput
     fused_l1_ssim_device(const SplatBufferView& prediction, const SplatBufferView& target,
                          std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
                          float photometric_weight = 1.0F, const SplatBufferView& mask = {},
-                         const SplatBufferView& gradient_destination = {});
+                         const SplatBufferView& gradient_destination = {},
+                         bool compute_loss_value = true);
     // Dispatch Photara's training-only PPISP/bilateral-grid compute kernel.
     // All buffers remain on the adopted Vulkan device.
     void color_correction_device(const std::array<SplatBufferView, 6>& buffers,

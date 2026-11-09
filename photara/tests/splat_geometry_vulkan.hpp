@@ -181,8 +181,9 @@ void test_vulkan_geometry_chain() {
     compare(detail::compute_3d_filter(means,{panorama,camera}),
         detail::compute_3d_filter(means.to(Device::Vulkan),{panorama,camera}),2e-5F,"Vulkan panorama filter parity");
 
-    struct Chain { ModelGradients total, sample; Tensor points, depth, normal, sampled, inside, upstream; detail::MultiViewLoss loss; Tensor stability; };
-    const auto run = [&](Device device, bool merge_sample, float photometric_weight = 0.F, bool collect_terms = true) {
+    struct Chain { ModelGradients total, sample; Tensor points, controlled_points, depth, normal, sampled, inside, upstream; detail::MultiViewLoss loss; Tensor stability; };
+    const auto run = [&](Device device, bool merge_sample, float photometric_weight = 0.F,
+                         bool collect_terms = true, const Tensor& fixed_upstream = Tensor{}) {
         std::cout << "MV chain backend=" << (device == Device::CUDA ? "CUDA" : "Vulkan") << std::endl;
         auto model = make_model(device);
         model.filter_3d = detail::compute_3d_filter(model.means,{camera,neighbour_camera});
@@ -213,6 +214,13 @@ void test_vulkan_geometry_chain() {
         require(!collect_terms || (result.loss.geometry_pixels > 0 && result.loss.ncc_pixels > 0),
             "Vulkan geometry chain must have actual MV/NCC support");
         auto sample_grad = rasterizer.sample_depth_backward(model,sampled,upstream);
+        if (fixed_upstream.is_valid()) {
+            // Each query is consumed once by backward; record a separate query
+            // for the controlled Jacobian comparison.
+            auto controlled = rasterizer.sample_depth(model,world,neighbour_camera,ro);
+            result.controlled_points = rasterizer.sample_depth_backward(
+                model, controlled, fixed_upstream.to(device)).points;
+        }
         if (device==Device::Vulkan)
             require(!sample_grad.model.sh.is_valid(),
                 "Vulkan depth queries allocated an unused appearance gradient");
@@ -223,7 +231,8 @@ void test_vulkan_geometry_chain() {
         if (merge_sample) detail::add_sample_depth_model_gradients(sample_grad,result.total);
         return result;
     };
-    const auto cuda = run(Device::CUDA,true), vk = run(Device::Vulkan,true);
+    const auto cuda = run(Device::CUDA,true);
+    const auto vk = run(Device::Vulkan,true,0.F,true,cuda.upstream);
     require(cuda.loss.geometry_pixels == vk.loss.geometry_pixels && cuda.loss.ncc_pixels == vk.loss.ncc_pixels,
         "Vulkan full geometry chain changed accepted-pixel counts");
     compare(cuda.stability,vk.stability,1e-6F,"Vulkan stability accumulator");
@@ -242,7 +251,11 @@ void test_vulkan_geometry_chain() {
         detail::add_multi_view_loss(cuda.sampled.to(Device::Vulkan),inside,same,ref,near,opts,grads,upstream,true);
         compare(cuda.upstream,upstream,1e-4F,"Vulkan multi-view gradient with identical inputs");
     }
-    compare(cuda.points,vk.points,.003F,"Vulkan query point gradient");
+    // At a near-zero round-trip residual, one ULP of forward-render difference
+    // changes the normalized loss gradient's direction. Hold its upstream fixed
+    // to test the query Jacobian across vendors; the identical-input loss check
+    // above and the full model-gradient checks below still test both sides.
+    compare(cuda.points,vk.controlled_points,1e-4F,"Vulkan query point gradient with fixed upstream");
     compare(cuda.sample.means,vk.sample.means,.001F,"Vulkan sample mean gradient");
     compare(cuda.sample.log_scales,vk.sample.log_scales,.001F,"Vulkan sample scale gradient");
     compare(cuda.sample.quaternions,vk.sample.quaternions,.001F,"Vulkan sample rotation gradient");

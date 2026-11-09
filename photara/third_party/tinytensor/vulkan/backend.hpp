@@ -22,6 +22,7 @@ struct DeviceInfo {
     bool buffer_atomic_f32 = false;
     bool buffer_atomic_f64 = false;
     bool push_descriptors = false;
+    bool compute_subgroup_size32 = false;
 };
 
 // Zero-copy bridge for compute libraries that can adopt an existing Vulkan

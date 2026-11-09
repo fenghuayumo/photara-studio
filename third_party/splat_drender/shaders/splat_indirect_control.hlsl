@@ -35,4 +35,5 @@ void main() {
     write_dispatch(10u, enabled * ((visible + 1023u) / 1024u));
     write_dispatch(13u, enabled * ((instances + 1023u) / 1024u));
     write_dispatch(16u, enabled * ((instances + 255u) / 256u));
+    write_dispatch(19u, enabled * min((visible + 7u) / 8u, pc.u3));
 }

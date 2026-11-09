@@ -34,13 +34,6 @@ static const uint kRelaxed = 0u;
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> grad_values;
 #endif
 
-groupshared float2 gs_mean[256];
-groupshared float4 gs_conic[256];
-groupshared float3 gs_color[256];
-groupshared float4 gs_bounds[256];
-groupshared float4 gs_plane[256];
-groupshared float3 gs_normal[256];
-
 void atomic_add_f32(uint index, float value) {
     if (value == 0.0f || isnan(value) || isinf(value))
         return;
@@ -77,9 +70,9 @@ void commit_gradient(uint gaussian, uint count, float3 acc_mean, float4 acc_coni
     atomic_add_f32(refine_base, acc_refine);
 }
 
-// Geometry training path. A 32-lane subgroup owns one snapshot bucket. The
-// bucket entries are staged once in group memory and subgroup prefix operations
-// replace each lane's O(lane) replay of its preceding Gaussians.
+// Geometry training path. A logical 32-lane team owns one snapshot bucket. The
+// Gaussian inputs are lane-private; subgroup prefix operations combine
+// contributions without a shared-memory input staging pass.
 [numthreads(256, 1, 1)]
 void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     uint lane = group_thread & 31u;
@@ -116,31 +109,24 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         pos = tile_bucket * 32u + lane;
     }
 
-    gs_mean[group_thread] = 0.0f;
-    gs_conic[group_thread] = 0.0f;
-    gs_color[group_thread] = 0.0f;
-    gs_bounds[group_thread] = 0.0f;
-    gs_plane[group_thread] = 0.0f;
-    gs_normal[group_thread] = 0.0f;
-    uint gaussian = 0;
-    if (bucket_active && pos < tile_n) {
-        gaussian = instances[range_begin + pos];
-        gs_mean[group_thread] = gauss_f[gaussian * 7u].xy;
-        gs_conic[group_thread] = gauss_f[gaussian * 7u + 1u];
-        gs_color[group_thread] = gauss_f[gaussian * 7u + 2u].xyz;
-        gs_bounds[group_thread] = gauss_f[gaussian * 7u + 5u];
-        gs_plane[group_thread] = gauss_f[gaussian * 7u + 3u];
-        gs_normal[group_thread] = gauss_f[gaussian * 7u + 4u].xyz;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (!bucket_active)
-        return;
-
+    // Each lane owns one Gaussian; only its contributions are exchanged by
+    // subgroup operations. Keep the Gaussian inputs in lane-private registers.
+    if (!bucket_active) return;
     const bool entry_valid = pos < tile_n;
-    const uint slot = group_thread;
-    const float4 conic = gs_conic[slot];
-    const float3 color = gs_color[slot];
-    const uint4 bounds = asuint(gs_bounds[slot]);
+    uint gaussian = 0;
+    float2 row_mean = 0.0f;
+    float4 conic = 0.0f, row_plane = 0.0f;
+    float3 color = 0.0f, row_normal = 0.0f;
+    uint4 bounds = 0u;
+    if (entry_valid) {
+        gaussian = instances[range_begin + pos];
+        row_mean = gauss_f[gaussian * 7u].xy;
+        conic = gauss_f[gaussian * 7u + 1u];
+        color = gauss_f[gaussian * 7u + 2u].xyz;
+        bounds = asuint(gauss_f[gaussian * 7u + 5u]);
+        row_plane = gauss_f[gaussian * 7u + 3u];
+        row_normal = gauss_f[gaussian * 7u + 4u].xyz;
+    }
     const uint pix_min_x = (tile_id % tiles_x) * 16u;
     const uint pix_min_y = (tile_id / tiles_x) * 16u;
 
@@ -222,12 +208,12 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const bool pixel_active = entry_valid && px < width && py < height && pos < last &&
                                       (wrap_width != 0 || (px >= bounds.x && px < bounds.y &&
                                                            py >= bounds.z && py < bounds.w));
-            float2 qdelta = float2(wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
-                                   gs_mean[slot].y - float(py));
-            float power = gaussian_power(gs_conic[slot], qdelta.x, qdelta.y);
+            float2 qdelta = float2(wrap_dx(row_mean.x - float(px), wrap_width, mode),
+                                   row_mean.y - float(py));
+            float power = gaussian_power(conic, qdelta.x, qdelta.y);
             float qG = power <= 0.0f ? exp(power) : 0.0f;
             float qalpha =
-                pixel_active && qG > 0.0f ? min(kAlphaClip, gs_conic[slot].w * qG) : 0.0f;
+                pixel_active && qG > 0.0f ? min(kAlphaClip, conic.w * qG) : 0.0f;
             qalpha = qalpha >= kAlphaFloor ? qalpha : 0.0f;
 
             const float transmittance = after0_t.w * WavePrefixProduct(1.0f - qalpha);
@@ -237,10 +223,10 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             // prefix over the projected contributions.
             const float color_after_dot =
                 dot(after0_t.xyz - blend_weight * color, pixel_grad) -
-                WavePrefixSum(blend_weight * dot(gs_color[slot], pixel_grad));
+                WavePrefixSum(blend_weight * dot(color, pixel_grad));
             const float normal_after_dot =
-                normal_after0_dot - blend_weight * dot(gs_normal[slot], normal_grad) -
-                WavePrefixSum(blend_weight * dot(gs_normal[slot], normal_grad));
+                normal_after0_dot - blend_weight * dot(row_normal, normal_grad) -
+                WavePrefixSum(blend_weight * dot(row_normal, normal_grad));
             if (!pixel_active || qalpha == 0.0f)
                 continue;
 
@@ -253,9 +239,9 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             float d_peak = 0.0f;
             if (geometry) {
                 d_opacity +=
-                    transmittance * dot(gs_normal[slot], normal_grad) - normal_after_dot * inv_1ma;
+                    transmittance * dot(row_normal, normal_grad) - normal_after_dot * inv_1ma;
                 acc_normal += blend_weight * normal_grad;
-                const float4 plane = gs_plane[slot];
+                const float4 plane = row_plane;
                 const float peak = plane.x * qdelta.x + plane.y * qdelta.y + plane.z;
                 const float td = (ms.x - peak) * plane.w;
                 const float ge = exp(-0.5f * td * td), gt = qalpha * ge;
@@ -279,8 +265,8 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const float dG = conic.w * d_opacity;
             const float dG_render = conic.w * d_opacity_render;
             const float gdx = qG * qdelta.x, gdy = qG * qdelta.y;
-            const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * gs_plane[slot].x;
-            const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * gs_plane[slot].y;
+            const float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * row_plane.x;
+            const float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * row_plane.y;
             acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
             const float refine_x = dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
             const float refine_y = dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);

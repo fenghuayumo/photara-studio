@@ -11,25 +11,43 @@
 [[vk::binding(8, 0)]] StructuredBuffer<float> loss_alpha;
 [[vk::binding(9, 0)]] StructuredBuffer<float> loss_normal;
 [[vk::binding(10, 0)]] StructuredBuffer<float2> median_state;
-[[vk::binding(11, 0)]] RWStructuredBuffer<uint> grad_values;
+#ifdef SPLAT_RGB_NATIVE_ATOMIC
+[[vk::binding(11, 0)]] RWStructuredBuffer<float> grad_values;
 
-groupshared float2 gs_mean[256];
-groupshared float4 gs_conic[256];
-groupshared float3 gs_color[256];
-groupshared float4 gs_bounds[256];
+// OpAtomicFAddEXT (SPV_EXT_shader_atomic_float_add): one hardware float
+// atomic instead of the CAS retry loop, which under the per-Gaussian commit
+// contention of a large scene dominates the whole backward. The extension and
+// its shaderBufferFloat32AtomicAdd feature must be enabled on the device; the
+// rasterizer selects this variant only then.
+[[vk::ext_extension("SPV_EXT_shader_atomic_float_add")]]
+[[vk::ext_capability(6033)]]  // AtomicFloat32AddEXT
+[[vk::ext_instruction(6035)]] // OpAtomicFAddEXT
+float op_atomic_f_add(
+    [[vk::ext_reference]] float destination,
+    uint scope,
+    uint semantics,
+    float value);
+
+static const uint kDeviceScope = 1u;
+static const uint kRelaxed = 0u;
+#else
+[[vk::binding(11, 0)]] RWStructuredBuffer<uint> grad_values;
+#endif
 
 void atomic_add_f32(uint index, float value) {
     if (value == 0.0f || isnan(value) || isinf(value))
         return;
+#ifdef SPLAT_RGB_NATIVE_ATOMIC
+    op_atomic_f_add(grad_values[index], kDeviceScope, kRelaxed, value);
+#else
     uint expected = grad_values[index];
     [loop] for (;;) {
-        uint desired = asuint(asfloat(expected) + value);
         uint observed;
-        InterlockedCompareExchange(grad_values[index], expected, desired, observed);
-        if (observed == expected)
-            return;
+        InterlockedCompareExchange(grad_values[index], expected, asuint(asfloat(expected) + value), observed);
+        if (observed == expected) return;
         expected = observed;
     }
+#endif
 }
 
 void commit_gradient(uint gaussian, uint count, float3 acc_mean, float4 acc_conic, float3 acc_color,
@@ -46,9 +64,11 @@ void commit_gradient(uint gaussian, uint count, float3 acc_mean, float4 acc_coni
     atomic_add_f32(refine_base, acc_refine);
 }
 
-// No-geometry training path. A 32-lane subgroup owns one snapshot bucket. The
-// bucket entries are staged once in group memory and subgroup prefix operations
-// replace each lane's O(lane) replay of its preceding Gaussians.
+// No-geometry training path. A logical 32-lane team owns one snapshot bucket. The
+// Gaussian inputs stay in the owning lane's registers. Subgroup prefix
+// operations communicate the per-pixel contributions; no other lane reads
+// these Gaussian inputs, so staging them in group memory only added traffic
+// and a workgroup barrier.
 [numthreads(256, 1, 1)]
 void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     uint lane = group_thread & 31u;
@@ -84,28 +104,20 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         pos = tile_bucket * 32u + lane;
     }
 
-    gs_mean[group_thread] = 0.0f;
-    gs_conic[group_thread] = 0.0f;
-    gs_color[group_thread] = 0.0f;
-    gs_bounds[group_thread] = 0.0f;
-    uint gaussian = 0;
-    if (bucket_active && pos < tile_n) {
-        gaussian = instances[range_begin + pos];
-        gs_mean[group_thread] = gauss_f[gaussian * 5u].xy;
-        gs_conic[group_thread] = gauss_f[gaussian * 5u + 1u];
-        gs_color[group_thread] = gauss_f[gaussian * 5u + 2u].xyz;
-        gs_bounds[group_thread] = gauss_f[gaussian * 5u + 3u];
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (!bucket_active)
-        return;
-
+    if (!bucket_active) return;
     const bool entry_valid = pos < tile_n;
-    const uint slot = group_thread;
-    const float2 mean = gs_mean[slot];
-    const float4 conic = gs_conic[slot];
-    const float3 color = gs_color[slot];
-    const uint4 bounds = asuint(gs_bounds[slot]);
+    uint gaussian = 0;
+    float2 mean = 0.0f;
+    float4 conic = 0.0f;
+    float3 color = 0.0f;
+    uint4 bounds = 0u;
+    if (entry_valid) {
+        gaussian = instances[range_begin + pos];
+        mean = gauss_f[gaussian * 5u].xy;
+        conic = gauss_f[gaussian * 5u + 1u];
+        color = gauss_f[gaussian * 5u + 2u].xyz;
+        bounds = asuint(gauss_f[gaussian * 5u + 3u]);
+    }
     const uint pix_min_x = (tile_id % tiles_x) * 16u;
     const uint pix_min_y = (tile_id / tiles_x) * 16u;
     const uint qbase = tile_bucket * 32u;
@@ -127,21 +139,27 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         const uint staged_pixel = staged_py * width + staged_px;
         const bool staged_in_image = staged_px < width && staged_py < height;
         uint stage_last = 0;
-        float4 stage_state = 0.0f;
-        float3 stage_final = 0.0f;
         float stage_alpha = 0.0f;
-        float3 stage_grad = 0.0f;
-        float stage_loss_alpha = 0.0f;
+        // Two staged float4s carry exactly what the subgroup needs per pixel:
+        // the color-after-bucket init folded with the snapshot transmittance,
+        // and the pixel gradient folded with the final-transmittance gradient.
+        // Folding at staging replaces seven separate broadcasts (final color,
+        // snapshot color, loss alpha) with per-lane arithmetic at load time.
+        float4 stage_after0_t = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        float4 stage_grad_dfin = 0.0f;
         if (staged_in_image) {
             stage_last = out_u[count + staged_pixel];
-            stage_state = snap[bucket_idx * 256u + staged_local];
-            stage_final = float3(out_f[4u * pixel_count + staged_pixel],
-                                 out_f[5u * pixel_count + staged_pixel],
-                                 out_f[6u * pixel_count + staged_pixel]);
+            const float4 stage_snap = snap[bucket_idx * 256u + staged_local];
+            const float3 stage_final = float3(out_f[4u * pixel_count + staged_pixel],
+                                              out_f[5u * pixel_count + staged_pixel],
+                                              out_f[6u * pixel_count + staged_pixel]);
             stage_alpha = out_f[3u * pixel_count + staged_pixel];
-            stage_grad = float3(loss_color[staged_pixel], loss_color[pixel_count + staged_pixel],
-                                loss_color[2u * pixel_count + staged_pixel]);
-            stage_loss_alpha = pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
+            const float3 stage_grad =
+                float3(loss_color[staged_pixel], loss_color[pixel_count + staged_pixel],
+                       loss_color[2u * pixel_count + staged_pixel]);
+            const float stage_loss_alpha = pc.u13 != 0u ? loss_alpha[staged_pixel] : 0.0f;
+            stage_after0_t = float4(stage_final - stage_snap.xyz, stage_snap.w);
+            stage_grad_dfin = float4(stage_grad, dot(background, stage_grad) - stage_loss_alpha);
         }
 
         [loop] for (uint j = 0u; j < 32u; ++j) {
@@ -149,36 +167,35 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             const uint px = pix_min_x + (local & 15u);
             const uint py = pix_min_y + (local >> 4u);
             const uint last = WaveReadLaneAt(stage_last, j);
-            const float4 state = WaveReadLaneAt(stage_state, j);
-            const float3 final_color = WaveReadLaneAt(stage_final, j);
+            const float4 after0_t = WaveReadLaneAt(stage_after0_t, j);
             const float alpha_final = WaveReadLaneAt(stage_alpha, j);
-            const float3 pixel_grad = WaveReadLaneAt(stage_grad, j);
-            const float loss_alpha_value = WaveReadLaneAt(stage_loss_alpha, j);
+            const float4 grad_dfin = WaveReadLaneAt(stage_grad_dfin, j);
+            const float3 pixel_grad = grad_dfin.xyz;
 
             const bool pixel_active = entry_valid && px < width && py < height && pos < last &&
                                       (wrap_width != 0 || (px >= bounds.x && px < bounds.y &&
                                                            py >= bounds.z && py < bounds.w));
-            float2 qdelta = float2(wrap_dx(gs_mean[slot].x - float(px), wrap_width, mode),
-                                   gs_mean[slot].y - float(py));
-            float power = gaussian_power(gs_conic[slot], qdelta.x, qdelta.y);
+            float2 qdelta = float2(wrap_dx(mean.x - float(px), wrap_width, mode),
+                                   mean.y - float(py));
+            float power = gaussian_power(conic, qdelta.x, qdelta.y);
             float qG = power <= 0.0f ? exp(power) : 0.0f;
             float qalpha =
-                pixel_active && qG > 0.0f ? min(kAlphaClip, gs_conic[slot].w * qG) : 0.0f;
+                pixel_active && qG > 0.0f ? min(kAlphaClip, conic.w * qG) : 0.0f;
             qalpha = qalpha >= kAlphaFloor ? qalpha : 0.0f;
 
-            const float transmittance = state.w * WavePrefixProduct(1.0f - qalpha);
+            const float transmittance = after0_t.w * WavePrefixProduct(1.0f - qalpha);
             const float blend_weight = qalpha * transmittance;
             // The prefix color only ever reaches the gradient projected onto the
             // pixel gradient, so the channel-wise prefix sum folds into one scalar
             // prefix over the projected contributions.
             const float color_after_dot =
-                dot(final_color - state.xyz - blend_weight * color, pixel_grad) -
-                WavePrefixSum(blend_weight * dot(gs_color[slot], pixel_grad));
+                dot(after0_t.xyz - blend_weight * color, pixel_grad) -
+                WavePrefixSum(blend_weight * dot(color, pixel_grad));
             if (!pixel_active || qalpha == 0.0f)
                 continue;
 
             const float final_t = 1.0f - alpha_final;
-            const float d_final_t_render = dot(background, pixel_grad) - loss_alpha_value;
+            const float d_final_t_render = grad_dfin.w;
             const float inv_1ma = 1.0f / (1.0f - qalpha);
             float d_opacity_render =
                 transmittance * dot(color, pixel_grad) - color_after_dot * inv_1ma;

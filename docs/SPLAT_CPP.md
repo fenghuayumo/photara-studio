@@ -253,6 +253,21 @@ upload, view prefetch, and adaptive cache sizing. It records source dimensions
 and camera calibration without decoding every full-resolution image during
 metadata discovery.
 
+CUDA and Vulkan share the host budget, lossless compression, adaptive host
+prefetch, packed-device cache, epoch-aware eviction, and upcoming-upload
+scheduling. With `--splat-cache-auto=true`, both may grow the configured host
+budget to fit the dataset, limited to 16 GiB and 75% of available RAM. Datasets
+larger than that budget use a decoded hot set and lossless compressed views.
+`--splat-cache-auto=false` keeps the explicit `--splat-view-cache-mb` budget.
+
+Both backends reserve at most two upcoming packed uploads inside the device
+cache budget; `--splat-device-cache-mb 0` disables device caching and this
+lookahead. CUDA uses its copy stream and loader-owned staging. Vulkan uses its
+fenced staging ring and shared queue, then unpacks the packed entry on demand.
+Vulkan publishes pending compute readers before an immediate upload can reuse
+a pooled buffer. Upload enqueue and cache mutation remain on the training
+thread; background jobs only prepare host data.
+
 `--splat-max-resolution 0` keeps the selected source files at their actual
 resolution. Positive limits downscale the working camera and targets while
 preserving calibration and source-to-working coordinate mapping.
@@ -323,10 +338,10 @@ build\photara\Release\photara.exe `
 - Reuse temporary storage and avoid per-iteration allocation.
 - Use CUDA events and profiler categories for stage timing.
 - Prefer a compile-time no-geometry blend-backward pipeline for RGB/alpha
-  training. When the device has one 32-lane subgroup and the required
-  nonuniform arithmetic operations, stage one snapshot bucket in group memory
-  and use subgroup prefix products/sums instead of replaying the preceding 31
-  entries independently in every lane. Set
+  training. With the required compute subgroup operations, a logical 32-lane
+  team uses prefix products/sums instead of replaying the preceding 31 entries
+  independently in every lane. Devices with a default wave64 can reuse this
+  wave32 shader when subgroup size control is supported and enabled. Set
   `SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD=1` to force the portable fallback.
 - Stage the backward's per-pixel constants 32 pixels at a time, one per lane,
   instead of having lane 0 load one pixel and the subgroup broadcast it. That
@@ -367,8 +382,8 @@ build\photara\Release\photara.exe `
   live backend frame already feeds the fused loss; live previews use their own
   explicitly rendered camera instead of the training-view attachments.
 - Keep Vulkan contribution flags on the device, defer non-reporting loss scalar
-  reads to log iterations, and retain materialized Vulkan supervision tensors in
-  a bounded LRU instead of re-uploading every host-cached view.
+  reads to log iterations, and retain packed supervision in the shared bounded
+  device cache instead of re-uploading every host-cached view.
 - Size backward snapshot storage for the channels the frame records. The
   color-only path writes one float4 per bucket/pixel; the geometry path also
   writes a second float4 for normals. Ordinary RGB training does not allocate
@@ -444,14 +459,64 @@ build\photara\Release\photara.exe `
   camera types use the general shader.
 - `photara_splat_vulkan_parity --bench-rgb MODEL IMAGES OUTPUT SFM [ITERS] [VIEW]`
   compares the current CUDA and Vulkan RGB render/loss/fused backward+Adam
-  chain from the same initial model and camera. Three warmups are excluded;
-  phase boundaries synchronize both backends, so these are isolated compute
-  timings, excluding ADC, data loading and normal production queue overlap.
+  chain from the same initial model and camera. Three warmups are excluded.
+  The next argument selects `streamed` (the default, boundary waits only) or
+  `phases` (diagnostic waits after each stage). Image I/O is outside the timed
+  loop. Set `PHOTARA_RGB_BENCH_FREEZE=1` and `PHOTARA_RGB_BENCH_NO_ADC=1` for a
+  fixed workload: parameters are checked after warmup safety clamps, the
+  rendered RGB/alpha are compared across backends, and parameters are checked
+  again after measurement.
+- Vulkan L1+SSIM uses two shared-memory 16x16 tile kernels with a five-pixel
+  halo, fusing the horizontal and vertical convolutions. Only three derivative
+  planes are retained between forward and backward. Non-reporting steps skip
+  the loss map and scalar reduction; every gradient pixel is overwritten, so
+  no full-image output clear is needed. Masked/valid-crop math is unchanged.
+  The superseded four-pass shader and its intermediate planes have been removed.
+- GPU-driven, non-wrapping 3DGS instance emission uses 32 cooperating lanes per
+  visible Gaussian. The lanes share each row's original prefix range and write
+  distinct entries in the same order, without atomic allocation. Other
+  primitives/wrapped views retain the general emitter.
+  The dispatch respects the device's X workgroup-count limit and grid-strides
+  over larger visible sets. `SPLAT_DRENDER_EMIT_MAX_GROUPS` can reduce this limit
+  for coverage testing.
+- The RGB and geometry subgroup backward shaders keep
+  lane-private Gaussian inputs in registers, removing shared-memory
+  stores/loads and a workgroup barrier.
+- These optimizations add no tensor-core, ray-tracing, cooperative-matrix,
+  FP16-arithmetic, or fixed subgroup-size requirement to the portable path.
+  Cooperative emission uses ordinary thread indices rather than subgroup
+  intrinsics; the SSIM tiles use 256 threads and less than 18 KiB of shared
+  memory per workgroup. Optional wave32 blend shaders are created and
+  selected only with compute-stage basic/arithmetic/shuffle subgroup support.
+  Other subgroup sizes use wave32 only when the optional size-control feature,
+  compute-stage range, and workgroup subgroup-count limit permit it. Otherwise,
+  or when subgroup operations are missing, they use the portable blend shaders;
+  missing float atomic add uses integer CAS accumulation. RGB native-atomic
+  and CAS variants include the same register-based shader body. Size control
+  reuses that shader without additional entry points or per-pixel buffers.
+  `SPLAT_DRENDER_DISABLE_SUBGROUP_SIZE_CONTROL=1` disables this optional path.
+  Set both `SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD=1` and
+  `SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD=1` to exercise that fallback on a
+  capable device. This checks the fallback implementation, but does not
+  substitute for testing memory limits, drivers, and throughput on other GPUs.
+- Round-trip projection refines its float32 quotient with a fused residual.
+  This avoids amplifying a vendor's division rounding error into a normalized
+  geometry gradient near zero reprojection error, without float64 support.
+  Cross-vendor query-Jacobian tests hold upstream gradients fixed; loss tests
+  hold rendered inputs fixed, and full model gradients are also compared.
+- The tensor buffer pool retains freed buffers up to heap/32, clamped to
+  64 MiB--1 GiB. Small-memory devices no longer inherit a 256 MiB retention
+  floor; live model, raster scratch, and bounded image-cache memory remain
+  separate from this reusable-buffer budget.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the
   aggregation window (default 100 iterations). Profiling is disabled by
   default because timestamp queries add measurable overhead.
+- `SPLAT_DRENDER_PROFILE_LOSS=1` splits the GPU loss into convolution and
+  reduction intervals. The fused implementation combines horizontal/vertical
+  work into one interval per forward/backward kernel. Timestamp diagnostics
+  explicitly wait for completion and are not sustained-throughput baselines.
 - Use `SPLAT_DRENDER_PROFILE_FORWARD=1` (with
   `SPLAT_DRENDER_PROFILE_FORWARD_INTERVAL`, default 100 frames) for the matching
   forward split: the count pass (preprocess, the per-Gaussian scans and the
