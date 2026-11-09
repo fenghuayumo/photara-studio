@@ -24,6 +24,19 @@ Pinhole PHPRIOR1/2 reading and PHPRIOR2 writing remain supported. Progressive
 resizing preserves depth units and validates the projection-specific intrinsics.
 The editor no longer forces pinhole rectification when AI priors are enabled.
 
+CUDA training loads only RGB until the geometry start iteration, then switches
+the view cache to the requested priors at the current training resolution.
+Normal supervision uses derived `.prior.cuda-oct16-WxH-MAPS` runtime caches:
+two signed 16-bit octahedral coordinates per pixel, expanded and normalized on
+the GPU. This reduces normal storage/upload from 12 to 4 bytes per pixel with
+small quantization error (the direction test requires vector error below 1e-4).
+Zero/invalid normals remain zero, and depth values retain float32 precision.
+Original `.prior` files are preserved. Runtime caches check source image and
+prior size/timestamp, path, camera pose, projection and resolution; stale or
+incomplete runtime caches are rebuilt. First use performs conversion on the
+host; subsequent loads reuse the packed maps without rescanning full-size
+float normals. Cache compression runs independently of prefetched data delivery.
+
 Validation: analytical sphere reprojection/normal rotations, cache roundtrips,
 projection mismatch rejection, independent depth/normal maps, unsupported scales
 and masks, CUDA/Vulkan loss oracles and finite differences through Gaussian
