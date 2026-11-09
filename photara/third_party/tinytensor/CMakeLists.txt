@@ -191,7 +191,8 @@ if(TINYTENSOR_ENABLE_VULKAN)
         SHADERS ${TINYTENSOR_SHADER_PATHS}
         INCLUDE_DIR "${TINYTENSOR_SHADER_DIR}"
         OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated"
-        DEPENDS "${TINYTENSOR_SHADER_DIR}/common.hlsli")
+        DEPENDS "${TINYTENSOR_SHADER_DIR}/common.hlsli"
+                "${TINYTENSOR_SHADER_DIR}/shape_regularizers_math.hlsli")
     target_include_directories(tinytensor_vulkan
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
         PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)

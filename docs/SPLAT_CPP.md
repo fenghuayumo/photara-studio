@@ -448,7 +448,11 @@ build\photara\Release\photara.exe `
   four independent optimizer dispatches. Scale bounds/ratio, finite-value
   handling, opacity/scale priors and moment decay for culled rows are preserved.
   No additional performance-selection environment variable is introduced.
-  Auxiliary gradient merges, shape regularizers, frozen structure and empty
+  Shape priors (effective rank, smallest scale share, quaternion norm and axis
+  ratio) run on the old row inside fused Adam, including culled rows. Fused and
+  standalone Vulkan updates share their shape-gradient math; enabling the
+  default effective-rank prior no longer materializes structure gradients.
+  Auxiliary gradient merges, frozen structure and empty
   renders retain their distinct required update paths.
 - Pinhole RGB training uses a compile-time specialization of the Vulkan fused
   projection backward and Adam shader. It removes other camera models,
@@ -508,6 +512,15 @@ build\photara\Release\photara.exe `
   64 MiB--1 GiB. Small-memory devices no longer inherit a 256 MiB retention
   floor; live model, raster scratch, and bounded image-cache memory remain
   separate from this reusable-buffer budget.
+- TinyTensor compute uses four reusable submission slots, each with its own
+  command encoder, fence, and CPU upload staging. A new batch waits only when
+  it reuses its slot; downloads and explicit synchronization retire all slots.
+  Staging exhaustion rotates slots instead of draining the queue. Cached buffers
+  are trimmed only after submissions that may reference them have retired.
+  `TINYTENSOR_VULKAN_COMPUTE_SLOTS=1` selects serial scheduling for A/B checks.
+  Timestamp op profiling uses one slot because query indices are shared;
+  `TINYTENSOR_VULKAN_PROFILE_BATCHES=1` reports fence waits without changing
+  normal scheduling.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the

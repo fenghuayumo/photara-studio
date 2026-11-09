@@ -2163,12 +2163,16 @@ void test_vulkan_fused_sh_adam() {
 
 photara::splat::GaussianModel test_fused_structure_adam(
     tinytensor::Device device = tinytensor::Device::CUDA, unsigned sh_degree = 1,
-    std::size_t storage_bases = 0, bool shape_penalties = false) {
+    std::size_t storage_bases = 0, bool shape_penalties = false, bool geometry = false,
+    bool extreme_shapes = false) {
     using namespace photara::splat;
     using photara::CameraModel;
     using tinytensor::Tensor;
     const bool vk = device == tinytensor::Device::Vulkan;
     constexpr std::size_t n = 257;
+    std::cout << "fused_structure_adam device=" << static_cast<int>(device)
+              << " degree=" << sh_degree << " shape=" << shape_penalties
+              << " geometry=" << geometry << " extreme=" << extreme_shapes << '\n';
     const std::size_t bases = storage_bases ? storage_bases : (sh_degree + 1) * (sh_degree + 1);
     const std::size_t stride = bases * 3;
     std::vector<float> means(n * 3), rotations(n * 4), log_scales(n * 3),
@@ -2180,9 +2184,17 @@ photara::splat::GaussianModel test_fused_structure_adam(
         rotations[i * 4] = 1.03F;
         rotations[i * 4 + 1] = .08F;
         rotations[i * 4 + 2] = -.04F;
+        if (shape_penalties) rotations[i * 4 + 3] = .03F;
         log_scales[i * 3] = -.7F;
         log_scales[i * 3 + 1] = -.5F;
         log_scales[i * 3 + 2] = -.9F;
+        if (extreme_shapes) {
+            // Include rank < 2, tied extrema, and a vanishing smallest share.
+            const float cases[][3]{{-.7F,-.5F,-.9F}, {-.6F,-3.F,-5.F},
+                {-.6F,-.6F,-5.F}, {-.6F,-5.F,-5.F}, {-.6F,-60.F,-90.F},
+                {-.7F,-.7F,-.7F}};
+            for (unsigned a = 0; a < 3; ++a) log_scales[i*3+a] = cases[i % 6][a];
+        }
         logits[i] = -3.F + .01F * float(i % 17);
         for (std::size_t j = 0; j < stride; ++j)
             coefficients[i * stride + j] = .04F * std::sin(float(i + j));
@@ -2241,7 +2253,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
     fused_means.first = Tensor::from_vector(moment, {n, 3}, device);
     RasterizeOptions options;
     options.active_sh_degree = sh_degree;
-    options.require_depth = false;
+    options.require_depth = geometry;
     TrainingOptions training;
     training.opacity_regularization_weight = .02F;
     training.scale_regularization_weight = .03F;
@@ -2249,12 +2261,16 @@ photara::splat::GaussianModel test_fused_structure_adam(
     if (shape_penalties) {
         training.shape_erank_reg = 0.001F;
         training.shape_erank_s3_reg = 0.0007F;
+        training.shape_quat_norm_reg = 0.002F;
         training.shape_axis_ratio_reg = 0.003F;
         training.shape_max_axis_ratio = 1.1F;
     }
     auto reference_sh = detail::make_sh_adam_quant(n, int(stride), device);
     auto fused_sh = detail::make_sh_adam_quant(n, int(stride), device);
-    for (unsigned step : {7U, 8U, 9U}) {
+    // Extreme shape probes check one update from identical parameters. Once
+    // thin axes are clamped, tiny raster rounding can change later gradients;
+    // the ordinary cases below separately check a multi-step trajectory.
+    for (unsigned step = 7; step < (extreme_shapes ? 8U : 10U); ++step) {
         const auto ref = rasterizer.forward(model, camera, options);
 
         auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
@@ -2273,6 +2289,7 @@ photara::splat::GaussianModel test_fused_structure_adam(
             0.F, 0.F, 0.F, true};
         update.shape_erank_reg = training.shape_erank_reg * inverse;
         update.shape_erank_s3_reg = training.shape_erank_s3_reg * inverse;
+        update.shape_quat_norm_reg = training.shape_quat_norm_reg * inverse;
         update.shape_axis_ratio_reg = training.shape_axis_ratio_reg * inverse;
         update.shape_max_axis_ratio = training.shape_max_axis_ratio;
         SHAdamUpdate sh_update;
@@ -2315,7 +2332,8 @@ photara::splat::GaussianModel test_fused_structure_adam(
             training.scale_regularization_weight);
         if (shape_penalties)
             detail::apply_shape_regularizers(model, g, update.shape_erank_reg,
-                update.shape_erank_s3_reg, 0.F, update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
+                update.shape_erank_s3_reg, update.shape_quat_norm_reg,
+                update.shape_axis_ratio_reg, update.shape_max_axis_ratio);
         require(fg.opacity_logits.is_valid(),
             "Fused structure diagnostics dropped opacity gradients");
         compare(g.opacity_logits, fg.opacity_logits,
@@ -8896,6 +8914,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--vulkan-photo-only") {
         try {
             test_vulkan_corrected_photometric_loss();
+            test_vulkan_large_grid_backward();
             test_vulkan_colour_steps_match_cuda();
             std::cout << "Vulkan corrected photometric tests passed\n";
             return 0;
@@ -9256,10 +9275,17 @@ int main(int argc, char** argv) {
             test_effective_rank_regularizer(tinytensor::Device::CUDA);
             test_effective_rank_regularizer(tinytensor::Device::Vulkan);
             test_fused_structure_adam(tinytensor::Device::CUDA, 1, 0, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 1, 0, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 3, 0, true, true);
             std::cout << "Shape regularizer tests passed\n";
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--structure-adam-only") {
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 3, 0, true, false, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 3, 0, true, true, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 0, 16, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 3, 0, true);
+            test_fused_structure_adam(tinytensor::Device::Vulkan, 3, 0, true, true);
             for (unsigned degree : {0U, 2U, 3U})
                 test_fused_structure_adam(tinytensor::Device::Vulkan, degree);
             // Progressive SH keeps all 16 bases allocated while only a subset

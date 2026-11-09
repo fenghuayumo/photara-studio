@@ -2436,9 +2436,7 @@ GaussianModel Trainer::train_impl(
         const bool fused_sh =
             !normal_field_active && rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
         const bool fused_structure =
-            (!vulkan_backend ||
-             (fused_sh && options_.shape_erank_reg <= 0.F && options_.shape_erank_s3_reg <= 0.F &&
-              options_.shape_quat_norm_reg <= 0.F && options_.shape_axis_ratio_reg <= 0.F)) &&
+            (!vulkan_backend || fused_sh) &&
             !sparsity_budget && !normal_field_active && !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;

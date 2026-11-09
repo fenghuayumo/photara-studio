@@ -213,6 +213,16 @@ private:
     void create_pipelines();
     void destroy();
 
+    static constexpr std::size_t kComputeSlotCount = 4;
+    struct ComputeSlot {
+        photara::vk::CommandEncoder encoder;
+        std::unique_ptr<Buffer> staging;
+        std::size_t staging_cursor = 0;
+    };
+    ComputeSlot& active_compute() { return compute_slots_[compute_slot_index_]; }
+    bool compute_pending_locked() const;
+    void retire_compute_slot_locked(ComputeSlot& slot);
+
     // Batch recording and fence retirement for blocking and interop submits.
     void adopt_runtime();
     void begin_batch_locked();
@@ -257,17 +267,17 @@ private:
     photara::vk::Device runtime_;
     std::array<photara::vk::ComputePipeline, static_cast<std::size_t>(ShaderId::Count)>
         pipelines_{};
-    photara::vk::CommandEncoder encoder_;
+    std::array<ComputeSlot, kComputeSlotCount> compute_slots_{};
+    std::size_t compute_slot_index_ = 0;
+    std::size_t compute_slot_count_ = kComputeSlotCount;
 
     std::unordered_map<std::size_t, std::vector<Buffer*>> free_buffers_;
     std::size_t pooled_bytes_ = 0;
     std::size_t pool_budget_bytes_ = 0;
     std::uint32_t batch_commands_ = 0;
-    std::size_t staging_cursor_ = 0;
     // Cleared by destroy(). A tensor that outlives the context then leaks its
     // buffer instead of touching a dead device.
     bool alive_ = true;
-    std::unique_ptr<Buffer> staging_;
     std::unique_ptr<Buffer> readback_staging_;
     std::unique_ptr<Buffer> dummy_;
 

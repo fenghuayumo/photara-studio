@@ -391,8 +391,9 @@ struct SplatSHAdamUpdate {
 struct SplatStructureAdamUpdate {
     std::array<SplatBufferView, 8> moments;
     // LRs (4), beta1/2, corrections1/2, epsilon, scale min/max,
-    // opacity regularization, scale regularization.
-    std::array<float, 13> settings{};
+    // opacity/scale regularization, effective rank, smallest scale share,
+    // quaternion norm, axis ratio weight and maximum ratio.
+    std::array<float, 18> settings{};
     bool capture_opacity_gradient{};
 };
 

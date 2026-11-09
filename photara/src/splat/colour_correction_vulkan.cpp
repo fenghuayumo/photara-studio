@@ -290,7 +290,7 @@ void backward_bilateral_grid_vulkan(
     push[8] = wrap_horizontal;
     const std::size_t pixels = color.shape()[1] * color.shape()[2];
     if (pixels >= 128 * 128) {
-        launch(
+        const auto input_backward = command(
             9,
             {buffer(color),
              buffer(state.grids),
@@ -299,9 +299,10 @@ void backward_bilateral_grid_vulkan(
              {},
              {}},
             push, groups(pixels));
-        launch(
+        const auto grid_backward = command(
             10, {buffer(color), {}, buffer(output_gradient), buffer(state.gradient), {}, {}}, push,
             static_cast<std::uint32_t>(state.grids.numel() / 12));
+        launch_batch(std::array{input_backward, grid_backward});
     } else {
         state.gradient.zero_();
         launch(
@@ -338,18 +339,21 @@ void step_bilateral_grid_vulkan(
         state.grids, state.gradient, state.adam, options.bilateral_grid_lr, iteration, options);
     push[12] = options.bilateral_grid_identity_projection;
     push[13] = bits(options.bilateral_grid_deviation_limit);
+    std::array<Command, 2> projection_commands{};
+    std::size_t projection_count = 0;
     if (options.bilateral_grid_identity_projection) {
         const tinytensor::TensorShape mean_shape{state.grids.shape()[0], std::size_t{12}};
         if (!state.projection_means.is_valid() || state.projection_means.shape() != mean_shape)
             state.projection_means =
                 tinytensor::Tensor::empty(mean_shape, tinytensor::Device::Vulkan);
-        launch(
+        projection_commands[projection_count++] = command(
             14, {buffer(state.grids), {}, {}, buffer(state.projection_means), {}, {}}, push,
             static_cast<std::uint32_t>(state.grids.shape()[0] * 12));
     }
-    launch(
+    projection_commands[projection_count++] = command(
         8, {buffer(state.grids), buffer(state.projection_means), {}, buffer(state.grids), {}, {}},
         push, groups(state.grids.numel()));
+    launch_batch(std::span<const Command>(projection_commands.data(), projection_count));
 }
 
 } // namespace photara::splat::detail

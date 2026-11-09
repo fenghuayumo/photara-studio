@@ -407,12 +407,9 @@ ModelGradients vulkan_raster_backward(
     const auto profile_start = context->backend->profile_stages
                                    ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};
-    if (structure_adam &&
-        (!sh_adam || structure_adam->shape_erank_reg > 0.F ||
-         structure_adam->shape_erank_s3_reg > 0.F || structure_adam->shape_quat_norm_reg > 0.F ||
-         structure_adam->shape_axis_ratio_reg > 0.F))
+    if (structure_adam && !sh_adam)
         throw std::invalid_argument(
-            "Vulkan fused structure Adam requires fused SH and no shape regularizers");
+            "Vulkan fused structure Adam requires fused SH");
     if (densify_map.is_valid() && densify_map.numel() != 0)
         throw std::invalid_argument("Vulkan EMC densify-map backward is not implemented yet");
     const SplatBufferView color_gradient = grad_color.is_valid() ? buffer_view(grad_color)
@@ -488,7 +485,12 @@ ModelGradients vulkan_raster_backward(
             structure_adam->minimum_log_scale,
             structure_adam->maximum_log_scale,
             structure_adam->opacity_reg,
-            structure_adam->scale_reg};
+            structure_adam->scale_reg,
+            structure_adam->shape_erank_reg,
+            structure_adam->shape_erank_s3_reg,
+            structure_adam->shape_quat_norm_reg,
+            structure_adam->shape_axis_ratio_reg,
+            structure_adam->shape_max_axis_ratio};
         structure_update.capture_opacity_gradient = structure_adam->capture_opacity_gradient;
     }
     tinytensor::vulkan::submit_async();

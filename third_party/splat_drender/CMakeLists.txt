@@ -167,6 +167,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward_structure_adam.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_structure_adam_fused.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../photara/third_party/tinytensor/vulkan/shaders/shape_regularizers_math.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_pruning_scores.hlsl"

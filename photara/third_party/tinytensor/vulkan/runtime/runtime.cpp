@@ -754,7 +754,14 @@ void Context::adopt_runtime() {
     runtime_ = photara::vk::Device::adopt(external);
     // none: the batch inserts its own read-after-write barrier, which also
     // orders a pooled buffer reused as an output before the batch is submitted.
-    encoder_ = runtime_.encoder(photara::vk::BarrierPolicy::none);
+    // Timestamp indices are shared in profiling mode, so keep its serial
+    // scheduling. Normal execution can record ahead without recycling an
+    // in-flight command buffer or its host-written upload staging.
+    compute_slot_count_ = env_flag("TINYTENSOR_VULKAN_PROFILE_OPS") ? 1u :
+        std::clamp<std::size_t>(env_u32("TINYTENSOR_VULKAN_COMPUTE_SLOTS").value_or(kComputeSlotCount),
+                                1u, kComputeSlotCount);
+    for (std::size_t i = 0; i < compute_slot_count_; ++i)
+        compute_slots_[i].encoder = runtime_.encoder(photara::vk::BarrierPolicy::none);
 }
 
 void Context::create_pools() {
@@ -802,10 +809,12 @@ void Context::destroy() {
         // Teardown runs from a destructor, so a device that is already lost
         // must not turn into a thrown exception here.
         try {
-            if (encoder_.recording()) encoder_.submit();
-            if (encoder_.in_flight()) {
-                encoder_.wait();
-                if (op_profile_.enabled) collect_op_profile_locked();
+            for (auto& slot : compute_slots_) {
+                if (slot.encoder.recording()) slot.encoder.submit();
+                if (slot.encoder.in_flight()) {
+                    slot.encoder.wait();
+                    if (op_profile_.enabled) collect_op_profile_locked();
+                }
             }
         } catch (...) {
         }
@@ -829,6 +838,11 @@ void Context::destroy() {
         }
         op_profile_.enabled = false;
     }
+    if (env_flag("TINYTENSOR_VULKAN_PROFILE_BATCHES")) {
+        std::fprintf(stderr, "tinytensor_vulkan_compute_slots=%zu retired_batches=%llu "
+                     "fence_wait_ms=%.3f\n", compute_slot_count_,
+                     static_cast<unsigned long long>(op_profile_.batches), op_profile_.wait_ms);
+    }
     alive_ = false;
     for (auto& entry : free_buffers_) {
         for (Buffer* buffer : entry.second) {
@@ -838,7 +852,7 @@ void Context::destroy() {
     free_buffers_.clear();
     pooled_bytes_ = 0;
     dummy_.reset();
-    staging_.reset();
+    for (auto& slot : compute_slots_) slot.staging.reset();
     readback_staging_.reset();
     for (UploadSlot& slot : upload_slots_) {
         slot.staging.reset();
@@ -851,7 +865,7 @@ void Context::destroy() {
     }
     // The encoder destructor may submit a leftover batch, so pipelines and the
     // adopted device have to outlive it.
-    encoder_ = {};
+    for (auto& slot : compute_slots_) slot.encoder = {};
     for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
     runtime_ = {};
     if (upload_command_pool_ != VK_NULL_HANDLE) {
@@ -911,7 +925,7 @@ std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) 
 void Context::recycle_locked(Buffer* buffer) {
     pooled_bytes_ += static_cast<std::size_t>(buffer->size());
     free_buffers_[static_cast<std::size_t>(buffer->size())].push_back(buffer);
-    if (!encoder_.recording() && !encoder_.in_flight()) {
+    if (!compute_pending_locked()) {
         // A recorded or submitted command may still hold this handle even
         // after the last tensor owner releases it.
         trim_pool_locked();
@@ -933,7 +947,7 @@ void Context::trim_pool_locked() {
             check(status, "vkGetFenceStatus(upload)");
         }
     }
-    if (encoder_.recording() || encoder_.in_flight() || upload_in_flight ||
+    if (compute_pending_locked() || upload_in_flight ||
         pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
@@ -967,12 +981,13 @@ Buffer& Context::dummy() {
 }
 
 void Context::ensure_staging(std::size_t bytes) {
-    if (staging_ && staging_->size() >= bytes) {
+    auto& slot = active_compute();
+    if (slot.staging && slot.staging->size() >= bytes) {
         return;
     }
-    staging_ = std::make_unique<Buffer>(physical_, device_, static_cast<VkDeviceSize>(bytes),
-                                        MemoryKind::host_visible);
-    staging_cursor_ = 0;
+    slot.staging = std::make_unique<Buffer>(
+        physical_, device_, static_cast<VkDeviceSize>(bytes), MemoryKind::host_visible);
+    slot.staging_cursor = 0;
 }
 
 // Cached host memory, because pulling a render target back to the host is
@@ -985,21 +1000,20 @@ void Context::ensure_readback_staging(std::size_t bytes) {
         physical_, device_, static_cast<VkDeviceSize>(bytes), MemoryKind::host_cached);
 }
 
-// One command buffer is recorded into and submitted once per flush, instead of
-// a fresh command buffer and a queue drain per op. The command buffer is kept
-// alive across flushes; only its contents are reset.
+// Slots retain command buffers, descriptors, and upload staging until their
+// fences retire. Reusing one slot does not drain the other queued submissions.
 VkCommandBuffer Context::command_buffer() {
-    return encoder_.native();
+    return active_compute().encoder.native();
 }
 
 void Context::begin_batch_locked() {
-    if (encoder_.recording()) {
+    if (active_compute().encoder.recording()) {
         return;
     }
-    retire_async_locked();
+    retire_compute_slot_locked(active_compute());
     const VkCommandBuffer command = command_buffer();
     batch_commands_ = 0;
-    staging_cursor_ = 0;
+    active_compute().staging_cursor = 0;
     if (op_profile_.enabled && !op_profile_.order.empty()) {
         // Retire the previous batch's timestamp range before reusing indices.
         vkCmdResetQueryPool(
@@ -1010,24 +1024,35 @@ void Context::begin_batch_locked() {
 }
 
 void Context::submit_async_locked() {
-    if (!encoder_.recording()) return;
+    if (!active_compute().encoder.recording()) return;
     // Publish writes to later compute and transfer commands on this queue,
     // including the splat rasterizer's submissions through the shared device.
-    encoder_.barrier();
-    encoder_.submit();
+    active_compute().encoder.barrier();
+    active_compute().encoder.submit();
+    compute_slot_index_ = (compute_slot_index_ + 1u) % compute_slot_count_;
     batch_commands_ = 0;
 }
 
-void Context::retire_async_locked() {
-    if (!encoder_.in_flight()) return;
+bool Context::compute_pending_locked() const {
+    for (const auto& slot : compute_slots_)
+        if (slot.encoder.recording() || slot.encoder.in_flight()) return true;
+    return false;
+}
+
+void Context::retire_compute_slot_locked(ComputeSlot& slot) {
+    if (!slot.encoder.in_flight()) return;
     const auto wait_started = std::chrono::steady_clock::now();
-    encoder_.wait();
+    slot.encoder.wait();
     op_profile_.wait_ms += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - wait_started).count();
     ++op_profile_.batches;
     if (op_profile_.enabled) collect_op_profile_locked();
-    staging_cursor_ = 0;
+    slot.staging_cursor = 0;
     trim_pool_locked();
+}
+
+void Context::retire_async_locked() {
+    for (auto& slot : compute_slots_) retire_compute_slot_locked(slot);
 }
 
 void Context::flush_locked() {
@@ -1163,7 +1188,7 @@ void Context::record_barrier_locked() {
     // input as its output before this batch is submitted.  Include shader reads
     // in the source scope so that reuse has a real read-to-write (WAR) ordering
     // dependency instead of relying on the driver's incidental execution order.
-    encoder_.barrier(
+    active_compute().encoder.barrier(
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1240,28 +1265,30 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
         return;
     }
     std::scoped_lock lock(mutex_);
-    // The staging buffer is shared by every recorded copy, so writing the same
-    // bytes again has to wait for the batch that already read them, and growing
-    // the staging buffer may not free memory a recorded copy still reads.
+    // Append within the active slot. If its recorded copies exhaust staging,
+    // publish them and rotate; only a slot's own fence gates its host writes.
     const std::size_t aligned = (bytes + 3U) & ~std::size_t{3};
-    if (staging_ == nullptr || staging_cursor_ + aligned > staging_->size()) {
-        flush_locked();
-        if (staging_ == nullptr || staging_->size() < aligned) {
-            ensure_staging(aligned);
-        }
-    }
     begin_batch_locked();
+    if (!active_compute().staging ||
+        active_compute().staging_cursor + aligned > active_compute().staging->size()) {
+        if (active_compute().staging_cursor != 0) {
+            submit_async_locked();
+            begin_batch_locked();
+        }
+        ensure_staging(aligned);
+    }
+    auto& slot = active_compute();
     const VkCommandBuffer command = command_buffer();
-    std::memcpy(static_cast<char*>(staging_->mapped()) + staging_cursor_, data, bytes);
+    std::memcpy(static_cast<char*>(slot.staging->mapped()) + slot.staging_cursor, data, bytes);
     VkBufferCopy region{};
-    region.srcOffset = staging_cursor_;
+    region.srcOffset = slot.staging_cursor;
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(command, staging_->handle(), dst.handle(), 1, &region);
+    vkCmdCopyBuffer(command, slot.staging->handle(), dst.handle(), 1, &region);
     barrier_buffer(command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    staging_cursor_ += aligned;
+    slot.staging_cursor += aligned;
     if (++batch_commands_ >= kMaxCommandsPerBatch) {
         flush_locked();
     }
@@ -1406,7 +1433,7 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         converted[index].offset = bindings[index].offset;
         converted[index].range = bindings[index].range;
     }
-    encoder_.dispatch(
+    active_compute().encoder.dispatch(
         pipeline,
         std::span<const photara::vk::BufferBinding>{converted.data(), bindings.size()},
         push_constants, push_bytes, groups_x, groups_y, groups_z);

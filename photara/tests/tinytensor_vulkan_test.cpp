@@ -211,6 +211,49 @@ void test_async_upload_ring() {
                             1e-6F, "async upload after pooled reader");
 }
 
+void test_compute_submission_ring() {
+    using namespace tinytensor;
+    std::vector<Tensor> outputs;
+    std::vector<std::vector<float>> expected;
+    for (std::size_t batch = 0; batch < 19; ++batch) {
+        // Two differently sized uploads before submission force staging growth
+        // while earlier copies and pooled-input readers may still be pending.
+        for (const std::size_t count : {std::size_t{257}, 4097 + batch * 37}) {
+            std::vector<float> host(count);
+            for (std::size_t i = 0; i < host.size(); ++i)
+                host[i] = static_cast<float>(batch * 10000 + i);
+            auto input = Tensor::from_vector(host, {host.size()}, Device::Vulkan);
+            outputs.push_back(input * 2.F + 3.F);
+            for (float& value : host) value = value * 2.F + 3.F;
+            expected.push_back(std::move(host));
+        }
+        vulkan::submit_async();
+    }
+    for (std::size_t index = 0; index < outputs.size(); ++index) {
+        const auto actual = outputs[index].to_vector();
+        for (std::size_t i = 0; i < actual.size(); ++i)
+            require_near(actual[i], expected[index][i],
+                         0.F, "compute ring staging/recycled-input lifetime");
+    }
+}
+
+void test_compute_pool_pressure() {
+    using namespace tinytensor;
+    std::vector<Tensor> sums;
+    for (std::size_t mb = 1; mb <= 19; ++mb) {
+        const std::size_t count = mb * (1u << 18);
+        auto input = Tensor::full({count}, 1.F, Device::Vulkan);
+        sums.push_back(input.sum());
+        vulkan::submit_async();
+    }
+    for (std::size_t i = 0; i < sums.size(); ++i)
+        require_near(sums[i].to_vector()[0], static_cast<float>((i + 1) * (1u << 18)),
+                     0.F, "pool pressure freed an in-flight input");
+    vulkan::synchronize();
+    const auto pool = vulkan::buffer_pool_stats();
+    require(pool.free_bytes <= pool.budget_bytes, "retired compute slots retained excess cache");
+}
+
 void test_multinomial() {
     using namespace tinytensor;
     auto weights = Tensor::from_vector(std::vector<float>{0.F, 1.F, 0.F, 0.F}, {4}, Device::Vulkan);
@@ -590,6 +633,8 @@ int main() {
         run("mask_and_convert", test_mask_and_convert);
         run("unpack_training_pixels", test_unpack_training_pixels);
         run("async_upload_ring", test_async_upload_ring);
+        run("compute_submission_ring", test_compute_submission_ring);
+        run("compute_pool_pressure", test_compute_pool_pressure);
         run("multinomial", test_multinomial);
         run("elementwise_and_where", test_elementwise_and_where);
         run("reduce_and_cumsum", test_reduce_and_cumsum);
