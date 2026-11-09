@@ -60,10 +60,10 @@ struct CacheStats {
     std::size_t prefetch_depth{};
 };
 
-// Owns bounded host and CUDA packed RGBA8 caches. Resident views are expanded
-// on CUDA without uploading the same image again. Host decoding may run on
-// background threads (see TrainingOptions::training_prefetch_views); every CUDA
-// call stays on the calling thread.
+// Owns bounded host and packed RGBA8/depth/normal device caches shared by CUDA
+// and Vulkan. Resident views are expanded on the selected device. Host decoding
+// may run on background threads; device allocation and upload enqueue stay on
+// the calling thread, with a bounded lookahead of upcoming packed uploads.
 class TrainingDataLoader {
   public:
     TrainingDataLoader(
@@ -96,7 +96,7 @@ class TrainingDataLoader {
     // away instead. Passing nullptr restores plain LRU.
     void set_epoch_plan(const std::vector<std::size_t>* order, std::size_t cursor);
     // Image caches are reconstructable; Gaussian/optimizer state is not. Drop
-    // packed CUDA views (and trim the CUDA memory pool) when a refinement is
+    // packed device views (and trim the CUDA memory pool) when a refinement is
     // about to need more headroom than currently remains.
     void ensure_device_headroom(std::size_t bytes);
     [[nodiscard]] CacheStats stats() const;

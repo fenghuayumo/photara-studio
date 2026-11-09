@@ -193,6 +193,22 @@ void test_async_upload_ring() {
          34.F * inverse_255, 85.F * inverse_255,
          51.F * inverse_255, 102.F * inverse_255},
         1e-6F, "async upload slot reuse");
+
+    // The packed temporary dies before its unpack is submitted. A following
+    // immediate upload may acquire that pooled allocation; it must not
+    // overwrite the previous unpack's input before that reader executes.
+    std::array<Tensor, 3> retained_rgb;
+    for (std::size_t index = 0; index < host.size(); ++index) {
+        auto temporary = Tensor::empty({std::size_t{1}, std::size_t{2}},
+                                      Device::Vulkan, DataType::Int32);
+        vulkan::upload_async(temporary, host[index].data(), host[index].size() * sizeof(int));
+        retained_rgb[index] = Tensor::empty(
+            {std::size_t{3}, std::size_t{1}, std::size_t{2}}, Device::Vulkan);
+        vulkan::unpack_training_pixels(temporary, retained_rgb[index], nullptr, nullptr);
+    }
+    for (std::size_t index = 0; index < host.size(); ++index)
+        require_vector_near(retained_rgb[index].to_vector(), rgb[index].to_vector(),
+                            1e-6F, "async upload after pooled reader");
 }
 
 void test_multinomial() {

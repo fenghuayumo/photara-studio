@@ -4943,10 +4943,12 @@ void test_jpeg_dct_scaled_training_view() {
     std::filesystem::remove_all(root);
 }
 
-void test_training_device_cache() {
+void test_training_device_cache(
+    const photara::splat::TrainingBackend backend = photara::splat::TrainingBackend::cuda) {
     using namespace photara;
     const auto root = std::filesystem::temp_directory_path() /
-        "photara_training_device_cache_test";
+        (backend == splat::TrainingBackend::cuda ? "photara_training_device_cache_test_cuda"
+                                                : "photara_training_device_cache_test_vulkan");
     std::filesystem::create_directories(root);
     std::vector<mvs::MvsView> views(4);
     for (std::size_t i = 0; i < views.size(); ++i) {
@@ -4965,6 +4967,7 @@ void test_training_device_cache() {
         view.depth_map.normal.assign(256, mvs::Vec3f(0.F, 0.F, 1.F));
     }
     splat::TrainingOptions options;
+    options.backend = backend;
     options.use_mask = options.use_mvs_depth = options.use_mvs_normals = true;
     options.multi_view_ncc_weight = 0.6F;
     options.training_prefetch_views = 0;
@@ -4979,13 +4982,15 @@ void test_training_device_cache() {
     const auto compare = [](const splat::TrainingView& a,
                             const splat::TrainingView& b,
                             const char* stage) {
-        require(a.rgb.to_vector() == b.rgb.to_vector() &&
-                a.gray.to_vector() == b.gray.to_vector() &&
-                a.mask.to_vector() == b.mask.to_vector() &&
-                a.depth.to_vector() == b.depth.to_vector() &&
-                a.normal.to_vector() == b.normal.to_vector() &&
-                a.has_mask == b.has_mask,
-                stage);
+        const auto same = [stage](const tinytensor::Tensor& x, const tinytensor::Tensor& y,
+                                  const char* channel) {
+            if (x.to_vector() != y.to_vector())
+                throw std::runtime_error(std::string(stage) + ": " + channel);
+        };
+        same(a.rgb, b.rgb, "rgb"); same(a.gray, b.gray, "gray");
+        same(a.mask, b.mask, "mask"); same(a.depth, b.depth, "depth");
+        same(a.normal, b.normal, "normal");
+        require(a.has_mask == b.has_mask, stage);
     };
     compare(reference, first, "first changed supervision");
     compare(reference, hit, "device hit changed supervision");
@@ -5090,9 +5095,9 @@ void test_training_device_cache() {
                 3 * options.training_device_cache_bytes,
             "Host prefetch did not re-upload the evicted view");
     const auto before_scale_memory = asynchronous.stats();
-    require(before_scale_memory.device_ring_bytes > 0 &&
+    require(backend != splat::TrainingBackend::cuda || (before_scale_memory.device_ring_bytes > 0 &&
             before_scale_memory.device_logical_peak_bytes >= before_scale_memory.device_ring_bytes &&
-            before_scale_memory.pinned_host_bytes > 0,
+            before_scale_memory.pinned_host_bytes > 0),
             "Loader memory accounting omitted upload staging");
     asynchronous.set_resolution_scale(0.5F);
     const auto after_scale_memory = asynchronous.stats();
@@ -5137,6 +5142,26 @@ void test_training_device_cache() {
             "Adaptive device cache exceeded its ceiling");
     compare(tuner.get(0), reference,
             "Adaptive device cache changed supervision");
+
+    // Both backends apply the same automatic host budget and drain lookahead
+    // entries at a resolution transition, including uploads never consumed.
+    options.training_view_cache_bytes = 1024;
+    options.training_device_cache_bytes = 2 * 256 * (4 + 4 + 12);
+    splat::training_data::TrainingDataLoader transition(views, options);
+    require(transition.stats().host_budget_bytes >= transition.stats().dataset_packed_bytes,
+            "Automatic host budget did not cover the small dataset");
+    (void)transition.get(0);
+    (void)transition.get(1);
+    (void)transition.get(2);
+    transition.prefetch(0);
+    require(transition.stats().async_upload_pending > 0,
+            "Upcoming view was not uploaded before get");
+    transition.set_resolution_scale(0.5F);
+    require(transition.stats().async_upload_pending == 0 &&
+            transition.stats().async_upload_pending_bytes == 0,
+            "Resolution transition retained upcoming packed uploads");
+    require(transition.get(0).rgb.numel() == 3 * 8 * 8,
+            "Upcoming upload survived the resolution transition");
 
     std::filesystem::remove_all(root);
 }
@@ -8870,6 +8895,7 @@ int main(int argc, char** argv) {
 #ifdef TINYTENSOR_HAS_VULKAN
     if (argc > 1 && std::string(argv[1]) == "--data-cache-vulkan-only") {
         try {
+            test_training_device_cache(photara::splat::TrainingBackend::vulkan);
             test_compressed_training_cache(photara::splat::TrainingBackend::vulkan);
             std::cout << "Vulkan training data cache tests passed\n";
             return 0;

@@ -12,6 +12,7 @@
 #include "internal/cuda_stream_context.hpp"
 #include "core/vram_profiler.hpp"
 #include "vulkan/ops.hpp"
+#include "vulkan/backend.hpp"
 
 #include <Eigen/Geometry>
 #include <zstd.h>
@@ -1243,25 +1244,6 @@ struct TrainingDataLoader::Impl {
         ++requests_;
         note_request_cadence();
         collect_ready_host_prefetches();
-        if (options_.backend == TrainingBackend::vulkan) {
-            const auto cached = vulkan_lookup_.find(index);
-            if (cached != vulkan_lookup_.end()) {
-                ++device_hits_;
-                device_hit_rate_ =
-                    static_cast<double>(device_hits_) / static_cast<double>(requests_);
-                vulkan_entries_.splice(vulkan_entries_.begin(), vulkan_entries_, cached->second);
-                return vulkan_entries_.front().view;
-            }
-            const bool host_resident = lookup_.contains(index);
-            const HostTrainingView& host = host_view(index);
-            if (host_resident)
-                ++host_hits_;
-            TrainingView view = upload_view(host);
-            uploaded_bytes_ += packed_host_bytes(host);
-            device_hit_rate_ = static_cast<double>(device_hits_) / static_cast<double>(requests_);
-            insert_vulkan_entry(index, view);
-            return view;
-        }
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
             ++device_hits_;
@@ -1273,7 +1255,7 @@ struct TrainingDataLoader::Impl {
             return decode_device_view(device_entries_.front());
         }
         const auto pending = device_uploads_.find(index);
-        if (pending != device_uploads_.end()) {
+        if (pending != device_uploads_.end() || vulkan_uploads_.contains(index)) {
             // Count it as a cache miss for budget feedback: the transfer was
             // still necessary even when it completed before get(). Budget
             // evaluation is deferred while any transfer owns reserved bytes.
@@ -1304,7 +1286,10 @@ struct TrainingDataLoader::Impl {
         DeviceEntry entry = allocate_device_entry(
             index, host.camera, host.has_mask, host.mask_is_validity, !host.depth.empty(),
             host.has_normal(), !host.packed_normal.empty());
-        copy_device_entry_with_pinned_staging(host, entry);
+        if (options_.backend == TrainingBackend::vulkan)
+            copy_vulkan_entry(host, entry);
+        else
+            copy_device_entry_with_pinned_staging(host, entry);
         insert_device_entry(std::move(entry));
         return decode_device_view(device_entries_.front());
     }
@@ -1315,13 +1300,13 @@ struct TrainingDataLoader::Impl {
         if (options_.training_prefetch_views == 0)
             return;
         collect_ready_host_prefetches();
-        // Host decoding is the only background-thread work. CUDA allocation,
+        // Host decoding is the only background-thread work. Device allocation,
         // staging and copy enqueue all remain on this training thread.
-        if (device_lookup_.contains(index) || device_uploads_.contains(index))
+        if (device_lookup_.contains(index) || has_pending_upload(index))
             return;
         const auto cached = lookup_.find(index);
         if (cached != lookup_.end()) {
-            if (copy_stream_ != nullptr && device_uploads_.size() < k_max_pending_device_uploads)
+            if (pending_upload_count() < k_max_pending_device_uploads)
                 schedule_device_upload(index, *cached->second->view);
             return;
         }
@@ -1418,8 +1403,6 @@ struct TrainingDataLoader::Impl {
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
-        vulkan_lookup_.clear();
-        vulkan_entries_.clear();
         // Budget feedback starts over at the new scale.
         device_budget_window_requests_ = 0;
         device_budget_window_hits_ = 0;
@@ -1462,12 +1445,10 @@ struct TrainingDataLoader::Impl {
     }
 
     void ensure_device_headroom(const std::size_t bytes) {
-        if (options_.backend == TrainingBackend::vulkan)
-            return;
         if (bytes == 0)
             return;
         std::size_t free_bytes{}, total_bytes{};
-        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || free_bytes >= bytes) {
+        if (!device_memory_info(free_bytes, total_bytes) || free_bytes >= bytes) {
             return;
         }
 
@@ -1478,8 +1459,9 @@ struct TrainingDataLoader::Impl {
         device_entries_.clear();
         device_cached_bytes_ = 0;
         device_capacity_bytes_ = 0;
-        tinytensor::Tensor::trim_memory_pool();
-        cudaMemGetInfo(&free_bytes, &total_bytes);
+        if (options_.backend == TrainingBackend::cuda)
+            tinytensor::Tensor::trim_memory_pool();
+        device_memory_info(free_bytes, total_bytes);
         core::Logger::instance().warning(
             "splat_data_cache low_vram_headroom_bytes=", bytes, " free_before_bytes=", free_before,
             " released_packed_bytes=", resident, " action=disable_device_cache");
@@ -1493,7 +1475,7 @@ struct TrainingDataLoader::Impl {
         result.async_upload_issued = async_upload_issued_;
         result.async_upload_waits = async_upload_waits_;
         result.async_upload_failures = async_upload_failures_;
-        result.async_upload_pending = device_uploads_.size();
+        result.async_upload_pending = pending_upload_count();
         result.async_upload_pending_bytes = device_pending_bytes_;
         result.uploaded_bytes = uploaded_bytes_;
         result.device_resident_bytes = device_cached_bytes_;
@@ -1547,13 +1529,6 @@ struct TrainingDataLoader::Impl {
     };
     using DeviceEntries = std::list<DeviceEntry>;
 
-    struct VulkanDeviceEntry {
-        std::size_t index{};
-        std::size_t bytes{};
-        TrainingView view;
-    };
-    using VulkanDeviceEntries = std::list<VulkanDeviceEntry>;
-
     struct PendingDeviceUpload {
         std::size_t bytes{};
         Camera camera;
@@ -1574,39 +1549,6 @@ struct TrainingDataLoader::Impl {
     [[nodiscard]] static std::size_t packed_host_bytes(const HostTrainingView& host) {
         return sizeof(int) * host.rgba.size() +
                sizeof(float) * host.depth.size() + host.normal_bytes();
-    }
-
-    [[nodiscard]] static std::size_t vulkan_view_bytes(const TrainingView& view) {
-        return saturate_add(
-            view.rgb.bytes(),
-            saturate_add(
-                view.gray.bytes(),
-                saturate_add(
-                    view.mask.bytes(), saturate_add(view.depth.bytes(), view.normal.bytes()))));
-    }
-
-    bool make_room_for_vulkan_bytes(const std::size_t bytes) {
-        if (bytes > device_capacity_bytes_)
-            return false;
-        while (!vulkan_entries_.empty() && device_cached_bytes_ + bytes > device_capacity_bytes_) {
-            const auto evicted = select_eviction_victim(vulkan_entries_);
-            device_cached_bytes_ -= evicted->bytes;
-            vulkan_lookup_.erase(evicted->index);
-            vulkan_entries_.erase(evicted);
-        }
-        return device_cached_bytes_ + bytes <= device_capacity_bytes_;
-    }
-
-    void insert_vulkan_entry(const std::size_t index, const TrainingView& view) {
-        VulkanDeviceEntry entry;
-        entry.index = index;
-        entry.bytes = vulkan_view_bytes(view);
-        entry.view = view;
-        if (!make_room_for_vulkan_bytes(entry.bytes))
-            return;
-        vulkan_entries_.push_front(std::move(entry));
-        vulkan_lookup_[index] = vulkan_entries_.begin();
-        device_cached_bytes_ += vulkan_entries_.front().bytes;
     }
 
     // Diagnostic switch (SPLAT_VERIFY_UPLOAD=1): compare the packed bytes a
@@ -1639,17 +1581,17 @@ struct TrainingDataLoader::Impl {
         entry.has_mask = has_mask;
         entry.mask_is_validity = mask_is_validity;
         entry.rgba = tinytensor::Tensor::empty(
-            {camera.height, camera.width}, tinytensor::Device::CUDA, tinytensor::DataType::Int32);
+            {camera.height, camera.width}, training_device(options_), tinytensor::DataType::Int32);
         if (has_depth)
             entry.depth =
-                tinytensor::Tensor::empty({camera.height, camera.width}, tinytensor::Device::CUDA);
+                tinytensor::Tensor::empty({camera.height, camera.width}, training_device(options_));
         if (has_normal) {
             if (packed_normal)
                 entry.normal = tinytensor::Tensor::empty(
-                    {camera.height, camera.width}, tinytensor::Device::CUDA, tinytensor::DataType::Int32);
+                    {camera.height, camera.width}, training_device(options_), tinytensor::DataType::Int32);
             else
                 entry.normal = tinytensor::Tensor::empty(
-                    {std::size_t{3}, camera.height, camera.width}, tinytensor::Device::CUDA);
+                    {std::size_t{3}, camera.height, camera.width}, training_device(options_));
         }
         memory_.track(entry.rgba); memory_.track(entry.depth); memory_.track(entry.normal);
         memory_.sample(device_ring_.capacity());
@@ -1711,15 +1653,52 @@ struct TrainingDataLoader::Impl {
                 entry.normal.data_ptr(), normal_source, normal_bytes, cudaMemcpyHostToDevice));
     }
 
+    [[nodiscard]] bool has_pending_upload(const std::size_t index) const {
+        return device_uploads_.contains(index) || vulkan_uploads_.contains(index);
+    }
+
+    [[nodiscard]] std::size_t pending_upload_count() const {
+        return device_uploads_.size() + vulkan_uploads_.size();
+    }
+
+    void copy_vulkan_entry(const HostTrainingView& host, DeviceEntry& entry) {
+        const auto copy = [this](tinytensor::Tensor& dst, const void* src) {
+            if (!dst.is_valid()) return;
+            if (options_.training_async_upload)
+                tinytensor::vulkan::upload_async(dst, src, dst.bytes());
+            else
+                tinytensor::vulkan::upload(dst, src, dst.bytes());
+        };
+        copy(entry.rgba, host.rgba.data());
+        copy(entry.depth, host.depth.data());
+        copy(entry.normal, host.normal_data());
+    }
+
     bool schedule_device_upload(const std::size_t index, const HostTrainingView& host) {
-        if (copy_stream_ == nullptr || device_uploads_.contains(index) ||
-            device_lookup_.contains(index) ||
-            device_uploads_.size() >= k_max_pending_device_uploads)
+        if (!options_.training_async_upload ||
+            (options_.backend == TrainingBackend::cuda && copy_stream_ == nullptr) ||
+            has_pending_upload(index) || device_lookup_.contains(index) ||
+            pending_upload_count() >= k_max_pending_device_uploads)
             return false;
         const std::size_t bytes = packed_host_bytes(host);
         if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_ ||
             !make_room_for_device_bytes(bytes))
             return false;
+
+        if (options_.backend == TrainingBackend::vulkan) {
+            WallTimer timer{upload_submit_ms_};
+            // The shared queue orders these independent transfers before the
+            // first unpack on get(). Keep packed tensors owned until consumed;
+            // no expanded RGB cache and no per-view CPU fence are needed.
+            auto entry = allocate_device_entry(index, host.camera, host.has_mask,
+                host.mask_is_validity, !host.depth.empty(), host.has_normal(),
+                !host.packed_normal.empty());
+            copy_vulkan_entry(host, entry);
+            vulkan_uploads_.emplace(index, std::move(entry));
+            device_pending_bytes_ += bytes;
+            ++async_upload_issued_;
+            return true;
+        }
 
         const auto [pending, inserted] = device_uploads_.try_emplace(index);
         if (!inserted)
@@ -1792,6 +1771,15 @@ struct TrainingDataLoader::Impl {
     // ordered ahead of the expansion kernels that read it.
     [[nodiscard]] bool consume_device_upload(const std::size_t index, DeviceEntry& entry) {
         WallTimer timer{upload_submit_ms_};
+        if (options_.backend == TrainingBackend::vulkan) {
+            const auto pending = vulkan_uploads_.find(index);
+            if (pending == vulkan_uploads_.end()) return false;
+            entry = std::move(pending->second);
+            device_pending_bytes_ -= entry.bytes;
+            vulkan_uploads_.erase(pending);
+            uploaded_bytes_ += entry.bytes;
+            return true;
+        }
         const auto found = device_uploads_.find(index);
         if (found == device_uploads_.end())
             return false;
@@ -1877,6 +1865,9 @@ struct TrainingDataLoader::Impl {
             staging_pool_.release(std::move(upload.staging));
         }
         device_uploads_.clear();
+        // Unconsumed Vulkan entries have no recorded readers. Upload staging
+        // is runtime-owned; its fences prevent pool destruction while in use.
+        vulkan_uploads_.clear();
         device_pending_bytes_ = 0;
     }
 
@@ -1906,12 +1897,26 @@ struct TrainingDataLoader::Impl {
         result.camera = entry.camera;
         result.has_mask = entry.has_mask;
         result.mask_is_validity = entry.mask_is_validity;
-        auto decoded = detail::decode_packed_training_pixels(
-            entry.rgba, entry.camera.width, entry.camera.height, entry.has_mask,
-            options_.multi_view_ncc_weight > 0.F);
-        result.rgb = std::move(decoded.rgb);
-        result.gray = std::move(decoded.gray);
-        result.mask = std::move(decoded.mask);
+        const bool vulkan = options_.backend == TrainingBackend::vulkan;
+        if (vulkan) {
+            const auto device = entry.rgba.device();
+            const std::size_t h = entry.camera.height, w = entry.camera.width;
+            const bool gray = options_.multi_view_ncc_weight > 0.F;
+            result.rgb = tinytensor::Tensor::empty({std::size_t{3}, h, w}, device);
+            result.gray = gray ? tinytensor::Tensor::empty({h, w}, device)
+                               : tinytensor::Tensor::zeros({1}, device);
+            result.mask = entry.has_mask ? tinytensor::Tensor::empty({h, w}, device)
+                                        : tinytensor::Tensor::zeros({1}, device);
+            tinytensor::vulkan::unpack_training_pixels(entry.rgba, result.rgb,
+                gray ? &result.gray : nullptr, entry.has_mask ? &result.mask : nullptr);
+        } else {
+            auto decoded = detail::decode_packed_training_pixels(
+                entry.rgba, entry.camera.width, entry.camera.height, entry.has_mask,
+                options_.multi_view_ncc_weight > 0.F);
+            result.rgb = std::move(decoded.rgb);
+            result.gray = std::move(decoded.gray);
+            result.mask = std::move(decoded.mask);
+        }
         // Own the returned supervision tensors independently of the LRU:
         // callers may retain a reference view while loading a neighbour.
         const auto device = entry.rgba.device();
@@ -1919,8 +1924,15 @@ struct TrainingDataLoader::Impl {
             entry.depth.is_valid() ? entry.depth : tinytensor::Tensor::zeros({1}, device);
         result.normal =
             entry.normal.is_valid() ? entry.normal : tinytensor::Tensor::zeros({1}, device);
-        if (entry.normal.is_valid() && entry.normal.dtype() == tinytensor::DataType::Int32)
-            result.normal = detail::decode_packed_training_normals(entry.normal, entry.camera.width, entry.camera.height);
+        if (entry.normal.is_valid() && entry.normal.dtype() == tinytensor::DataType::Int32) {
+            if (vulkan) {
+                result.normal = tinytensor::Tensor::empty(
+                    {std::size_t{3}, entry.camera.height, entry.camera.width}, entry.rgba.device());
+                tinytensor::vulkan::unpack_training_normals(entry.normal, result.normal);
+            } else
+                result.normal = detail::decode_packed_training_normals(
+                    entry.normal, entry.camera.width, entry.camera.height);
+        }
         return result;
     }
 
@@ -2155,13 +2167,13 @@ struct TrainingDataLoader::Impl {
     // training iteration takes. Both are exponentially smoothed on the training
     // thread only.
     double host_load_mean_ms_{};
+    double host_load_tail_ms_{};
     double step_mean_ms_{};
     std::chrono::steady_clock::time_point last_request_time_{};
     bool has_last_request_time_{false};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
-    VulkanDeviceEntries vulkan_entries_;
-    std::unordered_map<std::size_t, VulkanDeviceEntries::iterator> vulkan_lookup_;
+    std::unordered_map<std::size_t, DeviceEntry> vulkan_uploads_;
     std::unordered_map<std::size_t, PendingDeviceUpload> device_uploads_;
     float resolution_scale_{1.F};
     Entries entries_;
@@ -2200,6 +2212,11 @@ struct TrainingDataLoader::Impl {
         host_load_mean_ms_ = host_load_mean_ms_ <= 0.0 ? host_load_ms
                                                        : (1.0 - k_timing_ema) * host_load_mean_ms_ +
                                                              k_timing_ema * host_load_ms;
+        // Compressed hits can be much faster than the remaining cold decodes.
+        // A mean-only estimate shrinks lookahead just before a cold view needs
+        // it. Keep recent slow loads in the common CUDA/Vulkan latency budget;
+        // decay naturally once the dataset becomes entirely cache-resident.
+        host_load_tail_ms_ = std::max(host_load_ms, host_load_tail_ms_ * 0.99);
     }
 
     // A host load must be started far enough ahead of its use to cover one
@@ -2226,7 +2243,8 @@ struct TrainingDataLoader::Impl {
         }
         if (ceiling <= configured)
             return configured;
-        const double lookahead = 2.0 * host_load_mean_ms_ / std::max(step_mean_ms_, 1.0) + 1.0;
+        const double load_ms = std::max(host_load_mean_ms_, host_load_tail_ms_);
+        const double lookahead = 2.0 * load_ms / std::max(step_mean_ms_, 1.0) + 1.0;
         return std::clamp<std::size_t>(
             static_cast<std::size_t>(std::ceil(lookahead)), configured, ceiling);
     }
@@ -2301,7 +2319,7 @@ struct TrainingDataLoader::Impl {
         if (hit)
             ++device_budget_window_hits_;
         if (device_budget_window_requests_ >= device_budget_window_requests() &&
-            device_uploads_.empty()) {
+            pending_upload_count() == 0) {
             const std::size_t intervals =
                 device_budget_window_requests_ > 1 ? device_budget_window_requests_ - 1 : 1;
             evaluate_device_budget(device_budget_window_step_ms_ / static_cast<double>(intervals));
@@ -2319,7 +2337,7 @@ struct TrainingDataLoader::Impl {
         const double hit_rate = static_cast<double>(hits) / static_cast<double>(requests);
         device_hit_rate_ = hit_rate;
         std::size_t free_bytes{}, total_bytes{};
-        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess)
+        if (!device_memory_info(free_bytes, total_bytes))
             return;
         const std::size_t reserve =
             std::max(training_reserve_bytes_, projected_training_state_bytes());
@@ -2409,6 +2427,33 @@ struct TrainingDataLoader::Impl {
             " hit_rate=", hit_rate, " step_ms=", mean_step_ms, " growths=", device_budget_growths_);
     }
 
+    // Budget policy is shared; only the allocator/driver probe differs.
+    bool device_memory_info(std::size_t& free_bytes, std::size_t& total_bytes) const {
+        if (options_.backend == TrainingBackend::cuda)
+            return cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess;
+#ifdef TINYTENSOR_HAS_VULKAN
+        const auto handles = tinytensor::vulkan::device_handles();
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 props{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(handles.physical_device, &props);
+        total_bytes = free_bytes = 0;
+        for (std::uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+            if (!(props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+                continue;
+            if (budget.heapBudget[i] > total_bytes) {
+                total_bytes = budget.heapBudget[i];
+                free_bytes = total_bytes - std::min<std::size_t>(total_bytes, budget.heapUsage[i]);
+            }
+        }
+        return total_bytes != 0;
+#else
+        return false;
+#endif
+    }
+
     void update_cache_budgets() {
         dataset_packed_bytes_ = 0;
         std::size_t largest_host_view_bytes = 0;
@@ -2444,12 +2489,8 @@ struct TrainingDataLoader::Impl {
         // A random per-epoch view order bounds the best possible device-cache
         // hit rate by the resident fraction of the epoch. Datasets such as
         // London (15.7 GiB packed) cannot buy hits with the default 512 MiB.
-        // This only justifies disabling the Vulkan LRU: its uploads go through
-        // an independent asynchronous staging ring either way. The CUDA packed
-        // cache is different — a positive budget also enables the copy-stream
-        // prefetch pipeline (measured on London: get() wall 8.9 s -> 2.7 s,
-        // ~4% end-to-end, at 9 device hits), so its useless LRU bulk is demoted
-        // to the small async floor instead of being disabled outright.
+        // Both backends retain a small packed-cache floor for upcoming uploads
+        // even when the resident fraction cannot justify a large image cache.
         const auto device_cache_useless = [this](const std::size_t budget) {
             // Degenerate explicit budgets are already effectively disabled;
             // only real budgets justify overriding the configured value.
@@ -2464,69 +2505,30 @@ struct TrainingDataLoader::Impl {
                 static_cast<double>(budget / mean_view_bytes) / static_cast<double>(source_.size());
             return resident_share < k_min_useful_device_view_share;
         };
-        const auto log_device_cache_disabled = [this](const std::size_t budget) {
-            core::Logger::instance().info(
-                "splat_data_cache device_budget_disabled budget_bytes=", budget,
-                " dataset_packed_bytes=", dataset_packed_bytes_, " views=", source_.size(),
-                " resident_view_share_below=", k_min_useful_device_view_share);
-        };
-
-        // Vulkan views are materialized as ordinary TinyTensor tensors, then
-        // retained in a simple LRU. The CUDA packed-image layout and async
-        // copy stream remain separate because their representation is not
-        // shared by the Vulkan tensor runtime.
-        if (options_.backend == TrainingBackend::vulkan) {
-            capacity_bytes_ = options_.training_view_cache_bytes;
-            configure_host_cache();
-            device_capacity_bytes_ = options_.training_device_cache_bytes;
-            device_ceiling_bytes_ = 0;
-            // Unlike CUDA there is no adaptive growth path here (the ceiling
-            // stays zero), so the static budget is also the maximum the cache
-            // could ever reach.
-            if (options_.adaptive_training_cache && device_cache_useless(device_capacity_bytes_)) {
-                log_device_cache_disabled(device_capacity_bytes_);
-                device_capacity_bytes_ = 0;
-            }
-            return;
-        }
-
-        if (!options_.adaptive_training_cache) {
-            capacity_bytes_ = options_.training_view_cache_bytes;
-            configure_host_cache();
-            device_capacity_bytes_ = 0;
-            if (options_.training_device_cache_bytes != 0) {
-                std::size_t free_bytes{}, total_bytes{};
-                const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
-                if (error != cudaSuccess)
-                    throw std::runtime_error(
-                        std::string("Training cache VRAM query failed: ") +
-                        cudaGetErrorString(error));
-                device_capacity_bytes_ =
-                    std::min(options_.training_device_cache_bytes, free_bytes / 8);
-            }
-            return;
-        }
-
-        const std::size_t available_ram = available_system_memory_bytes();
         capacity_bytes_ = options_.training_view_cache_bytes;
-        if (capacity_bytes_ != 0) {
-            const std::size_t desired = std::max(capacity_bytes_, dataset_packed_bytes_);
+        if (options_.adaptive_training_cache && capacity_bytes_ != 0) {
+            const std::size_t available_ram = available_system_memory_bytes();
             const std::size_t hard_limit = std::size_t{16} * k_gib;
-            const std::size_t ram_limit =
-                available_ram == 0 ? hard_limit
-                                   : std::min(available_ram - available_ram / 4, hard_limit);
-            capacity_bytes_ = std::min(desired, ram_limit);
+            const std::size_t ram_limit = available_ram == 0 ? hard_limit
+                : std::min(available_ram - available_ram / 4, hard_limit);
+            capacity_bytes_ = std::min(std::max(capacity_bytes_, dataset_packed_bytes_), ram_limit);
         }
         configure_host_cache();
+
+        if (!options_.adaptive_training_cache) {
+            std::size_t free_bytes{}, total_bytes{};
+            device_capacity_bytes_ = options_.training_device_cache_bytes != 0 &&
+                device_memory_info(free_bytes, total_bytes)
+                ? std::min(options_.training_device_cache_bytes, free_bytes / 8) : 0;
+            return;
+        }
 
         device_capacity_bytes_ = 0;
         if (options_.training_device_cache_bytes == 0)
             return;
         std::size_t free_bytes{}, total_bytes{};
-        const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
-        if (error != cudaSuccess)
-            throw std::runtime_error(
-                std::string("Training cache VRAM query failed: ") + cudaGetErrorString(error));
+        if (!device_memory_info(free_bytes, total_bytes))
+            return;
 
         // At least 75% of VRAM remains for Gaussian/optimizer state and
         // raster scratch. A large projected model shrinks the image-cache

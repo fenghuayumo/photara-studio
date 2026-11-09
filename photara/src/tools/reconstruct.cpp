@@ -483,7 +483,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
-              << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
+              << "  --splat-device-cache-mb N  packed GPU image cache budget (default 512, 0 disables)\n"
               << "  --splat-device-cache-max-mb N  ceiling for the adaptive device cache\n"
               << "                              (default 0 = keep --splat-device-cache-mb)\n"
               << "  --splat-async-upload BOOL  submit packed-view H2D copies without blocking (default true)\n"
@@ -949,16 +949,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.25"))
         ("splat-view-cache-mb", "Packed RGBA8 splat host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
-        ("splat-device-cache-mb", "Packed splat CUDA-view LRU budget, capped by free VRAM (0 = disabled)",
+        ("splat-device-cache-mb", "Packed splat device-view cache budget, capped by free VRAM (0 = disabled)",
          cxxopts::value<std::uint64_t>()->default_value("512"))
         ("splat-device-cache-max-mb",
-         "Ceiling the adaptive splat CUDA-view cache may grow to (0 = no growth)",
+         "Ceiling the adaptive splat device-view cache may grow to (0 = no growth)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("splat-async-upload",
          "Upload decoded splat views without blocking the training thread",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
-         "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
+         "Grow host cache; tune device cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-prefetch-views",
          "Minimum concurrent host decode/pack prefetch views (0 disables; host-side only)",

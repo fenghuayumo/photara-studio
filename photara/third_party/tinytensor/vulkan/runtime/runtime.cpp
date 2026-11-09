@@ -1271,6 +1271,11 @@ void Context::upload_async(
     const std::size_t bytes) {
     if (bytes == 0) return;
     std::scoped_lock lock(mutex_);
+    // A newly allocated tensor can reuse a pooled buffer still referenced by
+    // the open compute batch. Publish those readers before the out-of-band
+    // transfer overwrites it. Queue order supplies the dependency without a
+    // host wait; a barrier in a later compute batch would be too late.
+    submit_async_locked();
     const std::size_t slot_index = next_upload_slot_;
     next_upload_slot_ = (next_upload_slot_ + 1) % upload_slots_.size();
     retire_upload_slot_locked(slot_index);

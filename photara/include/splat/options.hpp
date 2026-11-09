@@ -412,7 +412,8 @@ struct TrainingOptions {
     // cache only;
     // bounded device prefetch remains available independently.
     bool adaptive_training_cache{true};
-    // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
+    // Packed RGBA8 plus optional depth/normal cache on CUDA or Vulkan.
+    // Zero disables device caching and device-upload lookahead.
     // In adaptive mode this is the floor of the budget. Fixed mode retains the
     // earlier free-VRAM/8 guard and never exceeds the configured value.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
@@ -425,19 +426,20 @@ struct TrainingOptions {
     std::size_t training_device_cache_max_bytes{0};
     // Upload decoded views without blocking the training thread. CUDA uses a
     // non-blocking copy stream; Vulkan immediately submits packed-image copies
-    // through a mapped staging ring before recording the device unpack.
+    // through a mapped staging ring before recording the device unpack. Both
+    // backends pre-upload upcoming decoded views within the packed-cache budget.
     // Allocation and enqueue remain on the training thread. Each in-flight
     // transfer owns its staging storage until its completion fence fires.
-    // The copy engine only ever writes loader-owned device staging; the packed
+    // On CUDA the copy engine only writes loader-owned device staging; the packed
     // view is hopped into the cache entry on the compute stream, because pool
     // memory must not be touched by a transfer from another stream (the pool
     // hands blocks between streams and threads without any ordering). Measured
     // -3% iteration time on the alameda and iPhone sets with the integrity check
     // and ten repeat runs clean.
     bool training_async_upload{true};
-    // Decode and pack upcoming shuffled views on background threads while CUDA
+    // Decode and pack upcoming shuffled views on background threads while the GPU
     // processes the current iteration, so a host cache miss does not stall the
-    // step on image I/O. Host-side only: all CUDA calls stay on the training
+    // step on image I/O. Host-side only: all device calls stay on the training
     // thread. Zero disables prefetching. The value is the minimum lookahead;
     // with training_prefetch_adaptive the loader grows it to cover one measured
     // host decode plus one iteration of slack.
