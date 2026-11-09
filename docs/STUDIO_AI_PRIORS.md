@@ -167,3 +167,32 @@ geometry recovery, decoding and disk I/O; it is not a training speedup claim.
 Regression checks cover changed pixels, repeated runs and grid changes. A
 three-view smoke test verified reuse of two completed maps and regeneration of
 one partial map after removing the global completion stamp.
+
+
+## Vulkan geometry postprocessing
+
+When built with photara_vk and DXC, MoGe defaults to Vulkan dense geometry
+postprocessing. `MogeOptions::gpu_geometry=false` retains the CPU reference;
+`photara_moge_predict_test --cpu-geometry` exercises that reference path.
+Builds without this optional shader/runtime support retain CPU postprocessing.
+GPU execution failures are reported rather than silently retried on the CPU.
+
+The 64x64 camera-recovery fit still runs with the original CPU arithmetic and
+samples only the required raw-map locations. Dense bilinear resize, exponential
+point remapping, depth/XYZ generation, normal normalization and validity filtering
+run in a compute shader. Output is tiled at at most 1M pixels (32 MiB GPU output
+and 32 MiB readback), bounded by device storage-buffer limits. The existing host
+GeometryPrior interface, file format and metadata semantics are preserved.
+Raw heads currently pass through host memory into a separate logical Vulkan
+device on a physical GPU matched by name. Fitting, output allocation, readback,
+host map formatting/validation, native panorama fusion and serialization remain
+outside this shader. GPU F32 results are tolerance-equivalent, not bit-identical.
+
+A 10-view original-resolution iPhone test measured geometry wall time of
+5.158 s with CPU processing versus 1.898 s with Vulkan; total preparation was
+8.402 s versus 5.637 s. Across the resulting prior maps, depth validity was
+unchanged, maximum relative depth difference was 3.46e-5, and maximum normal
+component difference was 6.22e-5. These short sequential runs indicate about
+63% less geometry time and 33% less total preparation time, not a GPU utilization
+or full training speedup guarantee. Existing valid prior caches are still reused;
+use a fresh output directory when profiling generation.
