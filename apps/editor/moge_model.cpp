@@ -39,7 +39,7 @@ void request_moge_download(App& app, bool train_after, bool resume_training) {
 }
 bool ensure_moge_ready(App& app, bool resume_training) {
     const auto& s=app.settings;
-    if (!s.ai_priors || s.training_mode==0 || s.ai_prior_source!=0 ||
+    if (!s.ai_priors || s.ai_prior_source!=0 ||
         !(s.ai_depth_weight>0.F || s.ai_normal_weight>0.F)) return true;
     if (moge_model_ready()) {
         store_utf8_path_field(app.settings.ai_prior_model,moge_model_path());

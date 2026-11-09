@@ -1,4 +1,4 @@
-"""Check mode defaults and the RGB-only policy through the training CLI."""
+"""Check shared loss defaults and configurable constraints through the training CLI."""
 import argparse
 import math
 import os
@@ -28,7 +28,7 @@ def run(executable, backend):
                 '--splat-max-resolution', '32', '--splat-sh-degree', '1',
                 '--splat-use-mask=false', '--splat-focus-region=false',
                 '--splat-densification=false', '--splat-eval-checkpoints=false']
-        stale = ['--splat-scale-reg', '1', '--splat-shape-erank-reg', '1',
+        custom = ['--splat-scale-reg', '1', '--splat-shape-erank-reg', '1',
                  '--splat-sh-reg', '1', '--splat-opacity-reg', '1',
                  '--splat-shape-flatness-reg', '1', '--splat-shape-rotation-reg', '1',
                  '--splat-shape-axis-ratio-reg', '1', '--splat-screen-size-limit', '.2',
@@ -37,7 +37,7 @@ def run(executable, backend):
                  '--splat-normal-field=true', '--splat-normal-field-from-iter', '1',
                  '--splat-ppisp=true', '--splat-bilateral-grid=true',
                  '--splat-photometric-weight', '.7', '--splat-ssim-weight', '.35']
-        cases = [('standard', []), ('high-quality', []), ('fast', []), ('fast', stale),
+        cases = [('standard', []), ('high-quality', []), ('fast', []), ('fast', custom), ('standard', custom),
                  ('standard', ['--splat-scale-reg', '0', '--splat-shape-erank-reg', '0'])]
         for index, (mode, extra) in enumerate(cases):
             kwargs = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
@@ -51,15 +51,18 @@ def run(executable, backend):
             assert objective, log
             weights = {k: float(v) for k, v in (item.split('=') for item in objective[1].split())}
             assert all(math.isfinite(v) for v in weights.values())
-            if mode == 'fast':
-                for key, value in weights.items():
-                    if key not in ('splat-photometric-weight', 'splat-ssim-weight', 'splat-shape-max-axis-ratio'):
-                        assert value == 0, (mode, key, value)
-                for token in ('opacity_decay=0 ', 'scale_decay=0 ', 'ppisp=0 ',
-                              'bilateral_grid=0 ', 'depth_normal_loss=0 ', 'normal_field=0 '):
-                    assert token in log, (mode, token)
-                assert math.isclose(weights['splat-photometric-weight'], .7 if extra else 1)
-                assert math.isclose(weights['splat-ssim-weight'], .35 if extra else .2)
+            if extra == custom:
+                for flag in ('splat-scale-reg', 'splat-shape-erank-reg', 'splat-sh-reg',
+                             'splat-opacity-reg', 'splat-shape-flatness-reg',
+                             'splat-shape-rotation-reg', 'splat-shape-axis-ratio-reg',
+                             'splat-screen-size-penalty', 'splat-match-alpha-weight'):
+                    assert weights[flag] == 1, (mode, flag, weights[flag])
+                for token in ('ppisp=1 ', 'bilateral_grid=1 ',
+                              'depth_normal_loss=1 ', 'normal_field=1 '):
+                    assert token in log, (mode, token, log[-4000:])
+                assert math.isclose(weights['splat-screen-size-limit'], .2)
+                assert math.isclose(weights['splat-photometric-weight'], .7)
+                assert math.isclose(weights['splat-ssim-weight'], .35)
             else:
                 assert weights['splat-scale-reg'] == (0 if extra else .01)
                 assert weights['splat-shape-erank-reg'] == (0 if extra else .001)
@@ -77,7 +80,7 @@ def run(executable, backend):
         assert ' speedy_pruning=1 ' in log and 'speedy_schedule=two_soft_two_hard' in log, log
         events = re.findall(r'Speedy-Splat prune iteration=(\d+) phase=(soft|hard)', log)
         assert events == [('9', 'soft'), ('12', 'soft'), ('18', 'hard'), ('24', 'hard')], events
-        print(f'{backend}: mode defaults, Fast override suppression, and opt-in two-soft/two-hard pruning passed')
+        print(f'{backend}: mode defaults, custom constraints in Fast and Standard, and opt-in two-soft/two-hard pruning passed')
 
 
 if __name__ == '__main__':

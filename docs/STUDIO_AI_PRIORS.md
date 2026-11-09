@@ -1,8 +1,8 @@
 # Studio AI geometry priors
 
 In **Train 3DGS → Loss & constraints → Geometry**, enable **AI depth & normal
-priors**. The feature is available in Standard and High quality modes. Fast
-mode keeps RGB-only training and skips prior generation and loading.
+priors**. The feature is available in Fast, Standard and High quality modes. All modes
+use the configured prior weights and support prior generation and loading.
 
 Inspect generated maps using the **AI depth** and **AI normals** buttons in the
 **2D viewport**. Each button appears only when the selected photo has that map,

@@ -198,54 +198,9 @@ inline constexpr auto k_training_loss_fields = std::to_array<TrainingLossField>(
      "Start at 2; increase for larger white-balance differences. Zero removes the bound."},
 });
 
-[[nodiscard]] constexpr bool is_rgb_loss(const TrainingLossField& field) {
-    return field.value == &TrainingLossSettings::photometric_weight ||
-           field.value == &TrainingLossSettings::ssim_weight;
-}
-
-inline void disable_training_constraints(TrainingLossSettings& settings) {
-    for (const auto& field : k_training_loss_fields)
-        if (!is_rgb_loss(field) && field.minimum == 0.F)
-            settings.*field.value = 0.F;
-    settings.geometry_training = false;
-}
-
-inline void apply_training_loss_preset(TrainingLossSettings& settings, TrainingMode mode) {
+// All quality presets share loss defaults; constraints remain user-configurable.
+inline void apply_training_loss_preset(TrainingLossSettings& settings, TrainingMode) {
     settings = TrainingLossSettings{};
-    if (mode == TrainingMode::fast)
-        disable_training_constraints(settings);
-}
-
-// Apply last, after user overrides and automatic mesh/strategy setup.
-inline void enforce_training_loss_mode(
-    TrainingOptions& options,
-    TrainingMode mode,
-    bool build_mesh = false) {
-    if (mode != TrainingMode::fast)
-        return;
-    for (const auto& field : k_training_loss_fields)
-        if (!is_rgb_loss(field) && field.minimum == 0.F)
-            options.*field.training_value = 0.F;
-    options.use_depth_normal_loss = false;
-    options.use_normal_field = false;
-    options.use_mvs_depth = false;
-    options.use_mvs_normals = false;
-    options.lambda_d = options.lambda_n = 0.F;
-    options.use_ppisp = false;
-    options.use_bilateral_grid = false;
-    options.depth_weight = 0.F;
-    options.normal_weight = 0.F;
-    options.opacity_decay = 0.F;
-    options.scale_decay = 0.F;
-    options.mean_noise_weight = 0.F;
-    options.constrain_scale_range = false;
-    if (build_mesh) {
-        const TrainingLossSettings defaults;
-        options.depth_normal_weight = defaults.depth_normal_weight;
-        options.use_depth_normal_loss = true;
-        options.multi_view_geo_weight = defaults.multi_view_geo_weight;
-        options.multi_view_ncc_weight = defaults.multi_view_ncc_weight;
-    }
 }
 
 inline constexpr std::size_t k_training_loss_payload_bytes =

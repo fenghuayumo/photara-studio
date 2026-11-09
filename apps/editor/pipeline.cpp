@@ -1703,7 +1703,7 @@ std::string build_train_command(
         throw std::invalid_argument("POPSpa requires the 3DGS rendering method.");
     // Use the trainer's conservative two-soft/two-hard schedule when enabled.
     settings.validate();
-    if (settings.ai_priors && settings.training_mode != 0) {
+    if (settings.ai_priors) {
         if (!std::isfinite(settings.ai_depth_weight) || settings.ai_depth_weight < 0.F ||
             !std::isfinite(settings.ai_normal_weight) || settings.ai_normal_weight < 0.F)
             throw std::invalid_argument("AI prior weights must be finite and nonnegative.");

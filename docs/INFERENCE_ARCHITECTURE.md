@@ -320,8 +320,9 @@ an offline cache; CLI equivalents are `--splat-lambda-d`, `--splat-lambda-n`, an
 `--splat-prior-dir`. Python `TrainingOptions` exposes the same three fields.
 This initial experiment is available through the CLI/API, not the Studio panel.
 The weights do not enable DN, normal-field training, multi-view objectives, the
-geometry-training mode, or its automatic 3D filter. Fast mode remains RGB-only
-and clears these weights. Legacy MVS supervision and AI priors cannot share the
+geometry-training mode, or its automatic 3D filter. Fast mode supports configurable
+constraints and AI priors with the same loss defaults as Standard mode.
+Legacy MVS supervision and AI priors cannot share the
 same target slots in one training run.
 
 `photara_splat_prior_prepare` supports a separate native Vulkan preparation process:

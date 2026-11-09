@@ -2325,13 +2325,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.extractor_min_score < -1.F || cli.extractor_min_score > 1.F)
         throw std::invalid_argument(
             "--extractor-min-score must be -1 or in [0, 1]");
-    if (cli.splat_mode == photara::splat::TrainingMode::fast) {
-        photara::splat::disable_training_constraints(cli.loss_settings);
-        cli.splat_normal_field = false;
-        cli.splat_ppisp = false;
-        cli.splat_bilateral_grid = false;
-        cli.splat_constrain_scales = false;
-    }
     return cli;
 }
 
@@ -3957,7 +3950,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.multi_view_pixel_noise_threshold =
         cli.splat_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.splat_geometry_from_iter;
-    photara::splat::enforce_training_loss_mode(options, cli.splat_mode, cli.mesh);
     // Keep structural parameters trainable while GGGS geometry supervision is
     // active, starting at step 7000 by default as in GaussianWrapping.
     if ((options.use_depth_normal_loss ||

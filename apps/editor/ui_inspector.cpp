@@ -85,7 +85,6 @@ void objective_fields(ProjectSettings& settings, LossGroup group, bool advanced)
     for (const auto& field : photara::splat::k_training_loss_fields) {
         if (field.group != group || field.advanced != advanced ||
             !objective_field_visible(settings, field)) continue;
-        if (settings.training_mode == 0 && !photara::splat::is_rgb_loss(field)) continue;
         ImGui::PushID(field.cli);
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -170,17 +169,6 @@ void draw_ai_priors(App& app) {
 void draw_training_objective(App& app) {
     if (!ImGui::TreeNodeEx(tr("Loss & constraints"), ImGuiTreeNodeFlags_SpanAvailWidth)) return;
     auto& settings = app.settings;
-    if (settings.training_mode == 0) {
-        photara::splat::disable_training_constraints(settings);
-        settings.normal_field = false;
-        settings.ppisp_layout = 0;
-        settings.bilateral_grid = false;
-        objective_note("Fast uses L1 + SSIM. Build Mesh from 3DGS also enables depth-normal (0.05), multi-view geometry (0.02) and NCC (0.6); tail interval is 2.");
-        objective_fields(settings, LossGroup::image, false);
-        settings.sanitize();
-        ImGui::TreePop();
-        return;
-    }
     objective_note("Fit the photos, stabilize geometry and limit overfitting. Zero disables a penalty.");
     if (ImGui::BeginTabBar("##objective_tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
         const struct { const char* title; LossGroup group; } tabs[]{
@@ -924,7 +912,7 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip("%s\n\n%s", tr("Fast: 30,000 steps, 1M Gaussians, no pruning.\n"
                     "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
                     "High quality: 50,000 steps, 5M Gaussians, no pruning."),
-                    tr("Fast uses RGB loss plus geometry supervision when building a 3DGS mesh. Standard and High quality also enable scale and needle suppression. Selecting a mode resets loss settings."));
+                    tr("All modes share loss defaults and support configurable constraints and AI priors. Selecting a mode resets loss settings."));
             inspector_field("Capture type");
             ImGui::SetNextItemWidth(-1.F);
             const char* capture[] = {tr("Object"), tr("Scene")};
@@ -1407,7 +1395,7 @@ Action draw_inspector(App& app) {
             theme::metric("Mask opacity", buffer);
         }
         if (mesh_from_gaussians(app.settings) || app.settings.geometry_training || app.settings.normal_field ||
-            (app.settings.ai_priors && app.settings.training_mode != 0)) {
+            app.settings.ai_priors) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.depth_loss);
             theme::metric("Depth", buffer);
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.normal_loss);

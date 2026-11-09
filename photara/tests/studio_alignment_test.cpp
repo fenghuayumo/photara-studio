@@ -693,12 +693,16 @@ int main(int argc, char** argv) {
         prior_settings.geometry_training = false;
         prior_settings.ai_depth_weight = 0.F; prior_settings.ai_normal_weight = .02F;
         put_path(prior_settings.ai_prior_directory, task_root / "aligned priors");
-        command = editor::build_train_command("photara.exe",prior_settings,layout,{});
-        require(command.find("--splat-lambda-d 0") != std::string::npos &&
-            command.find("--splat-lambda-n 0.02") != std::string::npos &&
-            command.find("--splat-geometry-loss=false") != std::string::npos &&
-            command.find("--splat-prior-model") == std::string::npos,
-            "cached normal-only priors remain independent of DN/MV and inference");
+        for (int mode : {0, 1, 2}) {
+            prior_settings.training_mode = mode;
+            command = editor::build_train_command("photara.exe",prior_settings,layout,{});
+            require(command.find("--splat-lambda-d 0") != std::string::npos &&
+                command.find("--splat-lambda-n 0.02") != std::string::npos &&
+                command.find("--splat-geometry-loss=false") != std::string::npos &&
+                command.find("--splat-prior-model") == std::string::npos,
+                "all modes support cached normal-only priors independently of DN/MV and inference");
+        }
+        prior_settings.training_mode = 0;
         prior_settings.ai_depth_weight = prior_settings.ai_normal_weight = 0.F;
         prior_settings.ai_prior_directory.fill('\0');
         command = editor::build_train_command("photara.exe",prior_settings,layout,{});
@@ -746,10 +750,11 @@ int main(int argc, char** argv) {
             command.find("--splat-undistort=true") == std::string::npos &&
             command.find("ai_priors") != std::string::npos,
             "automatic preparation receives model/cache settings without forcing pinhole projection");
-        prior_settings.training_mode = 0; prior_settings.ai_prior_model.fill('\0');
+        prior_settings.training_mode = 0;
         command = editor::build_train_command("photara.exe",prior_settings,layout,{});
-        require(command.find("--splat-prior-") == std::string::npos,
-            "fast mode skips AI priors without requiring model files");
+        require(command.find("--splat-prior-model \"") != std::string::npos &&
+            command.find("--splat-lambda-d 0.01") != std::string::npos,
+            "fast mode retains configured AI priors and generation settings");
         monitor.begin(editor::JobKind::train);
         monitor.consume("stage started: splat.prepare_ai_priors");
         monitor.consume("progress: Prepare AI priors completed=2/4 percent=50.0 items/s=1 elapsed_s=2 eta_s=2");

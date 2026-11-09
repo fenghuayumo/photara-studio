@@ -711,37 +711,6 @@ int main() {
         expect(decode_settings(encode_settings(selected, ascan_path), ascan_path).mesh_quality == quality,
                "mesh quality modes survive project roundtrip");
     }
-    {
-        photara::splat::TrainingOptions options;
-        for (const auto& field : photara::splat::k_training_loss_fields)
-            options.*field.training_value = std::max(field.minimum, 0.5F);
-        options.use_depth_normal_loss = options.use_normal_field = true;
-        options.use_mvs_depth = options.use_mvs_normals = true;
-        options.use_ppisp = options.use_bilateral_grid = true;
-        options.opacity_decay = options.scale_decay = 0.1F;
-        photara::splat::enforce_training_loss_mode(options, photara::splat::TrainingMode::fast);
-        for (const auto& field : photara::splat::k_training_loss_fields)
-            if (!photara::splat::is_rgb_loss(field) && field.minimum == 0.F)
-                expect(options.*field.training_value == 0.F, "fast mode suppresses stale constraint weights");
-        expect(options.photometric_weight == 0.5F && options.ssim_weight == 0.5F,
-            "fast mode retains custom RGB loss settings");
-        expect(!options.use_depth_normal_loss && !options.use_normal_field &&
-               !options.use_mvs_depth && !options.use_mvs_normals &&
-               !options.use_ppisp && !options.use_bilateral_grid &&
-               options.opacity_decay == 0.F && options.scale_decay == 0.F &&
-               options.mean_noise_weight == 0.F && !options.constrain_scale_range,
-            "fast mode suppresses geometry, correction and optimizer priors");
-        photara::splat::enforce_training_loss_mode(options, photara::splat::TrainingMode::fast, true);
-        expect(options.use_depth_normal_loss && options.depth_normal_weight == 0.05F &&
-               options.multi_view_geo_weight == 0.02F && options.multi_view_ncc_weight == 0.6F,
-            "fast mesh training enables surface and multi-view supervision");
-        expect(!options.use_normal_field && !options.use_ppisp &&
-               options.scale_regularization_weight == 0.F,
-            "fast mesh training keeps unrelated constraints disabled");
-        expect(photara::splat::training_preset(photara::splat::TrainingMode::fast)
-                   .multi_view_tail_interval == 2,
-            "fast training retains interval-two multi-view tail supervision");
-    }
     for (int mode : {0, 1, 2}) {
         const auto preset = photara::splat::training_preset(
             static_cast<photara::splat::TrainingMode>(mode));
@@ -749,14 +718,10 @@ int main() {
         auto selected = settings;
         photara::splat::apply_training_loss_preset(selected,
             static_cast<photara::splat::TrainingMode>(mode));
-        if (mode == 0) {
-            for (const auto& field : photara::splat::k_training_loss_fields)
-                if (!photara::splat::is_rgb_loss(field) && field.minimum == 0.F)
-                    expect(selected.*field.value == 0.F, "fast preset has only RGB loss");
-        } else {
-            expect(selected.scale_regularization_weight == 0.01F && selected.shape_erank_reg == 0.001F,
-                "standard and high-quality presets enable scale and rank");
-        }
+        for (const auto& field : photara::splat::k_training_loss_fields)
+            expect(selected.*field.value == field.default_value,
+                "all training presets share loss defaults");
+        expect(!selected.geometry_training, "geometry supervision is opt-in for all presets");
         selected.training_mode = mode;
         selected.iterations = static_cast<int>(preset.iterations);
         selected.densification_cap = static_cast<int>(preset.gaussian_cap);
