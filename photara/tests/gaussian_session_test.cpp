@@ -328,6 +328,78 @@ void test_video_progress_layout() {
     ImGui::DestroyContext();
 }
 
+void deliver_scene_load(editor::App& app, editor::SceneLoad loaded,
+                        const bool training_views) {
+    std::promise<editor::SceneLoad> promise;
+    app.pending_load = promise.get_future();
+    app.pending_scene_load_generation = app.scene_load_generation;
+    app.pending_scene_training_views = training_views;
+    app.loading_scene = true;
+    promise.set_value(std::move(loaded));
+    editor::poll_scene_load(app);
+}
+
+void test_sparse_pose_viewport_seed() {
+    using namespace editor;
+    App app;
+    app.view_mode = VisualizationMode::points;
+    app.camera.target = {9.F, 8.F, 7.F};
+    app.camera.yaw = .25F;
+    app.camera.pitch = -.35F;
+    app.camera.distance = 4.F;
+    app.camera.fov_degrees = 70.F;
+
+    ViewPose capture;
+    capture.registered = true;
+    capture.centre = {1.F, 2.F, 3.F};
+    capture.rotation = {{1.F, 0.F, 0.F, 0.F, 1.F, 0.F, 0.F, 0.F, 1.F}};
+    capture.fy = 1000.F;
+    capture.height = 1000.F;
+    SceneLoad sparse;
+    sparse.ok = true;
+    sparse.scene.views.push_back(capture);
+    deliver_scene_load(app, std::move(sparse), true);
+
+    require(app.preview_view == 0 && app.preview_follow_view,
+            "sparse pose load did not select the first capture");
+    require(std::abs(app.camera.target.x - 1.F) < 1e-5F &&
+                std::abs(app.camera.target.y - 2.F) < 1e-5F &&
+                std::abs(app.camera.target.z - 7.F) < 1e-5F,
+            "viewport target was not seeded from the first capture ray");
+    require(std::abs(app.camera.yaw - 3.14159265F) < 1e-4F &&
+                std::abs(app.camera.pitch) < 1e-5F,
+            "viewport orientation was not seeded from the first capture");
+    require(std::abs(app.camera.fov_degrees - 53.130102F) < 1e-3F,
+            "viewport FOV was not seeded from capture intrinsics");
+    require(!app.pending_scene_training_views,
+            "training-view intent leaked into the next scene load");
+
+    // Gaussian model loads may contain imported views for QA, but they must
+    // keep model framing instead of moving the camera to capture zero.
+    app.camera.target = {5.F, 6.F, 7.F};
+    app.camera.yaw = .5F;
+    app.preview_view = 5;
+    ViewPose imported = capture;
+    imported.centre = {10.F, 20.F, 30.F};
+    SceneLoad model_scene;
+    model_scene.ok = true;
+    model_scene.scene.views.push_back(imported);
+    deliver_scene_load(app, std::move(model_scene), false);
+    require(std::abs(app.camera.target.x - 10.F) > 1e-4F ||
+                std::abs(app.camera.target.y - 20.F) > 1e-4F ||
+                std::abs(app.camera.target.z - 34.F) > 1e-4F,
+            "non-training scene load snapped the viewport to a capture");
+    require(app.preview_view == 0,
+            "stale preview view index survived a smaller scene load");
+
+    // Discarding the scene drops the load intent with it, so the next load
+    // cannot inherit a stale "seed the viewport" request.
+    app.pending_scene_training_views = true;
+    editor::clear_viewport_scene(app);
+    require(!app.pending_scene_training_views,
+            "cleared viewport kept stale training-view intent");
+}
+
 int main(int argc, char** argv) {
     {
         editor::App viewer;
@@ -338,6 +410,12 @@ int main(int argc, char** argv) {
         require(editor::model_viewer_active(viewer), "explicit viewer selection ignored");
         viewer.model_workspace = 0;
         require(!editor::model_viewer_active(viewer), "explicit reconstruction selection ignored");
+    }
+    try {
+        test_sparse_pose_viewport_seed();
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--view-shortcuts-only") {
         try {

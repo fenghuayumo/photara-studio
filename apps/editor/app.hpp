@@ -291,6 +291,10 @@ struct App {
     bool loading_scene{};
     std::string scene_source;
     std::string dataset_scene_key;
+    // True while the in-flight scene load carries calibrated training views.
+    // poll_scene_load seeds the viewport once from those views; Train 3DGS
+    // must not repeat the snap after the user has navigated the scene.
+    bool pending_scene_training_views{};
     // A source/visibility change arrived while a scene load was in
     // flight; reload the composed model once that load is discarded.
     bool gaussian_composition_reload{};

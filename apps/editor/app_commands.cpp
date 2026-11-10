@@ -162,6 +162,22 @@ void frame_reconstruction(App& app) {
         reconstruction_local_centroid(app), reconstruction_local_radius(app));
 }
 
+namespace {
+// The first calibrated capture is the natural opening viewpoint for a fresh
+// sparse scene. This runs only when training poses first enter the viewport;
+// Train 3DGS deliberately preserves the camera afterwards so a carefully
+// framed viewport does not jump back to capture zero.
+[[nodiscard]] bool seed_viewport_to_first_training_view(App& app) {
+    const ViewPose* pose = first_registered_view(app.scene);
+    if (!pose) return false;
+    app.preview_view = static_cast<unsigned>(pose - app.scene.views.data());
+    app.preview_follow_view = true;
+    snap_orbit_to_view(app.camera, *pose);
+    write_preview_view_index(app.layout, app.preview_view);
+    return true;
+}
+}
+
 std::filesystem::path existing_splat_model(const App& app) {
     std::error_code error;
     if (app.final_splat_ready && !app.final_splat_source.empty() &&
@@ -704,6 +720,7 @@ void request_asfm_scene_load(
     app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = std::move(label);
+    app.pending_scene_training_views = true;
     app.pending_load = std::async(
         std::launch::async, [asfm, images] {
             SceneLoad loaded;
@@ -740,6 +757,7 @@ void request_dataset_scene_load(App& app) {
     app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = "External dataset";
+    app.pending_scene_training_views = true;
     app.pending_load = std::async(
         std::launch::async, [source, initial_cloud, images] {
             return sparse_scene_from_dataset(
@@ -831,6 +849,7 @@ void request_ascan_scene_load(App& app) {
     app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = "Project SfM";
+    app.pending_scene_training_views = true;
     app.pending_load = std::async(
         std::launch::async, [ascan, working, asfm, images] {
             SceneLoad loaded;
@@ -1117,6 +1136,7 @@ void clear_viewport_scene(App& app) {
     app.view_mode = VisualizationMode::points;
     ++app.scene_load_generation;
     app.loading_scene = false;
+    app.pending_scene_training_views = false;
     app.gaussian_composition_reload = false;
     app.gaussian_composition_refresh_pending = false;
 }
@@ -1643,6 +1663,7 @@ void request_scene_load(
     app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = std::move(label);
+    app.pending_scene_training_views = !poses.empty();
     app.pending_load = std::async(
         std::launch::async,
         [cloud, poses] { return load_sparse_scene(cloud, poses); });
@@ -1766,6 +1787,7 @@ void reset_gaussian_preview(App& app) {
     // Import/remove paths are rejected while a load is in flight, so the
     // pending future is either invalid or complete and can be dropped.
     app.pending_load = {};
+    app.pending_scene_training_views = false;
     app.composed_model.reset();
     app.composed_model_key.clear();
     app.gaussian_placements.clear();
@@ -1987,6 +2009,7 @@ void request_gaussian_scene_load(App& app) {
     app.scene_source = composition.empty() || composition.size() == 1
         ? "Gaussian centres"
         : "Gaussian models";
+    app.pending_scene_training_views = false;
     app.pending_load = std::async(
         std::launch::async,
         [composition, composition_key, model_path, ascan, poses, dataset, dataset_source,
@@ -3741,6 +3764,8 @@ void poll_scene_load(App& app) {
         return;
     SceneLoad loaded = app.pending_load.get();
     app.loading_scene = false;
+    const bool training_views = app.pending_scene_training_views;
+    app.pending_scene_training_views = false;
     if (app.pending_scene_load_generation != app.scene_load_generation) {
         if (app.gaussian_composition_reload) {
             app.gaussian_composition_reload = false;
@@ -3784,11 +3809,18 @@ void poll_scene_load(App& app) {
         app.dataset_scene_key.clear();
     if (app.image_qa.selected >= static_cast<int>(app.scene.views.size()))
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
+    // The preview-view sidecar is the trainer's fallback camera. Keep the
+    // cached index inside the new scene so Train never publishes a capture
+    // that a smaller scene cannot serve.
+    if (app.preview_view >= app.scene.views.size()) app.preview_view = 0;
     infer_images_dir_from_scene(app);
     attach_view_image_paths(app.scene, reconstruction_images_path(app));
     ensure_reconstruction_box(app);
-    if (!live_preview_active(app) && app.view_mode != VisualizationMode::mesh)
-        frame_reconstruction(app);
+    if (!live_preview_active(app) && app.view_mode != VisualizationMode::mesh) {
+        const bool seeded =
+            training_views && seed_viewport_to_first_training_view(app);
+        if (!seeded) frame_reconstruction(app);
+    }
     if (app.view_mode != VisualizationMode::splat &&
         app.view_mode != VisualizationMode::rings &&
         app.view_mode != VisualizationMode::mesh)
@@ -4395,8 +4427,6 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         std::filesystem::create_directories(
             app.layout.preview_view_file.parent_path(), preview_error);
     }
-    app.preview_view = 0;
-    app.preview_follow_view = true;
     if (has_external_dataset(app)) {
         // Keep the already-reviewed imported cameras and cloud on screen.
         // The child CLI reloads the same dataset; wiping the viewport made
@@ -4407,8 +4437,9 @@ void start_train(App& app, const bool smoke, const bool resume_training) {
         load_view_poses(app.layout.sparse_poses, app.scene);
         attach_view_image_paths(app.scene, reconstruction_images_path(app));
     }
-    if (const ViewPose* pose = first_registered_view(app.scene))
-        snap_orbit_to_view(app.camera, *pose);
+    // Keep the viewport pose the user framed. Calibrated views seed the
+    // camera once when they load; snapping here would discard that work.
+    // The preview-view sidecar remains the fallback camera for the trainer.
     write_preview_view_index(app.layout, app.preview_view);
     app.view_mode = VisualizationMode::splat;
     sync_live_preview_camera(
