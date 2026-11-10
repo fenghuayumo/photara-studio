@@ -925,7 +925,7 @@ int main(const int argc, char** argv) {
                 const json result = json::parse(response.body);
                 for (const json& event : result["events"]) {
                     std::cout << event.dump() << std::endl;
-                    since = std::max(since, event.value("id", 0ULL));
+                    since = std::max(since, event.value("id", std::uint64_t{0}));
                 }
             } catch (...) {
             }
