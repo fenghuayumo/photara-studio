@@ -88,6 +88,17 @@ to inspect the scene.
 - [Windows packaging](docs/PACKAGING_WINDOWS.md) · [Agent control](docs/AGENT_CONTROL.md).
 - [SfM](docs/SFM_ARCHITECTURE.md) · [MVS](docs/MVS_ARCHITECTURE.md) · [Gaussian Splatting](docs/SPLAT_CPP.md) · [Feature backends](docs/FEATURES_BACKENDS.md).
 
+## Contributing and support
+
+Contributions are welcome!
+
+- **Bugs & features** — [open an issue](https://github.com/fenghuayumo/photara-studio/issues).
+- **Questions & ideas** — start a conversation in
+  [Discussions](https://github.com/fenghuayumo/photara-studio/discussions).
+- **Pull requests** — welcome! Fork the repo, make your change, and
+  [open a pull request](https://github.com/fenghuayumo/photara-studio/pulls).
+
+
 ## License
 
 Photara is licensed under [Apache-2.0](LICENSE); see also [NOTICE](NOTICE).
