@@ -2149,9 +2149,9 @@ void draw_viewport_panel(App& app) {
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
         input.undistort_to_pinhole = false; // AI priors preserve native camera projections.
-        input.use_metric_mask =
-            (app.settings.use_mask || app.settings.sam_masks) &&
-            app.settings.mask_mode == 0;
+        // RGB metrics use the foreground mask in both masked and transparent
+        // modes: transparent output must not be scored against photo background.
+        input.use_metric_mask = app.settings.use_mask || app.settings.sam_masks;
         input.mask_dir = reconstruction_images_path(app).parent_path() / "masks";
         if (alignment_job_running(app) &&
             app.align_live.kind != photara::sfm::AlignLiveKind::none) {
