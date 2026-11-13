@@ -233,8 +233,8 @@ Under `photara::splat`, [dataset.hpp](../../photara/include/splat/dataset.hpp):
 
 | Function | Contract |
 |---|---|
-| `load_splat_dataset(const DatasetLoadRequest&) -> DatasetLoadResult` | Imports COLMAP, RealityCapture or OpenMVS through default adapters. Request includes source, optional image root, initial PLY override, format, random-point count and seed. Result includes scene, detected format, resolved paths, generated/dense initialization flags and warnings. Python `load_dataset` retains only scene/warnings internally plus detected format. |
-| `initialize_scene_from_sparse_points(mvs::MvsScene&) -> void` | Fills initialization cloud from sparse landmarks without marking input as dense. Call on an SfM-built MVS scene before sparse-initialized training. No direct Python binding. |
+| `load_splat_dataset(const DatasetLoadRequest&) -> DatasetLoadResult` | Imports COLMAP, RealityCapture, OpenMVS or Nerfstudio/Blender transforms JSON through default adapters. Result includes scene, detected format, resolved paths, generated/dense initialization flags and warnings; these are exposed by Python `MvsScene`. |
+| `initialize_scene_from_sparse_points(mvs::MvsScene&) -> void` | Fills an empty initialization cloud from sparse landmarks. Call on an SfM-built MVS scene before sparse-initialized training. Same Python function name. |
 | `make_default_dataset_loader() -> DatasetLoader` | Returns loader with built-in adapters. Native callers may `register_reader(unique_ptr<DatasetReader>)` and call `load(request)` for custom adapters. |
 
 ```cpp
@@ -251,6 +251,11 @@ fill `dense_cloud`. The trainer requires that cloud to be nonempty. Either run
 MVS fusion, assign a loaded cloud, or call the sparse-initialization helper.
 Dataset import already finalizes initialization. It can generate random points
 if source metadata has none; these are not measured geometry.
+Set `TrainingOptions.input_is_dense` from `DatasetLoadResult.initial_points_dense`,
+or to `false` after sparse initialization. Python provides
+`training_options_for_scene(scene)` to do this and apply the default strategy
+preset; `train_3dgs(scene, options=None)` uses that helper. Explicit Python
+options preserve the caller's configuration.
 
 ## Gaussian training and callbacks
 
@@ -284,6 +289,7 @@ CUDA training settings are portable.
 // For an SfM-built working scene that has not undergone dense fusion:
 photara::splat::initialize_scene_from_sparse_points(mvs_scene);
 photara::splat::TrainingOptions training;
+training.input_is_dense = false;
 training.backend = photara::splat::TrainingBackend::cuda;
 training.densification_strategy = photara::splat::DensificationStrategy::emc;
 photara::splat::apply_strategy_defaults(training);
@@ -308,9 +314,23 @@ initializers are listed in [the shared reference](types.md#trainingoptions).
 
 Keep objects captured by callbacks alive for their use. Do not assume callbacks
 run on the UI thread or that another thread can mutate the training scene.
-Python only exposes the progress callback. A returned early-stop model is not
-proof of completed training. Resume checkpoints and ordinary model exports have
-different requirements; see [training resume](../training-resume.md).
+Python exposes progress and owning RGB preview callbacks, and a separate
+`render_evaluation_png` function. Native evaluation/device-preview callbacks
+remain C++ interfaces. A returned early-stop model is not proof of completed
+training. Recovery restores the model/iteration and reinitializes the optimizer;
+it is not bit-exact optimizer-state continuation. See
+[training checkpoint recovery](python.md#training-checkpoint-recovery) for options,
+fingerprint compatibility and file-lifetime requirements, also applicable to C++.
+`inspect_training_checkpoint(path)` and `training_checkpoint_in_use(path)` are
+available in both languages; see [checkpoint.hpp](../../photara/include/splat/checkpoint.hpp).
+Python checkpoint info omits native `focus_bounds`.
+
+`Trainer::compact_popspa(model, scene, progress={}, preview={}, device_preview={})`
+compacts an existing model without initialization/densification. Python
+`compact_popspa` accepts options and progress/RGB preview callbacks.
+`Trainer::finetune_sog_xt(model, scene, output, progress={})` is CUDA encoding-aware
+adaptation that writes SOG-XT assets and returns the decoded model. Python
+`finetune_sog_xt` exposes the same operation with an explicit options argument.
 
 ## Model I/O and mesh extraction
 
@@ -319,10 +339,13 @@ All names below use `photara::splat`.
 | Function | Return / effects | Python counterpart |
 |---|---|---|
 | `save_gaussians(model, path, format=GaussianFormat::auto_detect)` | `void`; writes PLY/SOG/SPZ/GLB/USDC subject to compiled support. | `GaussianModel.save` |
-| `load_gaussians(path, format=GaussianFormat::auto_detect, device=tinytensor::Device::CUDA)` | Owning `GaussianModel`; format inferred from source when automatic. Native overload also accepts `(path, device)`. | `load_3dgs` uses default format/device |
+| `load_gaussians(path, format=GaussianFormat::auto_detect, device=tinytensor::Device::CUDA)` | Owning `GaussianModel`; format inferred from source when automatic. Native overload also accepts `(path, device)`. | `load_3dgs(path, format=GaussianFormat.AUTO, device=Device.CUDA)` |
+| `transform_gaussians(model, transform)` | New model after positive uniform scale, Euler XYZ rotation and translation. | Same name; `GaussianTransform` fields use arrays of three values/degrees. |
+| `merge_gaussians(models)` | New concatenated model; zero-pads SH bands to the widest input degree. | Same name; accepts model handles. |
+| `restrict_sh_degree(model, degree)` | `void`; truncates SH bands in place, degree 0–3. | Same name. |
 | `extract_splat_mesh(model, scene, training_options={}, mesh_options={})` | `SplatMeshResult` with `mesh`, `surface_cloud`, `valid_depth_pixels`; options are `SplatMeshOptions`. | `extract_tsdf`, with forced TSDF/build-mesh settings |
-| `extract_pam_mesh(model, scene, seed_mesh, training_options={}, pam_options={})` | `PamMeshResult` with seed/final mesh, candidate cloud and tetrahedron counts. Seed is `const mvs::Mesh&`; an empty mesh requests native pivot-seed generation. | `extract_pam`, requiring a `MeshResult` seed |
-| `render_evaluation_png(model, view, path, options={})` | `RenderMetrics`; writes evaluation render and reports MAE, PSNR variants, SSIM and alpha metrics. | Not bound |
+| `extract_pam_mesh(model, scene, seed_mesh, training_options={}, pam_options={})` | `PamMeshResult` with seed/final mesh, candidate cloud and tetrahedron counts. An empty mesh requests native pivot-seed generation. | `extract_pam`; optional `MeshResult` seed, `None` uses native pivot generation. `load_mesh(path)` reads a PLY seed. |
+| `render_evaluation_png(model, view, path, options={})` | `RenderMetrics`; writes evaluation render and reports MAE, PSNR variants, SSIM and alpha metrics. | Same name; takes `(model, scene, view_index, path, options)` with a zero-based index. |
 
 Headers: [formats.hpp](../../photara/include/splat/formats.hpp) and
 [trainer.hpp](../../photara/include/splat/trainer.hpp). The native model uses
@@ -396,7 +419,7 @@ These entry points are not currently Python-bound:
 | Shared inference | `inference::available_devices() -> vector<DeviceInfo>` and geometry predictor contracts; [runtime.hpp](../../photara/include/inference/runtime.hpp), [geometry_predictor.hpp](../../photara/include/inference/geometry_predictor.hpp), [architecture](../INFERENCE_ARCHITECTURE.md). Memory/device data are snapshots. |
 | Project archives | `project::Archive` and stage/settings serialization; [archive.hpp](../../photara/include/project/archive.hpp), [document.hpp](../../photara/include/project/document.hpp). Keep archive format/version and stage consistency rules. |
 | Renderer | `splat::Rasterizer`; [rasterizer.hpp](../../photara/include/splat/rasterizer.hpp), [splat implementation guide](../SPLAT_CPP.md). Tensor layouts and device support are part of the native contract. |
-| Deployment | Native SOG LOD/collision exports; [deployment.hpp](../../photara/include/splat/deployment.hpp), [deployment guide](../splat-deployment.md). |
+| Deployment | Native SOG LOD/collision exports; [deployment.hpp](../../photara/include/splat/deployment.hpp). |
 
 These links document additional native access; they do not imply every native
 module is available in every build or has a Python equivalent.

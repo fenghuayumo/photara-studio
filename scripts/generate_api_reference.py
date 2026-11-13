@@ -75,10 +75,15 @@ def generate() -> str:
         block = source[match.end():end]
         out += ["", f"## {name}", "", f"C++: `{cpp}`. " +
                 ("Construct with `photara." + name + "()`." if ".def(nb::init<>())" in block else "Returned by API calls; no Python constructor is bound."), ""]
+        # Named class_ variables can receive fields after another class is
+        # declared (e.g. hierarchical.global_positioning). Group by the member
+        # owner throughout the source, rather than by adjacent declarations.
         members = [(m[2], m[1], m[3], m[4]) for m in re.finditer(
-            r'\.def_(rw|ro)\(\s*"([^"]+)",\s*&([\w:]+)::(\w+)\s*\)', block)]
+            r'\.def_(rw|ro)\(\s*"([^"]+)",\s*&([\w:]+)::(\w+)\s*\)', source)
+            if m[3] == cpp]
         members += [(m[2], "rw", m[1], m[2]) for m in re.finditer(
-            r'PHOTARA_BIND_RW\(\w+,\s*([\w:]+),\s*(\w+)\)', block)]
+            r'PHOTARA_BIND_RW\(\w+,\s*([\w:]+),\s*(\w+)\)', source)
+            if m[1] == cpp]
         if members:
             out += ["| Python field | Access | C++ type | Initializer | Description / declaration |", "|---|---|---|---|---|"]
         for field, access, owner, native in members:

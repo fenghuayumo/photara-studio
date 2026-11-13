@@ -86,24 +86,22 @@ the public C++ training fields, including backend, optimization, loss,
 densification, cache, evaluation, and preview controls:
 
 `build_mvs_scene()` alone does not populate the training initialization cloud.
-The example below fills it through depth fusion. To avoid PatchMatch, import an
-existing dataset with `load_dataset()` or load a cloud with
-`MvsScene.load_dense_cloud()`; see the reference for the sparse-only workflow.
+The example below initializes directly from sparse landmarks. To use dense MVS
+initialization instead, select neighbors, estimate depth maps and fuse them.
+`load_dataset()` also prepares imported initial points.
 
 ```python
 import photara as aes
 
 sfm = aes.run_sfm_directory("images", aes.SfmOptions())
 mvs = aes.build_mvs_scene(sfm, aes.MvsOptions())
-aes.mvs_select_neighbors(mvs)
-aes.mvs_estimate_depth_maps(mvs)
-aes.mvs_fuse_depth_maps(mvs)
+aes.initialize_scene_from_sparse_points(mvs)
 
-training = aes.TrainingOptions()
+training = aes.training_options_for_scene(mvs)
 training.backend = aes.TrainingBackend.CUDA
-training.iterations = 30_000
 training.densification_strategy = aes.DensificationStrategy.EMC
 training.apply_strategy_defaults()
+training.iterations = 30_000
 gaussians = aes.train_3dgs(
     mvs, training, progress=lambda stats: print(stats.iteration, stats.loss)
 )

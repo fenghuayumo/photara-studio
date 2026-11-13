@@ -54,9 +54,9 @@ presets. Enum members are case-sensitive; notably `GlobalPositioningTermination`
 members are lowercase. See [enum mappings](types.md#enumerations).
 
 Calls are synchronous. Functions with a native `gil_scoped_release` guard
-release the Python GIL while computing. `train_3dgs` releases it when `progress`
-is `None`; its callback branch does not wrap the entire training run in a GIL
-release. This is not an asynchronous job API. Do not mutate a scene or its options
+release the Python GIL while computing. Training, compaction and SOG-XT adaptation
+release it during native computation and reacquire it for Python callbacks.
+This is not an asynchronous job API. Do not mutate a scene or its options
 from another thread while a call is using them. Bundle backend preference is
 process-wide; configure it before starting reconstruction.
 
@@ -149,6 +149,7 @@ and the nested type tables.
 | `mvs_reconstruct_mesh(scene: MvsScene, options=MvsOptions())` | `None`; populates mesh from dense products. |
 | `apply_mvs_quality_preset(options: MvsOptions, quality: DensifyQuality)` | `None`; modifies the supplied options. Apply before custom overrides. |
 | `load_dataset(request: DatasetRequest)` | New `MvsScene`; imports external cameras/images/initial points. Inspect `warnings`. Does not train or run PatchMatch. |
+| `initialize_scene_from_sparse_points(scene: MvsScene)` | `None`; fills an empty initialization cloud from SfM sparse landmarks and marks it sparse. An existing cloud and its initialization metadata are preserved. |
 
 Use the same MVS options through each stage. Changing resolution after scene
 construction does not recreate working images; rebuild the working scene.
@@ -181,39 +182,56 @@ mvs = p.load_dataset(request)
 print(mvs.warnings)
 ```
 
-Supported adapters are COLMAP, RealityCapture and OpenMVS. `source` is a dataset
-directory or an adapter-specific CSV/MVS file; `AUTO` probes it. Empty
+Supported adapters are COLMAP, RealityCapture, OpenMVS and Nerfstudio/Blender
+transforms JSON. `source` is a dataset directory or an adapter-specific
+CSV/MVS/JSON file; `AUTO` probes it. Empty
 `image_directory` uses conventional locations. If metadata has no initial
 points, the loader can generate `random_initial_point_count` points using `seed`.
-The Python handle exposes warnings, but does not expose the native result's
-resolved source, generated-points flag or detected format.
+The handle exposes `dataset_format`, `resolved_source`, `initial_point_cloud`,
+`generated_initial_points`, `initial_points_dense` and `warnings`.
 
 ## Training and extraction
 
 | Signature | Return / effects |
 |---|---|
 | `apply_strategy_defaults(options: TrainingOptions)` | Same `TrainingOptions` object; mutates strategy-dependent settings. Also available as `options.apply_strategy_defaults()`. |
-| `train_3dgs(scene: MvsScene, options=TrainingOptions(), progress=None)` | New `GaussianModel`; trains from calibrated views and initial points. `progress` is an optional callable accepting `TrainingProgress`. |
-| `load_3dgs(path: Path)` | New `GaussianModel`; format inferred from input. Uses the native default CUDA device; Python does not expose a load-device argument. |
+| `training_options_for_scene(scene: MvsScene)` | New `TrainingOptions`; sets `input_is_dense` from the scene's initialization metadata and applies default ADC-IGS strategy settings. Apply custom strategy defaults and overrides afterward. |
+| `train_3dgs(scene: MvsScene, options=None, progress=None, preview=None)` | New `GaussianModel`; `None` options use `training_options_for_scene(scene)`. Explicit options are copied and respected, including `input_is_dense`; they are not automatically rewritten. |
+| `load_3dgs(path: Path, format=GaussianFormat.AUTO, device=Device.CUDA)` | New `GaussianModel`; choose inferred/explicit format and CPU, CUDA or Vulkan storage, subject to native reader/device support. CPU storage does not enable CPU training. |
+| `compact_popspa(model: GaussianModel, scene: MvsScene, options=TrainingOptions(), progress=None, preview=None)` | New compacted `GaussianModel`; uses registered views and source images, preserving the input model. Configure `popspa_*` fields; no initialization or densification occurs. |
+| `finetune_sog_xt(model: GaussianModel, scene: MvsScene, output: Path, options=TrainingOptions(), progress=None)` | New decoded `GaussianModel`; CUDA encoding-aware adaptation writes fixed-layout SOG-XT assets to `output`. Configure `sog_xt_*` fields. Plain SOG-XT export does not perform this adaptation. |
+| `transform_gaussians(model: GaussianModel, transform: GaussianTransform)` | New model with positive uniform scale, Euler XYZ rotation in degrees and translation. Preserves the input model; place its cameras consistently before training/extraction/evaluation. |
+| `merge_gaussians(models: list[GaussianModel])` | New concatenated model; requires a nonempty list of nonempty compatible models. SH bands are zero-padded to the widest input degree. |
+| `restrict_sh_degree(model: GaussianModel, degree: int)` | `None`; truncates the model's SH bands in place, degree 0–3. A degree at least as high as its current degree has no effect. |
+| `render_evaluation_png(model: GaussianModel, scene: MvsScene, view_index: int, path: Path, options=TrainingOptions())` | `RenderMetrics`; renders the zero-based scene view to PNG and reports MAE, PSNR variants, SSIM and alpha metrics. An out-of-range view raises `IndexError`. |
+| `load_mesh(path: Path)` | New `MeshResult` containing a PLY mesh, usable as a PAM seed. |
 | `extract_tsdf(model: GaussianModel, scene: MvsScene, training_options=TrainingOptions(), tsdf_options=TsdfOptions())` | New `MeshResult`; renders splat depth and fuses TSDF. Wrapper forces `fusion.mesh_method=TSDF` and `fusion.build_mesh=True` on its local options copy. |
-| `extract_pam(model: GaussianModel, scene: MvsScene, seed_mesh: MeshResult, training_options=TrainingOptions(), pam_options=PamOptions())` | New `MeshResult`; uses the seed's mesh for PAM. `seed_mesh` is required; Python does not bind an empty `MeshResult` constructor. |
+| `extract_pam(model: GaussianModel, scene: MvsScene, seed_mesh=None, training_options=TrainingOptions(), pam_options=PamOptions())` | New `MeshResult`; `None` requests automatic native pivot-seed generation. Supply a mesh from `load_mesh` or extraction to use an explicit seed. Requires a CGAL-enabled build. |
 
 Training requires calibrated views and a nonempty initialization cloud in the
 native `MvsScene.dense_cloud` storage (that storage may hold sparse initial
 points). `build_mvs_scene` alone does not fill it. Use MVS fusion as above,
 `mvs.load_dense_cloud(path)`, or `load_dataset`, which prepares initial points.
-For a sparse-only Python workflow, export the SfM scene as COLMAP and import it
-with `load_dataset`; this avoids PatchMatch. C++ also has a direct
-`initialize_scene_from_sparse_points` helper, which is not bound in Python.
+For sparse-only training directly from SfM, call
+`initialize_scene_from_sparse_points(mvs)` after `build_mvs_scene`.
+`load_dataset` already initializes its cloud. Both paths avoid PatchMatch.
+MVS fusion and `load_dense_cloud` mark the initialization dense; sparse/random
+dataset initialization is marked sparse. Use `training_options_for_scene` when
+constructing explicit options so sparse inputs enable ADC-IGS growth. A directly
+constructed `TrainingOptions()` retains the native `input_is_dense=True` default.
 If enabling MVS depth/normal supervision, estimate the corresponding maps.
 
 Select the densification strategy, apply its defaults, then apply your overrides.
 Extraction needs the matching scene coordinate system and relevant training
 rendering settings. A saved Gaussian model alone does not replace its cameras,
-source images, masks or a full resume checkpoint.
+source images, masks or checkpoint progress metadata. `render_method` selects
+3DGS or 3DGUT; 3DGUT is for rendering and cannot be used for mesh extraction.
+`rasterization`, `speedy_*` and all native `TrainingOptions` fields are exposed.
+SOG-XT adaptation requires a nonempty CUDA 3DGS model with SH degree greater
+than zero and Classic or Mip2D filtering; invalid combinations raise `ValueError`.
 
 ```python
-training = p.TrainingOptions()
+training = p.training_options_for_scene(mvs)
 training.backend = p.TrainingBackend.CUDA
 training.densification_strategy = p.DensificationStrategy.EMC
 training.apply_strategy_defaults()
@@ -236,11 +254,49 @@ mesh.save("output/mesh.ply")
 
 Callback return `None` or `True` continues training; `False` requests stopping
 after the current progress callback. The call returns the model accumulated so
-far after native finalization. Keep callbacks short and copy scalar values you
-want to retain. `TrainingProgress` includes iteration, losses, growth/pruning,
+far after native finalization. Keep callbacks short. Progress receives an owning
+`TrainingProgress` copy that can be retained. `TrainingProgress` includes iteration, losses, growth/pruning,
 resolution, timings and device memory counters; total VRAM of zero means the
 probe failed. Callback exceptions propagate to the caller; they are not a
 successful cancellation result.
+
+The optional `preview(frame)` callback receives an owning `TrainingPreview`.
+Set `options.preview_interval` to a nonzero cadence to enable it. `frame.rgb`
+is immutable bytes with interleaved RGB8 pixels, top-left origin, of length
+`frame.width * frame.height * 3`. Callbacks execute on the calling thread;
+their progress/frame objects may be retained. No device tensors are exposed.
+
+## Training checkpoint recovery
+
+`inspect_training_checkpoint(path: Path)` returns `TrainingCheckpointInfo` or
+`None` when no supported checkpoint exists. `training_checkpoint_in_use(path: Path)`
+returns whether another trainer holds its lease. Invalid/corrupt checkpoint
+data can raise a native exception. Info exposes `iteration`, `total_iterations`,
+`gaussian_count`, `fingerprint` and the referenced `model_path`.
+
+```python
+training = p.training_options_for_scene(mvs)
+training.iterations = 30_000
+training.checkpoint_path = "output/training.checkpoint"
+training.checkpoint_interval_iterations = 1_000
+model = p.train_3dgs(mvs, training, progress=lambda stats: stats.iteration < 1_000)
+
+info = p.inspect_training_checkpoint(training.checkpoint_path)
+if info is None:
+    raise RuntimeError("No checkpoint was saved")
+training.resume_checkpoint = True
+model = p.train_3dgs(mvs, training)
+```
+
+Recovery restores the saved model and iteration; the optimizer is reinitialized,
+so it is not bit-exact optimizer-state continuation. Keep source images, the
+manifest and its referenced model together, and reuse matching scene/options:
+the native fingerprint rejects incompatible settings. The total iteration
+budget is the original target, not an additional count. Native checkpoint
+leases prevent concurrent writers. Checkpoints are published at the configured
+iteration/time cadence, on a progress-requested stop, and on completion;
+callback exceptions do not request a graceful checkpoint save. Optional
+`checkpoint_control_file` uses the native control-file protocol.
 
 For an existing trained model and dataset, see the runnable
 [`tsdf_experiment.py`](../../python/examples/tsdf_experiment.py).
@@ -268,10 +324,15 @@ Properties: `summary: SfmSummary`, `frontend_timing: FrontEndTiming`, and intege
 
 Integer properties: `view_count`, `dense_point_count`, `mesh_vertex_count`,
 `mesh_face_count`; `warnings: list[str]` records dataset-loader warnings.
+Read-only import metadata: `dataset_format: DatasetFormat`, `resolved_source: Path`,
+`initial_point_cloud: Path`, `generated_initial_points: bool` and
+`initial_points_dense: bool`. `initial_point_cloud` is empty when no cloud file
+is used; fusion clears it. For scenes built directly from SfM the import format
+remains `AUTO` and resolved source is empty.
 
 | Method | Behavior (returns `None`) |
 |---|---|
-| `load_dense_cloud(path)` | Replaces current dense cloud with an ASCII or binary-little-endian PLY. Preserve the scene's world frame and camera ordering for view-indexed point data. |
+| `load_dense_cloud(path)` | Replaces current dense cloud with an ASCII or binary-little-endian PLY and marks initialization dense. Preserve the scene's world frame and camera ordering for view-indexed point data. |
 | `save_dense_cloud(path)` | PLY with available normals/colors and view-support data. |
 | `save_mesh(path)` | Writes PLY; changing the filename extension does not select OBJ/GLB. |
 
@@ -279,7 +340,7 @@ Integer properties: `view_count`, `dense_point_count`, `mesh_vertex_count`,
 
 Properties: `size: int` and `sh_degree: int`.
 `save(path, format=GaussianFormat.AUTO) -> None` exports the model. `AUTO` infers
-the format from the filename; explicit formats are PLY, SOG, SPZ, GLB and USDC.
+the format from the filename; explicit formats are PLY, SOG, SOG_XT, SPZ, GLB and USDC.
 Availability depends on the build (USDC uses optional LightUSD support).
 Not every export is a reloadable training checkpoint; readers and writers may
 support different formats. See [native format implementation](../../photara/src/splat/formats.cpp).
@@ -323,5 +384,5 @@ if not scene.summary.valid:
 An exception does not promise rollback of a mutated scene or files already
 written. Use separate output directories for independent runs. Python does not
 currently bind texture baking, SAM mask generation, the generic inference API,
-raw BA problems, renderer tensors, archive editing or native preview callbacks.
+raw BA problems, renderer tensors, archive editing or device-preview callbacks.
 The [C++ guide](cpp.md#additional-native-interfaces) links to these interfaces.

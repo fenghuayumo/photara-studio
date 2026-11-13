@@ -22,11 +22,14 @@ This lists the Python-exposed subset of C++ members. C++ may expose additional f
 | `ReconstructionMode` | `sfm::ReconstructionMode` | `HIERARCHICAL` → `hierarchical`; `GLOBAL` → `global` |
 | `MeshMethod` | `mvs::MeshMethod` | `DELAUNAY` → `delaunay_cut`; `TSDF` → `tsdf`; `NONE` → `none` |
 | `DensifyQuality` | `mvs::DensifyQuality` | `PREVIEW` → `preview`; `DEFAULT` → `default_quality`; `HIGH` → `high` |
-| `DatasetFormat` | `splat::DatasetFormat` | `AUTO` → `auto_detect`; `COLMAP` → `colmap`; `REALITY_CAPTURE` → `reality_capture`; `OPENMVS` → `openmvs` |
-| `GaussianFormat` | `splat::GaussianFormat` | `AUTO` → `auto_detect`; `PLY` → `ply`; `SOG` → `sog`; `SPZ` → `spz`; `GLB` → `glb`; `USDC` → `usdc` |
+| `DatasetFormat` | `splat::DatasetFormat` | `AUTO` → `auto_detect`; `COLMAP` → `colmap`; `REALITY_CAPTURE` → `reality_capture`; `OPENMVS` → `openmvs`; `NERFSTUDIO` → `nerfstudio` |
+| `GaussianFormat` | `splat::GaussianFormat` | `AUTO` → `auto_detect`; `PLY` → `ply`; `SOG` → `sog`; `SOG_XT` → `sog_xt`; `SPZ` → `spz`; `GLB` → `glb`; `USDC` → `usdc` |
 | `AlphaMode` | `splat::AlphaMode` | `MASKED` → `masked`; `TRANSPARENT` → `transparent` |
+| `SplatFilterMode` | `splat::SplatFilterMode` | `CLASSIC` → `classic`; `MIP2D` → `mip_2d`; `MIP3D` → `mip_3d`; `MIP` → `mip` |
 | `PpispParamType` | `splat::PpispParamType` | `NO_CRF_NO_VIG` → `no_crf_no_vig`; `NO_CRF` → `no_crf`; `ORIGINAL` → `original` |
 | `TrainingBackend` | `splat::TrainingBackend` | `CUDA` → `cuda`; `VULKAN` → `vulkan` |
+| `Device` | `tinytensor::Device` | `CPU` → `CPU`; `CUDA` → `CUDA`; `VULKAN` → `Vulkan` |
+| `RenderMethod` | `splat::RenderMethod` | `GAUSSIAN_3DGS` → `gaussian_3dgs`; `GAUSSIAN_3DGUT` → `gaussian_3dgut` |
 | `DensificationStrategy` | `splat::DensificationStrategy` | `ADC_PLUS` → `adc_plus`; `ADC_IGS` → `adc_igs`; `DENSE_ADAPTIVE` → `dense_adaptive`; `EMC` → `emc` |
 | `PositioningBackend` | `sfm::PositioningBackend` | `AUTOMATIC` → `automatic`; `CPU` → `cpu`; `CUDA` → `cuda`; `VULKAN` → `vulkan` |
 | `BundleBackend` | `sfm::BundleBackendPreference` | `AUTOMATIC` → `automatic`; `CPU` → `cpu`; `CUDA` → `cuda`; `VULKAN` → `vulkan` |
@@ -64,6 +67,11 @@ This lists the Python-exposed subset of C++ members. C++ may expose additional f
 - [GlobalRotationSummary](#globalrotationsummary) — `sfm::GlobalRotationSummary`
 - [GlobalPositioningSummary](#globalpositioningsummary) — `sfm::GlobalPositioningSummary`
 - [MvsOptions](#mvsoptions) — `mvs::DensifyOptions`
+- [RasterizationPolicy](#rasterizationpolicy) — `splat::RasterizationPolicy`
+- [GaussianTransform](#gaussiantransform) — `splat::GaussianTransform`
+- [RenderMetrics](#rendermetrics) — `splat::RenderMetrics`
+- [TrainingCheckpointInfo](#trainingcheckpointinfo) — `splat::TrainingCheckpointInfo`
+- [TrainingPreview](#trainingpreview) — `splat::TrainingPreview`
 - [TrainingOptions](#trainingoptions) — `splat::TrainingOptions`
 - [DatasetRequest](#datasetrequest) — `splat::DatasetLoadRequest`
 - [TsdfOptions](#tsdfoptions) — `splat::SplatMeshOptions`
@@ -226,6 +234,7 @@ C++: `sfm::VocabularyConfig`. Construct with `photara.VocabularyOptions()`.
 | `max_descriptors_per_image` | read/write | `std::size_t` | `{2000}` |  [source](../../photara/include/sfm/vocabulary.hpp#L17) |
 | `max_training_descriptors` | read/write | `std::size_t` | `{200000}` |  [source](../../photara/include/sfm/vocabulary.hpp#L18) |
 | `sample_grid` | read/write | `unsigned` | `{3}` |  [source](../../photara/include/sfm/vocabulary.hpp#L19) |
+| `sample_all_images` | read/write | `bool` | `{false}` | Keep established primary vocabularies reproducible. Supplemental retrieval can spread the same training cap over the entire collection. [source](../../photara/include/sfm/vocabulary.hpp#L22) |
 
 ## RetrievalOptions
 
@@ -236,10 +245,11 @@ C++: `sfm::RetrievalOptions`. Construct with `photara.RetrievalOptions()`.
 | `top_k` | read/write | `std::size_t` | `{50}` | Match openMVS' large-scene retrieval budget. Twenty neighbors leaves multi-room/loop datasets fragmented even when every retained pair is geometrically sound; fifty remains linear per image while providing enough cross-cluster links for robust global/hierarchical alignment. [source](../../photara/include/sfm/retrieval.hpp#L17) |
 | `max_descriptors_per_image` | read/write | `std::size_t` | `{2000}` |  [source](../../photara/include/sfm/retrieval.hpp#L18) |
 | `sample_grid` | read/write | `unsigned` | `{3}` |  [source](../../photara/include/sfm/retrieval.hpp#L19) |
-| `stop_word_ratio` | read/write | `float` | `{0.5F}` |  [source](../../photara/include/sfm/retrieval.hpp#L20) |
-| `max_posting_images` | read/write | `std::size_t` | `{64}` |  [source](../../photara/include/sfm/retrieval.hpp#L21) |
-| `vocabulary` | read/write | `VocabularyConfig` | `{}` |  [source](../../photara/include/sfm/retrieval.hpp#L22) |
-| `vocabulary_path` | read/write | `std::filesystem::path` | `default initialization` | Empty path trains an ephemeral vocabulary for this scene only. [source](../../photara/include/sfm/retrieval.hpp#L24) |
+| `systematic_sampling` | read/write | `bool` | `{false}` | Histogram-only alternative; does not retrain or replace the vocabulary. [source](../../photara/include/sfm/retrieval.hpp#L21) |
+| `stop_word_ratio` | read/write | `float` | `{0.5F}` |  [source](../../photara/include/sfm/retrieval.hpp#L22) |
+| `max_posting_images` | read/write | `std::size_t` | `{64}` |  [source](../../photara/include/sfm/retrieval.hpp#L23) |
+| `vocabulary` | read/write | `VocabularyConfig` | `{}` |  [source](../../photara/include/sfm/retrieval.hpp#L24) |
+| `vocabulary_path` | read/write | `std::filesystem::path` | `default initialization` | Empty path trains an ephemeral vocabulary for this scene only. [source](../../photara/include/sfm/retrieval.hpp#L26) |
 
 ## CheckpointOptions
 
@@ -304,10 +314,12 @@ C++: `sfm::ResectionConfig`. Construct with `photara.ResectionOptions()`.
 | `mult_depth_near` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/sfm/resection.hpp#L54) |
 | `mult_depth_far` | read/write | `float` | `{20.F}` |  [source](../../photara/include/sfm/resection.hpp#L55) |
 | `use_pair_match_correspondences` | read/write | `bool` | `{true}` | Recover weak views directly from verified pair matches to registered landmark observations, even when a conservative global track rebuild did not merge the weak edge into the landmark. [source](../../photara/include/sfm/resection.hpp#L59) |
-| `ransac` | read/write | `AbsolutePoseOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L60) |
-| `local_ba` | read/write | `ba::OptimizerOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L61) |
-| `full_ba` | read/write | `ba::OptimizerOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L62) |
-| `checkpoint_interval` | read/write | `unsigned` | `{1}` |  [source](../../photara/include/sfm/resection.hpp#L65) |
+| `preserve_conflict_alternatives` | read/write | `bool` | `{true}` | Preserve alternative feature/landmark assignments after a conflict. [source](../../photara/include/sfm/resection.hpp#L61) |
+| `retry_lower_support_candidates` | read/write | `bool` | `{true}` | If the strongest-count band fails, try the remaining eligible views. [source](../../photara/include/sfm/resection.hpp#L63) |
+| `ransac` | read/write | `AbsolutePoseOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L64) |
+| `local_ba` | read/write | `ba::OptimizerOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L65) |
+| `full_ba` | read/write | `ba::OptimizerOptions` | `{}` |  [source](../../photara/include/sfm/resection.hpp#L66) |
+| `checkpoint_interval` | read/write | `unsigned` | `{1}` |  [source](../../photara/include/sfm/resection.hpp#L69) |
 
 ## ClusterOptions
 
@@ -349,6 +361,8 @@ C++: `sfm::HierarchicalConfig`. Construct with `photara.HierarchicalOptions()`.
 | `star` | read/write | `StarInitConfig` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L45) |
 | `resection` | read/write | `ResectionConfig` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L46) |
 | `final_bundle_adjustment` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/hierarchical.hpp#L49) |
+| `global_rotation` | read/write | `GlobalRotationOptions` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L47) |
+| `global_positioning` | read/write | `GlobalPositioningOptions` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L48) |
 
 ## GlobalRotationOptions
 
@@ -371,38 +385,35 @@ C++: `sfm::GlobalPositioningOptions`. Construct with `photara.GlobalPositioningO
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `prefer_cuda` | read/write | `bool` | `{true}` | Dense camera Schur system for the fixed-rotation bearing solve. Camera-only initialization and unsupported sizes retain the CPU path. prefer_cuda applies only when backend is automatic. [source](../../photara/include/sfm/global_positioning.hpp#L28) |
-| `backend` | read/write | `PositioningBackend` | `{PositioningBackend::automatic}` |  [source](../../photara/include/sfm/global_positioning.hpp#L29) |
-| `min_views_per_track` | read/write | `unsigned` | `{4}` | Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes and avoids unconstrained short tracks in the selected subset. [source](../../photara/include/sfm/global_positioning.hpp#L32) |
-| `min_tracks_for_positioning` | read/write | `unsigned` | `{2500}` | Coverage-aware selection scales with scene size while retaining a hard ceiling for predictable solve time. [source](../../photara/include/sfm/global_positioning.hpp#L35) |
-| `tracks_per_registered_image` | read/write | `unsigned` | `{20}` |  [source](../../photara/include/sfm/global_positioning.hpp#L36) |
-| `max_tracks_for_positioning` | read/write | `unsigned` | `{20000}` |  [source](../../photara/include/sfm/global_positioning.hpp#L37) |
-| `coverage_grid_size` | read/write | `unsigned` | `{4}` |  [source](../../photara/include/sfm/global_positioning.hpp#L38) |
-| `max_irls_iterations` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/sfm/global_positioning.hpp#L39) |
-| `irls_inner_iterations` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/sfm/global_positioning.hpp#L40) |
-| `irls_tuning_constant` | read/write | `double` | `{4.685}` |  [source](../../photara/include/sfm/global_positioning.hpp#L41) |
-| `irls_min_weight` | read/write | `double` | `{1e-3}` |  [source](../../photara/include/sfm/global_positioning.hpp#L42) |
-| `irls_quarantine_after` | read/write | `unsigned` | `{2}` |  [source](../../photara/include/sfm/global_positioning.hpp#L43) |
-| `irls_weight_convergence` | read/write | `double` | `{1e-2}` |  [source](../../photara/include/sfm/global_positioning.hpp#L44) |
-| `max_num_iterations` | read/write | `unsigned` | `{100}` |  [source](../../photara/include/sfm/global_positioning.hpp#L45) |
-| `max_solver_time_sec` | read/write | `double` | `{45.0}` | Shared time budget per positioning attempt. Ceres checks between steps, so a step may overrun it. 0 disables this shared limit, not Solve's cap. [source](../../photara/include/sfm/global_positioning.hpp#L48) |
-| `function_tolerance` | read/write | `double` | `{1e-5}` |  [source](../../photara/include/sfm/global_positioning.hpp#L49) |
-| `huber_threshold` | read/write | `double` | `{0.1}` |  [source](../../photara/include/sfm/global_positioning.hpp#L50) |
-| `random_seed` | read/write | `unsigned` | `{123}` |  [source](../../photara/include/sfm/global_positioning.hpp#L51) |
-| `generate_random_positions` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L52) |
-| `generate_random_points` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L53) |
-| `generate_scales` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L54) |
-| `optimize_positions` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L55) |
-| `optimize_points` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L56) |
-| `optimize_scales` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L57) |
-| `ray_initialize_points` | read/write | `bool` | `{true}` | After camera-only warm-start, initialize points by multi-ray midpoints instead of uniform random noise (much better conditioned). [source](../../photara/include/sfm/global_positioning.hpp#L60) |
-| `camera_warm_start_first` | read/write | `bool` | `{true}` | Initialize camera centers from robust relative-translation constraints before point-bearing refinement. This avoids random point-only local minima on large weakly connected scenes. [source](../../photara/include/sfm/global_positioning.hpp#L64) |
-| `camera_warm_start_min_images` | read/write | `unsigned` | `{512}` |  [source](../../photara/include/sfm/global_positioning.hpp#L65) |
-| `constraint` | read/write | `GlobalPositioningConstraint` | `{ GlobalPositioningConstraint::only_points}` |  [source](../../photara/include/sfm/global_positioning.hpp#L66) |
-| `constraint_reweight_scale` | read/write | `double` | `{1.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L68) |
-| `regularize_complete_orbits` | read/write | `bool` | `{true}` | Detect complete, ordered turntable/orbit captures from solved geometry and regularize their centers before the final bundle polish. The detector is intentionally strict, so ordinary unordered or linear captures keep the unconstrained global solution. [source](../../photara/include/sfm/global_positioning.hpp#L73) |
-| `global_rotation` | read/write | `GlobalRotationOptions` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L47) |
-| `global_positioning` | read/write | `GlobalPositioningOptions` | `{}` |  [source](../../photara/include/sfm/hierarchical.hpp#L48) |
+| `prefer_cuda` | read/write | `bool` | `{true}` | Dense camera Schur system for the fixed-rotation bearing solve. Camera-only initialization and unsupported sizes retain the CPU path. prefer_cuda applies only when backend is automatic. [source](../../photara/include/sfm/global_positioning.hpp#L29) |
+| `backend` | read/write | `PositioningBackend` | `{PositioningBackend::automatic}` |  [source](../../photara/include/sfm/global_positioning.hpp#L30) |
+| `min_views_per_track` | read/write | `unsigned` | `{4}` | Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes and avoids unconstrained short tracks in the selected subset. [source](../../photara/include/sfm/global_positioning.hpp#L33) |
+| `min_tracks_for_positioning` | read/write | `unsigned` | `{2500}` | Coverage-aware selection scales with scene size while retaining a hard ceiling for predictable solve time. [source](../../photara/include/sfm/global_positioning.hpp#L36) |
+| `tracks_per_registered_image` | read/write | `unsigned` | `{20}` |  [source](../../photara/include/sfm/global_positioning.hpp#L37) |
+| `max_tracks_for_positioning` | read/write | `unsigned` | `{20000}` |  [source](../../photara/include/sfm/global_positioning.hpp#L38) |
+| `coverage_grid_size` | read/write | `unsigned` | `{4}` |  [source](../../photara/include/sfm/global_positioning.hpp#L39) |
+| `max_irls_iterations` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/sfm/global_positioning.hpp#L43) |
+| `irls_inner_iterations` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/sfm/global_positioning.hpp#L44) |
+| `irls_tuning_constant` | read/write | `double` | `{4.685}` |  [source](../../photara/include/sfm/global_positioning.hpp#L45) |
+| `irls_min_weight` | read/write | `double` | `{1e-3}` |  [source](../../photara/include/sfm/global_positioning.hpp#L46) |
+| `irls_quarantine_after` | read/write | `unsigned` | `{2}` |  [source](../../photara/include/sfm/global_positioning.hpp#L47) |
+| `irls_weight_convergence` | read/write | `double` | `{1e-2}` |  [source](../../photara/include/sfm/global_positioning.hpp#L48) |
+| `max_num_iterations` | read/write | `unsigned` | `{100}` |  [source](../../photara/include/sfm/global_positioning.hpp#L49) |
+| `max_solver_time_sec` | read/write | `double` | `{45.0}` | Shared time budget per positioning attempt. Ceres checks between steps, so a step may overrun it. 0 disables this shared limit, not Solve's cap. [source](../../photara/include/sfm/global_positioning.hpp#L52) |
+| `function_tolerance` | read/write | `double` | `{1e-5}` |  [source](../../photara/include/sfm/global_positioning.hpp#L53) |
+| `huber_threshold` | read/write | `double` | `{0.1}` |  [source](../../photara/include/sfm/global_positioning.hpp#L54) |
+| `random_seed` | read/write | `unsigned` | `{123}` |  [source](../../photara/include/sfm/global_positioning.hpp#L55) |
+| `generate_random_positions` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L56) |
+| `generate_random_points` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L57) |
+| `generate_scales` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L58) |
+| `optimize_positions` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L59) |
+| `optimize_points` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L60) |
+| `optimize_scales` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/global_positioning.hpp#L61) |
+| `ray_initialize_points` | read/write | `bool` | `{true}` | After camera-only warm-start, initialize points by multi-ray midpoints instead of uniform random noise (much better conditioned). [source](../../photara/include/sfm/global_positioning.hpp#L64) |
+| `camera_warm_start_first` | read/write | `bool` | `{true}` | Initialize camera centers from robust relative-translation constraints before point-bearing refinement. This avoids random point-only local minima on large weakly connected scenes. [source](../../photara/include/sfm/global_positioning.hpp#L68) |
+| `constraint` | read/write | `GlobalPositioningConstraint` | `{ GlobalPositioningConstraint::only_points}` |  [source](../../photara/include/sfm/global_positioning.hpp#L70) |
+| `constraint_reweight_scale` | read/write | `double` | `{1.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L72) |
+| `regularize_complete_orbits` | read/write | `bool` | `{false}` | Experimental, opt-in prior for ordered captures with a known uniform circular trajectory. It projects centers onto an equal-angle circle and locks them during final BA. A complete orbit alone does not establish uniform motion: keep measured geometry free by default, including for handheld or nonuniform turntable sequences. [source](../../photara/include/sfm/global_positioning.hpp#L78) |
 
 ## AsfmOptions
 
@@ -411,6 +422,7 @@ C++: `sfm::AsfmOptions`. Construct with `photara.AsfmOptions()`.
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
 | `path_base` | read/write | `std::filesystem::path` | `default initialization` | If set, image paths are stored relative to this directory when they do not escape it. Load resolves remaining relative paths against this base. [source](../../photara/include/sfm/asfm.hpp#L30) |
+| `compact` | read/write | `bool` | `{false}` | Project snapshots keep only inlier-referenced XY observations. Full working caches retain the original v4 feature representation. [source](../../photara/include/sfm/asfm.hpp#L27) |
 
 ## FrontEndOptions
 
@@ -418,49 +430,52 @@ C++: `sfm::FrontEndOptions`. Construct with `photara.FrontEndOptions()`.
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `camera_model` | read/write | `CameraModel` | `{CameraModel::automatic}` |  [source](../../photara/include/sfm/frontend.hpp#L18) |
-| `focal_pixels` | read/write | `double` | `{0.0}` | 0 => 1.2 * max(w,h), fisheye: 0.5 * max(w,h) [source](../../photara/include/sfm/frontend.hpp#L19) |
-| `trust_focal_pixels` | read/write | `bool` | `{false}` | A supplied focal is normally an initialization, not a calibration. Set true only for externally calibrated/locked intrinsics. [source](../../photara/include/sfm/frontend.hpp#L22) |
-| `neighbor_window` | read/write | `std::size_t` | `{3}` | 0 => exhaustive for small sets, else sequential window [source](../../photara/include/sfm/frontend.hpp#L23) |
-| `thread_count` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L24) |
-| `mask_dir` | read/write | `std::filesystem::path` | `default initialization` | Optional valid-region masks matched by image filename/stem. Zero pixels are excluded before retrieval and matching; non-zero pixels are kept. [source](../../photara/include/sfm/frontend.hpp#L27) |
-| `extractor` | read/write | `std::string` | `{"siftgpu"}` | Composable path: extractor × matcher (default siftgpu × gpu_mutual_ratio). [source](../../photara/include/sfm/frontend.hpp#L29) |
-| `matcher` | read/write | `std::string` | `{"gpu_mutual_ratio"}` | "gpu_mutual_ratio" (default) \| "mutual_ratio" \| "lightglue" \| "hybrid_lightglue" \| ... Legacy alias: "siftgpu" normalizes to "gpu_mutual_ratio". [source](../../photara/include/sfm/frontend.hpp#L34) |
-| `pipeline` | read/write | `std::string` | `default initialization` | Empty / "none" => compose extractor×matcher. "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor/matcher). [source](../../photara/include/sfm/frontend.hpp#L39) |
-| `match_ratio` | read/write | `float` | `{0.8F}` |  [source](../../photara/include/sfm/frontend.hpp#L35) |
-| `mutual_check` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L36) |
-| `max_features` | read/write | `unsigned` | `{27000}` |  [source](../../photara/include/sfm/frontend.hpp#L60) |
-| `sift_contrast_threshold` | read/write | `double` | `{0.005}` |  [source](../../photara/include/sfm/frontend.hpp#L30) |
-| `extractor_model_path` | read/write | `std::filesystem::path` | `default initialization` | Learned extractor ONNX (--extractor superpoint\|disk\|aliked). [source](../../photara/include/sfm/frontend.hpp#L41) |
-| `extractor_input_width` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L42) |
-| `extractor_input_height` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L43) |
-| `extractor_min_score` | read/write | `float` | `{-1.F}` | Negative selects the backend default (ALIKED=0.2, SuperPoint/DISK=0). [source](../../photara/include/sfm/frontend.hpp#L45) |
-| `extractor_use_cuda` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L46) |
-| `lightglue_model_path` | read/write | `std::filesystem::path` | `default initialization` | Descriptor LightGlue matcher ONNX (--matcher lightglue or hybrid_lightglue), or fused end2end model for lightglue_end2end. [source](../../photara/include/sfm/frontend.hpp#L49) |
-| `lightglue_extractor` | read/write | `std::string` | `{"disk"}` | end2end head only: disk\|superpoint [source](../../photara/include/sfm/frontend.hpp#L50) |
-| `lightglue_input_width` | read/write | `std::uint32_t` | `{1024}` | end2end network size [source](../../photara/include/sfm/frontend.hpp#L51) |
-| `lightglue_input_height` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L52) |
-| `lightglue_min_score` | read/write | `float` | `{0.0F}` |  [source](../../photara/include/sfm/frontend.hpp#L53) |
-| `hybrid_lightglue_max_features` | read/write | `unsigned` | `{2048}` | Hybrid rescue attention budget; zero disables the cap. [source](../../photara/include/sfm/frontend.hpp#L55) |
-| `lightglue_use_cuda` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L56) |
-| `relative` | read/write | `RelativePoseOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L57) |
-| `min_pair_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/sfm/frontend.hpp#L58) |
-| `pair_weighting` | read/write | `PairWeightingOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L59) |
-| `retrieval_min_images` | read/write | `std::size_t` | `{50}` |  [source](../../photara/include/sfm/frontend.hpp#L61) |
-| `augment_sequential_with_retrieval` | read/write | `bool` | `{true}` | When true, sequential window is augmented with BoW pairs (requires descriptors; temporary SiftGPU extract may be used for retrieval only). [source](../../photara/include/sfm/frontend.hpp#L64) |
-| `progressive_pair_expansion` | read/write | `bool` | `{true}` | After the primary GPU pass, expand only weak verified views against the remaining images with an independently configurable ratio test. This preserves the fast path for well-connected views while recovering difficult viewpoints without paying for an unconditional all-pairs run. [source](../../photara/include/sfm/frontend.hpp#L69) |
-| `structural_pair_expansion` | read/write | `bool` | `{false}` | Experimental: extra graph connectivity has not yet demonstrated correct branch coordinates on Alameda. Keep disabled in the default pipeline. [source](../../photara/include/sfm/frontend.hpp#L72) |
-| `progressive_min_verified_degree` | read/write | `unsigned` | `{4}` |  [source](../../photara/include/sfm/frontend.hpp#L73) |
-| `progressive_rescue_match_ratio` | read/write | `float` | `{0.85F}` |  [source](../../photara/include/sfm/frontend.hpp#L74) |
-| `progressive_rescue_min_inliers` | read/write | `unsigned` | `{20}` |  [source](../../photara/include/sfm/frontend.hpp#L75) |
-| `progressive_max_images` | read/write | `std::size_t` | `{500}` | Small scenes can afford exhaustive weak-view expansion. Larger scenes use a bounded union of wider sequential and deeper retrieval proposals. [source](../../photara/include/sfm/frontend.hpp#L78) |
-| `progressive_rescue_neighbor_window` | read/write | `std::size_t` | `{16}` |  [source](../../photara/include/sfm/frontend.hpp#L79) |
-| `progressive_rescue_retrieval_top_k` | read/write | `std::size_t` | `{64}` |  [source](../../photara/include/sfm/frontend.hpp#L80) |
-| `progressive_rescue_max_pairs_per_image` | read/write | `std::size_t` | `{96}` |  [source](../../photara/include/sfm/frontend.hpp#L81) |
-| `progressive_rescue_max_features` | read/write | `unsigned` | `{54000}` | Re-detect only weak views at this larger budget. Existing descriptors remain first so cached primary-match feature indices stay valid. [source](../../photara/include/sfm/frontend.hpp#L84) |
-| `compress_descriptors_u8` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L85) |
-| `retrieval` | read/write | `RetrievalOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L86) |
-| `checkpoint` | read/write | `CheckpointOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L87) |
+| `camera_model` | read/write | `CameraModel` | `{CameraModel::automatic}` |  [source](../../photara/include/sfm/frontend.hpp#L21) |
+| `camera_sharing` | read/write | `int` | `{0}` | 0 = group late by source folder and EXIF lens identity, 1 = all images, 2 = one independent intrinsic group per image. [source](../../photara/include/sfm/frontend.hpp#L28) |
+| `diagnostics_directory` | read/write | `std::filesystem::path` | `default initialization` | Optional stage-level feature/pair CSVs for diagnosing cold frontend runs. Does not affect feature, correspondence or geometry selection. [source](../../photara/include/sfm/frontend.hpp#L101) |
+| `focal_pixels` | read/write | `double` | `{0.0}` | 0 => 1.2 * max(w,h), fisheye: 0.5 * max(w,h) [source](../../photara/include/sfm/frontend.hpp#L22) |
+| `trust_focal_pixels` | read/write | `bool` | `{false}` | A supplied focal is normally an initialization, not a calibration. Set true only for externally calibrated/locked intrinsics. [source](../../photara/include/sfm/frontend.hpp#L25) |
+| `neighbor_window` | read/write | `std::size_t` | `{3}` | 0 => exhaustive for small sets, else sequential window [source](../../photara/include/sfm/frontend.hpp#L29) |
+| `thread_count` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L30) |
+| `mask_dir` | read/write | `std::filesystem::path` | `default initialization` | Optional valid-region masks matched by image filename/stem. Zero pixels are excluded before retrieval and matching; non-zero pixels are kept. [source](../../photara/include/sfm/frontend.hpp#L33) |
+| `extractor` | read/write | `std::string` | `{"siftgpu"}` | Composable path: extractor × matcher (default siftgpu × gpu_mutual_ratio). [source](../../photara/include/sfm/frontend.hpp#L35) |
+| `matcher` | read/write | `std::string` | `{"gpu_mutual_ratio"}` | "gpu_mutual_ratio" (default) \| "mutual_ratio" \| "lightglue" \| "hybrid_lightglue" \| ... Legacy alias: "siftgpu" normalizes to "gpu_mutual_ratio". [source](../../photara/include/sfm/frontend.hpp#L40) |
+| `pipeline` | read/write | `std::string` | `default initialization` | Empty / "none" => compose extractor×matcher. "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor/matcher). [source](../../photara/include/sfm/frontend.hpp#L45) |
+| `match_ratio` | read/write | `float` | `{0.8F}` |  [source](../../photara/include/sfm/frontend.hpp#L41) |
+| `mutual_check` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L42) |
+| `max_features` | read/write | `unsigned` | `{27000}` |  [source](../../photara/include/sfm/frontend.hpp#L66) |
+| `sift_contrast_threshold` | read/write | `double` | `{0.005}` |  [source](../../photara/include/sfm/frontend.hpp#L36) |
+| `extractor_model_path` | read/write | `std::filesystem::path` | `default initialization` | Learned extractor ONNX (--extractor superpoint\|disk\|aliked). [source](../../photara/include/sfm/frontend.hpp#L47) |
+| `extractor_input_width` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L48) |
+| `extractor_input_height` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L49) |
+| `extractor_min_score` | read/write | `float` | `{-1.F}` | Negative selects the backend default (ALIKED=0.2, SuperPoint/DISK=0). [source](../../photara/include/sfm/frontend.hpp#L51) |
+| `extractor_use_cuda` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L52) |
+| `lightglue_model_path` | read/write | `std::filesystem::path` | `default initialization` | Descriptor LightGlue matcher ONNX (--matcher lightglue or hybrid_lightglue), or fused end2end model for lightglue_end2end. [source](../../photara/include/sfm/frontend.hpp#L55) |
+| `lightglue_extractor` | read/write | `std::string` | `{"disk"}` | end2end head only: disk\|superpoint [source](../../photara/include/sfm/frontend.hpp#L56) |
+| `lightglue_input_width` | read/write | `std::uint32_t` | `{1024}` | end2end network size [source](../../photara/include/sfm/frontend.hpp#L57) |
+| `lightglue_input_height` | read/write | `std::uint32_t` | `{1024}` |  [source](../../photara/include/sfm/frontend.hpp#L58) |
+| `lightglue_min_score` | read/write | `float` | `{0.0F}` |  [source](../../photara/include/sfm/frontend.hpp#L59) |
+| `hybrid_lightglue_max_features` | read/write | `unsigned` | `{2048}` | Hybrid rescue attention budget; zero disables the cap. [source](../../photara/include/sfm/frontend.hpp#L61) |
+| `lightglue_use_cuda` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L62) |
+| `relative` | read/write | `RelativePoseOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L63) |
+| `min_pair_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/sfm/frontend.hpp#L64) |
+| `pair_weighting` | read/write | `PairWeightingOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L65) |
+| `retrieval_min_images` | read/write | `std::size_t` | `{50}` |  [source](../../photara/include/sfm/frontend.hpp#L67) |
+| `augment_sequential_with_retrieval` | read/write | `bool` | `{true}` | When true, sequential window is augmented with BoW pairs (requires descriptors; temporary SiftGPU extract may be used for retrieval only). [source](../../photara/include/sfm/frontend.hpp#L70) |
+| `progressive_pair_expansion` | read/write | `bool` | `{true}` | After the primary GPU pass, expand only weak verified views against the remaining images with an independently configurable ratio test. This preserves the fast path for well-connected views while recovering difficult viewpoints without paying for an unconditional all-pairs run. [source](../../photara/include/sfm/frontend.hpp#L75) |
+| `progressive_min_verified_degree` | read/write | `unsigned` | `{4}` |  [source](../../photara/include/sfm/frontend.hpp#L76) |
+| `progressive_rescue_match_ratio` | read/write | `float` | `{0.85F}` |  [source](../../photara/include/sfm/frontend.hpp#L77) |
+| `progressive_rescue_min_inliers` | read/write | `unsigned` | `{20}` |  [source](../../photara/include/sfm/frontend.hpp#L78) |
+| `progressive_max_images` | read/write | `std::size_t` | `{500}` | Small scenes can afford exhaustive weak-view expansion. Larger scenes use a bounded union of wider sequential and deeper retrieval proposals. [source](../../photara/include/sfm/frontend.hpp#L81) |
+| `progressive_rescue_neighbor_window` | read/write | `std::size_t` | `{16}` |  [source](../../photara/include/sfm/frontend.hpp#L82) |
+| `progressive_rescue_retrieval_top_k` | read/write | `std::size_t` | `{64}` |  [source](../../photara/include/sfm/frontend.hpp#L83) |
+| `progressive_rescue_max_pairs_per_image` | read/write | `std::size_t` | `{96}` |  [source](../../photara/include/sfm/frontend.hpp#L84) |
+| `progressive_rescue_max_features` | read/write | `unsigned` | `{54000}` | Re-detect only weak views at this larger budget. Existing descriptors remain first so cached primary-match feature indices stay valid. [source](../../photara/include/sfm/frontend.hpp#L87) |
+| `missing_view_retry_max_neighbors` | read/write | `unsigned` | `{24}` | Post-refinement resection may add overlap neighbors of its original anchors. Zero disables the retry; earlier product recovery keeps its 16-view budget. [source](../../photara/include/sfm/frontend.hpp#L90) |
+| `missing_view_minimum_consensus_ratio` | read/write | `double` | `{0}` | Additional consensus floor, used by conservative post-refinement recovery. [source](../../photara/include/sfm/frontend.hpp#L95) |
+| `compress_descriptors_u8` | read/write | `bool` | `{true}` |  [source](../../photara/include/sfm/frontend.hpp#L96) |
+| `retrieval` | read/write | `RetrievalOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L97) |
+| `checkpoint` | read/write | `CheckpointOptions` | `{}` |  [source](../../photara/include/sfm/frontend.hpp#L98) |
 
 ## SfmOptions
 
@@ -470,6 +485,7 @@ C++: `sfm::ReconstructionConfig`. Construct with `photara.SfmOptions()`.
 |---|---|---|---|---|
 | `mode` | read/write | `ReconstructionMode` | `{ReconstructionMode::global}` |  [source](../../photara/include/sfm/reconstruct.hpp#L20) |
 | `frontend` | read/write | `FrontEndOptions` | `{}` |  [source](../../photara/include/sfm/reconstruct.hpp#L21) |
+| `refine_weak_cameras` | read/write | `bool` | `{false}` | Optional final repair of weak registered poses; other poses/calibration stay fixed. Independent held-out improvement is required for admission. [source](../../photara/include/sfm/reconstruct.hpp#L34) |
 | `star` | read/write | `StarInitConfig` | `{}` |  [source](../../photara/include/sfm/reconstruct.hpp#L22) |
 | `resection` | read/write | `ResectionConfig` | `{}` |  [source](../../photara/include/sfm/reconstruct.hpp#L23) |
 | `hierarchical` | read/write | `HierarchicalConfig` | `{}` |  [source](../../photara/include/sfm/reconstruct.hpp#L24) |
@@ -484,17 +500,17 @@ C++: `sfm::ReconstructionSummary`. Returned by API calls; no Python constructor 
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `valid` | read-only | `bool` | `{false}` | A usable reconstruction; neither a precision guarantee nor solver convergence. [source](../../photara/include/sfm/reconstruct.hpp#L36) |
-| `position_audited_views` | read-only | `unsigned` | `{0}` | Graph-support screening is conservative and does not prove position accuracy. [source](../../photara/include/sfm/reconstruct.hpp#L43) |
-| `position_unverified_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L44) |
-| `registered_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L37) |
-| `alignment_reliable_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L40) |
-| `alignment_unreliable_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L41) |
-| `landmarks` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L38) |
-| `failed_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L39) |
-| `reprojection_observations` | read-only | `std::uint64_t` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L45) |
-| `mean_reprojection_error_pixels` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L46) |
-| `rms_reprojection_error_pixels` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L47) |
+| `valid` | read-only | `bool` | `{false}` | A usable reconstruction; neither a precision guarantee nor solver convergence. [source](../../photara/include/sfm/reconstruct.hpp#L39) |
+| `position_audited_views` | read-only | `unsigned` | `{0}` | Graph-support screening is conservative and does not prove position accuracy. [source](../../photara/include/sfm/reconstruct.hpp#L46) |
+| `position_unverified_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L47) |
+| `registered_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L40) |
+| `alignment_reliable_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L43) |
+| `alignment_unreliable_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L44) |
+| `landmarks` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L41) |
+| `failed_views` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L42) |
+| `reprojection_observations` | read-only | `std::uint64_t` | `{0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L48) |
+| `mean_reprojection_error_pixels` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L49) |
+| `rms_reprojection_error_pixels` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/reconstruct.hpp#L50) |
 
 ## FrontEndTiming
 
@@ -502,10 +518,10 @@ C++: `sfm::FrontEndTiming`. Returned by API calls; no Python constructor is boun
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `threads_used` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L93) |
-| `extract_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L94) |
-| `match_verify_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L95) |
-| `tracks_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L96) |
+| `threads_used` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L107) |
+| `extract_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L108) |
+| `match_verify_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L109) |
+| `tracks_seconds` | read-only | `double` | `{0}` |  [source](../../photara/include/sfm/frontend.hpp#L110) |
 
 ## GlobalRotationSummary
 
@@ -526,20 +542,20 @@ C++: `sfm::GlobalPositioningSummary`. Returned by API calls; no Python construct
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `success` | read-only | `bool` | `{false}` |  [source](../../photara/include/sfm/global_positioning.hpp#L97) |
-| `termination` | read-only | `GlobalPositioningTermination` | `{GlobalPositioningTermination::not_run}` |  [source](../../photara/include/sfm/global_positioning.hpp#L98) |
-| `cpu_accepted_updates` | read-only | `unsigned` | `{}` |  [source](../../photara/include/sfm/global_positioning.hpp#L99) |
-| `cpu_time_limited_passes` | read-only | `unsigned` | `{}` |  [source](../../photara/include/sfm/global_positioning.hpp#L100) |
-| `positioned_images` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L101) |
-| `positioned_tracks` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L102) |
-| `observations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L103) |
-| `iterations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L104) |
-| `irls_iterations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L105) |
-| `downweighted_constraints` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L106) |
-| `quarantined_constraints` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L107) |
-| `final_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L108) |
-| `median_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L109) |
-| `p90_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L110) |
+| `success` | read-only | `bool` | `{false}` |  [source](../../photara/include/sfm/global_positioning.hpp#L104) |
+| `termination` | read-only | `GlobalPositioningTermination` | `{GlobalPositioningTermination::not_run}` |  [source](../../photara/include/sfm/global_positioning.hpp#L105) |
+| `cpu_accepted_updates` | read-only | `unsigned` | `{}` |  [source](../../photara/include/sfm/global_positioning.hpp#L106) |
+| `cpu_time_limited_passes` | read-only | `unsigned` | `{}` |  [source](../../photara/include/sfm/global_positioning.hpp#L107) |
+| `positioned_images` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L108) |
+| `positioned_tracks` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L109) |
+| `observations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L110) |
+| `iterations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L111) |
+| `irls_iterations` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L112) |
+| `downweighted_constraints` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L113) |
+| `quarantined_constraints` | read-only | `unsigned` | `{0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L114) |
+| `final_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L115) |
+| `median_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L116) |
+| `p90_residual` | read-only | `double` | `{0.0}` |  [source](../../photara/include/sfm/global_positioning.hpp#L117) |
 
 ## MvsOptions
 
@@ -614,168 +630,260 @@ C++: `mvs::DensifyOptions`. Construct with `photara.MvsOptions()`.
 | `patchmatch_concurrent_views` | read/write | `unsigned` | `{8}` | Reference views concurrently sharing the CPU budget. Each view still runs row tiles; the final partial batch receives more threads per view. [source](../../photara/include/mvs/options.hpp#L198) |
 | `thread_count` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/mvs/options.hpp#L199) |
 
+## RasterizationPolicy
+
+C++: `splat::RasterizationPolicy`. Construct with `photara.RasterizationPolicy()`.
+
+| Python field | Access | C++ type | Initializer | Description / declaration |
+|---|---|---|---|---|
+| `alpha_clip` | read/write | `float` | `{0.99F}` |  [source](../../photara/include/splat/options.hpp#L32) |
+| `near_plane` | read/write | `float` | `{0.2F}` |  [source](../../photara/include/splat/options.hpp#L33) |
+| `pixel_center_offset` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L34) |
+| `compensate_2d` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L35) |
+
+## GaussianTransform
+
+C++: `splat::GaussianTransform`. Construct with `photara.GaussianTransform()`.
+
+| Python field | Access | C++ type | Initializer | Description / declaration |
+|---|---|---|---|---|
+| `translation` | read/write | `std::array<float, 3>` | `{}` |  [source](../../photara/include/splat/formats.hpp#L60) |
+| `scale` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/formats.hpp#L61) |
+| `rotation_degrees` | read/write | `std::array<float, 3>` | `{}` | Euler XYZ angles in degrees, applied X then Y then Z about the origin. [source](../../photara/include/splat/formats.hpp#L63) |
+
+## RenderMetrics
+
+C++: `splat::RenderMetrics`. Returned by API calls; no Python constructor is bound.
+
+| Python field | Access | C++ type | Initializer | Description / declaration |
+|---|---|---|---|---|
+| `mae` | read-only | `float` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L51) |
+| `psnr` | read-only | `float` | `{}` | PSNR over every image pixel. Comparable across runs with and without a mask, which is what an "is this run better" question needs. [source](../../photara/include/splat/trainer.hpp#L54) |
+| `foreground_psnr` | read-only | `float` | `{}` | PSNR over the unmasked (foreground) samples only: with a mask this is the static region, without one it equals `psnr`. Stricter than a full-image average because masked-out zeros never enter it. [source](../../photara/include/splat/trainer.hpp#L58) |
+| `masked_psnr` | read-only | `float` | `{}` | PSNR with prediction and target masked, then MSE averaged over every image pixel. Only use it when comparing against tools that score this way. [source](../../photara/include/splat/trainer.hpp#L62) |
+| `ssim` | read-only | `float` | `{}` | Mean 11x11 Gaussian SSIM on the valid interior, matching training. [source](../../photara/include/splat/trainer.hpp#L64) |
+| `alpha_bce` | read-only | `float` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L65) |
+| `alpha_coverage` | read-only | `float` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L66) |
+
+## TrainingCheckpointInfo
+
+C++: `splat::TrainingCheckpointInfo`. Returned by API calls; no Python constructor is bound.
+
+| Python field | Access | C++ type | Initializer | Description / declaration |
+|---|---|---|---|---|
+| `iteration` | read-only | `unsigned` | `{}` |  [source](../../photara/include/splat/checkpoint.hpp#L29) |
+| `total_iterations` | read-only | `unsigned` | `{}` |  [source](../../photara/include/splat/checkpoint.hpp#L30) |
+| `gaussian_count` | read-only | `std::uint64_t` | `{}` |  [source](../../photara/include/splat/checkpoint.hpp#L31) |
+| `fingerprint` | read-only | `std::uint64_t` | `{}` |  [source](../../photara/include/splat/checkpoint.hpp#L32) |
+| `model_path` | read-only | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/checkpoint.hpp#L34) |
+
+## TrainingPreview
+
+C++: `splat::TrainingPreview`. Returned by API calls; no Python constructor is bound.
+
+| Python field | Access | C++ type | Initializer | Description / declaration |
+|---|---|---|---|---|
+| `iteration` | read-only | `unsigned` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L70) |
+| `view_index` | read-only | `std::size_t` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L71) |
+| `width` | read-only | `std::uint32_t` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L72) |
+| `height` | read-only | `std::uint32_t` | `{}` |  [source](../../photara/include/splat/trainer.hpp#L73) |
+
+Read-only properties: `rgb`. See [result handles](python.md#result-handles).
+
 ## TrainingOptions
 
 C++: `splat::TrainingOptions`. Construct with `photara.TrainingOptions()`.
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `backend` | read/write | `TrainingBackend` | `{TrainingBackend::cuda}` | The orchestration, schedules and optimizer policy are shared. This selects the device for training tensors and backend GPU primitives. [source](../../photara/include/splat/options.hpp#L67) |
-| `iterations` | read/write | `unsigned` | `{30'000}` |  [source](../../photara/include/splat/options.hpp#L68) |
-| `sh_degree` | read/write | `unsigned` | `{3}` |  [source](../../photara/include/splat/options.hpp#L69) |
-| `sh_degree_interval` | read/write | `unsigned` | `{1'000}` |  [source](../../photara/include/splat/options.hpp#L70) |
-| `seed` | read/write | `unsigned` | `{42}` |  [source](../../photara/include/splat/options.hpp#L71) |
-| `log_interval` | read/write | `unsigned` | `{100}` | Console training stats every N steps. Zero logs only the first and last. [source](../../photara/include/splat/options.hpp#L83) |
-| `profile_cuda` | read/write | `bool` | `{false}` | Optional windowed CUDA-event timings for the GGGS training loop. Disabled by default so production training does not create or record profiling events. The interval is capped by the trainer to avoid an accidentally unbounded CUDA event pool. [source](../../photara/include/splat/options.hpp#L88) |
-| `cuda_profile_interval` | read/write | `unsigned` | `{100}` |  [source](../../photara/include/splat/options.hpp#L89) |
-| `input_is_dense` | read/write | `bool` | `{true}` | Sparse COLMAP initialization enables dynamic Gaussian management. Dense MVS initialization only enables it for the explicit dense_adaptive mode. [source](../../photara/include/splat/options.hpp#L92) |
-| `enable_densification` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L93) |
-| `densification_strategy` | read/write | `DensificationStrategy` | `{ DensificationStrategy::adc_igs}` |  [source](../../photara/include/splat/options.hpp#L94) |
-| `densification_cap` | read/write | `std::size_t` | `{3'000'000}` | Growth ceiling while densify is enabled. Initialization uses the full source cloud unless initial_point_budget asks for a subset. [source](../../photara/include/splat/options.hpp#L98) |
-| `refine_start_iter` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L104) |
-| `refine_stop_iter` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L105) |
-| `grow_stop_iter` | read/write | `unsigned` | `{0}` | Iteration after which densification stops adding parents and only prunes, replaces recovered slots, splits oversized splats and decays. 0 selects the Brush proportion (half of `iterations`, resolved by apply_strategy_defaults); an explicit value always wins. [source](../../photara/include/splat/options.hpp#L112) |
-| `refine_every` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L113) |
-| `opacity_reset_every` | read/write | `unsigned` | `{3'000}` |  [source](../../photara/include/splat/options.hpp#L114) |
-| `densify_gradient_threshold` | read/write | `float` | `{0.0025F}` | Shared split/growth controls. Strategies may differ in how they build the candidate set, but should not expose duplicate threshold knobs. [source](../../photara/include/splat/options.hpp#L117) |
-| `densify_select_fraction` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L118) |
-| `densify_screen_threshold` | read/write | `float` | `{0.25F}` | Broad semi-transparent splats that own the rendered median depth wrap meshes in a floater shell. Start size repair past a quarter frame. [source](../../photara/include/splat/options.hpp#L121) |
-| `prune_opacity` | read/write | `float` | `{1.F / 255.F}` |  [source](../../photara/include/splat/options.hpp#L158) |
-| `opacity_decay` | read/write | `float` | `{0.004F}` |  [source](../../photara/include/splat/options.hpp#L159) |
-| `scale_decay` | read/write | `float` | `{0.F}` | Optional per-refine scale shrink, tapered by remaining training progress. Disabled by default: the 2026-09-18 six-seed paired A/B found no detectable quality effect on either ADC strategy (artifacts/scale_decay_ab_20260918), and Brush does not decay scales. [source](../../photara/include/splat/options.hpp#L164) |
-| `background_noise_strength` | read/write | `float` | `{0.F}` | Uniform noise around a black background, clamped to [0,1]. Dense MVS input trains with a fixed background; both ADC strategies run with Brush's 0.1 through the reconstruction CLI. [source](../../photara/include/splat/options.hpp#L169) |
-| `initialize_scale_from_knn` | read/write | `bool` | `{false}` | Initialize isotropic scales from the RMS distance to the three nearest neighbours in the selected input cloud. [source](../../photara/include/splat/options.hpp#L174) |
-| `means_lr` | read/write | `float` | `{1.6e-4F}` |  [source](../../photara/include/splat/options.hpp#L182) |
-| `scales_lr` | read/write | `float` | `{5e-3F}` |  [source](../../photara/include/splat/options.hpp#L183) |
-| `opacities_lr` | read/write | `float` | `{5e-2F}` |  [source](../../photara/include/splat/options.hpp#L184) |
-| `quaternions_lr` | read/write | `float` | `{1e-3F}` |  [source](../../photara/include/splat/options.hpp#L185) |
-| `sh0_lr` | read/write | `float` | `{2.5e-3F}` |  [source](../../photara/include/splat/options.hpp#L186) |
-| `sh_rest_lr` | read/write | `float` | `{1.25e-4F}` |  [source](../../photara/include/splat/options.hpp#L187) |
-| `photometric_weight` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L199) |
-| `ssim_weight` | read/write | `float` | `{0.2F}` |  [source](../../photara/include/splat/options.hpp#L200) |
-| `use_bilateral_grid` | read/write | `bool` | `{false}` | Training-time colour correction for auto-exposure / auto-white-balance drift in video captures. Both transforms are applied to the rendered image the photometric loss sees; evaluation, preview and exported models keep canonical appearance. [source](../../photara/include/splat/options.hpp#L205) |
-| `bilateral_grid_width` | read/write | `unsigned` | `{16}` |  [source](../../photara/include/splat/options.hpp#L212) |
-| `bilateral_grid_height` | read/write | `unsigned` | `{16}` |  [source](../../photara/include/splat/options.hpp#L213) |
-| `bilateral_grid_luma` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/splat/options.hpp#L214) |
-| `bilateral_grid_lr` | read/write | `float` | `{2e-4F}` | The grid is a low-resolution LUT with Adam; a large rate diverges and produces non-finite renders, so the default is deliberately gentle. [source](../../photara/include/splat/options.hpp#L217) |
-| `bilateral_grid_tv_weight` | read/write | `float` | `{10.F}` |  [source](../../photara/include/splat/options.hpp#L218) |
-| `use_ppisp` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L227) |
-| `ppisp_type` | read/write | `PpispParamType` | `{PpispParamType::no_crf_no_vig}` |  [source](../../photara/include/splat/options.hpp#L228) |
-| `ppisp_lr` | read/write | `float` | `{2e-3F}` |  [source](../../photara/include/splat/options.hpp#L229) |
-| `ppisp_clamp_output` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L244) |
-| `ppisp_reg_exposure_mean` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L238) |
-| `ppisp_reg_color_mean` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L239) |
-| `ppisp_before_bilagrid` | read/write | `bool` | `{true}` | When both PPISP and the bilateral grid are enabled, PPISP runs first (exposure and white balance, then the spatially varying affine). [source](../../photara/include/splat/options.hpp#L247) |
-| `use_depth_normal_loss` | read/write | `bool` | `{false}` | GGGS meshing loss from the Python reference: cosine consistency between the rasterized Gaussian normal and the normal differentiated from the rendered median-depth map. [source](../../photara/include/splat/options.hpp#L253) |
-| `depth_normal_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L258) |
-| `depth_normal_from_iter` | read/write | `unsigned` | `{7'000}` |  [source](../../photara/include/splat/options.hpp#L259) |
-| `multi_view_geo_weight` | read/write | `float` | `{0.F}` | GGGS multi-view PatchMatch supervision. Geometry uses a differentiable depth round trip through a nearby camera; NCC uses the reference plane-induced homography and the original image pair. [source](../../photara/include/splat/options.hpp#L276) |
-| `multi_view_ncc_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L277) |
-| `multi_view_num` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/splat/options.hpp#L284) |
-| `multi_view_tail_interval` | read/write | `unsigned` | `{1}` | Subsample the expensive multi-view objective after ADC growth stops. Active-step weights are multiplied by this interval so the stochastic objective remains unchanged in expectation. [source](../../photara/include/splat/options.hpp#L288) |
-| `multi_view_adaptive_frequency` | read/write | `bool` | `{false}` | Optional quality-first replacement for the fixed grow-stop gate. The trainer observes topology churn, depth round-trip consistency, and the opacity/scale distribution at refinement boundaries. It only raises the interval after several stable windows and immediately restores every-step supervision when any metric drifts. [source](../../photara/include/splat/options.hpp#L294) |
-| `multi_view_adaptive_max_interval` | read/write | `unsigned` | `{2}` |  [source](../../photara/include/splat/options.hpp#L295) |
-| `multi_view_adaptive_stable_refinements` | read/write | `unsigned` | `{5}` |  [source](../../photara/include/splat/options.hpp#L296) |
-| `multi_view_adaptive_count_threshold` | read/write | `float` | `{0.005F}` |  [source](../../photara/include/splat/options.hpp#L297) |
-| `multi_view_adaptive_churn_threshold` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L298) |
-| `multi_view_adaptive_depth_threshold` | read/write | `float` | `{0.02F}` |  [source](../../photara/include/splat/options.hpp#L299) |
-| `multi_view_adaptive_min_depth_consistency` | read/write | `float` | `{0.5F}` |  [source](../../photara/include/splat/options.hpp#L300) |
-| `multi_view_adaptive_distribution_threshold` | read/write | `float` | `{0.025F}` |  [source](../../photara/include/splat/options.hpp#L301) |
-| `multi_view_pixel_noise_threshold` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L305) |
-| `use_mask` | read/write | `bool` | `{false}` | Mask training. `masked` treats zero-mask pixels as missing observations: RGB/geometry are supervised only where the mask is valid and alpha is not constrained. `transparent` treats the mask as the desired output alpha and adds full-image BCE(predicted alpha, mask). [source](../../photara/include/splat/options.hpp#L314) |
-| `alpha_mode` | read/write | `AlphaMode` | `{AlphaMode::masked}` |  [source](../../photara/include/splat/options.hpp#L315) |
-| `match_alpha_weight` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L316) |
-| `mask_dir` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L317) |
-| `minimum_scale_fraction` | read/write | `float` | `{1e-4F}` |  [source](../../photara/include/splat/options.hpp#L318) |
-| `maximum_scale_fraction` | read/write | `float` | `{0.002F}` |  [source](../../photara/include/splat/options.hpp#L319) |
-| `constrain_scale_range` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L320) |
-| `use_source_resolution` | read/write | `bool` | `{false}` | Train against source-resolution undistorted images rather than the MVS working resolution. [source](../../photara/include/splat/options.hpp#L332) |
-| `undistort_to_pinhole` | read/write | `bool` | `{false}` | When true, resample OpenCV fisheye views onto a pinhole working camera. Native fisheye/equirectangular rasterization is used otherwise. Equirect cannot be undistorted and always trains natively. [source](../../photara/include/splat/options.hpp#L339) |
-| `max_image_dimension` | read/write | `unsigned` | `{1'920}` | brush-style dataset controls. Images are resized so their largest dimension does not exceed this value (0 keeps the source resolution), and packed training views are retained in bounded host/device LRUs. Only current reference/neighbour views are expanded to float on CUDA. [source](../../photara/include/splat/options.hpp#L344) |
-| `progressive_resolution` | read/write | `bool` | `{false}` | Coarse-to-fine image schedule. The active linear resolution starts at 1/4, doubles every 3k iterations, and caps at max_image_dimension. Advancing a level clears the previous decoded RGB/mask cache. Library callers opt in explicitly; the reconstruction CLI enables this by default while unit-test configurations remain fixed-size. [source](../../photara/include/splat/options.hpp#L350) |
-| `progressive_resolution_interval` | read/write | `unsigned` | `{3'000}` |  [source](../../photara/include/splat/options.hpp#L351) |
-| `progressive_initial_scale` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L352) |
-| `training_view_cache_bytes` | read/write | `std::size_t` | `{ std::size_t{6} * 1024 * 1024 * 1024}` |  [source](../../photara/include/splat/options.hpp#L353) |
-| `training_prefetch_views` | read/write | `std::size_t` | `{4}` | Decode and pack upcoming shuffled views on background threads while CUDA processes the current iteration, so a host cache miss does not stall the step on image I/O. Host-side only: all CUDA calls stay on the training thread. Zero disables prefetching. The value is the minimum lookahead; with training_prefetch_adaptive the loader grows it to cover one measured host decode plus one iteration of slack. [source](../../photara/include/splat/options.hpp#L389) |
-| `training_prefetch_adaptive` | read/write | `bool` | `{true}` | Size the prefetch lookahead from the measured host-load and iteration times instead of using training_prefetch_views as a fixed count. Large datasets decode for far longer than one iteration, so a fixed count of four views leaves most of the decode exposed on the critical path. Bounded to 32 views and to 512MB of in-flight packed views. [source](../../photara/include/splat/options.hpp#L395) |
-| `training_device_cache_max_bytes` | read/write | `std::size_t` | `{0}` | Ceiling the adaptive budget may grow to, using the observed device-cache hit rate as feedback and the idle VRAM as a guard. Zero keeps the budget at training_device_cache_bytes: measured on the alameda and iPhone sets, a larger packed-image cache only pays while the uploads are exposed on the critical path, and at 2MP/1M Gaussians they are already hidden behind compute, so the VRAM is better left to the training state. [source](../../photara/include/splat/options.hpp#L370) |
-| `training_async_upload` | read/write | `bool` | `{true}` | Upload decoded views without blocking the training thread. CUDA uses a non-blocking copy stream; Vulkan immediately submits packed-image copies through a mapped staging ring before recording the device unpack. Allocation and enqueue remain on the training thread. Each in-flight transfer owns its staging storage until its completion fence fires. The copy engine only ever writes loader-owned device staging; the packed view is hopped into the cache entry on the compute stream, because pool memory must not be touched by a transfer from another stream (the pool hands blocks between streams and threads without any ordering). Measured -3% iteration time on the alameda and iPhone sets with the integrity check and ten repeat runs clean. [source](../../photara/include/splat/options.hpp#L382) |
-| `evaluation_split_every` | read/write | `unsigned` | `{0}` | Hold out every Nth source view from optimization (0 trains on all). The caller may render these views through the evaluation callback. Zero trains every view; the reconstruction CLI keeps that default and only holds out views when the user asks for a stride. Held-out metrics need an explicit --splat-eval-split-every N. [source](../../photara/include/splat/options.hpp#L401) |
-| `use_normal_field` | read/write | `bool` | `{false}` | GaussianWrapping normal field. Four features per Gaussian encode normalize(xyz) * tanh(w), and are aligned to normals differentiated from the rendered median-depth map. [source](../../photara/include/splat/options.hpp#L263) |
-| `normal_field_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L264) |
-| `normal_field_depth_ratio` | read/write | `float` | `{0.6F}` |  [source](../../photara/include/splat/options.hpp#L265) |
-| `normal_field_from_iter` | read/write | `unsigned` | `{20'001}` |  [source](../../photara/include/splat/options.hpp#L266) |
-| `normal_features_lr` | read/write | `float` | `{0.025F}` |  [source](../../photara/include/splat/options.hpp#L267) |
-| `initial_point_budget` | read/write | `std::size_t` | `{0}` | Upper bound on the Gaussians built from the input point cloud. Sparse SfM clouds regularly outnumber the growth ceiling, and an initialization already sitting on it leaves IGS no room to refine anything: every later step just swaps rows. 0 keeps every input point. [source](../../photara/include/splat/options.hpp#L103) |
-| `refine_stop_num_iter` | read/write | `unsigned` | `{2'500}` | IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter). [source](../../photara/include/splat/options.hpp#L107) |
-| `densify_score_power` | read/write | `float` | `{0.4F}` | Per-view exponent after image-to-splat reduction, before window averaging. EMC is the only strategy that scores by image error. [source](../../photara/include/splat/options.hpp#L124) |
-| `densify_loss_map_power` | read/write | `float` | `{4.F}` | Per-pixel error-map exponent before raster scatter ( default 4). [source](../../photara/include/splat/options.hpp#L126) |
-| `densify_growth_factor` | read/write | `float` | `{0.F}` | Extra Gaussians per refine as a multiplier of the live count. Values <= 1 fall back to densify_select_fraction of above-threshold rows. [source](../../photara/include/splat/options.hpp#L129) |
-| `shape_erank_reg` | read/write | `float` | `{0.F}` | Per-splat shape regularizers, added to scale/quaternion gradients. [source](../../photara/include/splat/options.hpp#L131) |
-| `shape_axis_ratio_reg` | read/write | `float` | `{0.F}` | Soft penalty only above the axis-ratio threshold; zero weight disables it. [source](../../photara/include/splat/options.hpp#L133) |
-| `shape_max_axis_ratio` | read/write | `float` | `{100.F}` |  [source](../../photara/include/splat/options.hpp#L134) |
-| `shape_erank_s3_reg` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L135) |
-| `shape_quat_norm_reg` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L136) |
-| `oversize_screen_limit` | read/write | `float` | `{0.F}` | Strategy-neutral on-screen size control: every step spends a share of one scale learning-rate step per octave over the limit, and each refinement hard-clips the remainder (bounded by the hardness factor). [source](../../photara/include/splat/options.hpp#L141) |
-| `oversize_penalty` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L142) |
-| `oversize_clip_hardness` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L143) |
-| `densify_oversize_split_fraction` | read/write | `float` | `{0.F}` | Share of the growth budget spent on oversized (screen-cap) parents. 0 keeps the default "split every oversized row that fits" path. [source](../../photara/include/splat/options.hpp#L146) |
-| `densify_oversize_score_blend` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L147) |
-| `densify_clip_screen_size` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L148) |
-| `densify_screen_clip_hardness` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L149) |
-| `densify_revised_noise` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L150) |
-| `densify_relocate` | read/write | `bool` | `{false}` | Sample replacement parents by densify score rather than opacity. [source](../../photara/include/splat/options.hpp#L152) |
-| `densify_keep_parent_adam` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L153) |
-| `dense_recycle_fraction` | read/write | `float` | `{0.01F}` | Dense MVS points already cover the surface. Recycle only a small part of the budget per refinement and grow more conservatively than sparse ADC. [source](../../photara/include/splat/options.hpp#L156) |
-| `dense_growth_fraction` | read/write | `float` | `{0.005F}` |  [source](../../photara/include/splat/options.hpp#L157) |
-| `mean_noise_weight` | read/write | `float` | `{50.F}` |  [source](../../photara/include/splat/options.hpp#L165) |
-| `initial_opacity` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L170) |
-| `initial_scale` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L171) |
-| `dense_structure_freeze_iter` | read/write | `unsigned` | `{1'000}` | Freeze dense MVS structure after its warm-up and keep optimizing the progressively enabled SH bands. dense_adaptive may still recycle/split rows after this point, without applying further structure Adam steps. 0 disables the freeze [source](../../photara/include/splat/options.hpp#L178) |
-| `structure_freeze_iter` | read/write | `unsigned` | `{0}` | Optional all-input diagnostic: stop means/scale/quaternion/opacity Adam after this iteration while continuing SH optimization. 0 disables the freeze [source](../../photara/include/splat/options.hpp#L181) |
-| `sh_regularization_weight` | read/write | `float` | `{0.001F}` | Mean-square prior on non-DC SH coefficients; zero disables. [source](../../photara/include/splat/options.hpp#L189) |
-| `opacity_regularization_weight` | read/write | `float` | `{0.F}` | Optional per-Gaussian priors; independent of colour correction. [source](../../photara/include/splat/options.hpp#L191) |
-| `scale_regularization_weight` | read/write | `float` | `{0.F}` | Mean actual scale exp(log_scale), with remaining-progress^0.4 decay. [source](../../photara/include/splat/options.hpp#L193) |
-| `beta1` | read/write | `float` | `{0.9F}` |  [source](../../photara/include/splat/options.hpp#L194) |
-| `beta2` | read/write | `float` | `{0.999F}` |  [source](../../photara/include/splat/options.hpp#L195) |
-| `adam_epsilon` | read/write | `float` | `{1e-15F}` | The raster gradients are averaged over every image pixel; a value as large as 1e-8 would suppress useful geometry updates. [source](../../photara/include/splat/options.hpp#L198) |
-| `bilateral_grid_shared` | read/write | `bool` | `{true}` | One grid shared by every view (the default) or one grid per view. A per-view grid has more free parameters than the view has pixels and absorbs that frame's appearance, which costs held-out quality even with the mean projection below; the shared form can only learn variation that is consistent across views (lens shading, vignetting, sensor response). [source](../../photara/include/splat/options.hpp#L211) |
-| `bilateral_grid_deviation_limit` | read/write | `float` | `{0.5F}` | Maximum distance of any grid coefficient from its identity value. Zero disables the bound (not recommended). [source](../../photara/include/splat/options.hpp#L221) |
-| `bilateral_grid_identity_projection` | read/write | `bool` | `{true}` | Keep every view's grid mean on the identity affine after each update. The matrix stays in the option struct (rather than being unconditional) so the projection can be ablated; disabling it is not recommended, since an unconstrained mean absorbs the global colour mapping. [source](../../photara/include/splat/options.hpp#L226) |
-| `ppisp_identity_projection` | read/write | `bool` | `{true}` | PPISP is a training-only transform. Without an exact identity gauge, the per-view table can absorb the scene's canonical colour while the exported Gaussians become progressively darker. Projection removes the shared component after every step; the bounds keep sparsely visited views from developing implausible exposure / white-balance corrections. [source](../../photara/include/splat/options.hpp#L235) |
-| `ppisp_exposure_limit` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L236) |
-| `ppisp_color_limit` | read/write | `float` | `{2.F}` |  [source](../../photara/include/splat/options.hpp#L237) |
-| `ppisp_reg_vig_center` | read/write | `float` | `{0.02F}` |  [source](../../photara/include/splat/options.hpp#L240) |
-| `ppisp_reg_vig_non_pos` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L241) |
-| `ppisp_reg_vig_channel_var` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L242) |
-| `ppisp_reg_crf_channel_var` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L243) |
-| `depth_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L248) |
-| `normal_weight` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L249) |
-| `filter_3d_update_interval` | read/write | `unsigned` | `{100}` | Depth-normal geometry training implicitly enables the reference GGGS/Mip-Splatting low-pass filter refresh interval. The auto mode leaves appearance-only 3DGS scale/opacity untouched and enables stable sub-pixel coverage for pinhole geometric supervision. [source](../../photara/include/splat/options.hpp#L272) |
-| `multi_view_depth_bracket` | read/write | `float` | `{0.F}` | Multi-view point-query median-depth seed window. > 0 overrides it, 0 derives it from the scene extent, < 0 keeps the wide +/-200 window. [source](../../photara/include/splat/options.hpp#L280) |
-| `multi_view_depth_tolerance` | read/write | `float` | `{0.F}` | Refinement stops early only for an explicit positive tolerance. The default (<= 0) uses all eight refinements to preserve median gradients. [source](../../photara/include/splat/options.hpp#L283) |
-| `multi_view_max_angle` | read/write | `float` | `{30.F}` |  [source](../../photara/include/splat/options.hpp#L302) |
-| `multi_view_min_distance` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L303) |
-| `multi_view_max_distance` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L304) |
-| `multi_view_robust_ncc` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L306) |
-| `multi_view_ncc_lambda_reference` | read/write | `float` | `{0.45F}` |  [source](../../photara/include/splat/options.hpp#L307) |
-| `multi_view_ncc_sharpness` | read/write | `float` | `{12.F}` |  [source](../../photara/include/splat/options.hpp#L308) |
-| `multi_view_ncc_min_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L309) |
-| `geometry_epsilon` | read/write | `float` | `{1e-3F}` |  [source](../../photara/include/splat/options.hpp#L321) |
-| `filter_mode` | read/write | `SplatFilterMode` | `classic` | Select Classic, Mip2D, Mip3D or the combined Mip ablation. [source](../../photara/include/splat/options.hpp#L87) |
-| `scale_modifier` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L325) |
-| `use_mvs_depth` | read/write | `bool` | `{false}` | Photometric training baseline. Geometry supervision is opt-in and can be added after fixed-model L1+SSIM convergence is verified. [source](../../photara/include/splat/options.hpp#L328) |
-| `use_mvs_normals` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L329) |
-| `ignore_undistortion_border` | read/write | `bool` | `{false}` | In unmasked images, undistortion outside the source is missing data, not black/transparent geometry. Ignore those rays in RGB supervision. [source](../../photara/include/splat/options.hpp#L335) |
-| `adaptive_training_cache` | read/write | `bool` | `{true}` | Expand the host budget when possible. The device budget is a hard upper bound even in adaptive mode. Zero disables the host-side decoded-image cache only; bounded device prefetch remains available independently. [source](../../photara/include/splat/options.hpp#L359) |
-| `training_device_cache_bytes` | read/write | `std::size_t` | `{std::size_t{512} * 1024 * 1024}` | Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it. In adaptive mode this is the floor of the budget. Fixed mode retains the earlier free-VRAM/8 guard and never exceeds the configured value. [source](../../photara/include/splat/options.hpp#L363) |
-| `evaluation_iterations` | read/write | `std::vector<unsigned>` | `default initialization` | Iterations at which the caller may render fixed-view comparison snapshots. [source](../../photara/include/splat/options.hpp#L403) |
-| `preview_interval` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/options.hpp#L404) |
-| `preview_view_index` | read/write | `unsigned` | `{0}` | Live preview camera. 0 is the first captured frame. An optional sidecar file lets the editor change this while training without restarting. [source](../../photara/include/splat/options.hpp#L407) |
-| `preview_view_file` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L408) |
-| `preview_camera_file` | read/write | `std::filesystem::path` | `default initialization` | Optional orbit-camera sidecar written by the editor (W2C + intrinsics). When present and readable it overrides preview_view_index. [source](../../photara/include/splat/options.hpp#L411) |
-| `preview_vis_file` | read/write | `std::filesystem::path` | `default initialization` | Editor visualization mode sidecar: splat / points / rings. [source](../../photara/include/splat/options.hpp#L413) |
-| `preview_ack_file` | read/write | `std::filesystem::path` | `default initialization` | Optional editor acknowledgement sidecar: the number of preview frames it has finished copying out of the shared image. While it is readable the trainer drops a preview instead of waiting for the editor, so a busy editor can never stall the optimizer. [source](../../photara/include/splat/options.hpp#L418) |
+| `checkpoint_path` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L89) |
+| `checkpoint_control_file` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L90) |
+| `resume_checkpoint` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L91) |
+| `checkpoint_interval_seconds` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/options.hpp#L92) |
+| `checkpoint_interval_iterations` | read/write | `unsigned` | `{0}` | Optional iteration cadence, primarily useful for reproducible tests. [source](../../photara/include/splat/options.hpp#L94) |
+| `render_method` | read/write | `RenderMethod` | `{RenderMethod::gaussian_3dgs}` |  [source](../../photara/include/splat/options.hpp#L98) |
+| `rasterization` | read/write | `RasterizationPolicy` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L100) |
+| `popspa_sparsify_every` | read/write | `unsigned` | `{50}` |  [source](../../photara/include/splat/options.hpp#L111) |
+| `popspa_penalty` | read/write | `float` | `{0.0005F}` |  [source](../../photara/include/splat/options.hpp#L112) |
+| `popspa_reference_weight` | read/write | `float` | `{0.F}` | Canonical input-render preservation during post-training fitting. [source](../../photara/include/splat/options.hpp#L120) |
+| `speedy_pruning` | read/write | `bool` | `{false}` | Speedy-Splat sensitivity pruning (CUDA/Vulkan), opt-in in every mode. start=0 selects two soft and two hard events scaled to the growth/tail phases. A nonzero start selects the explicit periodic CLI schedule. Zero score_views evaluates every training camera, never held-out views. [source](../../photara/include/splat/options.hpp#L130) |
+| `speedy_start` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/options.hpp#L131) |
+| `speedy_every` | read/write | `unsigned` | `{3'000}` |  [source](../../photara/include/splat/options.hpp#L132) |
+| `speedy_stop` | read/write | `unsigned` | `{30'000}` |  [source](../../photara/include/splat/options.hpp#L133) |
+| `speedy_score_views` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/options.hpp#L134) |
+| `speedy_soft_ratio` | read/write | `float` | `{0.3F}` | ADC-IGS quality/speed preset; paper ratios 0.8/0.3 remain explicit options. [source](../../photara/include/splat/options.hpp#L136) |
+| `speedy_hard_ratio` | read/write | `float` | `{0.2F}` |  [source](../../photara/include/splat/options.hpp#L137) |
+| `live_subject_bounds_file` | read/write | `std::filesystem::path` | `default initialization` | Studio updates this SubjectBounds file while object-mode training runs. An empty path keeps the scene's initial bounds fixed. [source](../../photara/include/splat/options.hpp#L478) |
+| `backend` | read/write | `TrainingBackend` | `{TrainingBackend::cuda}` | The orchestration, schedules and optimizer policy are shared. This selects the device for training tensors and backend GPU primitives. [source](../../photara/include/splat/options.hpp#L97) |
+| `iterations` | read/write | `unsigned` | `{30'000}` |  [source](../../photara/include/splat/options.hpp#L101) |
+| `sh_degree` | read/write | `unsigned` | `{3}` |  [source](../../photara/include/splat/options.hpp#L102) |
+| `sh_degree_interval` | read/write | `unsigned` | `{1'000}` |  [source](../../photara/include/splat/options.hpp#L103) |
+| `seed` | read/write | `unsigned` | `{42}` |  [source](../../photara/include/splat/options.hpp#L104) |
+| `log_interval` | read/write | `unsigned` | `{100}` | Console training stats every N steps. Zero logs only the first and last. [source](../../photara/include/splat/options.hpp#L139) |
+| `profile_cuda` | read/write | `bool` | `{false}` | Optional windowed CUDA-event timings for the GGGS training loop. Disabled by default so production training does not create or record profiling events. The interval is capped by the trainer to avoid an accidentally unbounded CUDA event pool. [source](../../photara/include/splat/options.hpp#L144) |
+| `cuda_profile_interval` | read/write | `unsigned` | `{100}` |  [source](../../photara/include/splat/options.hpp#L145) |
+| `input_is_dense` | read/write | `bool` | `{true}` | Sparse COLMAP initialization enables dynamic Gaussian management. Dense MVS initialization only enables it for the explicit dense_adaptive mode. [source](../../photara/include/splat/options.hpp#L148) |
+| `enable_densification` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L149) |
+| `densification_strategy` | read/write | `DensificationStrategy` | `{DensificationStrategy::adc_igs}` |  [source](../../photara/include/splat/options.hpp#L150) |
+| `densification_cap` | read/write | `std::size_t` | `{3'000'000}` | Growth ceiling while densify is enabled. Initialization uses the full source cloud unless initial_point_budget asks for a subset. [source](../../photara/include/splat/options.hpp#L153) |
+| `refine_start_iter` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L159) |
+| `refine_stop_iter` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L160) |
+| `grow_stop_iter` | read/write | `unsigned` | `{0}` | Iteration after which densification stops adding parents and only prunes, replaces recovered slots, splits oversized splats and decays. 0 selects the Brush proportion (half of `iterations`, resolved by apply_strategy_defaults); an explicit value always wins. [source](../../photara/include/splat/options.hpp#L167) |
+| `refine_every` | read/write | `unsigned` | `{0}` | 0 selects the strategy preset [source](../../photara/include/splat/options.hpp#L168) |
+| `opacity_reset_every` | read/write | `unsigned` | `{3'000}` |  [source](../../photara/include/splat/options.hpp#L169) |
+| `densify_gradient_threshold` | read/write | `float` | `{0.0025F}` | Shared split/growth controls. Strategies may differ in how they build the candidate set, but should not expose duplicate threshold knobs. [source](../../photara/include/splat/options.hpp#L172) |
+| `densify_select_fraction` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L173) |
+| `densify_screen_threshold` | read/write | `float` | `{0.25F}` | Broad semi-transparent splats that own the rendered median depth wrap meshes in a floater shell. Start size repair past a quarter frame. [source](../../photara/include/splat/options.hpp#L176) |
+| `prune_opacity` | read/write | `float` | `{1.F / 255.F}` |  [source](../../photara/include/splat/options.hpp#L213) |
+| `opacity_decay` | read/write | `float` | `{0.004F}` |  [source](../../photara/include/splat/options.hpp#L214) |
+| `scale_decay` | read/write | `float` | `{0.F}` | Optional per-refine scale shrink, tapered by remaining training progress. Disabled by default: the 2026-09-18 six-seed paired A/B found no detectable quality effect on either ADC strategy (artifacts/scale_decay_ab_20260918), and Brush does not decay scales. [source](../../photara/include/splat/options.hpp#L219) |
+| `background_noise_strength` | read/write | `float` | `{0.F}` | Uniform noise around a black background, clamped to [0,1]. Dense MVS input trains with a fixed background; both ADC strategies run with Brush's 0.1 through the reconstruction CLI. [source](../../photara/include/splat/options.hpp#L224) |
+| `initialize_scale_from_knn` | read/write | `bool` | `{false}` | Initialize isotropic scales from the RMS distance to the three nearest neighbours in the selected input cloud. [source](../../photara/include/splat/options.hpp#L229) |
+| `means_lr` | read/write | `float` | `{1.6e-4F}` |  [source](../../photara/include/splat/options.hpp#L237) |
+| `scales_lr` | read/write | `float` | `{5e-3F}` |  [source](../../photara/include/splat/options.hpp#L238) |
+| `opacities_lr` | read/write | `float` | `{5e-2F}` |  [source](../../photara/include/splat/options.hpp#L239) |
+| `quaternions_lr` | read/write | `float` | `{1e-3F}` |  [source](../../photara/include/splat/options.hpp#L240) |
+| `sh0_lr` | read/write | `float` | `{2.5e-3F}` |  [source](../../photara/include/splat/options.hpp#L241) |
+| `sh_rest_lr` | read/write | `float` | `{1.25e-4F}` |  [source](../../photara/include/splat/options.hpp#L242) |
+| `photometric_weight` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L254) |
+| `ssim_weight` | read/write | `float` | `{0.2F}` |  [source](../../photara/include/splat/options.hpp#L255) |
+| `use_bilateral_grid` | read/write | `bool` | `{false}` | Training-time colour correction for auto-exposure / auto-white-balance drift in video captures. Both transforms are applied to the rendered image the photometric loss sees; evaluation, preview and exported models keep canonical appearance. [source](../../photara/include/splat/options.hpp#L260) |
+| `bilateral_grid_width` | read/write | `unsigned` | `{16}` |  [source](../../photara/include/splat/options.hpp#L267) |
+| `bilateral_grid_height` | read/write | `unsigned` | `{16}` |  [source](../../photara/include/splat/options.hpp#L268) |
+| `bilateral_grid_luma` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/splat/options.hpp#L269) |
+| `bilateral_grid_lr` | read/write | `float` | `{2e-4F}` | The grid is a low-resolution LUT with Adam; a large rate diverges and produces non-finite renders, so the default is deliberately gentle. [source](../../photara/include/splat/options.hpp#L272) |
+| `bilateral_grid_tv_weight` | read/write | `float` | `{10.F}` |  [source](../../photara/include/splat/options.hpp#L273) |
+| `use_ppisp` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L282) |
+| `ppisp_type` | read/write | `PpispParamType` | `{PpispParamType::no_crf_no_vig}` |  [source](../../photara/include/splat/options.hpp#L283) |
+| `ppisp_lr` | read/write | `float` | `{2e-3F}` |  [source](../../photara/include/splat/options.hpp#L284) |
+| `ppisp_clamp_output` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L299) |
+| `ppisp_reg_exposure_mean` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L293) |
+| `ppisp_reg_color_mean` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L294) |
+| `ppisp_before_bilagrid` | read/write | `bool` | `{true}` | When both PPISP and the bilateral grid are enabled, PPISP runs first (exposure and white balance, then the spatially varying affine). [source](../../photara/include/splat/options.hpp#L302) |
+| `use_depth_normal_loss` | read/write | `bool` | `{false}` | GGGS meshing loss from the Python reference: cosine consistency between the rasterized Gaussian normal and the normal differentiated from the rendered median-depth map. [source](../../photara/include/splat/options.hpp#L313) |
+| `depth_normal_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L314) |
+| `depth_normal_from_iter` | read/write | `unsigned` | `{7'000}` | Shared start iteration for DN, AI depth/normal priors and multi-view losses. [source](../../photara/include/splat/options.hpp#L316) |
+| `multi_view_geo_weight` | read/write | `float` | `{0.F}` | GGGS multi-view PatchMatch supervision. Geometry uses a differentiable depth round trip through a nearby camera; NCC uses the reference plane-induced homography and the original image pair. [source](../../photara/include/splat/options.hpp#L333) |
+| `multi_view_ncc_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L334) |
+| `multi_view_num` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/splat/options.hpp#L341) |
+| `multi_view_tail_interval` | read/write | `unsigned` | `{1}` | Subsample the expensive multi-view objective after ADC growth stops. Active-step weights are multiplied by this interval so the stochastic objective remains unchanged in expectation. [source](../../photara/include/splat/options.hpp#L345) |
+| `multi_view_adaptive_frequency` | read/write | `bool` | `{false}` | Optional quality-first replacement for the fixed grow-stop gate. The trainer observes topology churn, depth round-trip consistency, and the opacity/scale distribution at refinement boundaries. It only raises the interval after several stable windows and immediately restores every-step supervision when any metric drifts. [source](../../photara/include/splat/options.hpp#L351) |
+| `multi_view_adaptive_max_interval` | read/write | `unsigned` | `{2}` |  [source](../../photara/include/splat/options.hpp#L352) |
+| `multi_view_adaptive_stable_refinements` | read/write | `unsigned` | `{5}` |  [source](../../photara/include/splat/options.hpp#L353) |
+| `multi_view_adaptive_count_threshold` | read/write | `float` | `{0.005F}` |  [source](../../photara/include/splat/options.hpp#L354) |
+| `multi_view_adaptive_churn_threshold` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L355) |
+| `multi_view_adaptive_depth_threshold` | read/write | `float` | `{0.02F}` |  [source](../../photara/include/splat/options.hpp#L356) |
+| `multi_view_adaptive_min_depth_consistency` | read/write | `float` | `{0.5F}` |  [source](../../photara/include/splat/options.hpp#L357) |
+| `multi_view_adaptive_distribution_threshold` | read/write | `float` | `{0.025F}` |  [source](../../photara/include/splat/options.hpp#L358) |
+| `multi_view_pixel_noise_threshold` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L362) |
+| `use_mask` | read/write | `bool` | `{false}` | Mask training. `masked` treats zero-mask pixels as missing observations: RGB/geometry are supervised only where the mask is valid and alpha is not constrained. `transparent` treats the mask as the desired output alpha and adds full-image BCE(predicted alpha, mask). [source](../../photara/include/splat/options.hpp#L371) |
+| `alpha_mode` | read/write | `AlphaMode` | `{AlphaMode::masked}` |  [source](../../photara/include/splat/options.hpp#L372) |
+| `match_alpha_weight` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L373) |
+| `mask_dir` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L374) |
+| `minimum_scale_fraction` | read/write | `float` | `{1e-4F}` |  [source](../../photara/include/splat/options.hpp#L375) |
+| `maximum_scale_fraction` | read/write | `float` | `{0.002F}` |  [source](../../photara/include/splat/options.hpp#L376) |
+| `constrain_scale_range` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L377) |
+| `use_source_resolution` | read/write | `bool` | `{false}` | Train against source-resolution undistorted images rather than the MVS working resolution. [source](../../photara/include/splat/options.hpp#L386) |
+| `undistort_to_pinhole` | read/write | `bool` | `{false}` | When true, resample OpenCV fisheye views onto a pinhole working camera. Native fisheye/equirectangular rasterization is used otherwise. Equirect cannot be undistorted and always trains natively. [source](../../photara/include/splat/options.hpp#L393) |
+| `max_image_dimension` | read/write | `unsigned` | `{1'920}` | brush-style dataset controls. Images are resized so their largest dimension does not exceed this value (0 keeps the source resolution), and packed training views are retained in bounded host/device LRUs. Only current reference/neighbour views are expanded to float on CUDA. [source](../../photara/include/splat/options.hpp#L398) |
+| `progressive_resolution` | read/write | `bool` | `{false}` | Coarse-to-fine image schedule. The active linear resolution starts at 1/4, doubles every 3k iterations, and caps at max_image_dimension. Advancing a level clears the previous decoded RGB/mask cache. Library callers opt in explicitly; the reconstruction CLI enables this by default while unit-test configurations remain fixed-size. [source](../../photara/include/splat/options.hpp#L404) |
+| `progressive_resolution_interval` | read/write | `unsigned` | `{3'000}` |  [source](../../photara/include/splat/options.hpp#L405) |
+| `progressive_initial_scale` | read/write | `float` | `{0.25F}` |  [source](../../photara/include/splat/options.hpp#L406) |
+| `training_view_cache_bytes` | read/write | `std::size_t` | `{std::size_t{6} * 1024 * 1024 * 1024}` | Large datasets share this budget between decoded lookahead and lossless compressed supervision, avoiding repeated image decode/undistortion. [source](../../photara/include/splat/options.hpp#L409) |
+| `training_prefetch_views` | read/write | `std::size_t` | `{4}` | Decode and pack upcoming shuffled views on background threads while the GPU processes the current iteration, so a host cache miss does not stall the step on image I/O. Host-side only: all device calls stay on the training thread. Zero disables prefetching. The value is the minimum lookahead; with training_prefetch_adaptive the loader grows it to cover one measured host decode plus one iteration of slack. [source](../../photara/include/splat/options.hpp#L446) |
+| `training_prefetch_adaptive` | read/write | `bool` | `{true}` | Size the prefetch lookahead from the measured host-load and iteration times instead of using training_prefetch_views as a fixed count. Large datasets decode for far longer than one iteration, so a fixed count of four views leaves most of the decode exposed on the critical path. Bounded to 32 views and to 512MB of in-flight packed views. [source](../../photara/include/splat/options.hpp#L452) |
+| `training_device_cache_max_bytes` | read/write | `std::size_t` | `{0}` | Ceiling the adaptive budget may grow to, using the observed device-cache hit rate as feedback and the idle VRAM as a guard. Zero keeps the budget at training_device_cache_bytes: measured on the alameda and iPhone sets, a larger packed-image cache only pays while the uploads are exposed on the critical path, and at 2MP/1M Gaussians they are already hidden behind compute, so the VRAM is better left to the training state. [source](../../photara/include/splat/options.hpp#L426) |
+| `training_async_upload` | read/write | `bool` | `{true}` | Upload decoded views without blocking the training thread. CUDA uses a non-blocking copy stream; Vulkan immediately submits packed-image copies through a mapped staging ring before recording the device unpack. Both backends pre-upload upcoming decoded views within the packed-cache budget. Allocation and enqueue remain on the training thread. Each in-flight transfer owns its staging storage until its completion fence fires. On CUDA the copy engine only writes loader-owned device staging; the packed view is hopped into the cache entry on the compute stream, because pool memory must not be touched by a transfer from another stream (the pool hands blocks between streams and threads without any ordering). Measured -3% iteration time on the alameda and iPhone sets with the integrity check and ten repeat runs clean. [source](../../photara/include/splat/options.hpp#L439) |
+| `evaluation_split_every` | read/write | `unsigned` | `{0}` | Hold out every Nth source view from optimization (0 trains on all). The caller may render these views through the evaluation callback. Zero trains every view; the reconstruction CLI keeps that default and only holds out views when the user asks for a stride. Held-out metrics need an explicit --splat-eval-split-every N. [source](../../photara/include/splat/options.hpp#L458) |
+| `use_normal_field` | read/write | `bool` | `{false}` | GaussianWrapping normal field. Four features per Gaussian encode normalize(xyz) * tanh(w), and are aligned to normals differentiated from the rendered median-depth map. [source](../../photara/include/splat/options.hpp#L320) |
+| `normal_field_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L321) |
+| `normal_field_depth_ratio` | read/write | `float` | `{0.6F}` |  [source](../../photara/include/splat/options.hpp#L322) |
+| `normal_field_from_iter` | read/write | `unsigned` | `{20'001}` |  [source](../../photara/include/splat/options.hpp#L323) |
+| `normal_features_lr` | read/write | `float` | `{0.025F}` |  [source](../../photara/include/splat/options.hpp#L324) |
+| `initial_point_budget` | read/write | `std::size_t` | `{0}` | Upper bound on the Gaussians built from the input point cloud. Sparse SfM clouds regularly outnumber the growth ceiling, and an initialization already sitting on it leaves IGS no room to refine anything: every later step just swaps rows. 0 keeps every input point. [source](../../photara/include/splat/options.hpp#L158) |
+| `refine_stop_num_iter` | read/write | `unsigned` | `{2'500}` | IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter). [source](../../photara/include/splat/options.hpp#L162) |
+| `densify_score_power` | read/write | `float` | `{0.4F}` | Per-view exponent after image-to-splat reduction, before window averaging. EMC is the only strategy that scores by image error. [source](../../photara/include/splat/options.hpp#L179) |
+| `densify_loss_map_power` | read/write | `float` | `{4.F}` | Per-pixel error-map exponent before raster scatter ( default 4). [source](../../photara/include/splat/options.hpp#L181) |
+| `densify_growth_factor` | read/write | `float` | `{0.F}` | Extra Gaussians per refine as a multiplier of the live count. Values <= 1 fall back to densify_select_fraction of above-threshold rows. [source](../../photara/include/splat/options.hpp#L184) |
+| `popspa` | read/write | `bool` | `{false}` | Optional post-reconstruction POPSpa compaction (two pruning stages and optimize-sparsify + fine-tuning). Ratios refer to the input trained model. [source](../../photara/include/splat/options.hpp#L107) |
+| `popspa_keep_ratio` | read/write | `float` | `{0.2F}` |  [source](../../photara/include/splat/options.hpp#L108) |
+| `popspa_refine_iterations` | read/write | `unsigned` | `{5'000}` |  [source](../../photara/include/splat/options.hpp#L109) |
+| `popspa_finetune_iterations` | read/write | `unsigned` | `{5'000}` |  [source](../../photara/include/splat/options.hpp#L110) |
+| `sog_xt_finetune_iterations` | read/write | `unsigned` | `{4'000}` | Separate codec-in-the-loop adaptation, never enabled by plain export. [source](../../photara/include/splat/options.hpp#L122) |
+| `sog_xt_batch_size` | read/write | `unsigned` | `{8}` |  [source](../../photara/include/splat/options.hpp#L123) |
+| `sog_xt_reference_weight` | read/write | `float` | `{2.F}` |  [source](../../photara/include/splat/options.hpp#L124) |
+| `sog_xt_learning_rate_scale` | read/write | `float` | `{0.02F}` |  [source](../../photara/include/splat/options.hpp#L125) |
+| `popspa_prune_cycles` | read/write | `unsigned` | `{4}` | Re-score after each partial removal; one cycle selects a single batch. [source](../../photara/include/splat/options.hpp#L114) |
+| `popspa_geometry_lr_scale` | read/write | `float` | `{1.F}` | Limit covariance drift while redistributing a finished reconstruction. [source](../../photara/include/splat/options.hpp#L116) |
+| `popspa_finetune_lr_scale` | read/write | `float` | `{0.2F}` | Final appearance/shape Adam rates relative to optimize-sparsify rates. [source](../../photara/include/splat/options.hpp#L118) |
+| `shape_erank_reg` | read/write | `float` | `{0.F}` | Per-splat shape regularizers, added to scale/quaternion gradients. [source](../../photara/include/splat/options.hpp#L186) |
+| `shape_axis_ratio_reg` | read/write | `float` | `{0.F}` | Soft penalty only above the axis-ratio threshold; zero weight disables it. [source](../../photara/include/splat/options.hpp#L188) |
+| `shape_max_axis_ratio` | read/write | `float` | `{100.F}` |  [source](../../photara/include/splat/options.hpp#L189) |
+| `shape_erank_s3_reg` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L190) |
+| `shape_quat_norm_reg` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L191) |
+| `oversize_screen_limit` | read/write | `float` | `{0.F}` | Strategy-neutral on-screen size control: every step spends a share of one scale learning-rate step per octave over the limit, and each refinement hard-clips the remainder (bounded by the hardness factor). [source](../../photara/include/splat/options.hpp#L196) |
+| `oversize_penalty` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L197) |
+| `oversize_clip_hardness` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L198) |
+| `densify_oversize_split_fraction` | read/write | `float` | `{0.F}` | Share of the growth budget spent on oversized (screen-cap) parents. 0 keeps the default "split every oversized row that fits" path. [source](../../photara/include/splat/options.hpp#L201) |
+| `densify_oversize_score_blend` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L202) |
+| `densify_clip_screen_size` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L203) |
+| `densify_screen_clip_hardness` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L204) |
+| `densify_revised_noise` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L205) |
+| `densify_relocate` | read/write | `bool` | `{false}` | Sample replacement parents by densify score rather than opacity. [source](../../photara/include/splat/options.hpp#L207) |
+| `densify_keep_parent_adam` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L208) |
+| `dense_recycle_fraction` | read/write | `float` | `{0.01F}` | Dense MVS points already cover the surface. Recycle only a small part of the budget per refinement and grow more conservatively than sparse ADC. [source](../../photara/include/splat/options.hpp#L211) |
+| `dense_growth_fraction` | read/write | `float` | `{0.005F}` |  [source](../../photara/include/splat/options.hpp#L212) |
+| `mean_noise_weight` | read/write | `float` | `{50.F}` |  [source](../../photara/include/splat/options.hpp#L220) |
+| `initial_opacity` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L225) |
+| `initial_scale` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L226) |
+| `dense_structure_freeze_iter` | read/write | `unsigned` | `{1'000}` | Freeze dense MVS structure after its warm-up and keep optimizing the progressively enabled SH bands. dense_adaptive may still recycle/split rows after this point, without applying further structure Adam steps. 0 disables the freeze [source](../../photara/include/splat/options.hpp#L233) |
+| `structure_freeze_iter` | read/write | `unsigned` | `{0}` | Optional all-input diagnostic: stop means/scale/quaternion/opacity Adam after this iteration while continuing SH optimization. 0 disables the freeze [source](../../photara/include/splat/options.hpp#L236) |
+| `sh_regularization_weight` | read/write | `float` | `{0.001F}` | Mean-square prior on non-DC SH coefficients; zero disables. [source](../../photara/include/splat/options.hpp#L244) |
+| `opacity_regularization_weight` | read/write | `float` | `{0.F}` | Optional per-Gaussian priors; independent of colour correction. [source](../../photara/include/splat/options.hpp#L246) |
+| `scale_regularization_weight` | read/write | `float` | `{0.F}` | Mean actual scale exp(log_scale), with remaining-progress^0.4 decay. [source](../../photara/include/splat/options.hpp#L248) |
+| `beta1` | read/write | `float` | `{0.9F}` |  [source](../../photara/include/splat/options.hpp#L249) |
+| `beta2` | read/write | `float` | `{0.999F}` |  [source](../../photara/include/splat/options.hpp#L250) |
+| `adam_epsilon` | read/write | `float` | `{1e-15F}` | The raster gradients are averaged over every image pixel; a value as large as 1e-8 would suppress useful geometry updates. [source](../../photara/include/splat/options.hpp#L253) |
+| `bilateral_grid_shared` | read/write | `bool` | `{true}` | One grid shared by every view (the default) or one grid per view. A per-view grid has more free parameters than the view has pixels and absorbs that frame's appearance, which costs held-out quality even with the mean projection below; the shared form can only learn variation that is consistent across views (lens shading, vignetting, sensor response). [source](../../photara/include/splat/options.hpp#L266) |
+| `bilateral_grid_deviation_limit` | read/write | `float` | `{0.5F}` | Maximum distance of any grid coefficient from its identity value. Zero disables the bound (not recommended). [source](../../photara/include/splat/options.hpp#L276) |
+| `bilateral_grid_identity_projection` | read/write | `bool` | `{true}` | Keep every view's grid mean on the identity affine after each update. The matrix stays in the option struct (rather than being unconditional) so the projection can be ablated; disabling it is not recommended, since an unconstrained mean absorbs the global colour mapping. [source](../../photara/include/splat/options.hpp#L281) |
+| `ppisp_identity_projection` | read/write | `bool` | `{true}` | PPISP is a training-only transform. Without an exact identity gauge, the per-view table can absorb the scene's canonical colour while the exported Gaussians become progressively darker. Projection removes the shared component after every step; the bounds keep sparsely visited views from developing implausible exposure / white-balance corrections. [source](../../photara/include/splat/options.hpp#L290) |
+| `ppisp_exposure_limit` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L291) |
+| `ppisp_color_limit` | read/write | `float` | `{2.F}` |  [source](../../photara/include/splat/options.hpp#L292) |
+| `ppisp_reg_vig_center` | read/write | `float` | `{0.02F}` |  [source](../../photara/include/splat/options.hpp#L295) |
+| `ppisp_reg_vig_non_pos` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L296) |
+| `ppisp_reg_vig_channel_var` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L297) |
+| `ppisp_reg_crf_channel_var` | read/write | `float` | `{0.1F}` |  [source](../../photara/include/splat/options.hpp#L298) |
+| `depth_weight` | read/write | `float` | `{0.05F}` |  [source](../../photara/include/splat/options.hpp#L303) |
+| `normal_weight` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L304) |
+| `filter_3d_update_interval` | read/write | `unsigned` | `{100}` | Depth-normal geometry training implicitly enables the reference GGGS/Mip-Splatting low-pass filter refresh interval. The auto mode leaves appearance-only 3DGS scale/opacity untouched and enables stable sub-pixel coverage for pinhole geometric supervision. [source](../../photara/include/splat/options.hpp#L329) |
+| `multi_view_depth_bracket` | read/write | `float` | `{0.F}` | Multi-view point-query median-depth seed window. > 0 overrides it, 0 derives it from the scene extent, < 0 keeps the wide +/-200 window. [source](../../photara/include/splat/options.hpp#L337) |
+| `multi_view_depth_tolerance` | read/write | `float` | `{0.F}` | Refinement stops early only for an explicit positive tolerance. The default (<= 0) uses all eight refinements to preserve median gradients. [source](../../photara/include/splat/options.hpp#L340) |
+| `multi_view_max_angle` | read/write | `float` | `{30.F}` |  [source](../../photara/include/splat/options.hpp#L359) |
+| `multi_view_min_distance` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/options.hpp#L360) |
+| `multi_view_max_distance` | read/write | `float` | `{1.5F}` |  [source](../../photara/include/splat/options.hpp#L361) |
+| `multi_view_robust_ncc` | read/write | `bool` | `{true}` |  [source](../../photara/include/splat/options.hpp#L363) |
+| `multi_view_ncc_lambda_reference` | read/write | `float` | `{0.45F}` |  [source](../../photara/include/splat/options.hpp#L364) |
+| `multi_view_ncc_sharpness` | read/write | `float` | `{12.F}` |  [source](../../photara/include/splat/options.hpp#L365) |
+| `multi_view_ncc_min_weight` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L366) |
+| `geometry_epsilon` | read/write | `float` | `{1e-3F}` |  [source](../../photara/include/splat/options.hpp#L378) |
+| `filter_mode` | read/write | `SplatFilterMode` | `{SplatFilterMode::classic}` |  [source](../../photara/include/splat/options.hpp#L99) |
+| `scale_modifier` | read/write | `float` | `{1.F}` |  [source](../../photara/include/splat/options.hpp#L379) |
+| `use_mvs_depth` | read/write | `bool` | `{false}` | Photometric training baseline. Geometry supervision is opt-in and can be added after fixed-model L1+SSIM convergence is verified. [source](../../photara/include/splat/options.hpp#L382) |
+| `lambda_d` | read/write | `float` | `{0.F}` | Independent AI priors, already aligned to scene units and training cameras. Zero disables loading/rendering for that prior. Does not enable DN/meshing. [source](../../photara/include/splat/options.hpp#L307) |
+| `lambda_n` | read/write | `float` | `{0.F}` |  [source](../../photara/include/splat/options.hpp#L308) |
+| `prior_directory` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L309) |
+| `use_mvs_normals` | read/write | `bool` | `{false}` |  [source](../../photara/include/splat/options.hpp#L383) |
+| `ignore_undistortion_border` | read/write | `bool` | `{false}` | In unmasked images, undistortion outside the source is missing data, not black/transparent geometry. Ignore those rays in RGB supervision. [source](../../photara/include/splat/options.hpp#L389) |
+| `adaptive_training_cache` | read/write | `bool` | `{true}` | Expand the host budget when possible. The device budget is a hard upper bound even in adaptive mode. Zero disables the host-side decoded-image cache only; bounded device prefetch remains available independently. [source](../../photara/include/splat/options.hpp#L414) |
+| `training_device_cache_bytes` | read/write | `std::size_t` | `{std::size_t{512} * 1024 * 1024}` | Packed RGBA8 plus optional depth/normal cache on CUDA or Vulkan. Zero disables device caching and device-upload lookahead. In adaptive mode this is the floor of the budget. Fixed mode retains the earlier free-VRAM/8 guard and never exceeds the configured value. [source](../../photara/include/splat/options.hpp#L419) |
+| `evaluation_iterations` | read/write | `std::vector<unsigned>` | `default initialization` | Iterations at which the caller may render fixed-view comparison snapshots. [source](../../photara/include/splat/options.hpp#L460) |
+| `preview_interval` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/options.hpp#L461) |
+| `preview_view_index` | read/write | `unsigned` | `{0}` | Live preview camera. 0 is the first captured frame. An optional sidecar file lets the editor change this while training without restarting. [source](../../photara/include/splat/options.hpp#L464) |
+| `preview_view_file` | read/write | `std::filesystem::path` | `default initialization` |  [source](../../photara/include/splat/options.hpp#L465) |
+| `preview_camera_file` | read/write | `std::filesystem::path` | `default initialization` | Optional orbit-camera sidecar written by the editor (W2C + intrinsics). When present and readable it overrides preview_view_index. [source](../../photara/include/splat/options.hpp#L468) |
+| `preview_vis_file` | read/write | `std::filesystem::path` | `default initialization` | Editor visualization mode sidecar: splat / points / rings. [source](../../photara/include/splat/options.hpp#L470) |
+| `preview_ack_file` | read/write | `std::filesystem::path` | `default initialization` | Optional editor acknowledgement sidecar: the number of preview frames it has finished copying out of the shared image. While it is readable the trainer drops a preview instead of waiting for the editor, so a busy editor can never stall the optimizer. [source](../../photara/include/splat/options.hpp#L475) |
 
 Methods: `apply_strategy_defaults()`. See [Python API](python.md) for signatures and behavior.
 
@@ -785,12 +893,12 @@ C++: `splat::DatasetLoadRequest`. Construct with `photara.DatasetRequest()`.
 
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
-| `source` | read/write | `std::filesystem::path` | `default initialization` | A directory for COLMAP/RealityCapture, or a .csv/.mvs file. [source](../../photara/include/splat/dataset.hpp#L27) |
-| `image_directory` | read/write | `std::filesystem::path` | `default initialization` | Image root. Empty uses conventional paths below source. [source](../../photara/include/splat/dataset.hpp#L29) |
-| `initial_point_cloud` | read/write | `std::filesystem::path` | `default initialization` | Optional PLY replacing the source sparse cloud. [source](../../photara/include/splat/dataset.hpp#L31) |
-| `format` | read/write | `DatasetFormat` | `{DatasetFormat::auto_detect}` | Readers probe the path. Leave auto_detect unless a caller must pin one. [source](../../photara/include/splat/dataset.hpp#L33) |
-| `random_initial_point_count` | read/write | `std::size_t` | `{10'000}` | Used only when camera metadata has no initial points. [source](../../photara/include/splat/dataset.hpp#L35) |
-| `seed` | read/write | `std::uint32_t` | `{42}` |  [source](../../photara/include/splat/dataset.hpp#L36) |
+| `source` | read/write | `std::filesystem::path` | `default initialization` | A dataset directory, or a .csv/.mvs/transforms JSON file. [source](../../photara/include/splat/dataset.hpp#L28) |
+| `image_directory` | read/write | `std::filesystem::path` | `default initialization` | Image root. Empty uses conventional paths below source. [source](../../photara/include/splat/dataset.hpp#L30) |
+| `initial_point_cloud` | read/write | `std::filesystem::path` | `default initialization` | Optional PLY replacing the source sparse cloud. [source](../../photara/include/splat/dataset.hpp#L32) |
+| `format` | read/write | `DatasetFormat` | `{DatasetFormat::auto_detect}` | Readers probe the path. Leave auto_detect unless a caller must pin one. [source](../../photara/include/splat/dataset.hpp#L34) |
+| `random_initial_point_count` | read/write | `std::size_t` | `{10'000}` | Used only when camera metadata has no initial points. [source](../../photara/include/splat/dataset.hpp#L36) |
+| `seed` | read/write | `std::uint32_t` | `{42}` |  [source](../../photara/include/splat/dataset.hpp#L37) |
 
 ## TsdfOptions
 
@@ -830,6 +938,7 @@ C++: `splat::PamMeshOptions`. Construct with `photara.PamOptions()`.
 | `refinement_step` | read/write | `float` | `{0.5F}` |  [source](../../photara/include/splat/trainer.hpp#L135) |
 | `mask_background_threshold` | read/write | `float` | `{0.01F}` |  [source](../../photara/include/splat/trainer.hpp#L136) |
 | `occupancy_chunk_size` | read/write | `std::size_t` | `{4'000'000}` | Amortize per-camera Gaussian preparation without reducing samples. [source](../../photara/include/splat/trainer.hpp#L138) |
+| `occupancy_cache_host_budget` | read/write | `std::size_t` | `{0}` | Zero selects a bounded budget from available system memory. Positive values cap immutable CUDA draw lists on the host (bytes, pageable RAM). [source](../../photara/include/splat/trainer.hpp#L141) |
 | `seed` | read/write | `unsigned` | `{0}` |  [source](../../photara/include/splat/trainer.hpp#L142) |
 
 ## SfmScene
@@ -848,6 +957,11 @@ C++: `MvsSceneHandle`. Returned by API calls; no Python constructor is bound.
 | Python field | Access | C++ type | Initializer | Description / declaration |
 |---|---|---|---|---|
 | `warnings` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
+| `dataset_format` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
+| `resolved_source` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
+| `initial_point_cloud` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
+| `generated_initial_points` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
+| `initial_points_dense` | read-only | wrapper field | — | See [result handles](python.md#result-handles). |
 
 Read-only properties: `view_count`, `dense_point_count`, `mesh_vertex_count`, `mesh_face_count`. See [result handles](python.md#result-handles).
 

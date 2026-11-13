@@ -70,21 +70,26 @@ def _load_native():
         if not matches:
             errors.append(f"{directory}: no photara extension")
             continue
-        _add_dll_directories(directory)
-        path = matches[0]
-        spec = importlib.util.spec_from_file_location("photara", path)
-        if spec is None or spec.loader is None:
-            errors.append(f"{path}: unable to create module spec")
-            continue
-        module = importlib.util.module_from_spec(spec)
-        if not getattr(module, "__version__", None):
-            module.__version__ = _read_version()
-        sys.modules["photara"] = module
-        try:
-            spec.loader.exec_module(module)
-            return module
-        except ImportError as error:
-            errors.append(f"{path}: {error}")
+        for path in matches:
+            previous = sys.modules.get("photara")
+            try:
+                _add_dll_directories(directory)
+                spec = importlib.util.spec_from_file_location("photara", path)
+                if spec is None or spec.loader is None:
+                    raise ImportError("unable to create module spec")
+                # Extension DLL loading can fail during module creation too.
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["photara"] = module
+                spec.loader.exec_module(module)
+                if not getattr(module, "__version__", None):
+                    module.__version__ = _read_version()
+                return module
+            except (ImportError, OSError) as error:
+                if previous is None:
+                    sys.modules.pop("photara", None)
+                else:
+                    sys.modules["photara"] = previous
+                errors.append(f"{path}: {error}")
     detail = "\n".join(errors) if errors else "No native build directory found."
     raise ImportError(
         "Unable to load the photara extension. Build with "

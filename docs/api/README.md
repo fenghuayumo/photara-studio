@@ -31,6 +31,22 @@ python scripts/generate_api_reference.py
 python scripts/generate_api_reference.py --check
 ```
 
+After building `photara_python` with `PHOTARA_BUILD_TESTS=ON`, run the binding
+checks with `ctest --test-dir build -C Release -R 'photara\.python\.' --output-on-failure`.
+They cover import/loading, documented runtime fields, model/mesh I/O and CUDA
+training/callback/checkpoint recovery. The training test requires a CUDA device;
+exclude it on hosts without one using `-E 'photara\.python\.training'`.
+When CGAL is found, `photara.python.pam` additionally checks automatic pivot
+seeds and external PLY seeds through extraction, PLY export and reload. Its
+fixtures, meshes and `report.json` are retained under `build/photara/python-pam-validation`.
+
+CGAL is optional for the rest of the Python API but required for PAM. Point
+`CGAL_DIR` at an installed or configured CGAL package before rebuilding
+`photara_python`. The Windows validation configuration uses CGAL 6.1.1 with
+the existing Boost 1.84 and GMP/MPFR from the dependency toolchain; a second
+Boost version is unnecessary. For a local CGAL source checkout, first configure
+it with CMake, then pass that build directory as `-DCGAL_DIR=...` to Photara.
+
 The generator only needs the Python standard library, not CUDA or a compiled
 extension. It resolves direct bound fields against their C++ declarations and
 fails on unresolved fields. It copies existing source comments; fields without

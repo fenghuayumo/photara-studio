@@ -873,9 +873,16 @@ if(PHOTARA_ENABLE_FEATURES)
             Photara::MVS
             Photara::Splat)
         target_compile_features(photara_python PRIVATE cxx_std_20)
+        if(WIN32)
+            add_custom_command(TARGET photara_python POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_python>
+                    $<TARGET_FILE_DIR:photara_python>
+                COMMAND_EXPAND_LISTS)
+        endif()
         if(MSVC)
             target_compile_options(photara_python PRIVATE
-                /W4 /permissive- /EHsc)
+                /W4 /permissive- /EHsc /bigobj)
         else()
             target_compile_options(photara_python PRIVATE
                 -Wall -Wextra -Wpedantic)
@@ -886,6 +893,32 @@ if(PHOTARA_ENABLE_FEATURES)
                 COMMAND "${Python_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_smoke.py"
                     "$<TARGET_FILE_DIR:photara_python>")
+            add_test(NAME photara.python.api
+                COMMAND "${Python_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_api_test.py"
+                    "$<TARGET_FILE_DIR:photara_python>")
+            add_test(NAME photara.python.training
+                COMMAND "${Python_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_training_test.py"
+                    "$<TARGET_FILE_DIR:photara_python>")
+            set_tests_properties(photara.python.training PROPERTIES LABELS "gpu" TIMEOUT 180)
+            set_tests_properties(photara.python.api photara.python.training PROPERTIES
+                FAIL_REGULAR_EXPRESSION "cudaErrorCudartUnloading;nanobind: leaked")
+            if(CGAL_FOUND)
+                add_test(NAME photara.python.pam
+                    COMMAND "${Python_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_pam_test.py"
+                        "$<TARGET_FILE_DIR:photara_python>"
+                        "${CMAKE_CURRENT_BINARY_DIR}/python-pam-validation")
+                set_tests_properties(photara.python.pam PROPERTIES LABELS "gpu" TIMEOUT 180
+                    FAIL_REGULAR_EXPRESSION "cudaErrorCudartUnloading;nanobind: leaked")
+            endif()
+            add_test(NAME photara.python.loader
+                COMMAND "${Python_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_loader_test.py")
+            add_test(NAME photara.python.docs
+                COMMAND "${Python_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/scripts/generate_api_reference.py" --check)
         endif()
     endif()
 
