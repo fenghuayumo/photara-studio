@@ -33,6 +33,11 @@ void save_gaussians(
     const std::filesystem::path& path,
     GaussianFormat format = GaussianFormat::auto_detect);
 
+// Reports stage completion; encoding stages can remain at the same value.
+void save_gaussians_with_progress(
+    const GaussianModel& model, const std::filesystem::path& path,
+    GaussianFormat format, const std::function<void(float)>& progress);
+
 // Export keeps the original quantization and lossless WebP parameters.
 struct SogXtExportOptions {
     std::function<void(float)> progress;

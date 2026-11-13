@@ -581,6 +581,14 @@ fields, defaults and declaration links.
 
 Select **SOG-XT** in Studio's **Export Splat** panel to write a `.sog-xt`
 file. The file can be reopened or dropped into Studio like `.sog` and `.spz`.
+Studio also exports PLY, SOG, SPZ, GLB and USDC in a background task with a
+progress display. PLY reports processed Gaussians, SOG reports encoded attribute
+images, SPZ reports compressed streams, and disk writes report completed bytes.
+Opaque preparation/encoding/copy stages show an activity animation rather than
+a fixed percentage. Successful completion remains visible at 100%. Closing the dialog keeps
+the export running. The C++ `save_gaussians_with_progress` API reports the same
+stage completion events. Existing `save_gaussians` callers remain supported.
+
 SOG-XT export preserves the original quantization, layout search rounds and
 lossless WebP settings (`quality=100`, `method=6`, `exact=1`). The C++
 `save_sog_xt` API accepts an optional stage progress callback through

@@ -256,7 +256,17 @@ void roundtrip(const std::filesystem::path& folder, unsigned n, unsigned degree,
     auto m = fixture(n, degree);
     const auto file = folder / (std::to_string(n) + "." + gaussian_format_extension(format));
     const auto start = std::chrono::steady_clock::now();
-    save_gaussians(m, file, format);
+    float progress = 0;
+    unsigned updates = 0;
+    save_gaussians_with_progress(m, file, format, [&](float value) {
+        require(value >= progress && value <= 1.F, "Export progress is not monotonic");
+        progress = value;
+        ++updates;
+    });
+    require(progress == 1.F && updates >= 2, "Export progress did not complete");
+    if (format == GaussianFormat::sog || format == GaussianFormat::spz ||
+        (format == GaussianFormat::ply && n > 4096))
+        require(updates >= 6, "Export omitted incremental progress updates");
     auto loaded = load_gaussians(file, tinytensor::Device::CPU);
     require(loaded.size() == n && loaded.sh_degree == degree, "Format changed shape or SH degree");
     const auto original = m.sh.to_vector(), decoded = loaded.sh.to_vector();
@@ -793,6 +803,7 @@ int run_tests(int argc, char** argv) {
             throw std::runtime_error("Vulkan test requires Vulkan build");
 #endif
         } else {
+            roundtrip(folder, 8193, 3, GaussianFormat::ply);
             sog_xt_parallel_parity();
             sog_xt_covariance_symmetry();
             sog_xt(folder);

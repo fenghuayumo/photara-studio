@@ -619,6 +619,8 @@ constexpr Entry k_entries[] = {
     {"PlayCanvas coordinates", "PlayCanvas 坐标系", "PlayCanvas 座標系", "PlayCanvas 좌표계"},
     {"New output folder", "新建输出文件夹", "新しい出力フォルダー", "새 출력 폴더"},
     {"SOG-XT compressed Gaussians (.sog-xt).", "SOG-XT 压缩高斯（.sog-xt）。", "SOG-XT 圧縮ガウス (.sog-xt)。", "SOG-XT 압축 가우시안 (.sog-xt)."},
+    {"Exporting splat...", "正在导出高斯模型…", "ガウシアンをエクスポート中…", "가우시안 내보내는 중…"},
+    {"Progress updates when each export stage completes.", "进度在各导出阶段完成时更新。", "各エクスポート段階の完了時に進捗が更新されます。", "각 내보내기 단계가 완료되면 진행률이 갱신됩니다."},
     {"Encoding SOG-XT...", "正在编码 SOG-XT…", "SOG-XT をエンコード中…", "SOG-XT 인코딩 중…"},
     {"Stop processing", "停止处理", "処理を停止", "처리 중지"},
     {"Browse selects the parent of a new folder.", "浏览用于选择新输出文件夹的父目录。", "参照で新しいフォルダーの親を選択します。", "찾아보기에서 새 폴더의 상위 폴더를 선택합니다."},

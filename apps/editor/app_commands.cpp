@@ -2663,13 +2663,14 @@ void poll_splat_export(App& app) {
     try {
         state.job.get();
         state.error.clear();
+        if (state.progress) state.progress->store(1.F);
         set_message(app, "Exported splat assets: " + path_to_utf8(state.output), theme::success);
     } catch (const std::exception& error) {
+        state.progress.reset();
         state.error = tr(error.what());
         set_message(app, state.error, theme::danger);
     }
     state.cancel.reset();
-    state.progress.reset();
 }
 
 // Export source model. A multi-model session composes the same merged cloud
@@ -2751,39 +2752,31 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
         const auto source_ext = lower_path_extension(source);
         // Baking changes the exported representation, so it must be serialized
         // even when the source and destination use the same file format.
-        if (!app.splat_export.bake_mip3d && !from_edit && !composed_export &&
-            export_degree >= model.sh_degree && !source.empty() &&
-            source_ext == dest_ext && copy_existing_file(source, out)) {
-            app.settings.splat_format =
-                splat_settings_format_from_export(app.splat_export.format);
-            set_message(app, "Exported splat", theme::success);
-            return true;
-        }
+        const bool can_copy = !app.splat_export.bake_mip3d && !from_edit &&
+            !composed_export && export_degree >= model.sh_degree &&
+            !source.empty() && source_ext == dest_ext;
         photara::splat::restrict_sh_degree(model, export_degree);
-        if (format == photara::splat::GaussianFormat::sog_xt) {
-            app.splat_export.output = std::filesystem::absolute(out);
-            app.splat_export.error.clear();
-            app.splat_export.cancel.reset();
-            auto progress = std::make_shared<std::atomic<float>>(0.F);
-            app.splat_export.progress = progress;
-            photara::splat::SogXtExportOptions options;
-            options.progress = [progress](float p) { progress->store(p); };
-            app.splat_export.job = std::async(std::launch::async,
-                [model = std::move(model), out = app.splat_export.output, options] {
-                    photara::splat::save_sog_xt(model, out, options);
-                });
-            app.splat_export.show = true;
-            app.settings.splat_format = splat_settings_format_from_export(app.splat_export.format);
-            set_message(app, "Encoding SOG-XT...", theme::success);
-            return true;
-        }
-        photara::splat::save_gaussians(model, out, format);
-        app.settings.splat_format =
-            splat_settings_format_from_export(app.splat_export.format);
-        std::string message = "Exported splat (SH ";
-        message += std::to_string(export_degree);
-        message += ")";
-        set_message(app, message, theme::success);
+        app.splat_export.output = std::filesystem::absolute(out);
+        app.splat_export.error.clear();
+        app.splat_export.cancel.reset();
+        auto progress = std::make_shared<std::atomic<float>>(0.F);
+        app.splat_export.progress = progress;
+        app.splat_export.job = std::async(std::launch::async,
+            [model = std::move(model), out = app.splat_export.output,
+             source, can_copy, format, progress] {
+                if (can_copy) {
+                    progress->store(.05F);
+                    if (copy_existing_file(source, out)) {
+                        progress->store(1.F);
+                        return;
+                    }
+                }
+                photara::splat::save_gaussians_with_progress(model, out, format,
+                    [progress](float p) { progress->store(p); });
+            });
+        app.splat_export.show = true;
+        app.settings.splat_format = splat_settings_format_from_export(app.splat_export.format);
+        set_message(app, "Exporting splat...", theme::success);
         return true;
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);

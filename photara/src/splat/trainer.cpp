@@ -3097,6 +3097,10 @@ RenderMetrics render_evaluation_png(
 }
 
 void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path& path) {
+    save_gaussians_ply_with_progress(model, path, {});
+}
+void save_gaussians_ply_with_progress(const GaussianModel& model,
+    const std::filesystem::path& path, const std::function<void(float)>& progress) {
     const std::size_t count = model.size();
     const std::size_t bases = model.sh.shape()[1];
     // Keep CPU snapshots by reference, including the final shared-memory
@@ -3184,7 +3188,10 @@ void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path&
         if (block.size() == block.capacity())
             flush();
     };
+    if (progress) progress(.1F);
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
+        if (progress && gaussian % 4096 == 0)
+            progress(.1F + .88F * float(gaussian) / float(count));
         for (int axis = 0; axis < 3; ++axis)
             append(means[3 * gaussian + axis]);
         append(0.F);
@@ -3211,6 +3218,7 @@ void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path&
     output.close();
     if (!output)
         throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
+    if (progress) progress(1.F);
 }
 
 GaussianModel load_gaussians_ply(

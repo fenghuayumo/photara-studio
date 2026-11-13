@@ -111,7 +111,8 @@ void append_u64(Bytes& bytes, const std::uint64_t value) {
     return bytes;
 }
 
-void write_file(const std::filesystem::path& path, const Bytes& bytes) {
+void write_file(const std::filesystem::path& path, const Bytes& bytes,
+                const std::function<void(float)>& progress = {}) {
     if (!path.parent_path().empty()) {
         std::error_code error;
         std::filesystem::create_directories(path.parent_path(), error);
@@ -122,10 +123,15 @@ void write_file(const std::filesystem::path& path, const Bytes& bytes) {
     std::ofstream output(path, std::ios::binary);
     if (!output)
         throw std::runtime_error("Failed to create splat file: " + path.string());
-    if (!bytes.empty())
-        output.write(
-            reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
+    constexpr std::size_t chunk = 1024 * 1024;
+    for (std::size_t offset = 0; offset < bytes.size(); offset += chunk) {
+        const auto size = std::min(chunk, bytes.size() - offset);
+        output.write(reinterpret_cast<const char*>(bytes.data() + offset),
+                     static_cast<std::streamsize>(size));
+        if (!output) throw std::runtime_error("Failed to write splat file: " + path.string());
+        if (progress) progress(.8F + .19F * float(offset + size) / float(bytes.size()));
+    }
+    output.close();
     if (!output)
         throw std::runtime_error("Failed to write splat file: " + path.string());
 }
@@ -878,7 +884,7 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     return output;
 }
 
-[[nodiscard]] Bytes save_spz_v4(const GaussianModel& model) {
+[[nodiscard]] Bytes save_spz_v4(const GaussianModel& model, const std::function<void(float)>& progress = {}) {
     std::size_t count = 0;
     std::size_t bases = 0;
     validate_model_shape(model, count, bases);
@@ -954,8 +960,11 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
                                               &packed_scales, &packed_rotations, &packed_sh};
     std::vector<Bytes> compressed;
     compressed.reserve(streams.size());
-    for (const Bytes* stream : streams)
+    if (progress) progress(.2F);
+    for (const Bytes* stream : streams) {
         compressed.push_back(zstd_compress(*stream));
+        if (progress) progress(.2F + .58F * float(compressed.size()) / float(streams.size()));
+    }
     Bytes output;
     output.reserve(32U + streams.size() * 16U);
     // NgspFileHeader, version 4, no extensions, six streams.
@@ -1178,7 +1187,7 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     return model;
 }
 
-[[nodiscard]] Bytes save_sog(const GaussianModel& model) {
+[[nodiscard]] Bytes save_sog(const GaussianModel& model, const std::function<void(float)>& progress = {}) {
     std::size_t count = 0;
     std::size_t bases = 0;
     validate_model_shape(model, count, bases);
@@ -1348,14 +1357,19 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     const std::string sh0_name = "sh0.webp";
     const auto means_l_webp = encode_webp(
         means_l.data(), static_cast<int>(width), static_cast<int>(height), 4, means_l_name);
+    if (progress) progress(0.3F);
     const auto means_u_webp = encode_webp(
         means_u.data(), static_cast<int>(width), static_cast<int>(height), 4, means_u_name);
+    if (progress) progress(0.38F);
     const auto scales_webp = encode_webp(
         scale_image.data(), static_cast<int>(width), static_cast<int>(height), 4, scales_name);
+    if (progress) progress(0.46F);
     const auto quats_webp = encode_webp(
         quat_image.data(), static_cast<int>(width), static_cast<int>(height), 4, quats_name);
+    if (progress) progress(0.54F);
     const auto sh0_webp = encode_webp(
         sh0_image.data(), static_cast<int>(width), static_cast<int>(height), 4, sh0_name);
+    if (progress) progress(0.62F);
     std::ostringstream meta;
     meta << "{\"version\":2,\"asset\":{\"generator\":\"Photara\"},"
          << "\"count\":" << count
@@ -1380,9 +1394,11 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
         const auto centroid_webp = encode_webp(
             shn_centroid_image.data(), static_cast<int>(64U * ac_count),
             static_cast<int>((palette_count + 63U) / 64U), 3, centroid_name);
+    if (progress) progress(0.7F);
         const auto label_webp = encode_webp(
             shn_label_image.data(), static_cast<int>(width), static_cast<int>(height), 4,
             label_name);
+    if (progress) progress(0.78F);
         meta << '}';
         const std::string meta_text = meta.str();
         const Bytes meta_bytes(meta_text.begin(), meta_text.end());
@@ -1831,29 +1847,43 @@ void save_gaussians(
     const GaussianModel& model,
     const std::filesystem::path& path,
     GaussianFormat format) {
+    save_gaussians_with_progress(model, path, format, {});
+}
+
+void save_gaussians_with_progress(
+    const GaussianModel& model, const std::filesystem::path& path,
+    GaussianFormat format, const std::function<void(float)>& progress) {
+    const auto report = [&](float value) { if (progress) progress(value); };
+    const auto write = [&](const Bytes& bytes) {
+        report(.8F);
+        write_file(path, bytes, progress);
+        report(1.F);
+    };
     if (format == GaussianFormat::auto_detect)
         format = gaussian_format_from_path(path);
     if (format != GaussianFormat::ply && model.filter_mode != SplatFilterMode::classic &&
         model.filter_mode != SplatFilterMode::mip_2d)
         throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
+    report(.05F);
     switch (format) {
     case GaussianFormat::ply:
-        save_gaussians_ply(model, path);
+        save_gaussians_ply_with_progress(model, path, progress);
+        report(1.F);
         return;
     case GaussianFormat::sog:
-        write_file(path, save_sog(model));
+        write(save_sog(model, progress));
         return;
     case GaussianFormat::sog_xt:
-        save_sog_xt(model, path);
+        save_sog_xt(model, path, {progress});
         return;
     case GaussianFormat::spz:
-        write_file(path, save_spz_v4(model));
+        write(save_spz_v4(model, progress));
         return;
     case GaussianFormat::glb:
-        write_file(path, detail::save_glb(model));
+        write(detail::save_glb(model));
         return;
     case GaussianFormat::usdc:
-        write_file(path, detail::save_usdc(model));
+        write(detail::save_usdc(model));
         return;
     case GaussianFormat::auto_detect:
         break;

@@ -377,8 +377,22 @@ void draw_splat_export_modal(App& app) {
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
-    if (running && state.progress) {
-        ImGui::ProgressBar(state.progress->load(), {-1.F, 0.F});
+    if (state.progress) {
+        const float p = state.progress->load();
+        if (running && p <= .05F) {
+            // Activity animation for codecs/copies without internal progress.
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float height = ImGui::GetFrameHeight();
+            const auto origin = ImGui::GetCursorScreenPos();
+            const float travel = float(ImGui::GetTime() - static_cast<long long>(ImGui::GetTime()));
+            ImGui::Dummy({width, height});
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(origin, {origin.x + width, origin.y + height}, ImGui::GetColorU32(ImGuiCol_FrameBg));
+            const float x = origin.x + travel * width * .75F;
+            draw->AddRectFilled({x, origin.y}, {x + width * .25F, origin.y + height}, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
+            ImGui::TextUnformatted(tr("Exporting splat..."));
+        } else ImGui::ProgressBar(p, {-1.F, 0.F});
+        theme::caption("Progress updates when each export stage completes.");
         if (state.cancel && ImGui::Button(tr("Stop processing"))) state.cancel->store(true);
     }
     if (!state.error.empty()) {

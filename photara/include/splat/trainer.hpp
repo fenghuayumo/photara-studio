@@ -205,6 +205,8 @@ class Trainer {
 };
 
 void save_gaussians_ply(const GaussianModel& model, const std::filesystem::path& path);
+void save_gaussians_ply_with_progress(const GaussianModel& model,
+    const std::filesystem::path& path, const std::function<void(float)>& progress);
 GaussianModel load_gaussians_ply(
     const std::filesystem::path& path,
     tinytensor::Device device = tinytensor::Device::CUDA);
