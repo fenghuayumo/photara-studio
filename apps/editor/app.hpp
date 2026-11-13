@@ -408,6 +408,7 @@ struct App {
     bool show_console{true};
     bool show_inspector{true};
     InspectorSection inspector_section{InspectorSection::automatic};
+    std::string compute_gpu_uuid; // User preference; applied at next startup.
     bool show_status_bar{true};
     bool reset_dock_layout{};
 

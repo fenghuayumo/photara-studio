@@ -1102,9 +1102,9 @@ void draw_status_bar(App& app) {
 
     const char* device =
         app.settings.training_backend == 1 ? "Vulkan" : "CUDA";
-    char backend[64];
+    char backend[320];
     std::snprintf(
-        backend, sizeof(backend), "%s  \xC2\xB7  %s", tr("Train"), device);
+        backend, sizeof(backend), "%s  \xC2\xB7  %s  \xC2\xB7  %s", tr("Train"), device, gpu::active_device_name().c_str());
     const float backend_width = status_segment_width(backend);
     right -= backend_width + 22.F;
     draw_status_separator(right + backend_width + 11.F, height);

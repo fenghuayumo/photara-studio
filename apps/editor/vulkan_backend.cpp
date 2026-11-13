@@ -20,6 +20,9 @@
 namespace editor::gpu {
 namespace {
 
+std::vector<ComputeDevice> g_compute_devices;
+std::string g_active_device_name;
+bool g_active_cuda{true};
 VkInstance g_instance{};
 VkPhysicalDevice g_physical_device{};
 VkDevice g_device{};
@@ -192,6 +195,10 @@ void check(const VkResult result) {
 }
 
 VkInstance instance() { return g_instance; }
+const std::vector<ComputeDevice>& compute_devices() { return g_compute_devices; }
+std::string active_device_name() { return g_active_device_name; }
+bool active_device_supports_cuda() { return g_active_cuda; }
+
 VkPhysicalDevice physical_device() { return g_physical_device; }
 VkDevice device() { return g_device; }
 std::uint32_t queue_family() { return g_queue_family; }
@@ -267,7 +274,7 @@ std::uint64_t consumed_timeline_value() { return g_consumed_value; }
 std::uint64_t copied_preview_frames() { return g_copied_frames; }
 std::uint64_t ready_timeline_value() { return g_ready_value; }
 
-void create_context(ImVector<const char*> extensions) {
+void create_context(ImVector<const char*> extensions, const std::string& preferred_uuid) {
     std::uint32_t count{};
     vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
     ImVector<VkExtensionProperties> properties;
@@ -289,6 +296,59 @@ void create_context(ImVector<const char*> extensions) {
     check(vkCreateInstance(&create, nullptr, &g_instance));
 
     g_physical_device = ImGui_ImplVulkanH_SelectPhysicalDevice(g_instance);
+    std::uint32_t gpu_count = 0;
+    check(vkEnumeratePhysicalDevices(g_instance, &gpu_count, nullptr));
+    std::vector<VkPhysicalDevice> candidates(gpu_count);
+    check(vkEnumeratePhysicalDevices(g_instance, &gpu_count, candidates.data()));
+    g_compute_devices.clear();
+    const char* hex = "0123456789abcdef";
+    for (std::uint32_t i = 0; i < gpu_count; ++i) {
+        VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        properties.pNext = &id;
+        vkGetPhysicalDeviceProperties2(candidates[i], &properties);
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(candidates[i], &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(candidates[i], &family_count, families.data());
+        const bool usable = std::any_of(families.begin(), families.end(), [](const auto& f) {
+            return (f.queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) ==
+                (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT);
+        });
+        if (!usable || properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+        ComputeDevice entry{properties.properties.deviceName, {}, i, properties.properties.vendorID};
+        for (const auto byte : id.deviceUUID) {
+            entry.uuid += hex[byte >> 4]; entry.uuid += hex[byte & 15];
+        }
+        g_compute_devices.push_back(entry);
+        if (!preferred_uuid.empty() && entry.uuid == preferred_uuid)
+            g_physical_device = candidates[i];
+    }
+    for (const auto& entry : g_compute_devices) {
+        if (candidates[entry.index] != g_physical_device) continue;
+        g_active_device_name = entry.name;
+        g_active_cuda = entry.vendor_id == 0x10de;
+        // Apply before any compute runtime initializes. Children inherit this
+        // selection; CUDA sees the chosen NVIDIA adapter as logical device 0.
+        if (!preferred_uuid.empty()) {
+            const auto index = std::to_string(entry.index);
+            std::string cuda_uuid = "-1";
+            if (g_active_cuda) cuda_uuid = "GPU-" + entry.uuid.substr(0,8) + "-" +
+                entry.uuid.substr(8,4) + "-" + entry.uuid.substr(12,4) + "-" +
+                entry.uuid.substr(16,4) + "-" + entry.uuid.substr(20);
+#if defined(_WIN32)
+            _putenv_s("PHOTARA_VULKAN_DEVICE_UUID", entry.uuid.c_str());
+            _putenv_s("TINYTENSOR_VULKAN_DEVICE", index.c_str());
+            _putenv_s("GGML_VK_VISIBLE_DEVICES", index.c_str());
+            _putenv_s("CUDA_VISIBLE_DEVICES", cuda_uuid.c_str());
+#else
+            setenv("PHOTARA_VULKAN_DEVICE_UUID", entry.uuid.c_str(), 1);
+            setenv("TINYTENSOR_VULKAN_DEVICE", index.c_str(), 1);
+            setenv("GGML_VK_VISIBLE_DEVICES", index.c_str(), 1);
+            setenv("CUDA_VISIBLE_DEVICES", cuda_uuid.c_str(), 1);
+#endif
+        }
+    }
     g_queue_family =
         ImGui_ImplVulkanH_SelectQueueFamilyIndex(g_physical_device);
 

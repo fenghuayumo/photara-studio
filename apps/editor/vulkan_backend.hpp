@@ -32,7 +32,14 @@ void check(VkResult result);
 
 // Instance, device, queue and descriptor pool. `extensions` carries the
 // platform surface extensions requested by GLFW.
-void create_context(ImVector<const char*> extensions);
+struct ComputeDevice {
+    std::string name, uuid;
+    std::uint32_t index{}, vendor_id{};
+};
+const std::vector<ComputeDevice>& compute_devices();
+std::string active_device_name();
+bool active_device_supports_cuda();
+void create_context(ImVector<const char*> extensions, const std::string& preferred_uuid = {});
 void create_window(VkSurfaceKHR surface, int width, int height);
 void resize_window(int width, int height);
 void destroy_context();

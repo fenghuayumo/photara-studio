@@ -78,6 +78,12 @@ int main(const int argc, char** argv) {
     if (!app.smoke_mode) editor::load_editor_preferences(app);
     if (!app.smoke_mode) editor::load_welcome_state(app);
     else app.show_welcome = false;
+    // Command-line override also permits isolated device smoke tests without
+    // modifying the user's saved preference.
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::string_view(argv[i]) == "--compute-gpu")
+            app.compute_gpu_uuid = argv[++i];
+
 
     if (app.smoke_mode && !transition_smoke && !transform_smoke) {
         // The interop smoke harness needs a fixed dataset so runs stay
@@ -147,7 +153,18 @@ int main(const int argc, char** argv) {
     const char** required = glfwGetRequiredInstanceExtensions(&extension_count);
     for (std::uint32_t i = 0; i < extension_count; ++i)
         extensions.push_back(required[i]);
-    editor::gpu::create_context(extensions);
+    editor::gpu::create_context(extensions, app.compute_gpu_uuid);
+    std::fprintf(stdout, "Studio GPU: %s uuid=%s CUDA=%s\n",
+        editor::gpu::active_device_name().c_str(), editor::gpu::device_uuid_hex().c_str(),
+        editor::gpu::active_device_supports_cuda() ? "available" : "unavailable");
+    if (!app.compute_gpu_uuid.empty() && app.compute_gpu_uuid != editor::gpu::device_uuid_hex())
+        std::fprintf(stderr, "Saved GPU unavailable; using %s\n", editor::gpu::active_device_name().c_str());
+
+    if (!editor::gpu::active_device_supports_cuda() && !app.compute_gpu_uuid.empty()) {
+        app.settings.training_backend = 1;
+        app.settings.alignment_backend = 3;
+        app.settings.sam_backend = 2;
+    }
     VkSurfaceKHR surface{};
     editor::gpu::check(
         glfwCreateWindowSurface(editor::gpu::instance(), window, nullptr, &surface));

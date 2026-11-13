@@ -790,3 +790,19 @@ Third-party code, optional backends, and model weights keep their upstream
 terms. The intrinsic/delight model weights have their own licensing boundary;
 see [`docs/LICENSE-Intrinsic.md`](LICENSE-Intrinsic.md). Review every
 enabled optional dependency before distribution.
+
+### Studio compute GPU selection
+
+Open **Preferences > Compute > Compute GPU** to choose a physical GPU, or
+**Automatic** to use Studio's default. The choice is saved per user by device
+UUID, separately from project settings. Restart Studio to apply it; the bottom
+status bar shows the device actually active in this session. Pending selections
+are identified in Preferences. If a saved GPU is disconnected, Studio falls
+back to the default and reports the missing device.
+
+An explicit choice pins independently-created Vulkan compute devices, AI Vulkan
+backends, CUDA visibility and child processes to the selected adapter. CUDA is
+available only for NVIDIA adapters; other adapters use Vulkan. The viewport
+uses the same physical adapter so training/preview shared resources remain
+compatible. `--compute-gpu UUID` overrides the saved choice for one launch
+(32 lowercase hex digits), including `--project-transition-smoke` runs.

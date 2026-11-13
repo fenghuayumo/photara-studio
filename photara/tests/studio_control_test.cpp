@@ -5,6 +5,7 @@
 #include "project/document.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -35,8 +36,23 @@ int main() {
     const auto folder = std::filesystem::temp_directory_path() /
         ("photara_control_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(folder);
+#if defined(_WIN32)
+    _putenv_s("APPDATA", folder.string().c_str());
+#else
+    setenv("XDG_CONFIG_HOME", folder.string().c_str(), 1);
+#endif
     try {
         editor::App app;
+        app.compute_gpu_uuid = "0123456789abcdef0123456789abcdef";
+        editor::store_editor_preferences(app);
+        editor::App restored_preferences;
+        editor::load_editor_preferences(restored_preferences);
+        require(restored_preferences.compute_gpu_uuid == app.compute_gpu_uuid,
+                "GPU UUID preference did not round-trip");
+        app.compute_gpu_uuid.clear();
+        editor::store_editor_preferences(app);
+        editor::load_editor_preferences(restored_preferences);
+        require(restored_preferences.compute_gpu_uuid.empty(), "Automatic GPU preference was not restored");
         ControlBus bus;
         bus.set_session_id("contract-test");
         const auto call = [&](const std::string& method, const json& params = json::object(),
@@ -139,9 +155,16 @@ int main() {
         app.has_model = true;
         const auto exported = folder / "model.ply";
         require(ok(call("studio.export.model", {{"path", editor::path_to_utf8(exported)}, {"sh_degree", 0}})), "model export failed");
+        require(app.splat_export.job.valid(), "PLY export did not start in background");
+        app.splat_export.job.wait();
+        editor::poll_splat_export(app);
+        require(app.splat_export.error.empty(), "Background PLY export failed");
         require(photara::splat::load_gaussians(exported, tinytensor::Device::CPU).size() == 1, "exported model invalid");
         require(error_code(call("studio.export.model", {{"path", editor::path_to_utf8(exported)}})) == "ALREADY_EXISTS", "export overwrote without request");
         require(ok(call("studio.export.model", {{"path", editor::path_to_utf8(exported)}, {"overwrite", true}})), "explicit overwrite failed");
+        app.splat_export.job.wait();
+        editor::poll_splat_export(app);
+        require(app.splat_export.error.empty(), "Background overwrite failed");
         const auto xt = folder / "model.sog-xt";
         const auto result = call("studio.export.model", {{"path", editor::path_to_utf8(xt)}, {"format", "sog-xt"}, {"sh_degree", 0}});
         require(ok(result) && app.splat_export.job.valid(), "SOG-XT export did not start in background");

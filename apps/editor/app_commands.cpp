@@ -1341,6 +1341,10 @@ void load_editor_preferences(App& app) {
             const auto result = std::from_chars(value.data(), value.data() + value.size(), seconds);
             if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && seconds >= 0 && seconds <= 86400)
                 app.settings.training_autosave_seconds = seconds;
+        } else if (key == "compute_gpu_uuid") {
+            if (value.empty() || (value.size() == 32 && std::all_of(value.begin(), value.end(),
+                [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })))
+                app.compute_gpu_uuid = value;
         } else if (key == "training") {
             static const char* tokens[] = {"cuda", "vulkan"};
             const int choice = preference_choice(value, tokens, 2);
@@ -1380,7 +1384,8 @@ void store_editor_preferences(const App& app) {
     const char* sam = app.settings.sam_backend == 1
         ? "cuda"
         : app.settings.sam_backend == 2 ? "vulkan" : "auto";
-    output << "training=" << training << '\n'
+    output << "compute_gpu_uuid=" << app.compute_gpu_uuid << '\n'
+           << "training=" << training << '\n'
            << "alignment=" << alignment << '\n'
            << "sam=" << sam << '\n'
            << "training_autosave_seconds=" << app.settings.training_autosave_seconds << '\n'
@@ -2712,9 +2717,7 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
         // for a single untransformed model. Always export the loaded cloud.
         const bool composed_export = gaussian_models_managed(app);
         if (!from_edit) {
-            model = load_export_model(
-                app, app.splat_export.format >= 4 ? tinytensor::Device::CPU
-                                                  : tinytensor::Device::CUDA);
+            model = load_export_model(app, tinytensor::Device::CPU);
         }
         if (app.splat_export.bake_mip3d)
             photara::splat::bake_gaussian_3d_filter(model);

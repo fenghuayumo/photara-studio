@@ -193,6 +193,30 @@ bool choice_row(
 
 void draw_compute_page(App& app) {
     const bool busy = app.job.running();
+    preference_heading("Compute GPU");
+    std::string selected = tr("Automatic");
+    for (const auto& device : gpu::compute_devices())
+        if (device.uuid == app.compute_gpu_uuid) selected = device.name;
+    if (!app.compute_gpu_uuid.empty() && selected == tr("Automatic"))
+        selected = tr("Selected GPU unavailable");
+    ImGui::SetNextItemWidth(-1.F);
+    if (ImGui::BeginCombo("##compute_gpu_device", selected.c_str())) {
+        if (ImGui::Selectable(tr("Automatic"), app.compute_gpu_uuid.empty())) {
+            app.compute_gpu_uuid.clear(); store_editor_preferences(app);
+        }
+        for (const auto& device : gpu::compute_devices()) {
+            ImGui::PushID(device.uuid.c_str());
+            if (ImGui::Selectable(device.name.c_str(), app.compute_gpu_uuid == device.uuid)) {
+                app.compute_gpu_uuid = device.uuid; store_editor_preferences(app);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    theme::caption("GPU changes take effect after restarting Studio.");
+    if (!app.compute_gpu_uuid.empty() && app.compute_gpu_uuid != gpu::device_uuid_hex())
+        theme::caption("GPU change pending. Restart Studio to apply.");
+    ImGui::Spacing();
     preference_heading("Training compute");
     theme::caption("The next Train 3DGS job uses this device.");
     theme::caption("The viewport preview stays on Vulkan.");
@@ -205,8 +229,8 @@ void draw_compute_page(App& app) {
     const float card_w = (ImGui::GetContentRegionAvail().x - gap) * 0.5F;
     const ImVec2 card_size{card_w, 74.F};
     if (compute_card(
-            "##train_cuda", "CUDA", "NVIDIA default",
-            app.settings.training_backend != 1, !busy, card_size) &&
+            "##train_cuda", "CUDA", gpu::active_device_name().c_str(),
+            app.settings.training_backend != 1, !busy && gpu::active_device_supports_cuda(), card_size) &&
         app.settings.training_backend != 0) {
         app.settings.training_backend = 0;
         store_editor_preferences(app);
@@ -227,7 +251,7 @@ void draw_compute_page(App& app) {
     preference_heading("Photo alignment");
     const char* alignment_labels[] = {"Automatic", "CPU", "CUDA", "Vulkan"};
     const bool alignment_enabled[] = {
-        !busy, !busy, !busy && studio_ba_cuda(),
+        !busy, !busy, !busy && studio_ba_cuda() && gpu::active_device_supports_cuda(),
         !busy && studio_ba_vulkan()};
     if (choice_row(
             "alignment", alignment_labels, 4, app.settings.alignment_backend,
@@ -242,7 +266,7 @@ void draw_compute_page(App& app) {
     const char* sam_labels[] = {"Automatic", "CUDA", "Vulkan"};
     const bool sam_enabled[] = {
         !busy && sam,
-        !busy && sam && studio_sam_cuda(),
+        !busy && sam && studio_sam_cuda() && gpu::active_device_supports_cuda(),
         !busy && sam && studio_sam_vulkan(),
     };
     if (choice_row(
