@@ -4,3 +4,6 @@
 [submodule "third_party/photara_vk"]
 	path = third_party/photara_vk
 	url = https://github.com/fenghuayumo/photara_vk.git
+[submodule "tools/photara_blender"]
+	path = tools/photara_blender
+	url = https://github.com/fenghuayumo/photara-blender.git
