@@ -2764,11 +2764,15 @@ bool export_trained_model_to_path(App& app, const std::filesystem::path& out) {
             app.splat_export.output = std::filesystem::absolute(out);
             app.splat_export.error.clear();
             app.splat_export.cancel.reset();
-            app.splat_export.progress.reset();
+            auto progress = std::make_shared<std::atomic<float>>(0.F);
+            app.splat_export.progress = progress;
+            photara::splat::SogXtExportOptions options;
+            options.progress = [progress](float p) { progress->store(p); };
             app.splat_export.job = std::async(std::launch::async,
-                [model = std::move(model), out = app.splat_export.output] {
-                    photara::splat::save_gaussians(model, out, photara::splat::GaussianFormat::sog_xt);
+                [model = std::move(model), out = app.splat_export.output, options] {
+                    photara::splat::save_sog_xt(model, out, options);
                 });
+            app.splat_export.show = true;
             app.settings.splat_format = splat_settings_format_from_export(app.splat_export.format);
             set_message(app, "Encoding SOG-XT...", theme::success);
             return true;

@@ -3,6 +3,7 @@
 #include "splat/types.hpp"
 
 #include <array>
+#include <functional>
 #include <cstddef>
 #include <filesystem>
 #include <vector>
@@ -31,6 +32,13 @@ void save_gaussians(
     const GaussianModel& model,
     const std::filesystem::path& path,
     GaussianFormat format = GaussianFormat::auto_detect);
+
+// Export keeps the original quantization and lossless WebP parameters.
+struct SogXtExportOptions {
+    std::function<void(float)> progress;
+};
+void save_sog_xt(const GaussianModel& model, const std::filesystem::path& path,
+                 const SogXtExportOptions& options = {});
 
 // Replaces scale/opacity tensors without modifying shared source storage.
 void bake_gaussian_3d_filter(GaussianModel& model);

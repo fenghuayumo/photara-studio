@@ -1,4 +1,6 @@
 #include "splat/formats.hpp"
+#include "core/logging.hpp"
+#include <chrono>
 
 #include "formats_glb.hpp"
 #include "formats_usdc.hpp"
@@ -1808,6 +1810,23 @@ GaussianModel merge_gaussians(const std::vector<GaussianModel>& models) {
     return merged;
 }
 
+void save_sog_xt(const GaussianModel& model, const std::filesystem::path& path,
+                 const SogXtExportOptions& options) {
+    if (model.filter_mode != SplatFilterMode::classic && model.filter_mode != SplatFilterMode::mip_2d)
+        throw std::invalid_argument("Mip3D filter modes require PLY to preserve the 3D filter");
+    std::size_t count = 0, bases = 0;
+    validate_model_shape(model, count, bases);
+    auto assets = detail::encode_sog_xt(model, nullptr, options);
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<ZipEntry> entries;
+    for (auto& [name, bytes] : assets)
+        entries.push_back({name, std::move(bytes)});
+    write_file(path, make_sog_zip(entries));
+    core::Logger::instance().info("sog_xt_export stage=pack_write elapsed_ms=",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+    if (options.progress) options.progress(1.F);
+}
+
 void save_gaussians(
     const GaussianModel& model,
     const std::filesystem::path& path,
@@ -1824,16 +1843,9 @@ void save_gaussians(
     case GaussianFormat::sog:
         write_file(path, save_sog(model));
         return;
-    case GaussianFormat::sog_xt: {
-        std::size_t count = 0, bases = 0;
-        validate_model_shape(model, count, bases);
-        auto assets = detail::encode_sog_xt(model);
-        std::vector<ZipEntry> entries;
-        for (auto& [name, bytes] : assets)
-            entries.push_back({name, std::move(bytes)});
-        write_file(path, make_sog_zip(entries));
+    case GaussianFormat::sog_xt:
+        save_sog_xt(model, path);
         return;
-    }
     case GaussianFormat::spz:
         write_file(path, save_spz_v4(model));
         return;

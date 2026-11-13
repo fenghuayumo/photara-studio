@@ -1,6 +1,6 @@
 #pragma once
 
-#include "splat/types.hpp"
+#include "splat/formats.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -32,7 +32,8 @@ struct DecodedSogXt {
 };
 
 // SOG-XT image payloads; packaging is handled by the existing ZIP layer.
-SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training = nullptr);
+SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training = nullptr,
+                          const SogXtExportOptions& options = {});
 GaussianModel sog_xt_training_forward(SogXtTrainingCodec& codec);
 void sog_xt_training_backward(
     SogXtTrainingCodec& codec,

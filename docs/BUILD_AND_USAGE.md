@@ -581,6 +581,15 @@ fields, defaults and declaration links.
 
 Select **SOG-XT** in Studio's **Export Splat** panel to write a `.sog-xt`
 file. The file can be reopened or dropped into Studio like `.sog` and `.spz`.
+SOG-XT export preserves the original quantization, layout search rounds and
+lossless WebP settings (`quality=100`, `method=6`, `exact=1`). The C++
+`save_sog_xt` API accepts an optional stage progress callback through
+`SogXtExportOptions`.
+CPU layout, box filtering and PRAS use OpenMP when available. At most two WebP
+images encode concurrently. Export logs report stage and per-image times
+(`sog_xt_export`); WebP work overlaps SH clustering, so those durations are not
+additive. Progress reports stage completion rather than an estimated finish time.
+
 Export runs in the background. The control API accepts `format: "sog-xt"`;
 when it returns `completed: false`, poll `studio.job.status` and inspect
 `splat_export.running` and `splat_export.error` before using the output.

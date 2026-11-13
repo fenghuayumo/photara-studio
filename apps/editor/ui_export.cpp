@@ -379,7 +379,7 @@ void draw_splat_export_modal(App& app) {
     ImGui::EndDisabled();
     if (running && state.progress) {
         ImGui::ProgressBar(state.progress->load(), {-1.F, 0.F});
-        if (ImGui::Button(tr("Stop processing")) && state.cancel) state.cancel->store(true);
+        if (state.cancel && ImGui::Button(tr("Stop processing"))) state.cancel->store(true);
     }
     if (!state.error.empty()) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 416.F);
@@ -396,7 +396,7 @@ void draw_splat_export_modal(App& app) {
     const float avail = ImGui::GetContentRegionAvail().x;
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX() + std::max(0.F, avail - export_w - cancel_w - 8.F));
-    if (theme::toolbar_button("Cancel", {cancel_w, 30.F}))
+    if (theme::toolbar_button(running ? "Close" : "Cancel", {cancel_w, 30.F}))
         ImGui::CloseCurrentPopup();
     ImGui::SameLine(0.F, 8.F);
     if (theme::primary_button(

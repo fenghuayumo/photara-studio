@@ -21,6 +21,9 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#if defined(PHOTARA_HAS_OPENMP)
+#include <omp.h>
+#endif
 
 using namespace photara::splat;
 namespace {
@@ -312,6 +315,22 @@ void sog_xt(const std::filesystem::path& folder, unsigned n = 17) {
         const auto start = std::chrono::steady_clock::now();
         save_gaussians(model, path);
         const auto restored = load_gaussians(path, cpu);
+        SogXtExportOptions options;
+        float progress = 0;
+        options.progress = [&](float value) {
+            require(value >= progress && value <= 1.F, "SOG-XT progress is not monotonic");
+            progress = value;
+        };
+        const auto repeated_path = folder / ("repeated-" + std::to_string(degree) + ".sog-xt");
+        save_sog_xt(model, repeated_path, options);
+        require(progress == 1.F, "SOG-XT progress did not complete");
+        const auto repeated_model = load_gaussians(repeated_path, cpu);
+        require(repeated_model.means.to_vector() == restored.means.to_vector() &&
+                repeated_model.log_scales.to_vector() == restored.log_scales.to_vector() &&
+                repeated_model.quaternions.to_vector() == restored.quaternions.to_vector() &&
+                repeated_model.opacity_logits.to_vector() == restored.opacity_logits.to_vector() &&
+                repeated_model.sh.to_vector() == restored.sh.to_vector(),
+                "SOG-XT parallel encoding changed decoded attributes");
         require(restored.size() == n && restored.sh_degree == degree &&
                 restored.filter_mode == model.filter_mode, "SOG-XT changed shape or metadata");
         const auto p = restored.means.to_vector(), s = restored.log_scales.to_vector();
@@ -411,6 +430,40 @@ void sog_xt_covariance_symmetry() {
     auto order = detail::sog_xt_layout(features, side, 3);
     std::sort(order.begin(), order.end());
     for (unsigned i = 0; i < n; ++i) require(order[i] == i, "SOG-XT layout is not a permutation");
+}
+
+void sog_xt_parallel_parity() {
+#if defined(PHOTARA_HAS_OPENMP)
+    const int previous = omp_get_max_threads();
+    // Include a non-power-of-two grid with incomplete edge tiles.
+    for (unsigned side : {64U, 72U}) {
+        const unsigned n = side * side;
+        std::vector<float> features(n * 6), q(n * 4), scales(n * 3);
+        std::vector<std::uint8_t> active(n, 1);
+        std::mt19937 random(731);
+        std::uniform_real_distribution<float> values(-1.F, 1.F);
+        for (auto& v : features) v = values(random);
+        for (unsigned i = 0; i < n; ++i) {
+            Eigen::Quaternionf rotation(1.F, values(random), values(random), values(random));
+            rotation.normalize();
+            q[i*4] = rotation.w(); q[i*4+1] = rotation.x();
+            q[i*4+2] = rotation.y(); q[i*4+3] = rotation.z();
+            for (unsigned d = 0; d < 3; ++d) scales[i*3+d] = values(random);
+            active[i] = i % 7 != 0;
+        }
+        auto parallel_q = q, parallel_s = scales;
+        omp_set_num_threads(1);
+        const auto serial = detail::sog_xt_layout(features, side, 6);
+        detail::sog_xt_pras(q, scales, active, side);
+        omp_set_num_threads(4);
+        require(serial == detail::sog_xt_layout(features, side, 6),
+                "SOG-XT parallel layout differs from serial");
+        detail::sog_xt_pras(parallel_q, parallel_s, active, side);
+        require(q == parallel_q && scales == parallel_s,
+                "SOG-XT parallel PRAS differs from serial");
+    }
+    omp_set_num_threads(previous);
+#endif
 }
 
 void sog_xt_benchmark(const std::filesystem::path& folder, const std::filesystem::path& source) {
@@ -681,6 +734,26 @@ int run_tests(int argc, char** argv) {
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(folder);
         struct Cleanup { std::filesystem::path p; ~Cleanup() { std::error_code e; std::filesystem::remove_all(p, e); } } cleanup{folder};
+        if (argc > 1 && std::string(argv[1]) == "--sog-xt-export-perf") {
+            auto model = argc > 2 ? load_gaussians(std::filesystem::u8path(argv[2]), tinytensor::Device::CPU)
+                                  : fixture(65536, 3);
+            bake_gaussian_3d_filter(model);
+            std::cout << "SOG-XT export benchmark count=" << model.size() << " degree=" << model.sh_degree << '\n';
+            // Warm GPU initialization/pipelines before timing repeated exports.
+            SogXtExportOptions warmup;
+            save_sog_xt(model, folder / "warmup.sog-xt", warmup);
+            for (unsigned repeat = 0; repeat < 3; ++repeat)
+            {
+                SogXtExportOptions options;
+                const auto output = folder / "export.sog-xt";
+                const auto start = std::chrono::steady_clock::now();
+                save_sog_xt(model, output, options);
+                std::cout << "repeat=" << repeat << " elapsed_ms="
+                          << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-start).count()
+                          << " bytes=" << std::filesystem::file_size(output) << '\n';
+            }
+            return 0;
+        }
         if(argc>1&&std::string(argv[1])=="--sog-xt-training-only"){sog_xt_training_test(folder);return 0;}
         if(argc==4&&std::string(argv[1])=="--decode-sog-xt") {
             save_gaussians_ply(load_gaussians(std::filesystem::u8path(argv[2]),tinytensor::Device::CPU),std::filesystem::u8path(argv[3]));return 0;
@@ -720,6 +793,7 @@ int run_tests(int argc, char** argv) {
             throw std::runtime_error("Vulkan test requires Vulkan build");
 #endif
         } else {
+            sog_xt_parallel_parity();
             sog_xt_covariance_symmetry();
             sog_xt(folder);
             sog_xt(folder, 1);

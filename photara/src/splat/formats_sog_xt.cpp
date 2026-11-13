@@ -1,6 +1,10 @@
 #include "formats_sog_xt.hpp"
 #include "sog_vulkan.hpp"
 #include "sog_palette.hpp"
+#include "core/logging.hpp"
+#include <chrono>
+#include <deque>
+#include <future>
 
 #include <Eigen/Geometry>
 #include <nlohmann/json.hpp>
@@ -170,7 +174,10 @@ std::vector<float> blur(
     for (unsigned pass = 0; pass < 2; ++pass) {
         const auto& src = pass ? temp : values;
         auto& dst = pass ? result : temp;
-        for (unsigned line = 0; line < side; ++line)
+#if defined(PHOTARA_HAS_OPENMP)
+#pragma omp parallel for schedule(static) if(side >= 64)
+#endif
+        for (int line = 0; line < int(side); ++line)
             for (unsigned d = 0; d < dims; ++d) {
                 const auto offset = [&](unsigned p) -> std::size_t {
                     return (pass ? std::size_t(p) * side + line : std::size_t(line) * side + p) *
@@ -293,44 +300,49 @@ std::vector<std::uint32_t> sog_xt_layout(
             const unsigned shift_x = pass & 1, shift_y = (pass >> 1) & 1;
             const unsigned stride = std::max(1U, radius);
             // Each 2*stride tile pairs four subtiles; all assignments are disjoint.
-            for (unsigned by = 0; by < side; by += 2 * stride)
+            const unsigned tiles = (side + 2 * stride - 1) / (2 * stride);
+#if defined(PHOTARA_HAS_OPENMP)
+#pragma omp parallel for schedule(static) if(n >= 4096)
+#endif
+            for (std::int64_t row = 0; row < std::int64_t(tiles) * stride; ++row)
                 for (unsigned bx = 0; bx < side; bx += 2 * stride)
-                    for (unsigned dy = 0; dy < stride; ++dy)
-                        for (unsigned dx = 0; dx < stride; ++dx) {
-                            if (bx + dx + stride >= side || by + dy + stride >= side)
-                                continue;
-                            std::array<std::size_t, 4> p{};
-                            for (unsigned j = 0; j < 4; ++j)
-                                p[j] = std::size_t((by + dy + (j / 2) * stride + shift_y) % side) *
-                                           side +
-                                       (bx + dx + (j % 2) * stride + shift_x) % side;
-                            double cost[4][4]{};
-                            for (unsigned a = 0; a < 4; ++a)
-                                for (unsigned b = 0; b < 4; ++b)
-                                    for (unsigned d = 0; d < dims; ++d) {
-                                        const double delta =
-                                            current[p[b] * dims + d] - target[p[a] * dims + d];
-                                        cost[a][b] += delta * delta;
-                                    }
-                            std::array<unsigned, 4> perm{0, 1, 2, 3}, best = perm;
-                            double minimum = cost[0][0] + cost[1][1] + cost[2][2] + cost[3][3];
-                            while (std::next_permutation(perm.begin(), perm.end())) {
-                                const double value = cost[0][perm[0]] + cost[1][perm[1]] +
-                                                     cost[2][perm[2]] + cost[3][perm[3]];
-                                if (value < minimum) {
-                                    minimum = value;
-                                    best = perm;
+                    for (unsigned dx = 0; dx < stride; ++dx) {
+                        const unsigned by = unsigned(row / stride) * 2 * stride;
+                        const unsigned dy = unsigned(row % stride);
+                        if (bx + dx + stride >= side || by + dy + stride >= side)
+                            continue;
+                        std::array<std::size_t, 4> p{};
+                        for (unsigned j = 0; j < 4; ++j)
+                            p[j] = std::size_t((by + dy + (j / 2) * stride + shift_y) % side) *
+                                       side +
+                                   (bx + dx + (j % 2) * stride + shift_x) % side;
+                        double cost[4][4]{};
+                        for (unsigned a = 0; a < 4; ++a)
+                            for (unsigned b = 0; b < 4; ++b)
+                                for (unsigned d = 0; d < dims; ++d) {
+                                    const double delta =
+                                        current[p[b] * dims + d] - target[p[a] * dims + d];
+                                    cost[a][b] += delta * delta;
                                 }
-                            }
-                            const std::array<std::uint32_t, 4> old{
-                                order[p[0]], order[p[1]], order[p[2]], order[p[3]]};
-                            for (unsigned j = 0; j < 4; ++j) {
-                                order[p[j]] = old[best[j]];
-                                std::copy_n(
-                                    features.data() + std::size_t(order[p[j]]) * dims, dims,
-                                    current.data() + p[j] * dims);
+                        std::array<unsigned, 4> perm{0, 1, 2, 3}, best = perm;
+                        double minimum = cost[0][0] + cost[1][1] + cost[2][2] + cost[3][3];
+                        while (std::next_permutation(perm.begin(), perm.end())) {
+                            const double value = cost[0][perm[0]] + cost[1][perm[1]] +
+                                                 cost[2][perm[2]] + cost[3][perm[3]];
+                            if (value < minimum) {
+                                minimum = value;
+                                best = perm;
                             }
                         }
+                        const std::array<std::uint32_t, 4> old{
+                            order[p[0]], order[p[1]], order[p[2]], order[p[3]]};
+                        for (unsigned j = 0; j < 4; ++j) {
+                            order[p[j]] = old[best[j]];
+                            std::copy_n(
+                                features.data() + std::size_t(order[p[j]]) * dims, dims,
+                                current.data() + p[j] * dims);
+                        }
+                    }
         }
         if (radius == 1)
             break;
@@ -378,7 +390,10 @@ void sog_xt_pras(
                 proxy[i * 7 + 4 + d] = (scales[i * 3 + d] - lo) / range;
         }
         const auto target = blur(proxy, side, 7, radius);
-        for (std::size_t i = 0; i < n; ++i) {
+#if defined(PHOTARA_HAS_OPENMP)
+#pragma omp parallel for schedule(static) if(n >= 4096)
+#endif
+        for (std::int64_t i = 0; i < std::int64_t(n); ++i) {
             if (!active[i])
                 continue;
             const Eigen::Quaternionf q(
@@ -414,7 +429,17 @@ void sog_xt_pras(
     }
 }
 
-SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training) {
+SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training,
+                          const SogXtExportOptions& options) {
+    const auto started = std::chrono::steady_clock::now();
+    auto previous = started;
+    const auto stage = [&](const char* name, float progress) {
+        const auto now = std::chrono::steady_clock::now();
+        core::Logger::instance().info("sog_xt_export stage=", name, " elapsed_ms=",
+            std::chrono::duration<double, std::milli>(now - previous).count());
+        previous = now;
+        if (options.progress) options.progress(progress);
+    };
     const auto n = model.size();
     const unsigned degree = model.sh_degree;
     const unsigned bases = (degree + 1) * (degree + 1), dims = (bases - 1) * 3;
@@ -454,7 +479,9 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
             features[i * 6 + d] = float(v >> 8) / 255;
             features[i * 6 + 3 + d] = float(v & 255) / 255 * .1F;
         }
+    stage("prepare", .05F);
     const auto order = sog_xt_layout(features, side, 6);
+    stage("layout", .3F);
     std::vector<float>().swap(features);
     Bytes active(pixels);
     const auto reorder = [&](const std::vector<float>& src, unsigned channels) {
@@ -481,6 +508,7 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
     for (std::size_t i = 0; i < pixels; ++i)
         active[i] = order[i] < n;
     sog_xt_pras(q, scales, active, side);
+    stage("reorder_pras", .55F);
     if (training) {
         training->side = side;
         training->dimensions = dims;
@@ -520,6 +548,26 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
         training->latent.filter_3d = {};
     }
     SogXtFiles files;
+    struct PendingImage { std::string name; std::future<Bytes> result; };
+    std::deque<PendingImage> pending;
+    const auto collect = [&] {
+        auto bytes = pending.front().result.get();
+        files.emplace(pending.front().name, std::move(bytes));
+        pending.pop_front();
+    };
+    const auto enqueue = [&](std::string name, Bytes rgba, unsigned w, unsigned h) {
+        if (pending.size() == 2) collect();
+        pending.push_back({name, std::async(std::launch::async,
+            [rgba = std::move(rgba), w, h, name] {
+                const auto start = std::chrono::steady_clock::now();
+                auto bytes = write_image(rgba, w, h);
+                core::Logger::instance().info("sog_xt_export image=", name,
+                    " bytes=", bytes.size(),
+                    " elapsed_ms=", std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count());
+                return bytes;
+            })});
+    };
     Json metadata = {
         {"format", "SOG-XT"},
         {"version", 2},
@@ -555,10 +603,10 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
                 high[i * 4 + d] = std::uint8_t(v >> 8);
             }
         if (levels > 256) {
-            files[field + "_bytes_0.webp"] = write_image(image, side, side);
-            files[field + "_bytes_1.webp"] = write_image(high, side, side);
+            enqueue(field + "_bytes_0.webp", std::move(image), side, side);
+            enqueue(field + "_bytes_1.webp", std::move(high), side, side);
         } else
-            files[field + ".webp"] = write_image(image, side, side);
+            enqueue(field + ".webp", std::move(image), side, side);
     };
     store("means", means, 3, 65536);
     store("scales", scales, 3, 256);
@@ -568,7 +616,7 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
     Bytes mask(pixels * 4, 255);
     for (std::size_t i = 0; i < pixels; ++i)
         mask[i * 4] = active[i] ? 255 : 0;
-    files["active_mask.webp"] = write_image(mask, side, side);
+    enqueue("active_mask.webp", std::move(mask), side, side);
     if (dims) {
         const unsigned centroid_side =
             std::clamp(unsigned(std::sqrt(double(n) / 8)) / 8 * 8, 8U, 256U);
@@ -580,6 +628,7 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
         else
 #endif
             palette = cpu_palette(ac, unsigned(n), dims, budget);
+        stage("sh_clustering_with_overlapped_webp", .8F);
         std::vector<float>().swap(ac);
         const auto k = palette.centroids.size() / dims;
         const unsigned cs = grid_side(k);
@@ -619,13 +668,12 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
                             : 0;
                 }
         // 3 rows x 5 columns, matching the reference decoder.
-        files["f_rest_centroids.webp"] = write_image(centers, cs * 5, cs * 3);
+        enqueue("f_rest_centroids.webp", std::move(centers), cs * 5, cs * 3);
         for (std::size_t i = 0; i < pixels; ++i) {
             const unsigned label = active[i] ? inverse[palette.labels[order[i]]] : 0;
             labels[i * 4] = std::uint8_t(label % cs);
             labels[i * 4 + 1] = std::uint8_t(label / cs);
         }
-        files["f_rest_labels.webp"] = write_image(labels, side, side);
         if (training) {
             training->center_side = cs;
             std::vector<int> ids(n), counts(std::size_t(cs) * cs);
@@ -642,7 +690,10 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
             training->sh_high = tinytensor::Tensor::from_vector(
                 quant.high, {std::size_t(dims)}, model.means.device());
         }
+        enqueue("f_rest_labels.webp", std::move(labels), side, side);
     }
+    while (!pending.empty()) collect();
+    stage("codebook_layout_and_webp", .95F);
     // JSON is a YAML 1.2 subset: paper-style metadata without a YAML dependency.
     const auto text = metadata.dump();
     files["container_meta.yaml"] = Bytes(text.begin(), text.end());
@@ -679,6 +730,9 @@ SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* trainin
             tinytensor::Tensor::from_vector(neighbors, {n, 2}, model.means.device());
         training->files = files;
     }
+    stage("metadata", .97F);
+    core::Logger::instance().info("sog_xt_export encode_total_ms=",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     return files;
 }
 
