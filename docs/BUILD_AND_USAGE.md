@@ -203,7 +203,8 @@ tools (for example, the Homebrew prefix). `PHOTARA_HNSWLIB_INCLUDE` must contain
 the `hnswlib/` header directory. The script adds the SDK and dependency `bin/`
 directories to `PATH`, disables CUDA, and selects the Vulkan Studio backend.
 It builds Release only and creates a local
-`build/Photara Studio.app` launcher. Keep it alongside the build
+`build/Photara Studio.app` launcher with a macOS application icon generated from
+`apps/icons/icon.png` and a local ad-hoc signature. Keep it alongside the build
 folder: dependencies are not bundled for distribution.
 
 All generated files live under `build/`. The main project builds its modules

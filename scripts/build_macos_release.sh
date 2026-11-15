@@ -14,16 +14,36 @@ cmake -S . -B build -G Ninja \
   -DPHOTARA_INFERENCE_VULKAN=OFF -DBUILD_TESTING=OFF
 cmake --build build --target photara_studio --parallel 8
 python3 - "$VULKAN_SDK" <<'PY'
-import pathlib, plistlib, shutil, sys
+import pathlib, plistlib, shutil, subprocess, sys, tempfile
 base = pathlib.Path('build')
 app = base / 'Photara Studio.app/Contents'
 bin_dir = app / 'MacOS'
 bin_dir.mkdir(parents=True, exist_ok=True)
+resources = app / 'Resources'
+resources.mkdir(parents=True, exist_ok=True)
+icon = pathlib.Path('apps/icons/icon.png').resolve()
+with tempfile.TemporaryDirectory(prefix='photara-icon-') as tmp:
+    iconset = pathlib.Path(tmp) / 'PhotaraStudio.iconset'
+    iconset.mkdir()
+    for size in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            pixels = str(size * scale)
+            suffix = '@2x' if scale == 2 else ''
+            subprocess.run(['sips', '-z', pixels, pixels, str(icon), '--out',
+                str(iconset / f'icon_{size}x{size}{suffix}.png')],
+                check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o',
+        str(resources / 'PhotaraStudio.icns')], check=True)
 shutil.copy2(base / 'photara/photara_studio', bin_dir / 'PhotaraStudio')
 cli = bin_dir / 'photara'
-if not cli.is_symlink(): cli.symlink_to('../../../photara/photara')
+if cli.is_symlink(): cli.unlink()
+shutil.copy2(base / 'photara/photara', cli)
 info = dict(CFBundleName='Photara Studio', CFBundleIdentifier='org.photara.studio.local',
-    CFBundleExecutable='PhotaraStudio', CFBundlePackageType='APPL', NSHighResolutionCapable=True,
+    CFBundleExecutable='PhotaraStudio', CFBundlePackageType='APPL',
+    CFBundleIconFile='PhotaraStudio.icns', NSHighResolutionCapable=True,
     LSEnvironment={'VK_ICD_FILENAMES': str(pathlib.Path(sys.argv[1]).resolve() / 'share/vulkan/icd.d/MoltenVK_icd.json')})
 with (app / 'Info.plist').open('wb') as f: plistlib.dump(info, f)
 PY
+# Refresh the local ad-hoc signature after changing the executable and resources.
+codesign --force --sign - "build/Photara Studio.app"
+touch "build/Photara Studio.app"
