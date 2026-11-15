@@ -71,7 +71,7 @@ if(PHOTARA_ENABLE_CUDA)
     else()
         message(WARNING "CUDA compiler not found; building CPU-only Photara")
         set(PHOTARA_ENABLE_CUDA OFF)
-        set(PHOTARA_ENABLE_SPLAT OFF)
+        # Vulkan splatting remains available without CUDA.
     endif()
 endif()
 
@@ -601,7 +601,7 @@ if(PHOTARA_ENABLE_FEATURES)
             "Delaunay meshing require a CGAL-enabled build")
     endif()
 
-    if(PHOTARA_ENABLE_SPLAT AND PHOTARA_ENABLE_CUDA)
+    if(PHOTARA_ENABLE_SPLAT)
         include(PhotaraFindDeps)
         photara_find_webpzstd()
         find_package(ZLIB REQUIRED)
@@ -615,6 +615,8 @@ if(PHOTARA_ENABLE_FEATURES)
             set(TINYTENSOR_ENABLE_VULKAN ON CACHE BOOL
                 "Build the TinyTensor Vulkan compute backend" FORCE)
         endif()
+        set(TINYTENSOR_ENABLE_CUDA ${PHOTARA_ENABLE_CUDA} CACHE BOOL "" FORCE)
+        set(SPLAT_DRENDER_ENABLE_CUDA ${PHOTARA_ENABLE_CUDA} CACHE BOOL "" FORCE)
         add_subdirectory(
             third_party/tinytensor
             ${CMAKE_CURRENT_BINARY_DIR}/third_party/tinytensor)
@@ -622,6 +624,7 @@ if(PHOTARA_ENABLE_FEATURES)
             "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/splat_drender"
             "${CMAKE_CURRENT_BINARY_DIR}/splat_drender")
 
+        if(PHOTARA_ENABLE_CUDA)
         add_library(photara_splat_cuda STATIC
             src/splat/sog_xt_training.cu
             src/splat/rasterizer.cu
@@ -648,7 +651,7 @@ if(PHOTARA_ENABLE_FEATURES)
             tinytensor::tinytensor
             splat_drender::splat_drender
             CUDA::cudart)
-        target_compile_definitions(photara_splat_cuda PUBLIC PHOTARA_HAS_SPLAT=1)
+        target_compile_definitions(photara_splat_cuda PUBLIC PHOTARA_HAS_SPLAT=1 PHOTARA_HAS_CUDA_SPLAT=1)
         target_compile_options(photara_splat_cuda PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
         # Match CPU nearest-neighbor distance ordering and field arithmetic.
@@ -659,9 +662,31 @@ if(PHOTARA_ENABLE_FEATURES)
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON)
 
+        else()
+            add_library(photara_splat_cuda STATIC
+                src/splat/cuda_vulkan_preview_unavailable.cpp
+                src/splat/focus_mask_portable.cpp
+                src/splat/visualize_portable.cpp
+                src/splat/cuda_ops_portable.cpp
+                src/splat/sh_adam_quant_portable.cpp
+                src/splat/ppisp_portable.cpp
+                src/splat/bilateral_grid_portable.cpp
+                src/splat/fused_ssim_portable.cpp
+                src/splat/pam_cuda_portable.cpp
+                src/splat/sog_xt_training_portable.cpp
+                src/splat/igs_selection_cuda_portable.cpp
+                src/splat/adc_ops.cpp
+                src/splat/optimizer.cpp)
+            target_include_directories(photara_splat_cuda PUBLIC
+                ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
+            target_link_libraries(photara_splat_cuda PUBLIC tinytensor::tinytensor)
+            target_compile_features(photara_splat_cuda PUBLIC cxx_std_20)
+        endif()
+
         find_package(nlohmann_json CONFIG REQUIRED)
         find_package(yaml-cpp CONFIG REQUIRED)
         add_library(photara_splat
+            src/splat/rasterizer.cpp
             src/splat/colmap.cpp
             src/splat/dataset.cpp
             src/splat/dataset_nerfstudio.cpp

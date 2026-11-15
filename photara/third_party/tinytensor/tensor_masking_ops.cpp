@@ -547,7 +547,7 @@ namespace tinytensor {
 
             // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
             // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
-            std::transform(std::execution::seq,
+            std::transform(
                            idx, idx + indices_same_device.numel(), dst,
                            [src, total](int pos) {
                                if (pos < 0)
@@ -1341,7 +1341,7 @@ namespace tinytensor {
                 } else {
                     // Element-wise assignment
                     size_t num_elements = numel();
-                    std::for_each(std::execution::seq,
+                    std::for_each(
                                   std::views::iota(size_t(0), idx.numel()).begin(),
                                   std::views::iota(size_t(0), idx.numel()).end(),
                                   [data, indices, values, num_elements](size_t i) {

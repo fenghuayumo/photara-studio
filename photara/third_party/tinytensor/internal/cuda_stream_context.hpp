@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <stdexcept>
 #include <string>
 

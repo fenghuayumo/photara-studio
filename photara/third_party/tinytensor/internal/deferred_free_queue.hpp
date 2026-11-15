@@ -3,7 +3,7 @@
 #include "core/logger.hpp"
 #include <atomic>
 #include <cstdint>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <mutex>
 #include <vector>
 

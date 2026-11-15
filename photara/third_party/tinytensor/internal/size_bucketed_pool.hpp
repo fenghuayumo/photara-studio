@@ -7,7 +7,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstdint>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <limits>
 #include <mutex>
 #include <vector>

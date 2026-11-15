@@ -290,6 +290,12 @@ void create_context(ImVector<const char*> extensions, const std::string& preferr
     app.pApplicationName = "Photara Studio";
     app.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+    if (has_extension(properties, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        create.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+#endif
     create.pApplicationInfo = &app;
     create.enabledExtensionCount = static_cast<std::uint32_t>(extensions.Size);
     create.ppEnabledExtensionNames = extensions.Data;
@@ -390,6 +396,9 @@ void create_context(ImVector<const char*> extensions, const std::string& preferr
 
     std::vector<const char*> required_device_extensions;
     required_device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // The portability subset must be enabled when advertised (MoltenVK).
+    if (advertised_has("VK_KHR_portability_subset"))
+        required_device_extensions.push_back("VK_KHR_portability_subset");
 #if defined(_WIN32)
     required_device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
     required_device_extensions.push_back(
@@ -965,6 +974,11 @@ void ExternalPreview::create(
         static_cast<std::size_t>(width) * height * 3, 10);
     display.upload(placeholder);
     g_display_image = display.image;
+#if defined(__APPLE__)
+    // MoltenVK cannot export Linux opaque FDs. Keep the ordinary preview
+    // texture; the pipeline uses its image/file handoff without export handles.
+    return;
+#endif
 
 #if defined(_WIN32)
     constexpr auto k_memory_export = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;

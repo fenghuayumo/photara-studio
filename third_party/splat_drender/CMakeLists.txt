@@ -1,17 +1,22 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(splat_drender VERSION 1.0.0 LANGUAGES CXX CUDA)
+project(splat_drender VERSION 1.0.0 LANGUAGES CXX)
 
-include(CheckLanguage)
-check_language(CUDA)
-if(NOT CMAKE_CUDA_COMPILER)
-    message(FATAL_ERROR "splat_drender requires CUDA.")
+set(_splat_cuda_default ON)
+if(DEFINED PHOTARA_ENABLE_CUDA)
+    set(_splat_cuda_default ${PHOTARA_ENABLE_CUDA})
+elseif(APPLE)
+    set(_splat_cuda_default OFF)
+endif()
+option(SPLAT_DRENDER_ENABLE_CUDA "Build the CUDA splat rasterizer" ${_splat_cuda_default})
+
+if(SPLAT_DRENDER_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit 12.0 REQUIRED)
 endif()
 
-find_package(CUDAToolkit 12.0 REQUIRED)
-
 option(SPLAT_DRENDER_BUILD_TESTS "Build CUDA geometry gradient checks" OFF)
-if(SPLAT_DRENDER_BUILD_TESTS)
+if(SPLAT_DRENDER_BUILD_TESTS AND SPLAT_DRENDER_ENABLE_CUDA)
     enable_testing()
     add_executable(splat_geometry_gradient_test tests/geometry_gradient_test.cu)
     target_include_directories(splat_geometry_gradient_test PRIVATE include src)
@@ -24,6 +29,7 @@ if(SPLAT_DRENDER_BUILD_TESTS)
     add_test(NAME splat_drender.geometry_gradient COMMAND splat_geometry_gradient_test)
 endif()
 
+if(SPLAT_DRENDER_ENABLE_CUDA)
 add_library(splat_drender STATIC
     src/gut.cu
     src/pipeline.cu
@@ -55,6 +61,8 @@ else()
     target_compile_options(splat_drender PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
 endif()
+
+endif() # SPLAT_DRENDER_ENABLE_CUDA
 
 # ---------------------------------------------------------------------------
 # Vulkan backend: the same forward rasterizer as Vulkan compute passes, so a
@@ -197,6 +205,10 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
         endif()
         message(STATUS "splat_drender: Vulkan backend enabled (${SPLAT_DRENDER_DXC_EXECUTABLE})")
     else()
-        message(STATUS "splat_drender: Vulkan backend disabled (Vulkan SDK or dxc not found)")
+        message(FATAL_ERROR "SPLAT_DRENDER_ENABLE_VULKAN requires Vulkan SDK 1.2+ and dxc")
     endif()
+endif()
+
+if(NOT SPLAT_DRENDER_ENABLE_CUDA AND NOT SPLAT_DRENDER_ENABLE_VULKAN)
+    message(FATAL_ERROR "Enable at least one splat_drender backend")
 endif()

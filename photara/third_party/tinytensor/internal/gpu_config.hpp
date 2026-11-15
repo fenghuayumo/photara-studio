@@ -6,7 +6,7 @@
 #pragma once
 
 #include <cstdint>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 
 namespace tinytensor {
 

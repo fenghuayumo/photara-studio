@@ -8,7 +8,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstring>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <functional>
 #include <initializer_list>
 #include <limits>

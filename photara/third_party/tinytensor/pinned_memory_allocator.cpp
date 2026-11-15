@@ -3,7 +3,7 @@
 #include "core/vram_profiler.hpp"
 #include <chrono>
 #include <cmath>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 
 #define CHECK_CUDA(call)                              \
     do {                                              \
@@ -26,11 +26,13 @@ namespace tinytensor {
           size(s),
           last_stream(stream) {
         if (ptr) {
+#if !defined(TINYTENSOR_NO_CUDA)
             cudaError_t err = cudaEventCreate(&ready_event);
             if (err != cudaSuccess) {
                 LOG_ERROR("cudaEventCreate failed: {}", cudaGetErrorString(err));
                 ready_event = nullptr;
             }
+#endif
         }
     }
 
@@ -171,6 +173,10 @@ namespace tinytensor {
 
         // Cache miss - need to allocate new pinned memory
         void* ptr = nullptr;
+#if defined(TINYTENSOR_NO_CUDA)
+        ptr = std::malloc(rounded_size);
+        if (!ptr) return nullptr;
+#else
         cudaError_t err = cudaHostAlloc(&ptr, rounded_size, cudaHostAllocDefault);
 
         if (err != cudaSuccess) {
@@ -185,6 +191,7 @@ namespace tinytensor {
             LOG_WARN("Falling back to regular malloc for {} bytes", rounded_size);
         }
 
+#endif
         allocated_blocks_[ptr] = rounded_size;
         stats_.allocated_bytes += rounded_size;
         stats_.num_allocs++;
@@ -263,7 +270,11 @@ namespace tinytensor {
                     }
                 }
 
+#if defined(TINYTENSOR_NO_CUDA)
+                std::free(block.ptr);
+#else
                 CHECK_CUDA(cudaFreeHost(block.ptr));
+#endif
                 freed_bytes += block.size;
                 freed_blocks++;
             }

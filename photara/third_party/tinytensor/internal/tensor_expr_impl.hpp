@@ -9,7 +9,7 @@
 #include "lazy_ir.hpp"
 #include "tensor_expr.hpp"
 #include "tensor_functors.hpp" // For ops::compose
-#include <cuda_fp16.h>
+#include "core/cuda_half_api.hpp"
 #include <optional>
 #include <typeinfo>
 

@@ -9,7 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <deque>
 #include <iterator>
 #include <list>

@@ -1,6 +1,6 @@
 #include "internal/tensor_impl.hpp"
 #include <cstring>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <vector>
 
 namespace tinytensor {

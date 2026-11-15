@@ -7,7 +7,7 @@
 #include "core/vram_profiler.hpp"
 #include "gpu_slab_allocator.hpp"
 #include "size_bucketed_pool.hpp"
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <iomanip>
 #include <memory>
 #include <mutex>

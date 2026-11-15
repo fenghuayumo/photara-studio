@@ -172,9 +172,9 @@ void assemble_explicit_schur(
                     reduced.blocks.data() + pattern.diagonal_blocks[camera] * pose_block_size);
 
     int thread_count = 1;
-#if defined(PHOTARA_HAS_OPENMP)
     const std::size_t local_values =
         pattern.upper_block_count * pose_block_size;
+#if defined(PHOTARA_HAS_OPENMP)
     const std::size_t values_per_thread =
         std::max<std::size_t>(1, local_values);
     const std::size_t memory_limited_threads =

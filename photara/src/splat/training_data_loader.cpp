@@ -8,7 +8,7 @@
 #include "core/logging.hpp"
 #include "splat/trainer.hpp"
 
-#include <cuda_runtime_api.h>
+#include "core/cuda_runtime_api.hpp"
 #include "internal/cuda_stream_context.hpp"
 #include "core/vram_profiler.hpp"
 #include "vulkan/ops.hpp"

@@ -742,7 +742,7 @@ void ImageQaSession::request_gt(
                 key += mask_path.native();
                 const auto stamp = std::filesystem::last_write_time(mask_path);
                 key += std::filesystem::path(
-                    std::to_string(stamp.time_since_epoch().count())).native();
+                    std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(stamp.time_since_epoch()).count())).native();
             }
         } catch (...) {
             mask_path_failed = true;

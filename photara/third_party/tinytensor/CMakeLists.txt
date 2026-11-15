@@ -3,10 +3,18 @@
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.20)
-project(tinytensor LANGUAGES CXX CUDA)
+project(tinytensor LANGUAGES CXX)
+
+option(TINYTENSOR_BUILD_VULKAN_RUNTIME_ONLY
+    "Build the independent Vulkan runtime without the legacy tensor/CUDA adapter" OFF)
+option(TINYTENSOR_ENABLE_CUDA "Build the CUDA tensor backend" ON)
+if(NOT TINYTENSOR_BUILD_VULKAN_RUNTIME_ONLY)
+if(TINYTENSOR_ENABLE_CUDA)
+    enable_language(CUDA)
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
+endif()
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -58,6 +66,7 @@ set(TINYTENSOR_CPP_SOURCES
 )
 
 # Create CUDA static library directly
+if(TINYTENSOR_ENABLE_CUDA)
 add_library(tinytensor_cuda OBJECT ${TINYTENSOR_CUDA_SOURCES})
 target_include_directories(tinytensor_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -69,29 +78,22 @@ set_target_properties(tinytensor_cuda PROPERTIES
     FOLDER "external"
 )
 
+endif()
+
 # Create C++ static library
 add_library(tinytensor_cpp OBJECT ${TINYTENSOR_CPP_SOURCES})
 target_include_directories(tinytensor_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-# Headers under internal/ include cuda_runtime.h; propagate CUDA includes to
-# host C++ translation units (not only the final tinytensor archive).
-target_link_libraries(tinytensor_cpp PUBLIC CUDA::cudart)
-# OBJECT libraries do not always propagate INTERFACE include dirs to consumers
-# of the object files alone; set includes explicitly as well.
-target_include_directories(tinytensor_cpp PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
-set_target_properties(tinytensor_cpp PROPERTIES FOLDER "external")
-
-target_link_libraries(tinytensor_cuda PUBLIC CUDA::cudart)
-target_include_directories(tinytensor_cuda PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
-
-# Create the main static library that merges both
-add_library(tinytensor STATIC $<TARGET_OBJECTS:tinytensor_cuda> $<TARGET_OBJECTS:tinytensor_cpp>)
-
-# Include directories
+if(TINYTENSOR_ENABLE_CUDA)
+    target_link_libraries(tinytensor_cpp PUBLIC CUDA::cudart)
+    target_link_libraries(tinytensor_cuda PUBLIC CUDA::cudart)
+    add_library(tinytensor STATIC $<TARGET_OBJECTS:tinytensor_cuda> $<TARGET_OBJECTS:tinytensor_cpp>)
+    target_link_libraries(tinytensor PUBLIC CUDA::cudart)
+else()
+    target_compile_definitions(tinytensor_cpp PUBLIC TINYTENSOR_NO_CUDA=1)
+    add_library(tinytensor STATIC $<TARGET_OBJECTS:tinytensor_cpp>)
+    target_compile_definitions(tinytensor PUBLIC TINYTENSOR_NO_CUDA=1)
+endif()
 target_include_directories(tinytensor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Link CUDA runtime (RNG is the in-house Philox in philox_rng.cuh, so no
-# curand dependency is needed)
-target_link_libraries(tinytensor PUBLIC CUDA::cudart)
 
 # Set CUDA properties
 set_target_properties(tinytensor PROPERTIES FOLDER "external")
@@ -99,14 +101,18 @@ set_target_properties(tinytensor PROPERTIES FOLDER "external")
 # Compile options
 # Device lambdas and constexpr host math (e.g. numeric_limits::infinity) need
 # these nvcc flags on both MSVC and Linux toolchains.
+if(TINYTENSOR_ENABLE_CUDA)
 target_compile_options(tinytensor_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr>)
+endif()
 if(MSVC)
     target_compile_options(tinytensor_cpp PRIVATE /EHsc /utf-8)
     find_package(fmt CONFIG REQUIRED)
-    target_link_libraries(tinytensor_cuda PRIVATE fmt::fmt-header-only)
-    target_compile_definitions(tinytensor_cuda PRIVATE
-        FMT_UNICODE=0 TINYTENSOR_USE_FMT_LOGGING=1)
+    if(TINYTENSOR_ENABLE_CUDA)
+        target_link_libraries(tinytensor_cuda PRIVATE fmt::fmt-header-only)
+        target_compile_definitions(tinytensor_cuda PRIVATE
+            FMT_UNICODE=0 TINYTENSOR_USE_FMT_LOGGING=1)
+    endif()
     # Consumers also include the logger from CUDA translation units.
     target_link_libraries(tinytensor INTERFACE fmt::fmt-header-only)
     target_compile_definitions(tinytensor INTERFACE
@@ -117,10 +123,12 @@ endif()
 # Alias for linking
 add_library(tinytensor::tinytensor ALIAS tinytensor)
 
+endif() # legacy tensor/CUDA adapter
+
 # ============================================================================
 # Optional Vulkan compute backend (HLSL -> SPIR-V via DXC)
 # ============================================================================
-option(TINYTENSOR_ENABLE_VULKAN "Build the TinyTensor Vulkan compute backend" OFF)
+option(TINYTENSOR_ENABLE_VULKAN "Build the TinyTensor Vulkan compute backend" ${TINYTENSOR_BUILD_VULKAN_RUNTIME_ONLY})
 if(TINYTENSOR_ENABLE_VULKAN)
     find_package(Vulkan 1.2 QUIET)
     find_program(TINYTENSOR_DXC_EXECUTABLE
@@ -183,33 +191,39 @@ if(TINYTENSOR_ENABLE_VULKAN)
     endif()
     include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
 
-    add_library(tinytensor_vulkan OBJECT
-        vulkan/runtime/runtime.cpp
-        vulkan/ops.cpp)
+    add_library(tinytensor_vulkan_runtime STATIC vulkan/runtime/runtime.cpp)
+    add_library(tinytensor::vulkan_runtime ALIAS tinytensor_vulkan_runtime)
     photara_vk_embed_hlsl(
-        TARGET tinytensor_vulkan
+        TARGET tinytensor_vulkan_runtime
         SHADERS ${TINYTENSOR_SHADER_PATHS}
         INCLUDE_DIR "${TINYTENSOR_SHADER_DIR}"
         OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated"
         DEPENDS "${TINYTENSOR_SHADER_DIR}/common.hlsli"
                 "${TINYTENSOR_SHADER_DIR}/shape_regularizers_math.hlsli")
-    target_include_directories(tinytensor_vulkan
+    target_include_directories(tinytensor_vulkan_runtime
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
         PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)
-    target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
-    target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_HAS_VULKAN=1)
-    target_link_libraries(tinytensor_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk CUDA::cudart)
-    target_include_directories(tinytensor_vulkan PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
-    set_target_properties(tinytensor_vulkan PROPERTIES FOLDER "external")
-    if(MSVC)
-        target_compile_options(tinytensor_vulkan PRIVATE /EHsc /utf-8)
-    endif()
-
+    target_compile_features(tinytensor_vulkan_runtime PUBLIC cxx_std_20)
+    target_compile_definitions(tinytensor_vulkan_runtime PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    target_link_libraries(tinytensor_vulkan_runtime PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
+    set_target_properties(tinytensor_vulkan_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(NOT TINYTENSOR_BUILD_VULKAN_RUNTIME_ONLY)
+        add_library(tinytensor_vulkan OBJECT vulkan/ops.cpp)
+        target_link_libraries(tinytensor_vulkan PUBLIC tinytensor_vulkan_runtime)
+        if(TINYTENSOR_ENABLE_CUDA)
+            target_link_libraries(tinytensor_vulkan PUBLIC CUDA::cudart)
+        else()
+            target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_NO_CUDA=1)
+        endif()
+        target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
     target_sources(tinytensor PRIVATE $<TARGET_OBJECTS:tinytensor_vulkan>)
-    target_link_libraries(tinytensor PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
+    target_link_libraries(tinytensor PUBLIC tinytensor_vulkan_runtime)
     target_compile_definitions(tinytensor PUBLIC TINYTENSOR_HAS_VULKAN=1)
     target_compile_definitions(tinytensor_cpp PUBLIC TINYTENSOR_HAS_VULKAN=1)
-    target_compile_definitions(tinytensor_cuda PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    if(TINYTENSOR_ENABLE_CUDA)
+        target_compile_definitions(tinytensor_cuda PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    endif()
+    endif()
     message(STATUS "TinyTensor Vulkan backend: ON (dxc=${TINYTENSOR_DXC_EXECUTABLE})")
     set(TINYTENSOR_HAS_VULKAN_BACKEND ON PARENT_SCOPE)
 endif()

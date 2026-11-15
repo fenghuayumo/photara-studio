@@ -1,7 +1,7 @@
 #pragma once
 
 #include <iostream>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 
 // TinyTensor CUDA Debug - Minimal CUDA debugging utilities
 

@@ -1,4 +1,4 @@
-#include "splat/rasterizer.hpp"
+#include "rasterizer_cuda.hpp"
 
 #include "cuda_ops.hpp"
 #include "rasterizer_vulkan.hpp"
@@ -338,7 +338,7 @@ std::array<const void*, 5> geometry_inputs_of(const GaussianModel& model) {
 
 } // namespace
 
-RenderResult Rasterizer::forward(
+RenderResult CudaRasterizer::forward(
     const GaussianModel& model,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
@@ -403,7 +403,7 @@ RenderResult Rasterizer::forward(
     return result;
 }
 
-RenderResult Rasterizer::forward_colors(
+RenderResult CudaRasterizer::forward_colors(
     const GaussianModel& model,
     RenderResult& source,
     const tinytensor::Tensor& colors_precomp) const {
@@ -450,7 +450,7 @@ RenderResult Rasterizer::forward_colors(
     return result;
 }
 
-tinytensor::Tensor Rasterizer::pruning_scores(
+tinytensor::Tensor CudaRasterizer::pruning_scores(
     const GaussianModel& model,
     const Camera& camera,
     RasterizeOptions options, const bool gaussian_pop) const {
@@ -495,7 +495,7 @@ tinytensor::Tensor Rasterizer::pruning_scores(
     return scores;
 }
 
-float Rasterizer::photometric_loss(
+float CudaRasterizer::photometric_loss(
     const RenderResult& rendered,
     const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask,
@@ -509,7 +509,7 @@ float Rasterizer::photometric_loss(
         color_gradient);
 }
 
-ModelGradients Rasterizer::backward(
+ModelGradients CudaRasterizer::backward(
     const GaussianModel& model,
     const RenderResult& rendered,
     const tinytensor::Tensor& grad_color,
@@ -762,7 +762,7 @@ ModelGradients Rasterizer::backward(
     return gradients;
 }
 
-void Rasterizer::materialize_visibility(RenderResult& rendered) const {
+void CudaRasterizer::materialize_visibility(RenderResult& rendered) const {
     if (rendered.visibility.is_valid())
         return;
     if (rendered.context.backend_impl) {
@@ -772,7 +772,7 @@ void Rasterizer::materialize_visibility(RenderResult& rendered) const {
     throw std::invalid_argument("Deferred visibility requires a live Vulkan forward context");
 }
 
-const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
+const float* CudaRasterizer::projected_mean2d(const RenderResult& rendered) const {
     if (!rendered.context.impl)
         return nullptr;
     const auto& buffer = rendered.context.impl->gaussian_buffer;
@@ -782,7 +782,7 @@ const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
     return reinterpret_cast<const float*>(buffer.data_ptr());
 }
 
-DepthSampleResult Rasterizer::sample_depth(
+DepthSampleResult CudaRasterizer::sample_depth(
     const GaussianModel& model,
     const tinytensor::Tensor& world_points,
     const Camera& camera,
@@ -827,7 +827,7 @@ DepthSampleResult Rasterizer::sample_depth(
     return result;
 }
 
-DepthSampleGradients Rasterizer::sample_depth_backward(
+DepthSampleGradients CudaRasterizer::sample_depth_backward(
     const GaussianModel& model,
     const DepthSampleResult& sampled,
     const tinytensor::Tensor& grad_camera_points) const {
@@ -873,7 +873,7 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
     return result;
 }
 
-OccupancyCache Rasterizer::prepare_occupancy_cache(
+OccupancyCache CudaRasterizer::prepare_occupancy_cache(
     const GaussianModel& model,
     const std::vector<Camera>& cameras,
     const RasterizeOptions& requested_options,
@@ -911,7 +911,7 @@ OccupancyCache Rasterizer::prepare_occupancy_cache(
     return {context};
 }
 
-OccupancyResult Rasterizer::evaluate_occupancy(
+OccupancyResult CudaRasterizer::evaluate_occupancy(
     OccupancyCache& cache,
     std::size_t camera_index,
     const tinytensor::Tensor& world_points) const {
@@ -1005,13 +1005,13 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     return result;
 }
 
-OccupancyCacheStats Rasterizer::occupancy_cache_stats(const OccupancyCache& cache) const {
+OccupancyCacheStats CudaRasterizer::occupancy_cache_stats(const OccupancyCache& cache) const {
     if (!cache.state)
         return {};
     return std::static_pointer_cast<OccupancyCacheImpl>(cache.state)->stats;
 }
 
-OccupancyResult Rasterizer::evaluate_occupancy(
+OccupancyResult CudaRasterizer::evaluate_occupancy(
     const GaussianModel& model,
     const tinytensor::Tensor& world_points,
     const Camera& camera,

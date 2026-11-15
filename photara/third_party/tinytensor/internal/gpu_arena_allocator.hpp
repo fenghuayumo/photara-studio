@@ -3,7 +3,7 @@
 #include "core/logger.hpp"
 #include "offset_allocator.hpp"
 #include <atomic>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <memory>
 #include <mutex>
 #include <unordered_map>

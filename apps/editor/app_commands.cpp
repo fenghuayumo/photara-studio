@@ -1764,7 +1764,7 @@ std::string gaussian_source_cache_key(const GaussianModelEntry& entry) {
     std::error_code error;
     const auto stamp = std::filesystem::last_write_time(entry.path, error);
     if (error) throw std::runtime_error("Cannot read Gaussian source: " + path_to_utf8(entry.path));
-    return path_to_utf8(entry.path) + ':' + std::to_string(stamp.time_since_epoch().count());
+    return path_to_utf8(entry.path) + ':' + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(stamp.time_since_epoch()).count());
 }
 
 std::shared_ptr<const photara::splat::GaussianModel> gaussian_source_model(const GaussianModelEntry& entry) {
@@ -4935,7 +4935,7 @@ std::string splat_disk_key(const std::filesystem::path& path) {
     std::error_code error;
     const auto stamp = std::filesystem::last_write_time(path, error);
     std::string key = path.string();
-    if (!error) key += ":" + std::to_string(stamp.time_since_epoch().count());
+    if (!error) key += ":" + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(stamp.time_since_epoch()).count());
     return key;
 }
 

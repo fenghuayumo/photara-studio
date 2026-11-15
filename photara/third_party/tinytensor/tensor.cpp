@@ -7,8 +7,8 @@
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
 #include <cstring>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include "core/cuda_half_api.hpp"
+#include "core/cuda_runtime_api.hpp"
 #include <format>
 #include <fstream>
 #include <iomanip>

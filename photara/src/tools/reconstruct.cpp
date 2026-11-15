@@ -2351,6 +2351,8 @@ std::filesystem::path splat_file_path(const ReconstructCli& cli) {
     return parent / (cli.output.stem().string() + "_splat.ply");
 }
 
+#endif
+
 void apply_cli_subject_bounds(
     const ReconstructCli& cli, photara::mvs::MvsScene& scene) {
     if (cli.splat && !cli.splat_focus_region) {
@@ -2370,6 +2372,7 @@ void apply_cli_subject_bounds(
     if (!cli.splat && cli.capture_mode == "scene") scene.subject_bounds = {};
 }
 
+#if defined(PHOTARA_HAS_SPLAT)
 photara::splat::CudaVulkanPreviewOptions make_preview_options(
     const ReconstructCli& cli) {
     photara::splat::CudaVulkanPreviewOptions options;

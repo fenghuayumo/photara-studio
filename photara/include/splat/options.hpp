@@ -94,7 +94,11 @@ struct TrainingOptions {
     unsigned checkpoint_interval_iterations{0};
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
+#if defined(TINYTENSOR_NO_CUDA)
+    TrainingBackend backend{TrainingBackend::vulkan};
+#else
     TrainingBackend backend{TrainingBackend::cuda};
+#endif
     RenderMethod render_method{RenderMethod::gaussian_3dgs};
     SplatFilterMode filter_mode{SplatFilterMode::classic};
     RasterizationPolicy rasterization;

@@ -123,7 +123,8 @@ void prepare_training_priors(
     identity << (native ? "photara-ai-priors-v2-native-faces\n" : "photara-ai-priors-v1\n")
              << std::string(model_name.begin(), model_name.end()) << '\n'
              << std::filesystem::file_size(model) << '\n'
-             << std::filesystem::last_write_time(model).time_since_epoch().count() << '\n'
+             << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::filesystem::last_write_time(model).time_since_epoch()).count() << '\n'
              << tokens << '\n'
              << sparse_hash << '\n'
              << training.undistort_to_pinhole << '\n'

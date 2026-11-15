@@ -597,7 +597,7 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
     application_info.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     application_info.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-#ifdef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
     if (portability_enumeration_available) {
         instance_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
@@ -927,7 +927,7 @@ std::vector<DeviceInfo> Context::enumerate_devices() {
 #ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
     if (has_instance_extension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-#ifdef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
         create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
     }

@@ -14,7 +14,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 #include <format>
 #include <numeric>
 #include <optional>

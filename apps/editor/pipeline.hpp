@@ -307,7 +307,11 @@ struct ProjectSettings : photara::splat::TrainingLossSettings {
     // alignment_backend: 0 automatic, 1 cpu, 2 cuda, 3 vulkan (positioning and BA).
     // automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
+#if defined(TINYTENSOR_NO_CUDA)
+    int training_backend = 1;
+#else
     int training_backend = 0;
+#endif
     int alignment_backend = 0;
     int sam_backend = 2;
     int max_features = 27'000;

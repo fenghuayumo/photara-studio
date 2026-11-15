@@ -5,7 +5,7 @@
 #include "sh_adam_quant.hpp"
 #include "core/logging.hpp"
 
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 
 #include <algorithm>
 #include <cmath>

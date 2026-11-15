@@ -33,7 +33,11 @@ endfunction()
 
 option(PHOTARA_BUILD_PYTHON
     "Build the nanobind Python module (`import photara`)" OFF)
-option(PHOTARA_ENABLE_CUDA "Build CUDA acceleration" ON)
+set(_photara_cuda_default ON)
+if(APPLE)
+    set(_photara_cuda_default OFF)
+endif()
+option(PHOTARA_ENABLE_CUDA "Build CUDA acceleration" ${_photara_cuda_default})
 set(PHOTARA_CUDA_ARCHITECTURES "" CACHE STRING
     "CUDA architectures for Photara targets (empty = RTX 20+ release set)")
 

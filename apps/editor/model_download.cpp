@@ -1,3 +1,4 @@
+#include <chrono>
 #include "model_download.hpp"
 #include "core/sha256.hpp"
 #include <cctype>
@@ -54,7 +55,7 @@ void write_receipt(const ModelDownloadSpec& spec) {
     const auto path=receipt_path(spec);
     std::ofstream output(path,std::ios::trunc);
     output<<spec.sha256<<'\n'<<std::filesystem::file_size(spec.destination)<<'\n'
-        <<std::filesystem::last_write_time(spec.destination).time_since_epoch().count()<<'\n';
+        <<std::chrono::duration_cast<std::chrono::nanoseconds>(std::filesystem::last_write_time(spec.destination).time_since_epoch()).count()<<'\n';
     if (!output) throw std::runtime_error("Cannot save model verification receipt");
 }
 }
@@ -63,7 +64,7 @@ bool verified_download_ready(const ModelDownloadSpec& spec) {
     if (spec.sha256.empty() || !std::filesystem::is_regular_file(spec.destination,error) || error) return false;
     const auto size=std::filesystem::file_size(spec.destination,error);
     if (error || size!=spec.expected_bytes) return false;
-    const auto stamp=std::filesystem::last_write_time(spec.destination,error).time_since_epoch().count();
+    const auto stamp=std::chrono::duration_cast<std::chrono::nanoseconds>(std::filesystem::last_write_time(spec.destination,error).time_since_epoch()).count();
     if (error) return false;
     std::ifstream input(receipt_path(spec));
     std::string hash;std::uint64_t stored_size{};std::int64_t stored_stamp{};

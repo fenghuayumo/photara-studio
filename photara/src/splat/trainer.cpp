@@ -26,7 +26,7 @@
 #include "internal/memory_pool.hpp"
 #include "vulkan/backend.hpp"
 
-#include <cuda_runtime.h>
+#include "core/cuda_runtime_api.hpp"
 
 #include <Eigen/Geometry>
 
