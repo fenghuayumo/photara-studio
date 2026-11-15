@@ -1,3 +1,4 @@
+#include "cuda_backend.hpp"
 #include "formats_sog_xt.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
@@ -223,11 +224,7 @@ void check() {
 }
 } // namespace
 
-GaussianModel sog_xt_training_forward(SogXtTrainingCodec& codec) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (codec.latent.means.device() == tinytensor::Device::Vulkan)
-        return sog_xt_training_forward_vulkan(codec);
-#endif
+GaussianModel cuda_backend::sog_xt_training_forward(SogXtTrainingCodec& codec) {
     using tinytensor::Tensor;
     auto& p = codec.latent;
     if (p.means.device() != tinytensor::Device::CUDA)
@@ -260,18 +257,12 @@ GaussianModel sog_xt_training_forward(SogXtTrainingCodec& codec) {
     return out;
 }
 
-void sog_xt_training_backward(
+void cuda_backend::sog_xt_training_backward(
     SogXtTrainingCodec& codec,
     const GaussianModel& decoded,
     ModelGradients& g,
     float tv,
     float qtv) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (codec.latent.means.device() == tinytensor::Device::Vulkan) {
-        sog_xt_training_backward_vulkan(codec, decoded, g, tv, qtv);
-        return;
-    }
-#endif
     auto& p = codec.latent;
     unsigned n = unsigned(p.size()), stride = unsigned(p.sh.shape()[1] * 3),
              dims = codec.dimensions;

@@ -26,19 +26,6 @@ class CudaRasterizer {
         RenderResult& source,
         const tinytensor::Tensor& colors_precomp) const;
 
-    // Fused training objective primitive. The Vulkan implementation keeps the
-    // image gradient in its render context for backward(); CUDA training keeps
-    // using the existing fused loss path.
-    float photometric_loss(
-        const RenderResult& rendered,
-        const tinytensor::Tensor& target,
-        const tinytensor::Tensor& mask,
-        bool mask_enabled,
-        float ssim_weight,
-        float photometric_weight,
-        bool read_loss_value = true,
-        tinytensor::Tensor* color_gradient = nullptr) const;
-
     ModelGradients backward(
         const GaussianModel& model,
         const RenderResult& rendered,
@@ -49,10 +36,6 @@ class CudaRasterizer {
         const tinytensor::Tensor& densify_map = {},
         const SHAdamUpdate* sh_adam = nullptr,
         const StructureAdamUpdate* structure_adam = nullptr) const;
-
-    // Materialize a deferred Vulkan contribution-visibility tensor. This is a
-    // no-op when forward() already returned the regular Float32 visibility.
-    void materialize_visibility(RenderResult& rendered) const;
 
     DepthSampleResult sample_depth(
         const GaussianModel& model,
@@ -92,7 +75,5 @@ class CudaRasterizer {
     // Packed [N,2] xy pixel centres from the last forward, or null.
     const float* projected_mean2d(const RenderResult& rendered) const;
 
-  private:
-    mutable std::shared_ptr<void> backend_;
 };
 }

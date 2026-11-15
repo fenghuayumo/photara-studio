@@ -1,3 +1,4 @@
+#include "cuda_backend.hpp"
 #include "bilateral_grid.hpp"
 #include "cuda_common.hpp"
 
@@ -764,7 +765,7 @@ void launch_identity(float* grids, const long long cells) {
 
 } // namespace
 
-BilateralGridState make_bilateral_grid_state(
+BilateralGridState cuda_backend::make_bilateral_grid_state(
     const std::size_t views,
     const TrainingOptions& options) {
     BilateralGridState state;
@@ -787,7 +788,7 @@ BilateralGridState make_bilateral_grid_state(
     return state;
 }
 
-void apply_bilateral_grid(
+void cuda_backend::apply_bilateral_grid(
     const tinytensor::Tensor& color,
     BilateralGridState& state,
     const std::size_t view,
@@ -813,7 +814,7 @@ void apply_bilateral_grid(
     check_cuda(cudaGetLastError(), "apply bilateral grid colour correction");
 }
 
-void backward_bilateral_grid(
+void cuda_backend::backward_bilateral_grid(
     BilateralGridState& state,
     const tinytensor::Tensor& color,
     const tinytensor::Tensor& output_gradient,
@@ -892,7 +893,7 @@ void backward_bilateral_grid(
     check_cuda(cudaGetLastError(), "backward bilateral grid colour correction");
 }
 
-void step_bilateral_grid(
+void cuda_backend::step_bilateral_grid(
     BilateralGridState& state,
     const TrainingOptions& options,
     const unsigned iteration,

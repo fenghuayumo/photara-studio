@@ -1,16 +1,15 @@
+#pragma once
 #include "focus_mask.hpp"
-
 #include "core/camera_projection.hpp"
-#include "internal/cuda_stream_context.hpp"
+#include <cmath>
 
-#include <stdexcept>
-
-#include <vector>
-
+#if defined(__CUDACC__)
+#define PHOTARA_FOCUS_HD __host__ __device__
+#else
+#define PHOTARA_FOCUS_HD
+#endif
 namespace photara::splat::detail {
-namespace {
-
-bool focus_ray_axis(
+PHOTARA_FOCUS_HD inline bool focus_ray_axis(
     float& t_near,
     float& t_far,
     const float origin,
@@ -30,7 +29,7 @@ bool focus_ray_axis(
     return t_far >= t_near;
 }
 
-bool focus_ray_hits(
+PHOTARA_FOCUS_HD inline bool focus_ray_hits(
     const float origin_x,
     const float origin_y,
     const float origin_z,
@@ -47,7 +46,7 @@ bool focus_ray_hits(
            focus_ray_axis(t_near, t_far, origin_z, direction_z, half_z) && t_far >= 0.F;
 }
 
-float focus_mask_value(
+PHOTARA_FOCUS_HD inline float focus_mask_value(
     const FocusMaskFrame& frame,
     const unsigned x,
     const unsigned y) {
@@ -80,20 +79,5 @@ float focus_mask_value(
                : 0.F;
 }
 
-} // namespace
-
-tinytensor::Tensor focus_view_mask_cpu(
-    const FocusMaskFrame& frame,
-    const tinytensor::Device device) {
-    const std::size_t pixels = static_cast<std::size_t>(frame.width) * frame.height;
-    std::vector<float> mask(pixels, 0.F);
-    for (unsigned y = 0; y < frame.height; ++y)
-        for (unsigned x = 0; x < frame.width; ++x)
-            mask[static_cast<std::size_t>(y) * frame.width + x] = focus_mask_value(frame, x, y);
-    return tinytensor::Tensor::from_vector(mask, {frame.height, frame.width}, device);
-}
-
-tinytensor::Tensor focus_view_mask_cuda(const FocusMaskFrame&) {
-    throw std::runtime_error("CUDA focus mask backend is disabled");
-}
 } // namespace photara::splat::detail
+#undef PHOTARA_FOCUS_HD

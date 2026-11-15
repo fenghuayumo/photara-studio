@@ -7,8 +7,11 @@ tinytensor::Tensor visualize(
     const GaussianModel& model,
     const Camera& camera,
     const VisualizeOptions& options) {
-    if (options.mode == VisualizationMode::points)
-        return detail::visualize_points_vulkan(model,camera,options);
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (model.means.device() == tinytensor::Device::Vulkan &&
+        options.mode == VisualizationMode::points)
+        return detail::visualize_points_vulkan(model, camera, options);
+#endif
     const bool diagnostics =
         options.mode == VisualizationMode::splat && options.channel != VisualizationChannel::color;
     if (options.mode == VisualizationMode::splat ||
@@ -26,8 +29,22 @@ tinytensor::Tensor visualize(
         raster.preview_rings = options.mode == VisualizationMode::rings;
         raster.preview_ring_scale = options.ring_scale;
         const auto rendered = rasterizer.forward(model, camera, raster);
-        return diagnostics ? detail::visualize_diagnostics_vulkan(rendered, camera, options) : rendered.color;
+        if (!diagnostics)
+            return rendered.color;
+#if defined(TINYTENSOR_HAS_VULKAN)
+        if (rendered.color.device() == tinytensor::Device::Vulkan)
+            return detail::visualize_diagnostics_vulkan(rendered, camera, options);
+#endif
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+        return detail::visualize_diagnostics_cuda(rendered, camera, options);
+#else
+        throw std::runtime_error("Visualization backend is not enabled");
+#endif
     }
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    if (model.means.device() == tinytensor::Device::CUDA)
+        return detail::visualize_overlay_cuda(model, camera, options);
+#endif
     throw std::invalid_argument("This visualization mode requires the CUDA backend");
 }
 

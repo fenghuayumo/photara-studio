@@ -1,3 +1,4 @@
+#include "cuda_backend.hpp"
 #include "ppisp.hpp"
 #include "cuda_common.hpp"
 
@@ -819,7 +820,7 @@ __global__ void ppisp_constrain_kernel(
 
 } // namespace
 
-PpispState make_ppisp_state(const std::size_t views, const TrainingOptions& options) {
+PpispState cuda_backend::make_ppisp_state(const std::size_t views, const TrainingOptions& options) {
     PpispState state;
     if (views == 0)
         return state;
@@ -844,7 +845,7 @@ PpispState make_ppisp_state(const std::size_t views, const TrainingOptions& opti
     return state;
 }
 
-void apply_ppisp(
+void cuda_backend::apply_ppisp(
     const tinytensor::Tensor& color,
     PpispState& state,
     const Camera& camera,
@@ -873,7 +874,7 @@ void apply_ppisp(
     check_cuda(cudaGetLastError(), "apply PPISP colour correction");
 }
 
-void backward_ppisp(
+void cuda_backend::backward_ppisp(
     PpispState& state,
     const tinytensor::Tensor& color,
     const tinytensor::Tensor& output_gradient,
@@ -909,7 +910,10 @@ void backward_ppisp(
     check_cuda(cudaGetLastError(), "backward PPISP colour correction");
 }
 
-void step_ppisp(PpispState& state, const TrainingOptions& options, const unsigned iteration) {
+void cuda_backend::step_ppisp(
+    PpispState& state,
+    const TrainingOptions& options,
+    const unsigned iteration) {
     if (!state.is_valid())
         return;
     const int views = static_cast<int>(state.parameters.shape()[0]);
@@ -931,28 +935,6 @@ void step_ppisp(PpispState& state, const TrainingOptions& options, const unsigne
         options.ppisp_identity_projection ? 1 : 0, options.ppisp_exposure_limit,
         options.ppisp_color_limit);
     check_cuda(cudaGetLastError(), "constrain PPISP colour correction");
-}
-
-std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {
-    std::array<float, 2> result{0.F, 0.F};
-    if (!state.is_valid() || state.num_params <= 0)
-        return result;
-    const std::vector<float> values = state.parameters.to_vector();
-    const std::size_t views = values.size() / static_cast<std::size_t>(state.num_params);
-    if (views == 0)
-        return result;
-    double total = 0.0;
-    std::size_t count = 0;
-    for (std::size_t view = 0; view < views; ++view) {
-        const float* row = values.data() + view * state.num_params;
-        const float deviation = std::abs(std::exp2(row[0]) - 1.F);
-        total += deviation;
-        ++count;
-        result[1] = std::max(result[1], deviation);
-    }
-    if (count != 0)
-        result[0] = static_cast<float>(total / count);
-    return result;
 }
 
 } // namespace photara::splat::detail

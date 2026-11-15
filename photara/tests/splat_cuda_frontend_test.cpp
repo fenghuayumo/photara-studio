@@ -1,6 +1,6 @@
 #include "splat/rasterizer.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
-#include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/ops.hpp"
 #include "../src/splat/optimizer.hpp"
 #include <cuda_runtime_api.h>
 #include "vulkan/backend.hpp"

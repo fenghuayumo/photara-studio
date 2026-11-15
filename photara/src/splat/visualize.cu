@@ -1,7 +1,7 @@
 #include "splat/visualize.hpp"
 
 #include "core/camera_projection.hpp"
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "splat/rasterizer.hpp"
 #include "visualize_diagnostics.hpp"
 
@@ -603,10 +603,6 @@ tinytensor::Tensor diagnostic_color(
     const RenderResult& rendered,
     const Camera& camera,
     const VisualizeOptions& options) {
-#if defined(TINYTENSOR_HAS_VULKAN)
-    if (rendered.color.device() == tinytensor::Device::Vulkan)
-        return detail::visualize_diagnostics_vulkan(rendered, camera, options);
-#endif
     auto color =
         tinytensor::Tensor::empty({3, camera.height, camera.width}, tinytensor::Device::CUDA);
     std::vector<float> initial(260, 0.F);
@@ -634,33 +630,17 @@ tinytensor::Tensor diagnostic_color(
 }
 } // namespace
 
-tinytensor::Tensor visualize(
+tinytensor::Tensor detail::visualize_diagnostics_cuda(
+    const RenderResult& rendered,
+    const Camera& camera,
+    const VisualizeOptions& options) {
+    return diagnostic_color(rendered, camera, options);
+}
+
+tinytensor::Tensor detail::visualize_overlay_cuda(
     const GaussianModel& model,
     const Camera& camera,
     const VisualizeOptions& options) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (model.means.device() == tinytensor::Device::Vulkan && options.mode == VisualizationMode::points)
-        return detail::visualize_points_vulkan(model,camera,options);
-#endif
-    const bool diagnostics =
-        options.mode == VisualizationMode::splat && options.channel != VisualizationChannel::color;
-    if (options.mode == VisualizationMode::splat ||
-        (model.means.device() == tinytensor::Device::Vulkan &&
-         options.mode == VisualizationMode::rings)) {
-        Rasterizer rasterizer;
-        RasterizeOptions raster;
-        raster.active_sh_degree = options.active_sh_degree;
-        raster.background = options.background;
-        raster.kernel_size = options.kernel_size;
-        raster.rasterization = options.rasterization;
-        raster.scale_modifier = options.scale_modifier;
-        raster.require_depth = diagnostics;
-        raster.record_backward_state = false;
-        raster.preview_rings = options.mode == VisualizationMode::rings;
-        raster.preview_ring_scale = options.ring_scale;
-        const auto rendered = rasterizer.forward(model, camera, raster);
-        return diagnostics ? diagnostic_color(rendered, camera, options) : rendered.color;
-    }
     return render_debug_overlay(model, camera, options);
 }
 

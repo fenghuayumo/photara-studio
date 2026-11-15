@@ -1,6 +1,6 @@
 // Included by splat_test.cpp so the geometry fixtures can also exercise its
 // existing depth-normal finite differences and planar multi-view oracle.
-void test_vulkan_geometry_chain() {
+void test_vulkan_geometry_chain(bool cuda_parity = true) {
     using namespace photara::splat;
     using tinytensor::Tensor;
     using tinytensor::Device;
@@ -120,6 +120,8 @@ void test_vulkan_geometry_chain() {
         }
         std::cout<<"Tiled depth query tails, invalid points, scatter and tolerance passed\n";
     }
+    if (!cuda_parity)
+        return;
     // Exercise chunk boundaries and heavy overlap, with the CUDA query oracle.
     {
         constexpr std::size_t queries=270017;

@@ -1,12 +1,10 @@
-#include "cuda_ops.hpp"
+#include "cuda_backend.hpp"
+#include "ops.hpp"
 #include "splat_drender/camera.h"
-#include "geometry_vulkan.hpp"
 #include "adc_backends.hpp"
-#include "rasterizer_vulkan.hpp"
 #include "fused_ssim.hpp"
 #include "optimizer_backends.hpp"
 #include "core/vram_profiler.hpp"
-#include "vulkan/ops.hpp"
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -2202,7 +2200,7 @@ __global__ void reset_opacity_kernel(
 
 } // namespace
 
-DecodedTrainingPixels decode_packed_training_pixels(
+DecodedTrainingPixels cuda_backend::decode_packed_training_pixels(
     const tinytensor::Tensor& packed,
     const std::uint32_t width,
     const std::uint32_t height,
@@ -2229,8 +2227,10 @@ DecodedTrainingPixels decode_packed_training_pixels(
     return result;
 }
 
-tinytensor::Tensor decode_packed_training_normals(
-    const tinytensor::Tensor& packed, std::uint32_t width, std::uint32_t height) {
+tinytensor::Tensor cuda_backend::decode_packed_training_normals(
+    const tinytensor::Tensor& packed,
+    std::uint32_t width,
+    std::uint32_t height) {
     const std::size_t pixels = std::size_t(width) * height;
     if (packed.device() != tinytensor::Device::CUDA ||
         packed.dtype() != tinytensor::DataType::Int32 || !packed.is_contiguous() || packed.numel() != pixels)
@@ -2243,25 +2243,14 @@ tinytensor::Tensor decode_packed_training_normals(
     return result;
 }
 
-std::array<float, 6> percentile_bounds(const tinytensor::Tensor& means, const float percentile) {
-    if (!means.is_valid() ||
-        (means.device() != tinytensor::Device::CUDA &&
-         means.device() != tinytensor::Device::Vulkan) ||
-        means.dtype() != tinytensor::DataType::Float32 || !means.is_contiguous() ||
-        means.shape().rank() != 2 || means.shape()[1] != 3 ||
-        means.shape()[0] > static_cast<std::size_t>(INT_MAX))
-        throw std::invalid_argument(
-            "Percentile bounds require a device float32 [N,3] means tensor");
+std::array<float, 6> cuda_backend::percentile_bounds(
+    const tinytensor::Tensor& means,
+    const float percentile) {
+
     const std::size_t count = means.shape()[0];
     if (count == 0)
         return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
-    if (means.device() == tinytensor::Device::Vulkan) {
-#ifdef TINYTENSOR_HAS_VULKAN
-        return tinytensor::vulkan::quantile_bounds(means, percentile);
-#else
-        throw std::invalid_argument("Vulkan percentile bounds are not compiled");
-#endif
-    }
+
     auto axes = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto sorted = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto bounds = tinytensor::Tensor::empty({6}, tinytensor::Device::CUDA);
@@ -2292,7 +2281,7 @@ std::array<float, 6> percentile_bounds(const tinytensor::Tensor& means, const fl
     return result;
 }
 
-ActivatedParameters activate_parameters(const GaussianModel& model) {
+ActivatedParameters cuda_backend::activate_parameters(const GaussianModel& model) {
     const std::size_t count = model.size();
     ActivatedParameters result{
         tinytensor::Tensor::empty({count, 3}, tinytensor::Device::CUDA),
@@ -2310,11 +2299,8 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
     return result;
 }
 
-tinytensor::Tensor normal_features_to_normals(const tinytensor::Tensor& normal_features) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
-        return normal_features_to_normals_vulkan(normal_features);
-#endif
+tinytensor::Tensor cuda_backend::normal_features_to_normals(
+    const tinytensor::Tensor& normal_features) {
     if (!normal_features.is_valid() || normal_features.device() != tinytensor::Device::CUDA ||
         normal_features.dtype() != tinytensor::DataType::Float32 ||
         !normal_features.is_contiguous() || normal_features.shape().rank() != 2 ||
@@ -2329,13 +2315,9 @@ tinytensor::Tensor normal_features_to_normals(const tinytensor::Tensor& normal_f
     return normals;
 }
 
-tinytensor::Tensor normal_features_backward(
+tinytensor::Tensor cuda_backend::normal_features_backward(
     const tinytensor::Tensor& normal_features,
     const tinytensor::Tensor& grad_normals) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (normal_features.is_valid() && normal_features.device() == tinytensor::Device::Vulkan)
-        return normal_features_backward_vulkan(normal_features, grad_normals);
-#endif
     if (!grad_normals.is_valid() || grad_normals.shape().rank() != 2 ||
         grad_normals.shape()[0] != normal_features.shape()[0] || grad_normals.shape()[1] != 3)
         throw std::invalid_argument("GGGS normal gradient must have shape [N,3]");
@@ -2348,7 +2330,7 @@ tinytensor::Tensor normal_features_backward(
     return result;
 }
 
-void bake_3d_filter(GaussianModel& model) {
+void cuda_backend::bake_3d_filter(GaussianModel& model) {
     if (!model.filter_3d.is_valid())
         return;
     const std::size_t count = model.size();
@@ -2366,14 +2348,14 @@ void bake_3d_filter(GaussianModel& model) {
     model.filter_3d = {};
 }
 
-AdcPlusPruneResult adc_plus_prune(
+AdcPlusPruneResult cuda_backend::adc_plus_prune(
     const GaussianModel& model,
     const float minimum_opacity,
     const float maximum_bounds,
     const std::array<float, 3>& scene_center,
     const std::size_t maximum_count) {
     const std::size_t count = model.size();
-    auto masks = prune_masks(model, minimum_opacity, maximum_bounds, scene_center);
+    auto masks = cuda_backend::prune_masks(model, minimum_opacity, maximum_bounds, scene_center);
     auto keep = std::move(masks.keep);
     auto hard = std::move(masks.hard);
     auto opacities = std::move(masks.opacities);
@@ -2433,7 +2415,7 @@ AdcPlusPruneResult adc_plus_prune(
     return {std::move(keep_indices), std::move(opacities), count - retained};
 }
 
-PruneMasks prune_masks(
+PruneMasks cuda_backend::prune_masks(
     const GaussianModel& model,
     const float minimum_opacity,
     const float maximum_bounds,
@@ -2446,18 +2428,7 @@ PruneMasks prune_masks(
         tinytensor::Tensor::empty({count}, device)};
     if (count == 0)
         return masks;
-    if (device == tinytensor::Device::Vulkan) {
-        // One fused dispatch, the twin of the CUDA kernel below. The first
-        // version of this port composed ~30 TinyTensor ops; besides paying a
-        // barrier per dispatch it also tripped the [N] x [N, 3] broadcast
-        // outer-product quirk (a 41 GB request). Row-local logic belongs in
-        // one shader.
-        tinytensor::vulkan::prune_masks(
-            model.means, model.log_scales, model.quaternions, model.opacity_logits, model.sh,
-            masks.keep, masks.hard, masks.opacities, minimum_opacity, maximum_bounds,
-            scene_center[0], scene_center[1], scene_center[2]);
-        return masks;
-    }
+
     adc_plus_prune_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
         model.opacity_logits.ptr<float>(), model.sh.ptr<float>(), model.sh.numel() / count,
@@ -2468,12 +2439,11 @@ PruneMasks prune_masks(
     return masks;
 }
 
-tinytensor::Tensor compute_3d_filter(
+tinytensor::Tensor cuda_backend::compute_3d_filter(
     const tinytensor::Tensor& means,
     const std::vector<Camera>& cameras,
     const float minimum_scale_factor) {
-    if (means.device() == tinytensor::Device::Vulkan)
-        return compute_3d_filter_vulkan(means, cameras, minimum_scale_factor);
+
     if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
         means.dtype() != tinytensor::DataType::Float32 || means.shape().rank() != 2 ||
         means.shape()[1] != 3)
@@ -2509,7 +2479,7 @@ tinytensor::Tensor compute_3d_filter(
     return result;
 }
 
-MultiViewLoss add_multi_view_loss(
+MultiViewLoss cuda_backend::add_multi_view_loss(
     const tinytensor::Tensor& sampled_neighbour_points,
     const tinytensor::Tensor& sampled_inside,
     const RenderResult& reference_render,
@@ -2525,10 +2495,7 @@ MultiViewLoss add_multi_view_loss(
     if (pixels == 0 ||
         (options.multi_view_geo_weight <= 0.F && options.multi_view_ncc_weight <= 0.F))
         return {};
-    if (reference_render.median_depth.device() == tinytensor::Device::Vulkan)
-        return add_multi_view_loss_vulkan(
-            sampled_neighbour_points, sampled_inside, reference_render, reference, neighbour,
-            options, gradients, grad_sampled_points, collect_scalar_terms, stability_accumulator);
+
     // Row-major reference-camera -> neighbour-camera rigid transform.
     float rr[9], rn[9], tr[3], tn[3];
     for (int row = 0; row < 3; ++row) {
@@ -2600,9 +2567,9 @@ MultiViewLoss add_multi_view_loss(
     return result;
 }
 
-GeometryDistributionSummary summarize_geometry_distribution(const GaussianModel& model) {
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return summarize_geometry_distribution_vulkan(model);
+GeometryDistributionSummary cuda_backend::summarize_geometry_distribution(
+    const GaussianModel& model) {
+
     GeometryDistributionSummary summary;
     const std::size_t count = model.size();
     if (count == 0)
@@ -2634,7 +2601,7 @@ GeometryDistributionSummary summarize_geometry_distribution(const GaussianModel&
     return summary;
 }
 
-OpacityProgressStats summarize_opacity_progress(
+OpacityProgressStats cuda_backend::summarize_opacity_progress(
     const tinytensor::Tensor& opacity_logits,
     const tinytensor::Tensor& opacity_gradients) {
     OpacityProgressStats stats;
@@ -2666,9 +2633,10 @@ OpacityProgressStats summarize_opacity_progress(
     return stats;
 }
 
-tinytensor::Tensor unproject_depth_to_world(const tinytensor::Tensor& depth, const Camera& camera) {
-    if (depth.device() == tinytensor::Device::Vulkan)
-        return unproject_depth_to_world_vulkan(depth, camera);
+tinytensor::Tensor cuda_backend::unproject_depth_to_world(
+    const tinytensor::Tensor& depth,
+    const Camera& camera) {
+
     const std::size_t pixels = static_cast<std::size_t>(camera.width) * camera.height;
     if (depth.numel() != pixels)
         throw std::invalid_argument("GGGS depth unprojection shape does not match camera");
@@ -2679,15 +2647,11 @@ tinytensor::Tensor unproject_depth_to_world(const tinytensor::Tensor& depth, con
     return result;
 }
 
-void add_sample_depth_point_gradients(
+void cuda_backend::add_sample_depth_point_gradients(
     const Camera& reference_camera,
     const tinytensor::Tensor& grad_world_points,
     LossGradients& image_gradients) {
-    if (grad_world_points.device() == tinytensor::Device::Vulkan) {
-        add_sample_depth_point_gradients_vulkan(
-            reference_camera, grad_world_points, image_gradients);
-        return;
-    }
+
     const std::size_t pixels =
         static_cast<std::size_t>(reference_camera.width) * reference_camera.height;
     add_point_depth_gradients_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
@@ -2696,22 +2660,10 @@ void add_sample_depth_point_gradients(
     check_cuda(cudaGetLastError(), "accumulate GGGS sample-depth point gradients");
 }
 
-void add_sample_depth_model_gradients(
+void cuda_backend::add_sample_depth_model_gradients(
     const DepthSampleGradients& sample_gradients,
     ModelGradients& model_gradients) {
-    if (model_gradients.means.device() == tinytensor::Device::Vulkan) {
-        // Raster gradients are slices of a packed device allocation. Generic
-        // Tensor view assignment uses host pointers; copy_from preserves the
-        // slice and records a Vulkan copy, including its byte offset.
-        model_gradients.means.copy_from(model_gradients.means.add(sample_gradients.model.means));
-        model_gradients.log_scales.copy_from(
-            model_gradients.log_scales.add(sample_gradients.model.log_scales));
-        model_gradients.quaternions.copy_from(
-            model_gradients.quaternions.add(sample_gradients.model.quaternions));
-        model_gradients.opacity_logits.copy_from(
-            model_gradients.opacity_logits.add(sample_gradients.model.opacity_logits));
-        return;
-    }
+
     const auto add = [](tinytensor::Tensor& target, const tinytensor::Tensor& source) {
         const std::size_t count = target.numel();
         add_tensor_in_place_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
@@ -2724,7 +2676,7 @@ void add_sample_depth_model_gradients(
     check_cuda(cudaGetLastError(), "accumulate GGGS sample-depth gradients");
 }
 
-void add_model_gradients(
+void cuda_backend::add_model_gradients(
     const ModelGradients& source,
     ModelGradients& destination,
     const bool include_refine_weight) {
@@ -2734,12 +2686,7 @@ void add_model_gradients(
             return;
         if (!destination_tensor.is_valid() || destination_tensor.shape() != source_tensor.shape())
             throw std::invalid_argument("Cannot merge incompatible GGGS model gradients");
-        if (destination_tensor.device() == tinytensor::Device::Vulkan) {
-            if (source_tensor.device() != destination_tensor.device())
-                throw std::invalid_argument("Cannot merge model gradients across devices");
-            destination_tensor.copy_from(destination_tensor.add(source_tensor));
-            return;
-        }
+
         const std::size_t count = destination_tensor.numel();
         add_tensor_in_place_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
             destination_tensor.ptr<float>(), source_tensor.ptr<float>(), count);
@@ -2754,7 +2701,7 @@ void add_model_gradients(
     check_cuda(cudaGetLastError(), "merge GGGS model gradients");
 }
 
-void chain_parameter_gradients(
+void cuda_backend::chain_parameter_gradients(
     const GaussianModel& model,
     const ActivatedParameters& activated,
     const tinytensor::Tensor& grad_scales,
@@ -2781,7 +2728,7 @@ void chain_parameter_gradients(
     check_cuda(cudaGetLastError(), "chain GGGS parameter gradients");
 }
 
-LossGradients compute_training_loss(
+LossGradients cuda_backend::compute_training_loss(
     const RenderResult& rendered,
     const TrainingView& target,
     const TrainingOptions& options,
@@ -2789,30 +2736,7 @@ LossGradients compute_training_loss(
     const bool depth_normal_active,
     const bool need_geometry_gradients,
     const bool ai_prior_active) {
-    if (rendered.median_depth.device() == tinytensor::Device::Vulkan ||
-        rendered.color.device() == tinytensor::Device::Vulkan) {
-        LossGradients result;
-        result.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
-        if (options.photometric_weight > 0.F) {
-            const bool mask = target.has_mask && (options.use_mask || target.mask_is_validity);
-            result.rgb = vulkan_photometric_loss(
-                rendered, target.rgb, target.mask, mask, options.ssim_weight,
-                options.photometric_weight, collect_scalar_terms, &result.color);
-            result.total = result.rgb;
-        } else {
-            result.color = tinytensor::Tensor::zeros_like(rendered.color);
-        }
-        add_alpha_mask_loss_vulkan(rendered, target, options, result, collect_scalar_terms);
-        if (need_geometry_gradients)
-            add_depth_normal_loss_vulkan(
-                rendered, target.camera, depth_normal_active ? options.depth_normal_weight : 0.F,
-                result, collect_scalar_terms);
-        if (options.use_mvs_depth || options.use_mvs_normals)
-            add_mvs_loss_vulkan(rendered,target,options,result,collect_scalar_terms);
-        if (ai_prior_active && (options.lambda_d > 0.F || options.lambda_n > 0.F))
-            add_prior_loss_vulkan(rendered, target, options, result, collect_scalar_terms);
-        return result;
-    }
+
     const std::size_t pixels = static_cast<std::size_t>(target.camera.width) * target.camera.height;
     // Depth and normal gradients exist only when the render carried those
     // channels; otherwise they were two full-image allocations plus a
@@ -2860,7 +2784,7 @@ LossGradients compute_training_loss(
         prior_depth_weight > 0.F || prior_normal_weight > 0.F);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
     if (use_fused_photometric)
-        fused_l1_ssim_loss(
+        cuda_backend::fused_l1_ssim_loss(
             rendered.color, target.rgb, target.mask, mask_enabled, ssim_weight,
             options.photometric_weight, result.color,
             collect_scalar_terms ? terms.ptr<float>() : nullptr, target.camera.width,
@@ -2897,15 +2821,11 @@ LossGradients compute_training_loss(
     return result;
 }
 
-LossGradients compute_normal_field_loss(
+LossGradients cuda_backend::compute_normal_field_loss(
     const RenderResult& rendered,
     const Camera& camera,
     const float weight,
     const bool collect_scalar_terms) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (rendered.color.device() == tinytensor::Device::Vulkan)
-        return compute_normal_field_loss_vulkan(rendered, camera, weight, collect_scalar_terms);
-#endif
     LossGradients result{
         tinytensor::Tensor::zeros_like(rendered.color),
         tinytensor::Tensor::zeros_like(rendered.alpha),
@@ -2940,7 +2860,7 @@ LossGradients compute_normal_field_loss(
     return result;
 }
 
-void adam_step_cuda(
+void cuda_backend::adam_step_cuda(
     tinytensor::Tensor& parameter,
     const tinytensor::Tensor& gradient,
     AdamState& state,
@@ -2964,20 +2884,12 @@ void adam_step_cuda(
     check_cuda(cudaGetLastError(), "GGGS Adam update");
 }
 
-void zero_adam_rows(const tinytensor::Tensor& indices, const std::array<AdamState*, 6>& states) {
+void cuda_backend::zero_adam_rows(
+    const tinytensor::Tensor& indices,
+    const std::array<AdamState*, 6>& states) {
     if (indices.numel() == 0)
         return;
-    if (indices.device() == tinytensor::Device::Vulkan) {
-        for (AdamState* state : states) {
-            if (!state)
-                continue;
-            if (state->first.is_valid())
-                state->first.index_fill_(0, indices, 0.F);
-            if (state->second.is_valid())
-                state->second.index_fill_(0, indices, 0.F);
-        }
-        return;
-    }
+
     AdamRows rows{};
     std::size_t max_stride = 0;
     for (int i = 0; i < 6; ++i) {
@@ -3003,7 +2915,7 @@ void zero_adam_rows(const tinytensor::Tensor& indices, const std::array<AdamStat
     check_cuda(cudaGetLastError(), "clear split parent Adam moments");
 }
 
-void adam_step_structure_cuda(
+void cuda_backend::adam_step_structure_cuda(
     GaussianModel& model,
     const ModelGradients& gradient,
     AdamState& means,
@@ -3044,7 +2956,7 @@ void adam_step_structure_cuda(
     check_cuda(cudaGetLastError(), "GGGS fused structure Adam update");
 }
 
-void adam_step_reduced_second_cuda(
+void cuda_backend::adam_step_reduced_second_cuda(
     tinytensor::Tensor& parameter,
     const tinytensor::Tensor& gradient,
     AdamState& state,
@@ -3071,7 +2983,7 @@ void adam_step_reduced_second_cuda(
     check_cuda(cudaGetLastError(), "GGGS reduced-second Adam update");
 }
 
-void adam_step_active_prefix_cuda(
+void cuda_backend::adam_step_active_prefix_cuda(
     tinytensor::Tensor& parameter,
     const tinytensor::Tensor& gradient,
     AdamState& state,
@@ -3113,7 +3025,7 @@ void adam_step_active_prefix_cuda(
     check_cuda(cudaGetLastError(), "GGGS active-prefix Adam update");
 }
 
-void add_sh_regularization(
+void cuda_backend::add_sh_regularization(
     const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient,
     const float weight) {
@@ -3126,7 +3038,7 @@ void add_sh_regularization(
     check_cuda(cudaGetLastError(), "regularize view-dependent SH coefficients");
 }
 
-void add_geometry_regularization(
+void cuda_backend::add_geometry_regularization(
     const GaussianModel& model,
     ModelGradients& gradients,
     const float opacity_weight,
@@ -3134,26 +3046,7 @@ void add_geometry_regularization(
     const std::size_t count = model.size();
     if (count == 0 || (!(opacity_weight > 0.F) && !(scale_weight > 0.F)))
         return;
-    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
-        if (opacity_weight > 0.F) {
-            const auto invalid = model.opacity_logits.isfinite().logical_not();
-            const auto logits = model.opacity_logits.masked_fill(invalid, 0.F);
-            const auto alpha = logits.neg().exp().add(1.F).reciprocal();
-            const auto prior =
-                (alpha * alpha.neg().add(1.F) * (opacity_weight / static_cast<float>(count)))
-                    .masked_fill(invalid, 0.F);
-            gradients.opacity_logits.copy_from(gradients.opacity_logits.add(prior));
-        }
-        if (scale_weight > 0.F) {
-            const auto invalid =
-                model.log_scales.isfinite().logical_not().logical_or(model.log_scales.le(-40.F));
-            const auto scales = model.log_scales.masked_fill(invalid, 0.F).exp();
-            const auto prior = (scales * (scale_weight / (3.F * static_cast<float>(count))))
-                                   .masked_fill(invalid, 0.F);
-            gradients.log_scales.copy_from(gradients.log_scales.add(prior));
-        }
-        return;
-    }
+
     // Both priors are means over the model (applies
     // `opacity_reg * mean(alpha)` and `scale_reg * mean(exp(log_scale))`), so
     // the weights do not depend on the Gaussian count.
@@ -3165,7 +3058,7 @@ void add_geometry_regularization(
     check_cuda(cudaGetLastError(), "regularize Gaussian opacity and actual scale");
 }
 
-void accumulate_densification_stats_cuda(
+void cuda_backend::accumulate_densification_stats_cuda(
     const tinytensor::Tensor& refine_weight,
     const tinytensor::Tensor& visibility,
     const tinytensor::Tensor& radii,
@@ -3189,7 +3082,7 @@ void accumulate_densification_stats_cuda(
     check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
 }
 
-tinytensor::Tensor panorama_densification_sizes(
+tinytensor::Tensor cuda_backend::panorama_densification_sizes(
     const GaussianModel& model,
     const std::array<float, 3>& camera_position,
     const float screen_threshold,
@@ -3199,13 +3092,7 @@ tinytensor::Tensor panorama_densification_sizes(
     if (model.size() == 0)
         return sizes;
     constexpr float k_angular_threshold_radians = 30.F * CUDART_PI_F / 180.F;
-    if (device == tinytensor::Device::Vulkan) {
-        tinytensor::vulkan::panorama_sizes(
-            model.means, model.log_scales, model.quaternions, sizes, camera_position[0],
-            camera_position[1], camera_position[2], screen_threshold / k_angular_threshold_radians,
-            scale_modifier);
-        return sizes;
-    }
+
     panorama_sizes_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
         sizes.ptr<float>(), model.size(),
@@ -3215,7 +3102,7 @@ tinytensor::Tensor panorama_densification_sizes(
     return sizes;
 }
 
-void split_gaussians(
+void cuda_backend::split_gaussians(
     GaussianModel& parents,
     GaussianModel& children,
     const tinytensor::Tensor& parent_indices,
@@ -3228,85 +3115,7 @@ void split_gaussians(
     const std::size_t count = parent_indices.numel();
     if (count == 0)
         return;
-    if (parents.means.device() == tinytensor::Device::Vulkan) {
-        if (mode != SplitMode::igs_random)
-            throw std::invalid_argument("Vulkan split primitive currently supports ADC-IGS only");
-        // `children` already holds a copy of every selected parent row, so
-        // the row math only needs the selection. The previous path downloaded
-        // and re-uploaded every full-model tensor at each refinement; the
-        // mutated parent rows now go back through a device-side scatter.
-        auto parent_means = children.means.to_vector();
-        auto parent_scales = children.log_scales.to_vector();
-        auto parent_opacity = children.opacity_logits.to_vector();
-        const auto parent_rotations = children.quaternions.to_vector();
-        auto child_means = children.means.to_vector();
-        auto child_scales = children.log_scales.to_vector();
-        auto child_opacity = children.opacity_logits.to_vector();
-        const auto indices = parent_indices.to_vector_int();
-        const auto samples = random_samples.to_vector();
-        for (std::size_t child = 0; child < count; ++child) {
-            // Both sides are row-local copies of the same parent row.
-            const std::size_t parent = child;
-            int largest = 0;
-            if (parent_scales[3 * parent + 1] > parent_scales[3 * parent + largest])
-                largest = 1;
-            if (parent_scales[3 * parent + 2] > parent_scales[3 * parent + largest])
-                largest = 2;
-            float local[3]{};
-            for (int axis = 0; axis < 3; ++axis)
-                local[axis] = std::exp(parent_scales[3 * parent + axis]) * samples[3 * child];
-            const float* raw = parent_rotations.data() + 4 * parent;
-            const float inverse_norm =
-                1.F /
-                std::sqrt(std::max(
-                    raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2] + raw[3] * raw[3], 1e-20F));
-            const float w = raw[0] * inverse_norm;
-            const float qx = raw[1] * inverse_norm;
-            const float qy = raw[2] * inverse_norm;
-            const float qz = raw[3] * inverse_norm;
-            const float tx = 2.F * (qy * local[2] - qz * local[1]);
-            const float ty = 2.F * (qz * local[0] - qx * local[2]);
-            const float tz = 2.F * (qx * local[1] - qy * local[0]);
-            const float offset[3]{
-                local[0] + w * tx + (qy * tz - qz * ty), local[1] + w * ty + (qz * tx - qx * tz),
-                local[2] + w * tz + (qx * ty - qy * tx)};
-            for (int axis = 0; axis < 3; ++axis) {
-                const float center = parent_means[3 * parent + axis];
-                parent_means[3 * parent + axis] = center - offset[axis];
-                child_means[3 * child + axis] = center + offset[axis];
-                if (axis == largest) {
-                    parent_scales[3 * parent + axis] += std::log(0.5F);
-                    child_scales[3 * child + axis] += std::log(0.5F);
-                }
-            }
-            const float opacity = 1.F / (1.F + std::exp(-parent_opacity[parent]));
-            const float revised = std::clamp(
-                1.F - std::sqrt(std::max(1.F - opacity, 0.F)), minimum_opacity,
-                1.F - minimum_opacity);
-            const float logit = std::log(revised / (1.F - revised));
-            parent_opacity[parent] = logit;
-            child_opacity[child] = logit;
-        }
-        const auto device = tinytensor::Device::Vulkan;
-        children.means =
-            tinytensor::Tensor::from_vector(child_means, children.means.shape(), device);
-        children.log_scales =
-            tinytensor::Tensor::from_vector(child_scales, children.log_scales.shape(), device);
-        children.opacity_logits =
-            tinytensor::Tensor::from_vector(child_opacity, children.opacity_logits.shape(), device);
-        tinytensor::vulkan::scatter(
-            parents.means, parent_indices,
-            tinytensor::Tensor::from_vector(parent_means, {count, std::size_t{3}}, device), 0,
-            false);
-        tinytensor::vulkan::scatter(
-            parents.log_scales, parent_indices,
-            tinytensor::Tensor::from_vector(parent_scales, {count, std::size_t{3}}, device), 0,
-            false);
-        tinytensor::vulkan::scatter(
-            parents.opacity_logits, parent_indices,
-            tinytensor::Tensor::from_vector(parent_opacity, {count}, device), 0, false);
-        return;
-    }
+
     split_gaussians_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         parents.means.ptr<float>(), parents.log_scales.ptr<float>(),
         parents.opacity_logits.ptr<float>(), parents.quaternions.ptr<float>(),
@@ -3362,7 +3171,7 @@ __global__ void relocate_long_axis_kernel(
         quaternions[4 * destination + component] = quaternions[4 * parent + component];
 }
 
-void relocate_long_axis(
+void cuda_backend::relocate_long_axis(
     GaussianModel& model,
     const tinytensor::Tensor& parent_indices,
     const tinytensor::Tensor& destination_indices,
@@ -3377,7 +3186,7 @@ void relocate_long_axis(
     check_cuda(cudaGetLastError(), "relocate EMC long-axis children");
 }
 
-void inject_emc_noise(
+void cuda_backend::inject_emc_noise(
     GaussianModel& model,
     const tinytensor::Tensor& radii,
     const float scaler,
@@ -3517,7 +3326,7 @@ __global__ void apply_shape_regularizers_kernel(
     }
 }
 
-void apply_shape_regularizers(
+void cuda_backend::apply_shape_regularizers(
     GaussianModel& model,
     ModelGradients& gradients,
     const float erank_weight,
@@ -3527,12 +3336,7 @@ void apply_shape_regularizers(
     const float max_axis_ratio) {
     if (model.size() == 0)
         return;
-    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
-        tinytensor::vulkan::apply_shape_regularizers(
-            model.log_scales, model.quaternions, gradients.log_scales, gradients.quaternions,
-            erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio);
-        return;
-    }
+
     apply_shape_regularizers_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
         gradients.log_scales.ptr<float>(), gradients.quaternions.ptr<float>(), model.size(),
@@ -3564,7 +3368,7 @@ __global__ void apply_oversize_penalty_kernel(
     }
 }
 
-void apply_oversize_penalty(
+void cuda_backend::apply_oversize_penalty(
     GaussianModel& model,
     const tinytensor::Tensor& radii,
     const float inverse_resolution,
@@ -3574,36 +3378,28 @@ void apply_oversize_penalty(
     if (model.size() == 0 || !radii.is_valid() || radii.numel() != model.size() ||
         !(screen_limit > 0.F) || !(penalty > 0.F))
         return;
-    if (model.log_scales.device() == tinytensor::Device::Vulkan) {
-        tinytensor::vulkan::apply_oversize_penalty(
-            model.log_scales, radii, inverse_resolution, screen_limit, penalty, scales_lr);
-        return;
-    }
+
     apply_oversize_penalty_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), radii.ptr<int>(), model.size(), inverse_resolution,
         screen_limit, penalty, scales_lr);
     check_cuda(cudaGetLastError(), "apply EMC screen penalty");
 }
 
-void apply_adc_decay(GaussianModel& model, const float opacity_decay, const float scale_decay) {
+void cuda_backend::apply_adc_decay(
+    GaussianModel& model,
+    const float opacity_decay,
+    const float scale_decay) {
     if (model.size() == 0)
         return;
     const float scale_factor = std::max(1.F - scale_decay, 1e-6F);
-    if (model.means.device() == tinytensor::Device::Vulkan) {
-        auto opacity = model.opacity_logits.sigmoid()
-                           .sub(std::max(opacity_decay, 0.F))
-                           .clamp(1e-7F, 1.F - 1e-7F);
-        model.opacity_logits = opacity.div(opacity.mul(-1.F).add(1.F)).log();
-        model.log_scales = model.log_scales.add(std::log(scale_factor));
-        return;
-    }
+
     adc_decay_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.opacity_logits.ptr<float>(), model.size(),
         std::max(opacity_decay, 0.F), std::log(scale_factor));
     check_cuda(cudaGetLastError(), "decay ADC Gaussian parameters");
 }
 
-tinytensor::Tensor adc_plus_footprint_weights(
+tinytensor::Tensor cuda_backend::adc_plus_footprint_weights(
     const tinytensor::Tensor& gradients,
     const tinytensor::Tensor& screens) {
     const std::size_t count = gradients.numel();
@@ -3620,7 +3416,7 @@ tinytensor::Tensor adc_plus_footprint_weights(
     return weights;
 }
 
-void inject_adc_noise_cuda(
+void cuda_backend::inject_adc_noise_cuda(
     GaussianModel& model,
     const tinytensor::Tensor& visibility,
     const tinytensor::Tensor& radii,
@@ -3640,7 +3436,7 @@ void inject_adc_noise_cuda(
     check_cuda(cudaGetLastError(), "inject ADC exploration noise");
 }
 
-tinytensor::Tensor compute_ssim_cs_error_map(
+tinytensor::Tensor cuda_backend::compute_ssim_cs_error_map(
     const tinytensor::Tensor& prediction,
     const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask,
@@ -3673,7 +3469,7 @@ tinytensor::Tensor compute_ssim_cs_error_map(
     return error;
 }
 
-tinytensor::Tensor scatter_error_map_to_gaussians(
+tinytensor::Tensor cuda_backend::scatter_error_map_to_gaussians(
     const tinytensor::Tensor& error_hw,
     const float* mean2d,
     const tinytensor::Tensor& radii,
@@ -3691,7 +3487,7 @@ tinytensor::Tensor scatter_error_map_to_gaussians(
     return scores;
 }
 
-tinytensor::Tensor densify_avg_scores(
+tinytensor::Tensor cuda_backend::densify_avg_scores(
     const tinytensor::Tensor& numerator,
     const tinytensor::Tensor& denominator) {
     const std::size_t n = numerator.numel();
@@ -3704,7 +3500,7 @@ tinytensor::Tensor densify_avg_scores(
     return out;
 }
 
-tinytensor::Tensor densify_oversize_weights(
+tinytensor::Tensor cuda_backend::densify_oversize_weights(
     const tinytensor::Tensor& scores,
     const tinytensor::Tensor& screens,
     const float screen_threshold,
@@ -3720,7 +3516,7 @@ tinytensor::Tensor densify_oversize_weights(
     return weights;
 }
 
-void clip_log_scale_by_screen(
+void cuda_backend::clip_log_scale_by_screen(
     tinytensor::Tensor& log_scales,
     const tinytensor::Tensor& screens,
     const float screen_threshold,
@@ -3728,19 +3524,13 @@ void clip_log_scale_by_screen(
     const std::size_t count = screens.numel();
     if (count == 0 || !(screen_threshold > 0.F))
         return;
-    if (log_scales.device() == tinytensor::Device::Vulkan) {
-        auto oversize = screens.div(screen_threshold).clamp_min(1.F);
-        if (std::isfinite(hardness))
-            oversize = oversize.clamp_max(hardness);
-        log_scales = log_scales.sub(oversize.log().unsqueeze(1));
-        return;
-    }
+
     clip_log_scale_by_screen_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         log_scales.ptr<float>(), screens.ptr<float>(), count, screen_threshold, hardness);
     check_cuda(cudaGetLastError(), "clip log-scale by screen share");
 }
 
-void reset_opacity(GaussianModel& model, const float maximum_opacity) {
+void cuda_backend::reset_opacity(GaussianModel& model, const float maximum_opacity) {
     if (model.size() == 0)
         return;
     const float opacity = std::clamp(maximum_opacity, 1e-8F, 1.F - 1e-8F);

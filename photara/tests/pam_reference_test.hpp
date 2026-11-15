@@ -1,5 +1,5 @@
 #pragma once
-#include "../src/splat/pam_cuda.hpp"
+#include "../src/splat/pam_ops.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>

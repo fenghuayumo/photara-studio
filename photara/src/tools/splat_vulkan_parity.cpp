@@ -7,7 +7,7 @@
 #include "../splat/optimizer.hpp"
 #include "../splat/sh_adam_quant.hpp"
 #include "../splat/photometric_loss.hpp"
-#include "../splat/cuda_ops.hpp"
+#include "../splat/ops.hpp"
 #include "../splat/geometry_vulkan.hpp"
 #include "../splat/training_data_loader.hpp"
 #include "../splat/densification.hpp"

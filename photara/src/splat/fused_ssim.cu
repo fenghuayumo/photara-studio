@@ -1,3 +1,4 @@
+#include "cuda_backend.hpp"
 // Ported from fused-ssim/ssim.cu (MIT, Copyright (c) 2024 Rahul Goel).
 // The CUDA math and 11x11 Gaussian separable forward/backward kernels are kept
 // intact; only the PyTorch allocation/dispatch wrapper is replaced by
@@ -469,7 +470,7 @@ __global__ void fused_l1_ssim_backward_kernel(
 
 } // namespace
 
-void fused_l1_ssim_loss(
+void cuda_backend::fused_l1_ssim_loss(
     const tinytensor::Tensor& prediction,
     const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask,
@@ -553,7 +554,7 @@ void fused_l1_ssim_loss(
         graph->launch();
 }
 
-float fused_ssim_metric(
+float cuda_backend::fused_ssim_metric(
     const tinytensor::Tensor& prediction,
     const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask,

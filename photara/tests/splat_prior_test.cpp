@@ -2,7 +2,7 @@
 #include "native_prior.hpp"
 #include "splat/trainer.hpp"
 #include "training_data_loader.hpp"
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "checkpoint.hpp"
 #if defined(TINYTENSOR_HAS_VULKAN)
 #include "geometry_vulkan.hpp"

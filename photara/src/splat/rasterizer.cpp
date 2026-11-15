@@ -9,8 +9,10 @@ RenderResult Rasterizer::forward(
     const GaussianModel& model,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_raster_forward(backend_, model, camera, requested_options);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.forward(model, camera, requested_options);
 #else
@@ -32,9 +34,12 @@ RenderResult Rasterizer::forward_colors(
 tinytensor::Tensor Rasterizer::pruning_scores(
     const GaussianModel& model,
     const Camera& camera,
-    RasterizeOptions options, const bool gaussian_pop) const {
+    RasterizeOptions options,
+    const bool gaussian_pop) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_pruning_scores(backend_, model, camera, options, gaussian_pop);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.pruning_scores(model, camera, options, gaussian_pop);
 #else
@@ -51,7 +56,13 @@ float Rasterizer::photometric_loss(
     const float photometric_weight,
     const bool read_loss_value,
     tinytensor::Tensor* color_gradient) const {
-    return detail::vulkan_photometric_loss(rendered, target, mask, mask_enabled, ssim_weight, photometric_weight, read_loss_value, color_gradient);
+#if defined(TINYTENSOR_HAS_VULKAN)
+    return detail::vulkan_photometric_loss(
+        rendered, target, mask, mask_enabled, ssim_weight, photometric_weight, read_loss_value,
+        color_gradient);
+#else
+    throw std::runtime_error("Vulkan photometric backend is not enabled");
+#endif
 }
 
 ModelGradients Rasterizer::backward(
@@ -64,27 +75,38 @@ ModelGradients Rasterizer::backward(
     const tinytensor::Tensor& densify_map,
     const SHAdamUpdate* sh_adam,
     const StructureAdamUpdate* structure_adam) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_raster_backward(model, rendered, grad_color, grad_alpha, grad_depth, grad_normal, densify_map, sh_adam, structure_adam);
+        return detail::vulkan_raster_backward(
+            model, rendered, grad_color, grad_alpha, grad_depth, grad_normal, densify_map, sh_adam,
+            structure_adam);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return CudaRasterizer{}.backward(model, rendered, grad_color, grad_alpha, grad_depth, grad_normal, densify_map, sh_adam, structure_adam);
+    return CudaRasterizer{}.backward(
+        model, rendered, grad_color, grad_alpha, grad_depth, grad_normal, densify_map, sh_adam,
+        structure_adam);
 #else
     throw std::runtime_error("backward: CUDA backend is not enabled for this operation");
 #endif
 }
 
 void Rasterizer::materialize_visibility(RenderResult& rendered) const {
-    if (rendered.visibility.is_valid()) return;
-    if (rendered.context.backend_impl) { detail::vulkan_materialize_visibility(rendered); return; }
-#if defined(PHOTARA_HAS_CUDA_SPLAT)
-    CudaRasterizer{}.materialize_visibility(rendered);
-#else
-    throw std::runtime_error("materialize_visibility: CUDA backend is not enabled for this operation");
+    if (rendered.visibility.is_valid())
+        return;
+
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (rendered.context.backend_impl) {
+        detail::vulkan_materialize_visibility(rendered);
+        return;
+    }
 #endif
+
+    throw std::invalid_argument("Deferred visibility requires a live backend context");
 }
 
 const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
-    if (rendered.context.backend_impl) return nullptr;
+    if (rendered.context.backend_impl)
+        return nullptr;
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.projected_mean2d(rendered);
 #else
@@ -97,8 +119,11 @@ DepthSampleResult Rasterizer::sample_depth(
     const tinytensor::Tensor& world_points,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_sample_depth(backend_, model, world_points, camera, requested_options);
+        return detail::vulkan_sample_depth(
+            backend_, model, world_points, camera, requested_options);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.sample_depth(model, world_points, camera, requested_options);
 #else
@@ -110,12 +135,15 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
     const GaussianModel& model,
     const DepthSampleResult& sampled,
     const tinytensor::Tensor& grad_camera_points) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_sample_depth_backward(model, sampled, grad_camera_points);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.sample_depth_backward(model, sampled, grad_camera_points);
 #else
-    throw std::runtime_error("sample_depth_backward: CUDA backend is not enabled for this operation");
+    throw std::runtime_error(
+        "sample_depth_backward: CUDA backend is not enabled for this operation");
 #endif
 }
 
@@ -126,9 +154,11 @@ OccupancyCache Rasterizer::prepare_occupancy_cache(
     std::size_t device_budget,
     std::size_t host_budget) const {
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return CudaRasterizer{}.prepare_occupancy_cache(model, cameras, requested_options, device_budget, host_budget);
+    return CudaRasterizer{}.prepare_occupancy_cache(
+        model, cameras, requested_options, device_budget, host_budget);
 #else
-    throw std::runtime_error("prepare_occupancy_cache: CUDA backend is not enabled for this operation");
+    throw std::runtime_error(
+        "prepare_occupancy_cache: CUDA backend is not enabled for this operation");
 #endif
 }
 
@@ -147,7 +177,8 @@ OccupancyCacheStats Rasterizer::occupancy_cache_stats(const OccupancyCache& cach
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.occupancy_cache_stats(cache);
 #else
-    throw std::runtime_error("occupancy_cache_stats: CUDA backend is not enabled for this operation");
+    throw std::runtime_error(
+        "occupancy_cache_stats: CUDA backend is not enabled for this operation");
 #endif
 }
 
@@ -156,8 +187,10 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     const tinytensor::Tensor& world_points,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
+#if defined(TINYTENSOR_HAS_VULKAN)
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_occupancy(backend_, model, world_points, camera, requested_options);
+#endif
 #if defined(PHOTARA_HAS_CUDA_SPLAT)
     return CudaRasterizer{}.evaluate_occupancy(model, world_points, camera, requested_options);
 #else

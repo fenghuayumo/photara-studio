@@ -2,7 +2,7 @@
 
 #include <splat_drender/vulkan_api.h>
 #include <splat_drender/api.h>
-#include "../../../photara/src/splat/cuda_ops.hpp"
+#include "../../../photara/src/splat/ops.hpp"
 #include "../../../photara/src/splat/optimizer.hpp"
 #include "../../../photara/src/splat/photometric_loss.hpp"
 #include "internal/tensor_impl.hpp"

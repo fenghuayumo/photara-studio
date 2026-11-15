@@ -1,31 +1,17 @@
-// Vulkan and backend-independent entry points. CUDA kernels stay in .cu files.
-#include "cuda_ops.hpp"
-#include "geometry_vulkan.hpp"
-#include "adc_backends.hpp"
-#include "rasterizer_vulkan.hpp"
-#include "fused_ssim.hpp"
-#include "optimizer_backends.hpp"
-#include "sh_adam_quant.hpp"
-#include "ppisp.hpp"
-#include "bilateral_grid.hpp"
-#include "pam_cuda.hpp"
-#include "formats_sog_xt.hpp"
-#include "igs_selection_cuda.hpp"
-#include "core/vram_profiler.hpp"
-#include "vulkan/ops.hpp"
-#include "vulkan/backend.hpp"
-#include "pam_vulkan.hpp"
+#include "cuda_backend.hpp"
+
 #include <algorithm>
 #include <cmath>
-#include <climits>
-#include <cstring>
 #include <stdexcept>
 
 namespace photara::splat::detail {
 PpispState make_ppisp_state(const std::size_t views, const TrainingOptions& options) {
 
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    return cuda_backend::make_ppisp_state(views, options);
+#else
     throw std::runtime_error("make_ppisp_state: this operation requires the CUDA backend");
-
+#endif
 }
 
 void apply_ppisp(
@@ -34,8 +20,11 @@ void apply_ppisp(
     const Camera& camera,
     const std::size_t view) {
 
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    return cuda_backend::apply_ppisp(color, state, camera, view);
+#else
     throw std::runtime_error("apply_ppisp: this operation requires the CUDA backend");
-
+#endif
 }
 
 void backward_ppisp(
@@ -45,14 +34,20 @@ void backward_ppisp(
     const Camera& camera,
     const std::size_t view) {
 
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    return cuda_backend::backward_ppisp(state, color, output_gradient, camera, view);
+#else
     throw std::runtime_error("backward_ppisp: this operation requires the CUDA backend");
-
+#endif
 }
 
 void step_ppisp(PpispState& state, const TrainingOptions& options, const unsigned iteration) {
 
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    return cuda_backend::step_ppisp(state, options, iteration);
+#else
     throw std::runtime_error("step_ppisp: this operation requires the CUDA backend");
-
+#endif
 }
 
 std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {
@@ -76,7 +71,6 @@ std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {
     if (count != 0)
         result[0] = static_cast<float>(total / count);
     return result;
-
 }
 
-}
+} // namespace photara::splat::detail

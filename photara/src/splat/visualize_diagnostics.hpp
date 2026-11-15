@@ -21,6 +21,16 @@ inline DiagnosticPush diagnostic_push(const Camera& camera, const VisualizeOptio
     std::copy(std::begin(rotation), std::end(rotation), push.rotation);
     return push;
 }
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+tinytensor::Tensor visualize_overlay_cuda(
+    const GaussianModel&,
+    const Camera&,
+    const VisualizeOptions&);
+tinytensor::Tensor visualize_diagnostics_cuda(
+    const RenderResult&,
+    const Camera&,
+    const VisualizeOptions&);
+#endif
 #if defined(TINYTENSOR_HAS_VULKAN)
 tinytensor::Tensor visualize_points_vulkan(const GaussianModel&, const Camera&, const VisualizeOptions&);
 tinytensor::Tensor visualize_diagnostics_vulkan(

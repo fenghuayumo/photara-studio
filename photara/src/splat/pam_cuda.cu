@@ -1,7 +1,5 @@
-#include "pam_cuda.hpp"
-#ifdef TINYTENSOR_HAS_VULKAN
-#include "pam_vulkan.hpp"
-#endif
+#include "cuda_backend.hpp"
+#include "pam_ops.hpp"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -229,7 +227,7 @@ int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigne
 
 } // namespace
 
-void pam_accumulate_occupancy_cuda(
+void cuda_backend::pam_accumulate_occupancy_cuda(
     tinytensor::Tensor& occupancy,
     tinytensor::Tensor& observed,
     const tinytensor::Tensor& values,
@@ -256,14 +254,10 @@ void pam_accumulate_occupancy_cuda(
     check(cudaGetLastError());
 }
 
-tinytensor::Tensor pam_field_gradients(
+tinytensor::Tensor cuda_backend::pam_field_gradients(
     const PamGpuField& field,
     const tinytensor::Tensor& points,
     unsigned neighbors) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (points.device() == tinytensor::Device::Vulkan)
-        return pam_field_gradients_vulkan(field, points, neighbors);
-#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     auto gradients = tinytensor::Tensor::empty({count, std::size_t{3}}, tinytensor::Device::CUDA);
@@ -286,7 +280,7 @@ tinytensor::Tensor pam_field_gradients(
     return gradients;
 }
 
-void pam_refine_points(
+void cuda_backend::pam_refine_points(
     const PamGpuField& field,
     tinytensor::Tensor& points,
     const tinytensor::Tensor& occupancy,
@@ -294,13 +288,6 @@ void pam_refine_points(
     float iso_value,
     float minimum_gradient_norm_squared,
     float step) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (points.device() == tinytensor::Device::Vulkan) {
-        pam_refine_points_vulkan(
-            field, points, occupancy, neighbors, iso_value, minimum_gradient_norm_squared, step);
-        return;
-    }
-#endif
     const int k = validate(field, points, neighbors);
     const std::size_t count = points.shape()[0];
     if (!occupancy.is_valid() || occupancy.device() != tinytensor::Device::CUDA ||

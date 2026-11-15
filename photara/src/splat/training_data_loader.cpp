@@ -4,7 +4,7 @@
 
 #include "core/camera_projection.hpp"
 #include "io/image.hpp"
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "core/logging.hpp"
 #include "splat/trainer.hpp"
 

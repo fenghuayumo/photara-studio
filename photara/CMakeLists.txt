@@ -624,63 +624,59 @@ if(PHOTARA_ENABLE_FEATURES)
             "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/splat_drender"
             "${CMAKE_CURRENT_BINARY_DIR}/splat_drender")
 
-        if(PHOTARA_ENABLE_CUDA)
-        add_library(photara_splat_cuda STATIC
-            src/splat/sog_xt_training.cu
-            src/splat/rasterizer.cu
-            src/splat/pam_cuda.cu
-            src/splat/sh_adam_quant.cu
-            src/splat/cuda_ops.cu
-            src/splat/igs_selection_cuda.cu
+        # Shared C++ entry points are always compiled. Each optional backend
+        # contributes implementations only; disabling CUDA never requires nvcc.
+        add_library(photara_splat_backends STATIC
+            src/splat/focus_mask.cpp
+            src/splat/visualize.cpp
+            src/splat/ops.cpp
+            src/splat/sh_adam_quant.cpp
+            src/splat/ppisp.cpp
+            src/splat/bilateral_grid.cpp
+            src/splat/fused_ssim.cpp
+            src/splat/pam_ops.cpp
+            src/splat/sog_xt_training.cpp
+            src/splat/igs_selection.cpp
             src/splat/adc_ops.cpp
-            src/splat/optimizer.cpp
-            src/splat/bilateral_grid.cu
-            src/splat/ppisp.cu
-            src/splat/cuda_vulkan_preview.cu
-            src/splat/fused_ssim.cu
-            src/splat/focus_mask.cu
-            src/splat/visualize.cu)
-        target_include_directories(photara_splat_cuda
-            PUBLIC
-                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-                $<INSTALL_INTERFACE:include>
-            PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
-        target_compile_features(photara_splat_cuda PUBLIC cxx_std_20)
-        target_link_libraries(photara_splat_cuda PUBLIC
-            tinytensor::tinytensor
-            splat_drender::splat_drender
-            CUDA::cudart)
-        target_compile_definitions(photara_splat_cuda PUBLIC PHOTARA_HAS_SPLAT=1 PHOTARA_HAS_CUDA_SPLAT=1)
-        target_compile_options(photara_splat_cuda PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
-        # Match CPU nearest-neighbor distance ordering and field arithmetic.
-        set_source_files_properties(src/splat/pam_cuda.cu PROPERTIES
-            COMPILE_OPTIONS "--fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
-        set_target_properties(photara_splat_cuda PROPERTIES
-            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-            CUDA_SEPARABLE_COMPILATION OFF
-            POSITION_INDEPENDENT_CODE ON)
+            src/splat/optimizer.cpp)
+        target_include_directories(photara_splat_backends PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
+        target_link_libraries(photara_splat_backends PUBLIC tinytensor::tinytensor)
+        target_compile_features(photara_splat_backends PUBLIC cxx_std_20)
+        set_target_properties(photara_splat_backends PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        if(PHOTARA_ENABLE_CUDA)
+            target_sources(photara_splat_backends PRIVATE
+                src/splat/sog_xt_training.cu
+                src/splat/rasterizer.cu
+                src/splat/pam_cuda.cu
+                src/splat/sh_adam_quant.cu
+                src/splat/cuda_ops.cu
+                src/splat/igs_selection_cuda.cu
+                src/splat/bilateral_grid.cu
+                src/splat/ppisp.cu
+                src/splat/cuda_vulkan_preview.cu
+                src/splat/fused_ssim.cu
+                src/splat/focus_mask.cu
+                src/splat/visualize.cu)
+            target_link_libraries(photara_splat_backends PUBLIC
+                splat_drender::splat_drender
+                CUDA::cudart)
+            target_compile_definitions(photara_splat_backends PUBLIC PHOTARA_HAS_SPLAT=1 PHOTARA_HAS_CUDA_SPLAT=1)
+            target_compile_options(photara_splat_backends PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+            # Match CPU nearest-neighbor distance ordering and field arithmetic.
+            set_source_files_properties(src/splat/pam_cuda.cu PROPERTIES
+                COMPILE_OPTIONS "--fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
+            set_target_properties(photara_splat_backends PROPERTIES
+                CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+                CUDA_SEPARABLE_COMPILATION OFF
+                POSITION_INDEPENDENT_CODE ON)
 
         else()
-            add_library(photara_splat_cuda STATIC
-                src/splat/cuda_vulkan_preview_unavailable.cpp
-                src/splat/focus_mask_portable.cpp
-                src/splat/visualize_portable.cpp
-                src/splat/cuda_ops_portable.cpp
-                src/splat/sh_adam_quant_portable.cpp
-                src/splat/ppisp_portable.cpp
-                src/splat/bilateral_grid_portable.cpp
-                src/splat/fused_ssim_portable.cpp
-                src/splat/pam_cuda_portable.cpp
-                src/splat/sog_xt_training_portable.cpp
-                src/splat/igs_selection_cuda_portable.cpp
-                src/splat/adc_ops.cpp
-                src/splat/optimizer.cpp)
-            target_include_directories(photara_splat_cuda PUBLIC
-                ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
-            target_link_libraries(photara_splat_cuda PUBLIC tinytensor::tinytensor)
-            target_compile_features(photara_splat_cuda PUBLIC cxx_std_20)
+            target_sources(photara_splat_backends PRIVATE
+                src/splat/cuda_vulkan_preview_unavailable.cpp)
         endif()
 
         find_package(nlohmann_json CONFIG REQUIRED)
@@ -732,7 +728,7 @@ if(PHOTARA_ENABLE_FEATURES)
         endif()
         target_link_libraries(photara_splat PUBLIC
             Photara::MVS
-            photara_splat_cuda
+            photara_splat_backends
             WebP::webp
             ZLIB::ZLIB
             zstd::libzstd)
@@ -752,7 +748,10 @@ if(PHOTARA_ENABLE_FEATURES)
             endif()
         endif()
         if(TARGET splat_drender::vulkan)
-            target_sources(photara_splat_cuda PRIVATE
+            target_sources(photara_splat_backends PRIVATE
+                src/splat/ops_vulkan.cpp
+                src/splat/pam_ops_vulkan.cpp
+                src/splat/sh_adam_quant_vulkan.cpp
                 src/splat/optimizer_vulkan.cpp
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
@@ -760,19 +759,20 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/pam_vulkan.cpp
                 src/splat/deployment_vulkan.cpp
                 src/splat/sog_xt_training_vulkan.cpp
+                src/splat/sog_xt_dispatch_vulkan.cpp
                 src/splat/sog_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_points_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
-            target_link_libraries(photara_splat_cuda PUBLIC
+            target_link_libraries(photara_splat_backends PUBLIC
                 splat_drender::vulkan)
-            target_compile_definitions(photara_splat_cuda PUBLIC
+            target_compile_definitions(photara_splat_backends PUBLIC
                 TINYTENSOR_HAS_VULKAN=1)
             if(PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
                 include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
                 photara_vk_embed_hlsl(
-                    TARGET photara_splat_cuda
+                    TARGET photara_splat_backends
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/adc_revised_noise.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_points.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/sog_xt_training.hlsl"
@@ -1622,6 +1622,17 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     target_link_libraries(photara_logging_test PRIVATE Photara::BA)
     add_test(NAME photara.core.logging COMMAND photara_logging_test)
     if(TARGET photara_splat)
+        add_executable(photara_splat_backend_dispatch_test tests/splat_backend_dispatch_test.cpp)
+        target_link_libraries(photara_splat_backend_dispatch_test PRIVATE Photara::Splat)
+        add_test(NAME photara.splat.backend_dispatch COMMAND photara_splat_backend_dispatch_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.backend_dispatch_vulkan
+                COMMAND photara_splat_backend_dispatch_test --vulkan)
+        endif()
+        if(PHOTARA_ENABLE_CUDA)
+            add_test(NAME photara.splat.backend_dispatch_cuda
+                COMMAND photara_splat_backend_dispatch_test --cuda)
+        endif()
         add_executable(photara_splat_prior_test tests/splat_prior_test.cpp)
         target_include_directories(photara_splat_prior_test PRIVATE src/splat)
         target_link_libraries(photara_splat_prior_test PRIVATE Photara::Splat)
@@ -1684,14 +1695,16 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_RUNTIME_DLLS:photara_splat_igs_selection_test>
                     $<TARGET_FILE_DIR:photara_splat_igs_selection_test> COMMAND_EXPAND_LISTS)
         endif()
-        add_executable(photara_splat_cuda_frontend_test tests/splat_cuda_frontend_test.cpp)
-        target_link_libraries(photara_splat_cuda_frontend_test PRIVATE Photara::Splat)
-        add_test(NAME photara.splat.cuda_frontend COMMAND photara_splat_cuda_frontend_test)
-        if(WIN32)
-            add_custom_command(TARGET photara_splat_cuda_frontend_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:photara_splat_cuda_frontend_test>
-                    $<TARGET_FILE_DIR:photara_splat_cuda_frontend_test> COMMAND_EXPAND_LISTS)
+        if(PHOTARA_ENABLE_CUDA)
+            add_executable(photara_splat_cuda_frontend_test tests/splat_cuda_frontend_test.cpp)
+            target_link_libraries(photara_splat_cuda_frontend_test PRIVATE Photara::Splat)
+            add_test(NAME photara.splat.cuda_frontend COMMAND photara_splat_cuda_frontend_test)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_cuda_frontend_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_splat_cuda_frontend_test>
+                        $<TARGET_FILE_DIR:photara_splat_cuda_frontend_test> COMMAND_EXPAND_LISTS)
+            endif()
         endif()
         add_executable(photara_splat_formats_test tests/splat_formats_test.cpp)
         target_link_libraries(photara_splat_formats_test PRIVATE Photara::Splat)
@@ -1785,10 +1798,22 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_test(NAME photara.splat.pruning_camera COMMAND photara_splat_test --speedy-camera-only)
         add_test(NAME photara.splat.popspa COMMAND photara_splat_test --popspa-only)
         if(TARGET splat_drender::vulkan)
+            # These tests require Vulkan only. CUDA reference comparisons are
+            # registered separately, only when the CUDA backend is built.
             add_test(NAME photara.splat.vulkan_geometry
-                COMMAND photara_splat_test --vulkan-geometry-only)
+                COMMAND photara_splat_test --vulkan-geometry-independent-only)
             add_test(NAME photara.splat.vulkan_transparent
-                COMMAND photara_splat_test --transparent-vulkan-only)
+                COMMAND photara_splat_test --transparent-vulkan-trainer-only)
+            if(PHOTARA_ENABLE_CUDA)
+                add_test(NAME photara.splat.vulkan_geometry_cuda_parity
+                    COMMAND photara_splat_test --vulkan-geometry-only)
+                add_test(NAME photara.splat.vulkan_transparent_cuda_parity
+                    COMMAND photara_splat_test --transparent-vulkan-only)
+                set_tests_properties(
+                    photara.splat.vulkan_geometry_cuda_parity
+                    photara.splat.vulkan_transparent_cuda_parity
+                    PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
             add_test(NAME photara.splat.vulkan_pam
                 COMMAND photara_splat_test --pam-vulkan-only)
             add_test(NAME photara.splat.vulkan_rings_preview
@@ -1796,7 +1821,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
             add_test(NAME photara.splat.vulkan_live_near
                 COMMAND photara_splat_test --vulkan-live-near-only)
         endif()
-        if(TARGET splat_drender::vulkan)
+        if(PHOTARA_ENABLE_CUDA AND TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.
             add_executable(photara_splat_vulkan_forward_test
                 "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/splat_drender/tests/vulkan_forward_compare.cpp")

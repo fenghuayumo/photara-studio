@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "sh_adam_quant.hpp"
 #include "mvs/types.hpp"
 #include "splat/options.hpp"

@@ -5,7 +5,7 @@
 
 #include "bilateral_grid.hpp"
 #include "checkpoint.hpp"
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "geometry_vulkan.hpp"
 #include "focus_mask.hpp"
 #include "focus_mask_frame.hpp"

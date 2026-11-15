@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 #include "splat/options.hpp"
 
 #include "internal/tensor_impl.hpp"

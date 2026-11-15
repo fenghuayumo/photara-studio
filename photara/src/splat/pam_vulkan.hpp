@@ -1,5 +1,5 @@
 #pragma once
-#include "pam_cuda.hpp"
+#include "pam_ops.hpp"
 namespace photara::splat::detail {
 tinytensor::Tensor pam_field_gradients_vulkan(
     const PamGpuField&,

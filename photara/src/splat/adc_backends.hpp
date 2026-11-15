@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cuda_ops.hpp"
+#include "ops.hpp"
 
 namespace photara::splat::detail {
 

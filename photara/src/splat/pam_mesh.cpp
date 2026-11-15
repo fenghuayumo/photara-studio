@@ -1,8 +1,8 @@
 #include "splat/trainer.hpp"
 
 #include "core/logging.hpp"
-#include "cuda_ops.hpp"
-#include "pam_cuda.hpp"
+#include "ops.hpp"
+#include "pam_ops.hpp"
 #ifdef TINYTENSOR_HAS_VULKAN
 #include "rasterizer_vulkan.hpp"
 #endif

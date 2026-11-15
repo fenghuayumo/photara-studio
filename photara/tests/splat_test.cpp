@@ -7,12 +7,12 @@
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
-#include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/ops.hpp"
 #include "../src/splat/geometry_vulkan.hpp"
 #include "../src/splat/focus_mask.hpp"
 #include "../src/splat/focus_mask_frame.hpp"
 #include "splat/simplify.hpp"
-#include "../src/splat/pam_cuda.hpp"
+#include "../src/splat/pam_ops.hpp"
 #include "pam_reference_test.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
@@ -35,7 +35,7 @@
 
 #include <FreeImage.h>
 
-#include <cuda_runtime_api.h>
+#include "core/cuda_runtime_api.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1342,7 +1342,7 @@ void cpu_sh_adam_quant_step(
     const auto dequant = [](float code, float lo, float hi) {
         return lo + (hi - lo) * (code / qmax);
     };
-    const auto enquant = [](float value, float lo, float hi) {
+    const auto enquant = [eps, qmax](float value, float lo, float hi) {
         const float range = std::max(hi - lo, eps);
         return static_cast<std::uint8_t>(std::lround(std::min(
             std::max(qmax * (value - lo) / range, 0.F), qmax)));
@@ -8978,6 +8978,20 @@ int main(int argc, char** argv) {
             std::cout << "Raster policy CPU-oracle tests passed on CUDA and Vulkan\n";
             return 0;
         }
+        const bool cuda_parity = argc > 1 &&
+            (std::string(argv[1]) == "--transparent-vulkan-only" ||
+             std::string(argv[1]) == "--vulkan-geometry-only");
+        if (cuda_parity) {
+            int count = 0;
+            if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+                std::cout << "SKIP: CUDA/Vulkan parity requires a CUDA device\n";
+                return 77;
+            }
+        }
+        if (argc > 1 && std::string(argv[1]) == "--transparent-vulkan-trainer-only") {
+            test_vulkan_transparent_trainer();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--transparent-vulkan-only") {
             test_vulkan_transparent_loss();
             test_vulkan_transparent_trainer();
@@ -9041,7 +9055,9 @@ int main(int argc, char** argv) {
             test_vulkan_rings_preview();
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "--vulkan-geometry-only") {
+        if (argc > 1 &&
+            (std::string(argv[1]) == "--vulkan-geometry-only" ||
+             std::string(argv[1]) == "--vulkan-geometry-independent-only")) {
             std::cout << "Vulkan depth-normal oracle\n";
             test_gggs_depth_normal_consistency(tinytensor::Device::Vulkan);
             std::cout << "Vulkan depth-normal finite differences\n";
@@ -9049,8 +9065,9 @@ int main(int argc, char** argv) {
             std::cout << "Vulkan planar MV oracle\n";
             test_gggs_multi_view_geometry_and_ncc(tinytensor::Device::Vulkan);
             std::cout << "Vulkan complete MV gradient chain\n";
-            test_vulkan_geometry_chain();
-            test_vulkan_normal_field();
+            test_vulkan_geometry_chain(cuda_parity);
+            if (cuda_parity)
+                test_vulkan_normal_field();
             std::cout << "Vulkan geometry trainer and mesh\n";
             test_vulkan_geometry_trainer();
             std::cout << "Vulkan geometry tests passed\n";

@@ -1,7 +1,6 @@
 #include "rasterizer_cuda.hpp"
 
-#include "cuda_ops.hpp"
-#include "rasterizer_vulkan.hpp"
+#include "ops.hpp"
 #include "core/vram_profiler.hpp"
 #include "internal/size_bucketed_pool.hpp"
 
@@ -342,11 +341,10 @@ RenderResult CudaRasterizer::forward(
     const GaussianModel& model,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_raster_forward(backend_, model, camera, requested_options);
+
     if (model.render_method == RenderMethod::gaussian_3dgut &&
         model.means.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("3DGUT requires a CUDA or Vulkan backend");
+        throw std::invalid_argument("CUDA 3DGUT requires a CUDA model");
     validate_model(model, requested_options);
     if (camera.width == 0 || camera.height == 0)
         throw std::invalid_argument("Splat camera dimensions must be positive");
@@ -456,10 +454,9 @@ tinytensor::Tensor CudaRasterizer::pruning_scores(
     RasterizeOptions options, const bool gaussian_pop) const {
     if (model.render_method == RenderMethod::gaussian_3dgut)
         throw std::invalid_argument("3DGUT Speedy pruning is not implemented");
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_pruning_scores(backend_, model, camera, options, gaussian_pop);
+
     if (model.means.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("Speedy-Splat pruning requires a CUDA or Vulkan model");
+        throw std::invalid_argument("CUDA Speedy-Splat pruning requires a CUDA model");
     options.require_depth = false;
     options.record_backward_state = false;
     options.record_contributor_counts = true;
@@ -495,20 +492,6 @@ tinytensor::Tensor CudaRasterizer::pruning_scores(
     return scores;
 }
 
-float CudaRasterizer::photometric_loss(
-    const RenderResult& rendered,
-    const tinytensor::Tensor& target,
-    const tinytensor::Tensor& mask,
-    const bool mask_enabled,
-    const float ssim_weight,
-    const float photometric_weight,
-    const bool read_loss_value,
-    tinytensor::Tensor* color_gradient) const {
-    return detail::vulkan_photometric_loss(
-        rendered, target, mask, mask_enabled, ssim_weight, photometric_weight, read_loss_value,
-        color_gradient);
-}
-
 ModelGradients CudaRasterizer::backward(
     const GaussianModel& model,
     const RenderResult& rendered,
@@ -519,10 +502,7 @@ ModelGradients CudaRasterizer::backward(
     const tinytensor::Tensor& densify_map,
     const SHAdamUpdate* sh_adam,
     const StructureAdamUpdate* structure_adam) const {
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_raster_backward(
-            model, rendered, grad_color, grad_alpha, grad_depth, grad_normal, densify_map, sh_adam,
-            structure_adam);
+
     if (!rendered.context.impl)
         throw std::invalid_argument("Splat backward requires a live forward context");
     const auto& context = *rendered.context.impl;
@@ -762,16 +742,6 @@ ModelGradients CudaRasterizer::backward(
     return gradients;
 }
 
-void CudaRasterizer::materialize_visibility(RenderResult& rendered) const {
-    if (rendered.visibility.is_valid())
-        return;
-    if (rendered.context.backend_impl) {
-        detail::vulkan_materialize_visibility(rendered);
-        return;
-    }
-    throw std::invalid_argument("Deferred visibility requires a live Vulkan forward context");
-}
-
 const float* CudaRasterizer::projected_mean2d(const RenderResult& rendered) const {
     if (!rendered.context.impl)
         return nullptr;
@@ -787,9 +757,7 @@ DepthSampleResult CudaRasterizer::sample_depth(
     const tinytensor::Tensor& world_points,
     const Camera& camera,
     const RasterizeOptions& requested_options) const {
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::vulkan_sample_depth(
-            backend_, model, world_points, camera, requested_options);
+
     require_cuda_float_contiguous(world_points, "world_points");
     if (world_points.shape().rank() != 2 || world_points.shape()[1] != 3)
         throw std::invalid_argument("sample_depth points must have shape [P,3]");
@@ -831,8 +799,6 @@ DepthSampleGradients CudaRasterizer::sample_depth_backward(
     const GaussianModel& model,
     const DepthSampleResult& sampled,
     const tinytensor::Tensor& grad_camera_points) const {
-    if (sampled.backend_impl)
-        return detail::vulkan_sample_depth_backward(model, sampled, grad_camera_points);
     if (!sampled.context)
         throw std::invalid_argument("sample_depth backward requires a live context");
     require_cuda_float_contiguous(grad_camera_points, "grad_camera_points");

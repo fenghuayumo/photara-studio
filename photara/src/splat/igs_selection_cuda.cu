@@ -1,3 +1,4 @@
+#include "cuda_backend.hpp"
 #include "igs_selection_cuda.hpp"
 #include <cuda_runtime.h>
 #include <cub/device/device_radix_sort.cuh>
@@ -72,7 +73,7 @@ __global__ void unpack_indices(const std::uint64_t* keys, int* indices, unsigned
 }
 } // namespace
 
-tinytensor::Tensor igs_weighted_sample_cuda(
+tinytensor::Tensor cuda_backend::igs_weighted_sample_cuda(
     const tinytensor::Tensor& weights,
     const std::size_t requested,
     const std::uint64_t seed,
