@@ -1253,6 +1253,8 @@ json snapshot_state(const App& app, const ControlBus& bus) {
             {"stop", action_state(app.job.running(), "job_not_running")},
         }},
         {"view", {
+            {"preview_requested_camera_revision", app.preview_camera_revision},
+            {"preview_displayed_camera_revision", app.preview.camera_revision()},
             {"workspace", workspace_name(app.workspace)},
             {"mode", mode_name(app.view_mode)},
             {"channel", channel_name(app.display_channel)},

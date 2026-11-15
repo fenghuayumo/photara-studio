@@ -14,6 +14,7 @@
 #include "imgui_impl_vulkan.h"
 
 #include "photara_vk/photara_vk.hpp"
+#include "photara_vk/iosurface_preview.hpp"
 
 #include <array>
 #include <cstdint>
@@ -133,8 +134,8 @@ private:
 
 // The trainer writes this image through an inherited Win32 handle or, on
 // Linux, an opaque fd. The editor copies it into a sampled display image
-// each frame. The trainer signals odd timeline values; the editor signals
-// even ones.
+// each frame. Win32/Linux use odd/even timeline values. macOS shares an
+// IOSurface and exchanges completion sequences in an anonymous memory page.
 struct ExternalPreview {
     PreviewTexture display;
     VkImage image{};
@@ -155,10 +156,20 @@ struct ExternalPreview {
     void renew_export_handles();
     void close_export_handles();
     void poll();
+    [[nodiscard]] std::uint64_t camera_revision() const;
     // Keeps training unblocked while the swapchain is minimised: consume and
     // copy the pending frame without acquiring a WSI image.
     void consume_without_present();
     void reset();
+
+private:
+#if defined(__APPLE__)
+    std::unique_ptr<photara::vk::IOSurfacePreview> metal_preview_;
+    VkCommandPool copy_pool_{};
+    VkCommandBuffer copy_command_{};
+    VkFence copy_fence_{};
+    std::uint64_t copying_frame_{}, copying_camera_revision_{}, displayed_camera_revision_{};
+#endif
 };
 
 std::uint64_t consumed_timeline_value();

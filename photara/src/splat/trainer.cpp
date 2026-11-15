@@ -1200,7 +1200,7 @@ GaussianModel Trainer::train(
         if (preview) preview(std::move(p));
     };
     auto compact_device_preview = [&](unsigned i, std::size_t v, const Camera& c, const tinytensor::Tensor& colour) {
-        if (device_preview) device_preview(i + options_.iterations, v, c, colour);
+        return device_preview && device_preview(i + options_.iterations, v, c, colour);
     };
     model = compact_popspa(model, scene, [&](TrainingProgress p) {
         const bool result = compact_progress(p); stopped |= !result; return result;
@@ -1350,7 +1350,7 @@ GaussianModel Trainer::compact_popspa(
         if (preview) preview(std::move(p));
     };
     auto fine_device_preview = [&](unsigned i, std::size_t v, const Camera& c, const tinytensor::Tensor& colour) {
-        if (device_preview) device_preview(i + options_.popspa_refine_iterations, v, c, colour);
+        return device_preview && device_preview(i + options_.popspa_refine_iterations, v, c, colour);
     };
     return finetuning.train_impl(refine_scene,
         [&](TrainingProgress p) { return report(p, options_.popspa_refine_iterations); },
@@ -2130,7 +2130,8 @@ GaussianModel Trainer::train_impl(
                 }
             }
             const bool shared_image_free =
-                !has_preview_ack || preview_ack_frames >= preview_frames_queued;
+                (!has_preview_ack || preview_ack_frames >= preview_frames_queued) &&
+                (!options_.preview_ready || options_.preview_ready());
             if (due && !shared_image_free && preview_now >= next_preview_drop_log) {
                 // The editor is still copying the previous frame. Dropping this
                 // preview keeps the optimizer moving; the next poll retries.
@@ -2148,14 +2149,11 @@ GaussianModel Trainer::train_impl(
                 const tinytensor::Tensor preview_color = render_preview_color(
                     model, preview_camera, options_, raster_options.active_sh_degree, camera_vis,
                     vis_revision);
-                last_preview_view = preview_index;
-                last_preview_camera_revision = camera_revision;
-                last_preview_vis_revision = vis_revision;
-                last_preview_camera = preview_camera;
-                has_last_preview_camera = true;
+                bool published = true;
                 if (device_preview) {
-                    device_preview(iteration, preview_index, preview_camera, preview_color);
-                    ++preview_frames_queued;
+                    if (options_.preview_metadata) options_.preview_metadata(camera_revision);
+                    published = device_preview(iteration, preview_index, preview_camera, preview_color);
+                    if (published) ++preview_frames_queued;
                 } else {
                     const std::vector<float> planar = download<float>(preview_color);
                     const std::size_t pixels =
@@ -2176,7 +2174,14 @@ GaussianModel Trainer::train_impl(
                     }
                     preview(std::move(frame));
                 }
-                if (pose_changed && !preview_scheduled) {
+                if (published) {
+                    last_preview_view = preview_index;
+                    last_preview_camera_revision = camera_revision;
+                    last_preview_vis_revision = vis_revision;
+                    last_preview_camera = preview_camera;
+                    has_last_preview_camera = true;
+                }
+                if (published && pose_changed && !preview_scheduled) {
                     // Keep interactive previews inside a fixed share of the
                     // loop: never sooner than the render that just happened.
                     const auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3636,9 +3641,10 @@ void run_orbit_preview(
         load_visualization_sidecar(vis_file, vis, vis_revision);
         if (load_preview_camera_file(camera_file, next, revision, &vis) &&
             (revision != last_revision || vis_revision != last_vis_revision)) {
-            device_preview(0, 0, next, visualize(model, next, vis));
-            last_revision = revision;
-            last_vis_revision = vis_revision;
+            if (device_preview(0, 0, next, visualize(model, next, vis))) {
+                last_revision = revision;
+                last_vis_revision = vis_revision;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }

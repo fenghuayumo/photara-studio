@@ -399,7 +399,11 @@ void create_context(ImVector<const char*> extensions, const std::string& preferr
     // The portability subset must be enabled when advertised (MoltenVK).
     if (advertised_has("VK_KHR_portability_subset"))
         required_device_extensions.push_back("VK_KHR_portability_subset");
-#if defined(_WIN32)
+#if defined(__APPLE__)
+    if (!advertised_has("VK_EXT_metal_objects"))
+        throw std::runtime_error("GPU preview requires VK_EXT_metal_objects");
+    required_device_extensions.push_back("VK_EXT_metal_objects");
+#elif defined(_WIN32)
     required_device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
     required_device_extensions.push_back(
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
@@ -975,9 +979,39 @@ void ExternalPreview::create(
     display.upload(placeholder);
     g_display_image = display.image;
 #if defined(__APPLE__)
-    // MoltenVK cannot export Linux opaque FDs. Keep the ordinary preview
-    // texture; the pipeline uses its image/file handoff without export handles.
-    return;
+    {
+        metal_preview_ = std::make_unique<photara::vk::IOSurfacePreview>();
+        metal_preview_->create(width, height);
+        metal_preview_->create_image(g_device, g_physical_device, width, height, image, memory);
+        allocation_size = static_cast<VkDeviceSize>(width) * height * 4;
+        VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool.queueFamilyIndex = g_queue_family;
+        check(vkCreateCommandPool(g_device, &pool, nullptr, &copy_pool_));
+        VkCommandBufferAllocateInfo commands{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        commands.commandPool = copy_pool_;
+        commands.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        commands.commandBufferCount = 1;
+        check(vkAllocateCommandBuffers(g_device, &commands, &copy_command_));
+        VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        check(vkCreateFence(g_device, &fence, nullptr, &copy_fence_));
+        renew_export_handles();
+        g_external_image = image;
+        g_external_width = width;
+        g_external_height = height;
+        OneShotRecorder recorder;
+        VkImageMemoryBarrier release{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        release.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        release.srcQueueFamilyIndex = g_queue_family;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        release.image = image;
+        release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(recorder.command(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &release);
+        recorder.submit();
+        return;
+    }
 #endif
 
 #if defined(_WIN32)
@@ -1085,7 +1119,11 @@ void ExternalPreview::create(
 
 void ExternalPreview::renew_export_handles() {
     close_export_handles();
-#if defined(_WIN32)
+#if defined(__APPLE__)
+    if (!metal_preview_) return;
+    memory_handle = metal_preview_->export_fd();
+    semaphore_handle = metal_preview_->export_fd();
+#elif defined(_WIN32)
     const auto get_memory = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(g_device, "vkGetMemoryWin32HandleKHR"));
     const auto get_semaphore =
@@ -1153,6 +1191,39 @@ void ExternalPreview::close_export_handles() {
 }
 
 void ExternalPreview::poll() {
+#if defined(__APPLE__)
+    if (metal_preview_) {
+        if (copying_frame_) {
+            const auto status = vkGetFenceStatus(g_device, copy_fence_);
+            if (status == VK_NOT_READY) return;
+            check(status);
+            g_consumed_value = 2 * copying_frame_ - 1;
+            ++g_copied_frames;
+            displayed_camera_revision_ = copying_camera_revision_;
+            metal_preview_->consume(copying_frame_);
+            copying_frame_ = 0;
+        }
+        const auto frame = metal_preview_->ready();
+        if (frame == 0 || 2 * frame - 1 <= g_consumed_value) return;
+        check(vkResetFences(g_device, 1, &copy_fence_));
+        check(vkResetCommandBuffer(copy_command_, 0));
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(copy_command_, &begin));
+        record_shared_copy(copy_command_);
+        check(vkEndCommandBuffer(copy_command_));
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &copy_command_;
+        {
+            photara::vk::QueueLock lock(g_queue);
+            check(vkQueueSubmit(g_queue, 1, &submit, copy_fence_));
+        }
+        copying_frame_ = frame;
+        copying_camera_revision_ = metal_preview_->camera_revision();
+        return;
+    }
+#endif
     if (!timeline) return;
     // The protocol pins the counter: the trainer announces frame f by
     // signalling 2f-1 and cannot start frame f+1 until this editor answers
@@ -1168,6 +1239,14 @@ void ExternalPreview::poll() {
         return;
     if (value != expected) return;
     g_ready_value = value;
+}
+
+std::uint64_t ExternalPreview::camera_revision() const {
+#if defined(__APPLE__)
+    return displayed_camera_revision_;
+#else
+    return 0;
+#endif
 }
 
 void ExternalPreview::consume_without_present() {
@@ -1211,6 +1290,15 @@ void ExternalPreview::reset() {
     memory = {};
     allocation_size = 0;
     width = height = 0;
+#if defined(__APPLE__)
+    if (copy_fence_) vkDestroyFence(g_device, copy_fence_, nullptr);
+    if (copy_pool_) vkDestroyCommandPool(g_device, copy_pool_, nullptr);
+    copy_fence_ = {};
+    copy_pool_ = {};
+    copy_command_ = {};
+    copying_frame_ = copying_camera_revision_ = displayed_camera_revision_ = 0;
+    metal_preview_.reset();
+#endif
     display.reset();
 }
 

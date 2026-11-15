@@ -19,8 +19,24 @@ through CMake targets in that directory. Independent runtime checks use
 the public rasterizer API. Full training and CUDA regression tests have not
 been run on macOS. CUDA-only entry points fail explicitly when CUDA is absent;
 this does not imply feature parity. Texture baking and USDC are disabled by
-this build script. Inference uses CPU. macOS preview uses the ordinary texture
-handoff because Linux opaque FD exports are unavailable on MoltenVK.
+this build script. Inference uses CPU. Training previews share an IOSurface-backed
+GPU image through `VK_EXT_metal_objects`. The producer packs and copies pixels
+on the GPU; Studio copies the shared image into its sampled viewport texture on
+the GPU. Only completed producer/consumer sequence numbers cross an anonymous
+shared-memory page, after each GPU submission completes. A busy viewport drops
+updates instead of blocking training. No image readback, PNG codec, or preview
+files are involved. Completed models use the in-process Vulkan renderer.
+
+To check live preview, camera updates, completion and a second training run
+with an existing ASFM scene and its sibling `images/` folder:
+
+```sh
+VK_ICD_FILENAMES="$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json" \
+  python3 scripts/studio_training_preview_smoke.py --asfm /data/scene.asfm
+```
+
+The check uses isolated preferences and a temporary working copy of the ASFM;
+it leaves captures and a JSON report in the printed artifact directory.
 
 Changes under the photara_vk and photara_drender git submodules must be retained
 along with the parent repository changes; updating/resetting these submodules

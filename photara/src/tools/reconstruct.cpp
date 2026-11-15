@@ -184,7 +184,6 @@ struct ReconstructCli {
     std::filesystem::path splat_preview_camera_file;
     std::filesystem::path splat_preview_vis_file;
     std::filesystem::path splat_preview_ack_file;
-    std::filesystem::path splat_preview_dir;
     std::uint64_t splat_preview_vk_memory_handle{};
     std::uint64_t splat_preview_vk_semaphore_handle{};
     std::uint64_t splat_preview_vk_allocation_size{};
@@ -480,7 +479,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-preview-camera-file PATH  optional orbit-camera sidecar (overrides view index)\n"
               << "  --splat-preview-vis-file PATH  optional splat/points/rings visualization sidecar\n"
               << "  --splat-preview-ack-file PATH  optional sidecar the editor updates with the frames it copied\n"
-              << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-device-cache-mb N  packed GPU image cache budget (default 512, 0 disables)\n"
@@ -893,8 +891,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-ack-file",
          "Sidecar file the editor updates with the preview frames it consumed",
-         cxxopts::value<std::string>()->default_value(""))
-        ("splat-preview-dir", "Directory for live training preview PNGs",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-vk-memory-handle",
          "Inherited Win32 Vulkan external-memory handle",
@@ -1607,10 +1603,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-preview-ack-file"].as<std::string>();
     if (!splat_preview_ack_file_text.empty())
         cli.splat_preview_ack_file = utf8_to_path(splat_preview_ack_file_text);
-    const std::string splat_preview_dir_text =
-        result["splat-preview-dir"].as<std::string>();
-    if (!splat_preview_dir_text.empty())
-        cli.splat_preview_dir = utf8_to_path(splat_preview_dir_text);
     cli.splat_preview_vk_memory_handle =
         result["splat-preview-vk-memory-handle"].as<std::uint64_t>();
     cli.splat_preview_vk_semaphore_handle =
@@ -2449,6 +2441,7 @@ void run_splat_view(
             unsigned, std::size_t, const photara::splat::Camera& camera,
             const tinytensor::Tensor& color) {
             vulkan_preview->submit(color, camera.width, camera.height);
+            return true;
         },
         cli.splat_preview_vis_file);
 }
@@ -4199,6 +4192,10 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                     preview_handles.device_node_mask,
                     preview_handles.device_uuid,
                     preview_handles.has_device_uuid});
+        options.preview_ready = [&vulkan_preview] { return vulkan_preview->available(); };
+        options.preview_metadata = [&vulkan_preview](std::uint64_t revision) {
+            vulkan_preview->set_camera_revision(revision);
+        };
         device_preview = [&vulkan_preview](
                              const unsigned iteration,
                              const std::size_t view_index,
@@ -4208,7 +4205,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 throw std::runtime_error(
                     "Vulkan training preview only supports the splat view");
             const auto view = tinytensor::vulkan::buffer_view(color);
-            vulkan_preview->submit(
+            const bool published = vulkan_preview->submit(
                 {view.buffer, view.offset, view.bytes}, camera.width,
                 camera.height);
             photara::core::Logger::instance().debug(
@@ -4216,9 +4213,14 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 " view=", view_index,
                 " transport=vulkan_external_memory",
                 " timeline_value=", 2 * vulkan_preview->frame_count() - 1);
+            return published;
         };
         photara::core::Logger::instance().info(
+#if defined(__APPLE__)
+            "splat_preview_transport=vulkan_iosurface extent=",
+#else
             "splat_preview_transport=vulkan_external_memory extent=",
+#endif
             cli.splat_preview_vk_width, 'x',
             cli.splat_preview_vk_height);
         if (!cli.splat_preview_ack_file.empty())
@@ -4239,6 +4241,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 " view=", view_index,
                 " transport=cuda_vulkan_external_memory",
                 " timeline_value=", 2 * cuda_preview->frame_count() - 1);
+            return true;
         };
         photara::core::Logger::instance().info(
             "splat_preview_transport=cuda_vulkan_external_memory extent=",
@@ -4247,33 +4250,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         if (!cli.splat_preview_ack_file.empty())
             photara::core::Logger::instance().info(
                 "splat_preview_ack_file=\"", cli.splat_preview_ack_file, '"');
-    } else if (options.preview_interval != 0 && !cli.gui) {
-        const std::filesystem::path preview_dir =
-            cli.splat_preview_dir.empty()
-                ? out_dir / "splat_previews"
-                : cli.splat_preview_dir;
-        std::filesystem::create_directories(preview_dir);
-        preview = [preview_dir, previous = std::filesystem::path{}](
-                      photara::splat::TrainingPreview frame) mutable {
-            photara::io::RgbImage image;
-            image.width = frame.width;
-            image.height = frame.height;
-            image.pixels = std::move(frame.rgb);
-            std::ostringstream filename;
-            filename << "preview_iter_" << std::setw(8)
-                     << std::setfill('0') << frame.iteration << "_view_"
-                     << frame.view_index << ".png";
-            const auto path = preview_dir / filename.str();
-            photara::io::save_rgb_png(image, path);
-            if (!previous.empty()) {
-                std::error_code remove_error;
-                std::filesystem::remove(previous, remove_error);
-            }
-            previous = path;
-            photara::core::Logger::instance().debug(
-                "splat_preview_iteration=", frame.iteration,
-                " view=", frame.view_index, " image=", path);
-        };
     }
     photara::splat::GaussianModel gaussians;
     double training_seconds = 0.0;

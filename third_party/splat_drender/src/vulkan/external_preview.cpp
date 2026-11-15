@@ -11,6 +11,7 @@
 #include "splat_drender/vulkan_api.h"
 
 #include "photara_vk/device.hpp"
+#include "photara_vk/iosurface_preview.hpp"
 
 #include "splat_preview_pack.hlsl.embedded.hpp"
 
@@ -54,6 +55,9 @@ std::uint32_t memory_type(const VkPhysicalDevice physical, const std::uint32_t b
 
 struct ExternalImagePreview::Impl {
     PreviewDevice device;
+#if defined(__APPLE__)
+    std::unique_ptr<photara::vk::IOSurfacePreview> metal;
+#endif
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
@@ -132,6 +136,14 @@ ExternalImagePreview::ExternalImagePreview(const PreviewDevice& device,
             "The Vulkan training device does not match the editor preview image");
     }
 
+#if defined(__APPLE__)
+    impl_->metal = std::make_unique<photara::vk::IOSurfacePreview>();
+    impl_->metal->import(static_cast<int>(options.memory_handle));
+    ::close(static_cast<int>(options.memory_handle));
+    ::close(static_cast<int>(options.semaphore_handle));
+    impl_->metal->create_image(device.device, device.physical_device, options.width,
+                              options.height, impl_->image, impl_->memory);
+#else
 #if defined(_WIN32)
     HANDLE memory_handle =
         reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(options.memory_handle));
@@ -245,6 +257,7 @@ ExternalImagePreview::ExternalImagePreview(const PreviewDevice& device,
         throw;
     }
     close_imports();
+#endif
 
     const VkDeviceSize packed_bytes =
         static_cast<VkDeviceSize>(options.width) * options.height * 4U;
@@ -335,11 +348,14 @@ ExternalImagePreview::ExternalImagePreview(const PreviewDevice& device,
 
 ExternalImagePreview::~ExternalImagePreview() = default;
 
-void ExternalImagePreview::submit(const SplatBufferView& color, const std::uint32_t source_width,
+bool ExternalImagePreview::submit(const SplatBufferView& color, const std::uint32_t source_width,
                                   const std::uint32_t source_height) {
     if (!impl_ || color.buffer == VK_NULL_HANDLE || source_width == 0 || source_height == 0) {
         throw std::invalid_argument("Vulkan preview requires a device RGB buffer");
     }
+#if defined(__APPLE__)
+    if (!impl_->metal->available()) return false; // never stall training for a hidden/closed editor
+#endif
     // The rasterizer submitted the color write without waiting. Hold the queue
     // gate from that drain through the copy so another submit cannot land
     // between them. The caller's tensor is released only after the second wait.
@@ -432,6 +448,14 @@ void ExternalImagePreview::submit(const SplatBufferView& color, const std::uint3
     }
     timeline.signalSemaphoreValueCount = 1;
     timeline.pSignalSemaphoreValues = &signal_value;
+#if defined(__APPLE__)
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &impl_->command;
+    check(vkQueueSubmit(impl_->device.queue, 1, &submit, VK_NULL_HANDLE), "submit IOSurface preview");
+    check(vkQueueWaitIdle(impl_->device.queue), "finish IOSurface preview");
+    impl_->metal->publish(frame);
+    return true;
+#endif
     submit.pNext = &timeline;
     if (frame > 1) {
         submit.waitSemaphoreCount = 1;
@@ -444,6 +468,23 @@ void ExternalImagePreview::submit(const SplatBufferView& color, const std::uint3
     submit.pSignalSemaphores = &impl_->timeline;
     check(vkQueueSubmit(impl_->device.queue, 1, &submit, VK_NULL_HANDLE), "submit preview");
     check(vkQueueWaitIdle(impl_->device.queue), "finish preview");
+    return true;
+}
+
+bool ExternalImagePreview::available() const {
+#if defined(__APPLE__)
+    return impl_ && impl_->metal->available();
+#else
+    return true; // external-memory transports use their existing handshake
+#endif
+}
+
+void ExternalImagePreview::set_camera_revision(std::uint64_t revision) {
+#if defined(__APPLE__)
+    impl_->metal->set_camera_revision(revision);
+#else
+    (void)revision;
+#endif
 }
 
 std::uint64_t ExternalImagePreview::frame_count() const noexcept {

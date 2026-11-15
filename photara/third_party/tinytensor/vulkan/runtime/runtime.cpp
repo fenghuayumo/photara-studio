@@ -733,6 +733,8 @@ void Context::create_device() {
         "VK_KHR_external_semaphore",
         "VK_KHR_external_semaphore_win32",
     };
+#elif defined(__APPLE__)
+    const char* external_extensions[] = {"VK_EXT_metal_objects"};
 #else
     // Linux exports the same image as an opaque fd.
     const char* external_extensions[] = {

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 namespace photara::splat {
@@ -463,6 +464,10 @@ struct TrainingOptions {
     // Iterations at which the caller may render fixed-view comparison snapshots.
     std::vector<unsigned> evaluation_iterations;
     unsigned preview_interval{0};
+    // Optional transport hooks. Check before rasterizing; metadata belongs to
+    // the exact camera used for that raster, not a later sidecar reread.
+    std::function<bool()> preview_ready;
+    std::function<void(std::uint64_t camera_revision)> preview_metadata;
     // Live preview camera. 0 is the first captured frame. An optional sidecar
     // file lets the editor change this while training without restarting.
     unsigned preview_view_index{0};

@@ -296,6 +296,29 @@ void training_test() {
         "ADC-IGS training did not refine/report");
     for (float x : result.means.to_vector())
         require(std::isfinite(x), "ADC-IGS produced invalid positions");
+    // Busy transports must skip rasterization, and a rejected submission must
+    // leave its camera pending instead of waiting for the next 100-step tick.
+    auto preview_options = o;
+    preview_options.iterations = 6;
+    preview_options.preview_interval = 100;
+    preview_options.preview_vis_file = root / "unused-vis";
+    unsigned readiness_checks = 0, attempts = 0, preview_reports = 0;
+    unsigned first_attempt = 0;
+    bool retried_before_final = false;
+    preview_options.preview_ready = [&] { return ++readiness_checks > 2; };
+    auto preview_model = Trainer(preview_options).train(scene,
+        [&](const TrainingProgress&) {
+            ++preview_reports;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return true;
+        }, {}, {}, [&](unsigned iteration, std::size_t, const Camera&, const Tensor&) {
+            if (!first_attempt) first_attempt = iteration;
+            if (++attempts <= 2) return false;
+            retried_before_final |= iteration < preview_options.iterations;
+            return true;
+        });
+    require(first_attempt >= 3 && attempts >= 3 && retried_before_final && preview_reports == 6,
+            "Busy/rejected previews lost the pending camera or skipped optimizer steps");
     for (auto& view : scene.views) {
         view.foreground_mask.resize(32 * 32);
         for (unsigned i = 0; i < 32 * 32; ++i)

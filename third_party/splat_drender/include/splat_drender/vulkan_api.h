@@ -614,7 +614,11 @@ class ExternalImagePreview {
     ExternalImagePreview(const ExternalImagePreview&) = delete;
     ExternalImagePreview& operator=(const ExternalImagePreview&) = delete;
 
-    void submit(const SplatBufferView& color, std::uint32_t source_width,
+    // A single producer must check availability before rendering; only this
+    // producer can turn a free slot into an occupied slot.
+    [[nodiscard]] bool available() const;
+    void set_camera_revision(std::uint64_t revision);
+    bool submit(const SplatBufferView& color, std::uint32_t source_width,
                 std::uint32_t source_height);
     [[nodiscard]]
     std::uint64_t frame_count() const noexcept;

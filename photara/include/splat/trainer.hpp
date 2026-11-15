@@ -157,7 +157,8 @@ using PreviewCallback = std::function<void(TrainingPreview)>;
 // device. The tensor is planar float RGB [3,H,W] and is valid only for the
 // duration of the call. CUDA training fills the editor image through CUDA
 // interop; Vulkan training copies this tensor into the same image.
-using DevicePreviewCallback = std::function<void(
+// Return false when the frame was dropped; the trainer will retry its camera.
+using DevicePreviewCallback = std::function<bool(
     unsigned iteration,
     std::size_t view_index,
     const Camera& camera,
