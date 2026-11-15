@@ -131,7 +131,7 @@ hnswlib, Boost, and GLFW for Photara Studio.
 
 Optional or feature-specific requirements are:
 
-- CUDA Toolkit 12 or newer for CUDA BA, CUDA MVS, and all splat training;
+- CUDA Toolkit 12 or newer for CUDA BA, CUDA MVS, and the CUDA splat backend;
 - Vulkan SDK 1.2 or newer for Photara Studio and texture baking;
 - CGAL for global Delaunay meshing, PAM extraction, and optional mesh tools;
 - ONNX Runtime for learned feature backends, LightGlue, and delighting;
@@ -182,6 +182,41 @@ Single-config generators write `build/photara/photara` and
 root are stored in `$XDG_CONFIG_HOME/Photara`, or `~/.config/Photara` when
 `XDG_CONFIG_HOME` is unset.
 
+### macOS Vulkan Release
+
+Use an arm64 C++20 toolchain, CMake 3.28+, Ninja, Vulkan SDK (including DXC
+and MoltenVK), Eigen, PoseLib (fetched by CMake), Ceres, gflags, glog,
+FreeImage, JPEG, PNG, Boost, hnswlib headers, GLFW, nlohmann-json, yaml-cpp,
+WebP, zstd, and optional CGAL.
+
+From the repository root, set the SDK and dependency paths, then run:
+
+```sh
+export VULKAN_SDK="/path/to/vulkan-sdk/macOS"
+export PHOTARA_DEPS_PREFIX="/path/to/dependency-prefix"
+export PHOTARA_HNSWLIB_INCLUDE="/path/to/hnswlib"
+scripts/build_macos_release.sh
+```
+
+`PHOTARA_DEPS_PREFIX` is the prefix containing dependency libraries and build
+tools (for example, the Homebrew prefix). `PHOTARA_HNSWLIB_INCLUDE` must contain
+the `hnswlib/` header directory. The script adds the SDK and dependency `bin/`
+directories to `PATH`, disables CUDA, and selects the Vulkan Studio backend.
+It builds Release only and creates a local
+`build/Photara Studio.app` launcher. Keep it alongside the build
+folder: dependencies are not bundled for distribution.
+
+All generated files live under `build/`. The main project builds its modules
+through CMake targets in that directory. Independent runtime checks use
+`build/checks/tinytensor-vulkan` and `build/checks/splat-vulkan`.
+
+The macOS release script disables texture baking and USDC export and uses CPU
+inference. Launch Studio with:
+
+```sh
+open "build/Photara Studio.app"
+```
+
 ### Windows packaging
 
 The repository includes a repeatable Windows release script that gathers the
@@ -193,7 +228,7 @@ the release command.
 Paths vary with the generator and platform. With a single-config generator,
 the executables normally appear directly below `build/photara/`.
 
-For a CPU-only CLI build, disable the CUDA-only splat component and the Studio
+For a CPU-only CLI build, disable the splat component and the Studio
 target, which currently links the splat library:
 
 ```powershell
@@ -226,9 +261,9 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_BUILD_TESTS` | `OFF` | Configure correctness and regression tests |
 | `PHOTARA_BUILD_BENCHMARKS` | `OFF` | Configure auxiliary tools and benchmarks |
 | `PHOTARA_BUILD_PYTHON` | `OFF` | Build the nanobind Python module (`import photara`) |
-| `PHOTARA_ENABLE_CUDA` | `ON` | Enable CUDA BA and MVS acceleration |
+| `PHOTARA_ENABLE_CUDA` | `OFF` on macOS, `ON` elsewhere | Enable CUDA BA and MVS acceleration |
 | `PHOTARA_CUDA_ARCHITECTURES` | auto | CUDA targets; auto builds RTX 20/30/40 cubins, RTX 50 with CUDA 12.8+, and PTX fallback |
-| `PHOTARA_ENABLE_SPLAT` | `ON` | Build CUDA Gaussian training and extraction |
+| `PHOTARA_ENABLE_SPLAT` | `ON` | Build Gaussian training and extraction with the enabled GPU backends |
 | `PHOTARA_ENABLE_FEATURES` | `ON` | Build image features, SfM, MVS, and the CLI |
 | `PHOTARA_ENABLE_SAM` | `ON` | Build in-process SAM 3 mask generation with ggml |
 | `PHOTARA_ENABLE_INFERENCE` | `ON` | Build shared ggml inference support independently of SAM |

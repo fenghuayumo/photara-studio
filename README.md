@@ -85,7 +85,7 @@ to inspect the scene.
 - [Build and usage reference](docs/BUILD_AND_USAGE.md) — requirements, configuration, CLI examples, and output formats.
 - [Pipeline overview](docs/PIPELINE.md) — reconstruction stages and artifacts.
 - [Python API](docs/api/python.md) · [C++ API](docs/api/cpp.md) · [API index](docs/api/README.md).
-- [macOS Vulkan Release build](docs/BUILD_MACOS.md) — local Apple Silicon build and current limitations.
+- [macOS Vulkan Release build](docs/BUILD_AND_USAGE.md#macos-vulkan-release) — local Apple Silicon build and current limitations.
 - [Windows packaging](docs/PACKAGING_WINDOWS.md) · [Agent control](docs/AGENT_CONTROL.md).
 - [SfM](docs/SFM_ARCHITECTURE.md) · [MVS](docs/MVS_ARCHITECTURE.md) · [Gaussian Splatting](docs/SPLAT_CPP.md) · [Feature backends](docs/FEATURES_BACKENDS.md).
 
