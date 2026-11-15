@@ -1,4 +1,5 @@
 #include "sfm/bundle.hpp"
+#include "solver_dispatch.hpp"
 #include "core/logging.hpp"
 #include "sfm/triangulation.hpp"
 
@@ -223,100 +224,9 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     const bool supported_parameterization =
         (opt.optimize_rotations || opt.optimize_translations) &&
         !has_partial_pose_locks;
-    const BundleBackendPreference backend = bundle_backend_preference();
-    const bool automatic = backend == BundleBackendPreference::automatic;
-    const bool want_cuda =
-        (automatic && options.prefer_cuda) ||
-        backend == BundleBackendPreference::cuda;
-    const bool want_vulkan =
-        automatic || backend == BundleBackendPreference::vulkan;
-#if defined(PHOTARA_HAS_CUDA)
-    const bool use_cuda = want_cuda && supported_parameterization &&
-        problem.observations.size() >= options.cuda_min_observations &&
-        ba::CudaOptimizer::is_available();
-#else
-    const bool use_cuda = false;
-#endif
-#if defined(PHOTARA_HAS_VULKAN_BA)
-    const bool use_vulkan = want_vulkan && !use_cuda &&
-        supported_parameterization &&
-        problem.observations.size() >= options.cuda_min_observations &&
-        ba::VulkanOptimizer::is_available();
-#else
-    const bool use_vulkan = false;
-#endif
-    const char* requested = backend == BundleBackendPreference::cuda ? "cuda" :
-        backend == BundleBackendPreference::vulkan ? "vulkan" :
-        backend == BundleBackendPreference::cpu ? "cpu" : "automatic";
-    const char* reason = backend == BundleBackendPreference::cpu ? "requested_cpu" :
-        has_partial_pose_locks ? "partial_pose_locks" :
-        !supported_parameterization ? "unsupported_parameterization" :
-        problem.observations.size() < options.cuda_min_observations ? "below_observation_threshold" :
-        "gpu_unavailable_or_not_built";
-    core::Logger::instance().info(
-        "sfm backend selection: stage=bundle requested=", requested,
-        " selected=", use_cuda ? "cuda" : use_vulkan ? "vulkan" : "cpu",
-        " reason=", (use_cuda || use_vulkan) ? "gpu_supported" : reason,
-        " observations=", problem.observations.size(),
-        " minimum=", options.cuda_min_observations,
-        " intrinsic_groups=", problem.intrinsics.size());
-    if (!use_cuda && !use_vulkan &&
-        (backend == BundleBackendPreference::cuda ||
-         backend == BundleBackendPreference::vulkan))
-        core::Logger::instance().warning(
-            "requested GPU bundle solver stays on CPU: reason=", reason);
     packing.finish();
-    bool solved = false;
-    if (use_cuda) {
-#if defined(PHOTARA_HAS_CUDA)
-        try {
-            core::Logger::instance().info(
-                "bundle backend=cuda device=", ba::CudaOptimizer::device_name(),
-                " observations=", problem.observations.size());
-            core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "cuda");
-            summary.optimizer = ba::optimize_cuda(problem, opt);
-            summary.backend = BundleBackend::cuda;
-            if (!summary.optimizer.usable()) {
-                core::Logger::instance().warning(
-                    "CUDA bundle adjustment produced an unusable step; "
-                    "continuing with CPU from the last accepted state");
-            } else {
-                solved = true;
-            }
-        } catch (const std::exception& error) {
-            core::Logger::instance().warning(
-                "CUDA bundle adjustment unavailable at runtime; falling back "
-                "to CPU: ", error.what());
-        }
-#endif
-    } else if (use_vulkan) {
-#if defined(PHOTARA_HAS_VULKAN_BA)
-        try {
-            core::Logger::instance().info(
-                "bundle backend=vulkan device=", ba::VulkanOptimizer::device_name(),
-                " observations=", problem.observations.size());
-            core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "vulkan");
-            summary.optimizer = ba::optimize_vulkan(problem, opt);
-            summary.backend = BundleBackend::vulkan;
-            if (!summary.optimizer.usable()) {
-                core::Logger::instance().warning(
-                    "Vulkan bundle adjustment produced an unusable step; "
-                    "continuing with CPU from the last accepted state");
-            } else {
-                solved = true;
-            }
-        } catch (const std::exception& error) {
-            core::Logger::instance().warning(
-                "Vulkan bundle adjustment unavailable at runtime; falling back "
-                "to CPU: ", error.what());
-        }
-#endif
-    }
-    if (!solved) {
-        core::StageScope solve_stage("sfm.bundle_solve", core::LogLevel::info, "cpu");
-        summary.optimizer = ba::optimize_cpu(problem, opt);
-        summary.backend = BundleBackend::cpu;
-    }
+    detail::solve_bundle(problem, opt, options, bundle_backend_preference(),
+                         supported_parameterization, has_partial_pose_locks, summary);
     summary.success = summary.optimizer.usable();
     summary.num_cameras = static_cast<unsigned>(problem.poses.size());
     summary.num_points = static_cast<unsigned>(problem.points.size());

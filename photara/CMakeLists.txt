@@ -49,6 +49,7 @@ if(TARGET photara_inference)
 endif()
 
 set(PHOTARA_BA_SOURCES
+    src/ba/solver_backend.cpp
     src/ba/linearizer_cpu.cpp
     src/ba/optimizer_cpu.cpp)
 
@@ -65,6 +66,7 @@ if(PHOTARA_ENABLE_CUDA)
             "Photara CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
         find_package(CUDAToolkit 12.0 REQUIRED)
         list(APPEND PHOTARA_BA_SOURCES
+            src/ba/solver_backend_cuda.cpp
             src/ba/linearizer_cuda.cu
             src/ba/bearing_cuda.cu
             src/ba/optimizer_cuda.cu)
@@ -180,6 +182,7 @@ if(PHOTARA_ENABLE_VK AND TARGET photara_vk::photara_vk AND PHOTARA_VK_DXC)
             "${PHOTARA_BEARING_SHADER_DIR}/${shader}")
     endforeach()
     target_sources(photara_ba PRIVATE
+        src/ba/solver_backend_vulkan.cpp
         src/ba/bearing_vulkan.cpp
         src/ba/optimizer_vulkan.cpp)
     include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
@@ -429,6 +432,7 @@ if(PHOTARA_ENABLE_FEATURES)
         src/sfm/pair_weighting.cpp
         src/sfm/triangulation.cpp
         src/sfm/tracks.cpp
+        src/sfm/solver_dispatch.cpp
         src/sfm/bundle.cpp
         src/sfm/star_init.cpp
         src/sfm/resection.cpp
@@ -489,6 +493,7 @@ if(PHOTARA_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
     list(APPEND PHOTARA_RECONSTRUCTION_CACHE_ID_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/solver_dispatch.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/resection_seeding.hpp")
     list(SORT PHOTARA_FRONTEND_CACHE_ID_FILES)
     list(SORT PHOTARA_RECONSTRUCTION_CACHE_ID_FILES)
@@ -525,6 +530,16 @@ if(PHOTARA_ENABLE_FEATURES)
         Eigen3::Eigen
         PoseLib::PoseLib
         Ceres::ceres)
+    add_executable(photara_sfm_backend_dispatch_test EXCLUDE_FROM_ALL tests/sfm_backend_dispatch_test.cpp)
+    target_link_libraries(photara_sfm_backend_dispatch_test PRIVATE Photara::SfM)
+    if(BUILD_TESTING)
+        add_test(NAME photara.sfm.backend_dispatch COMMAND photara_sfm_backend_dispatch_test)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME photara.sfm.backend_layering
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sfm_backend_layering_test.py")
+        endif()
+    endif()
     target_compile_definitions(photara_sfm PRIVATE
         PHOTARA_HAS_POSELIB=1
         PHOTARA_FRONTEND_CACHE_BUILD_ID="${PHOTARA_FRONTEND_CACHE_BUILD_ID}"

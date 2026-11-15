@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ba/bearing_cuda.hpp"
+#include "ba/bearing_problem.hpp"
 
 #include <memory>
 #include <string>

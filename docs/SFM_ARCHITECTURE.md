@@ -342,6 +342,24 @@ Vulkan share the bearing-Schur formulation, robust IRLS passes, gauge
 constraints, and stopping rules so backend comparisons preserve the mapping
 semantics.
 
+Backend boundaries are implemented in shared C++:
+`src/sfm/solver_dispatch.cpp` owns selection, size/parameterization gates, and
+CPU fallback. `bundle.cpp` packs the scene; `global_positioning.cpp` retains
+shared problem assembly, gauge handling, and IRLS scheduling. Neither directly
+constructs a concrete CUDA/Vulkan optimizer.
+
+`ba/bearing_problem.hpp` defines backend-neutral bearing data.
+`ba/solver_backend.hpp` exposes the common solver operations and persistent
+bearing interface. `src/ba/solver_backend_cuda.cpp` and
+`solver_backend_vulkan.cpp` adapt their respective implementations. Disabled
+backends report unavailable through `solver_backend.cpp`; explicit GPU requests
+retain CPU fallback without switching to another GPU backend.
+
+`photara_sfm_backend_dispatch_test` checks BA cost reduction, selection gates,
+and failure fallback; available GPU backends also exercise the persistent
+bearing adapter. Unavailable GPU numeric checks are reported as skipped.
+`photara/tests/sfm_backend_layering_test.py` guards the source boundaries.
+
 Camera warm-start selection remains internal to CLI and Studio with the existing
 512 registered-camera default. Research comparisons use the dedicated positioning
 benchmark and existing low-level library fields, not new product switches.
