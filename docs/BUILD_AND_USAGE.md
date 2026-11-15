@@ -843,3 +843,36 @@ available only for NVIDIA adapters; other adapters use Vulkan. The viewport
 uses the same physical adapter so training/preview shared resources remain
 compatible. `--compute-gpu UUID` overrides the saved choice for one launch
 (32 lowercase hex digits), including `--project-transition-smoke` runs.
+
+### Standalone macOS arm64 DMG
+
+After `scripts/build_macos_release.sh`, create an independently relocatable
+application and disk image (FFmpeg must be installed on the packaging machine).
+Rebuild runtime dependencies first to avoid bottles requiring a newer OS:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=27.0 scripts/build_macos_runtime_deps.sh
+python3 scripts/package_macos.py --sdk "$VULKAN_SDK" --ffmpeg "$(command -v ffmpeg)" \
+  --deployment-target 27.0
+```
+
+Outputs are in `build/release/`: `Photara-Studio-<version>-macOS-arm64.dmg`,
+its SHA-256 checksum, and a dependency manifest. The DMG includes an Applications
+shortcut and installation instructions. The packager recursively copies all
+non-system Mach-O dependencies, bundles MoltenVK and its driver manifest, rewrites
+library references to bundle-relative paths, collects dependency license files,
+and validates the final ad-hoc signature. Its native launcher selects the bundled
+Vulkan driver and adds the bundled FFmpeg to PATH. Optional model weights remain
+separate downloads. The default deployment target is macOS 27.0, recorded in
+the application and README. Packaging fails if any included arm64 binary requires
+a newer OS. The launcher is also compiled for the selected target. OpenMP and
+SVT-AV1 are rebuilt from checksum-verified upstream sources into
+`build/macos-deps/prefix`; system Homebrew installations are left unchanged.
+Use `--dependency-prefix` to select a different rebuilt dependency prefix.
+Building for earlier macOS releases requires rebuilding the main application
+and all dependencies for that deployment target, then testing on that release;
+changing only the plist or Mach-O version declaration is insufficient.
+
+This package does not require an Apple developer account and is not notarized.
+Users may need to allow the downloaded app under System Settings → Privacy &
+Security → Open Anyway. Validate releases on a clean target Mac before publishing.

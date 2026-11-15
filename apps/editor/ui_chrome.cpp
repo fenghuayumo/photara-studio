@@ -31,6 +31,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #else
 #include <unistd.h>
 #endif
@@ -456,6 +458,12 @@ std::filesystem::path studio_icon_path() {
     const DWORD n = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
     if (n > 0 && n < MAX_PATH)
         exe_dir = std::filesystem::path(buffer).parent_path();
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) == 0)
+        exe_dir = std::filesystem::path(buffer.data()).parent_path();
 #else
     char buffer[4096]{};
     const ssize_t n = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
@@ -465,6 +473,7 @@ std::filesystem::path studio_icon_path() {
                       .parent_path();
 #endif
     const std::filesystem::path candidates[] = {
+        exe_dir / ".." / "Resources" / "icon.png",
         exe_dir / "icon.png",
         exe_dir / "icons" / "icon.png",
         exe_dir / ".." / ".." / ".." / "apps" / "icons" / "icon.png",
