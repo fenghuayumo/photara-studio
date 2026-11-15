@@ -18,6 +18,12 @@ namespace {
 
 using i18n::tr;
 
+void preference_caption(const char* text) {
+    ImGui::PushTextWrapPos(0.F);
+    theme::caption(text);
+    ImGui::PopTextWrapPos();
+}
+
 void preference_heading(const char* text) {
     ImGui::PushStyleColor(ImGuiCol_Text, theme::text_bright);
     ImGui::TextUnformatted(tr(text));
@@ -34,17 +40,28 @@ void draw_shortcuts_page(App& app) {
         store_editor_preferences(app);
     }
     if (ImGui::BeginTable("##shortcuts", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        float binding_width = 0.F;
+        float group_width = 0.F;
+        for (const auto& entry : shortcuts::entries) {
+            binding_width = std::max(binding_width, ImGui::CalcTextSize(shortcuts::label(entry.binding).c_str()).x);
+            group_width = std::max(group_width, ImGui::CalcTextSize(tr(entry.group)).x);
+        }
+        ImGui::TableSetupColumn("##group", ImGuiTableColumnFlags_WidthFixed, group_width + 8.F);
+        ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##binding", ImGuiTableColumnFlags_WidthFixed,
+                                binding_width + 2.F * ImGui::GetStyle().FramePadding.x + 8.F);
         for (int i = 0; i < static_cast<int>(shortcuts::entries.size()); ++i) {
             auto& entry = shortcuts::entries[i];
             ImGui::PushID(entry.id);
             ImGui::TableNextRow();
             ImGui::TableNextColumn(); ImGui::TextUnformatted(tr(entry.group));
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(tr(entry.label));
+            ImGui::TableNextColumn(); ImGui::PushTextWrapPos(0.F);
+            ImGui::TextUnformatted(tr(entry.label)); ImGui::PopTextWrapPos();
             ImGui::TableNextColumn();
-            if (ImGui::Button(shortcuts::label(entry.binding).c_str(), {-1.F, 0.F})) {
-                editing = i; error.clear(); ImGui::OpenPopup("Change shortcut");
+            if (ImGui::Button(tr(shortcuts::label(entry.binding).c_str()), {-1.F, 0.F})) {
+                editing = i; error.clear(); ImGui::OpenPopup(i18n::id("Change shortcut", "###ChangeShortcut"));
             }
-            if (ImGui::BeginPopupModal("Change shortcut", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::BeginPopupModal(i18n::id("Change shortcut", "###ChangeShortcut"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::TextUnformatted(tr(entry.label));
                 ImGui::TextUnformatted(tr("Press a key combination (Esc to cancel)."));
                 if (editing == i && !ImGui::IsWindowAppearing()) {
@@ -95,7 +112,7 @@ void draw_shortcuts_page(App& app) {
 
 void preferences_footer() {
     ImGui::Dummy({0.F, 8.F});
-    theme::caption(
+    preference_caption(
         "Saved on this computer. Projects keep their own training parameters.");
 }
 
@@ -213,15 +230,15 @@ void draw_compute_page(App& app) {
         }
         ImGui::EndCombo();
     }
-    theme::caption("GPU changes take effect after restarting Studio.");
+    preference_caption("GPU changes take effect after restarting Studio.");
     if (!app.compute_gpu_uuid.empty() && app.compute_gpu_uuid != gpu::device_uuid_hex())
-        theme::caption("GPU change pending. Restart Studio to apply.");
+        preference_caption("GPU change pending. Restart Studio to apply.");
     ImGui::Spacing();
     preference_heading("Training compute");
-    theme::caption("The next Train 3DGS job uses this device.");
-    theme::caption("The viewport preview stays on Vulkan.");
+    preference_caption("The next Train 3DGS job uses this device.");
+    preference_caption("The viewport preview stays on Vulkan.");
     if (busy)
-        theme::caption("The running job keeps the backend it started with.");
+        preference_caption("The running job keeps the backend it started with.");
     ImGui::Spacing();
 
     const bool vulkan_ok = studio_vulkan_training();
@@ -257,7 +274,7 @@ void draw_compute_page(App& app) {
             "alignment", alignment_labels, 4, app.settings.alignment_backend,
             alignment_enabled))
         store_editor_preferences(app);
-    theme::caption(
+    preference_caption(
         "Feature extraction, matching, positioning and refinement. Automatic uses CUDA, then Vulkan, then CPU.");
 
     ImGui::Spacing();
@@ -272,7 +289,7 @@ void draw_compute_page(App& app) {
     if (choice_row(
             "sam", sam_labels, 3, app.settings.sam_backend, sam_enabled))
         store_editor_preferences(app);
-    theme::caption(
+    preference_caption(
         sam ? "SAM 3. Prompts and whether masks are generated stay with the project."
             : "SAM is not in this build.");
     preferences_footer();
@@ -282,7 +299,7 @@ void draw_storage_page(App& app) {
     const bool busy = app.job.running();
     preference_heading("Training autosave");
     ImGui::PushTextWrapPos(0.F);
-    theme::caption("Save training progress inside the project at this time interval.");
+    preference_caption("Save training progress inside the project at this time interval.");
     ImGui::PopTextWrapPos();
     ImGui::BeginDisabled(busy);
     ImGui::SetNextItemWidth(130.F);
@@ -290,22 +307,22 @@ void draw_storage_page(App& app) {
         app.settings.training_autosave_seconds = std::clamp(app.settings.training_autosave_seconds, 0, 86400);
     if (ImGui::IsItemDeactivatedAfterEdit()) store_editor_preferences(app);
     ImGui::SameLine(0.F, 8.F);
-    theme::caption("seconds (0 disables periodic autosave)");
+    preference_caption("seconds (0 disables periodic autosave)");
     ImGui::EndDisabled();
-    theme::caption("Manual saves and first/final iteration checkpoints remain enabled.");
-    if (busy) theme::caption("Stop training before changing the autosave interval.");
+    preference_caption("Manual saves and first/final iteration checkpoints remain enabled.");
+    if (busy) preference_caption("Stop training before changing the autosave interval.");
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
     preference_heading("Cache folder");
     ImGui::PushTextWrapPos(0.F);
-    theme::caption(
+    preference_caption(
         "Leave empty to keep the working copies next to the project\n"
         "(<project folder>/<project name>.cache). Set a folder to\n"
         "collect every dataset's cache on another drive.");
     ImGui::PopTextWrapPos();
     if (busy)
-        theme::caption("Stop the running job before changing the cache folder.");
+        preference_caption("Stop the running job before changing the cache folder.");
     ImGui::Spacing();
 
     ImGui::BeginDisabled(busy);
@@ -328,7 +345,7 @@ void draw_storage_page(App& app) {
     ImGui::EndDisabled();
 
     if (!app.layout.working_sfm.empty())
-        theme::caption(path_to_utf8(app.layout.working_sfm.parent_path()).c_str());
+        preference_caption(path_to_utf8(app.layout.working_sfm.parent_path()).c_str());
 
     ImGui::Spacing();
     ImGui::Spacing();
@@ -341,7 +358,7 @@ void draw_storage_page(App& app) {
         summary, sizeof(summary), "%s  \xC2\xB7  %zu %s",
         format_cache_bytes(app.cache_usage.bytes).c_str(),
         app.cache_usage.unused_folders, tr("unused"));
-    theme::caption(summary);
+    preference_caption(summary);
     ImGui::BeginDisabled(busy);
     if (theme::toolbar_button("Clean unused caches", {-1.F, 30.F})) {
         std::uintmax_t freed = 0;
@@ -382,7 +399,7 @@ void draw_storage_page(App& app) {
             store_editor_cache_dir(app);
         }
         ImGui::SameLine(0.F, 8.F);
-        theme::caption(tr("days unused"));
+        preference_caption(tr("days unused"));
     }
     preferences_footer();
 }
@@ -526,9 +543,9 @@ void draw_preferences_window(App& app) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
-    ImGui::SetNextWindowSize({680.F, 480.F}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({860.F, 560.F}, ImGuiCond_Appearing);
     ImGui::SetNextWindowSizeConstraints(
-        ImVec2(640.F, 420.F), ImVec2(960.F, 760.F));
+        ImVec2(760.F, 420.F), ImVec2(960.F, 760.F));
     if (app.preferences_raise) {
         ImGui::SetNextWindowFocus();
         app.preferences_raise = false;
@@ -545,7 +562,9 @@ void draw_preferences_window(App& app) {
         return;
     }
 
-    constexpr float nav_w = 168.F;
+    float nav_w = 168.F;
+    for (const char* label : {"Compute", "Language", "Storage", "Keyboard shortcuts"})
+        nav_w = std::max(nav_w, ImGui::CalcTextSize(tr(label)).x + 36.F);
     const ImVec2 seam_top = ImGui::GetCursorScreenPos();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_0);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));

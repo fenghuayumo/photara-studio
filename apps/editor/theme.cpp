@@ -24,8 +24,9 @@ const char* pick_latin_font() {
         "C:\\Windows\\Fonts\\segoeui.ttf",
         "C:\\Windows\\Fonts\\msyh.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
     };
-    return first_existing(candidates, 3);
+    return first_existing(candidates, static_cast<int>(std::size(candidates)));
 }
 
 const char* pick_chinese_font() {
@@ -33,8 +34,10 @@ const char* pick_chinese_font() {
         "C:\\Windows\\Fonts\\msyh.ttc",
         "C:\\Windows\\Fonts\\msyhbd.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
     };
-    return first_existing(candidates, 3);
+    return first_existing(candidates, static_cast<int>(std::size(candidates)));
 }
 
 const char* pick_japanese_font() {
@@ -43,8 +46,11 @@ const char* pick_japanese_font() {
         "C:\\Windows\\Fonts\\yugothic.ttf",
         "C:\\Windows\\Fonts\\meiryo.ttc",
         "C:\\Windows\\Fonts\\msgothic.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
     };
-    return first_existing(candidates, 4);
+    return first_existing(candidates, static_cast<int>(std::size(candidates)));
 }
 
 const char* pick_korean_font() {
@@ -52,8 +58,11 @@ const char* pick_korean_font() {
         "C:\\Windows\\Fonts\\malgun.ttf",
         "C:\\Windows\\Fonts\\malgunsl.ttf",
         "C:\\Windows\\Fonts\\gulim.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     };
-    return first_existing(candidates, 3);
+    return first_existing(candidates, static_cast<int>(std::size(candidates)));
 }
 
 const char* pick_mono_font() {
@@ -64,6 +73,7 @@ const char* pick_mono_font() {
         "C:\\Windows\\Fonts\\lucon.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
     };
     for (const char* candidate : candidates)
         if (std::filesystem::exists(candidate)) return candidate;
@@ -80,6 +90,10 @@ const ImWchar* ui_glyph_ranges(ImGuiIO& io) {
     if (ranges.empty()) {
         ImFontGlyphRangesBuilder builder;
         builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        // UI punctuation, arrows and mathematical symbols are outside ImGui's
+        // default Latin/CJK ranges (for example →, − and …).
+        static const ImWchar symbols[] = {0x2000, 0x206F, 0x2190, 0x22FF, 0x2500, 0x25FF, 0};
+        builder.AddRanges(symbols);
         builder.AddRanges(io.Fonts->GetGlyphRangesChineseFull());
         builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
         builder.AddRanges(io.Fonts->GetGlyphRangesKorean());
@@ -92,13 +106,13 @@ ImFont* merge_cjk_fonts(ImGuiIO& io, ImFontConfig& config, const float size) {
     config.MergeMode = true;
     if (const char* chinese = pick_chinese_font())
         io.Fonts->AddFontFromFileTTF(
-            chinese, size, &config, io.Fonts->GetGlyphRangesChineseFull());
+            chinese, size, &config, ui_glyph_ranges(io));
     if (const char* japanese = pick_japanese_font())
         io.Fonts->AddFontFromFileTTF(
-            japanese, size, &config, io.Fonts->GetGlyphRangesJapanese());
+            japanese, size, &config, ui_glyph_ranges(io));
     if (const char* korean = pick_korean_font())
         io.Fonts->AddFontFromFileTTF(
-            korean, size, &config, io.Fonts->GetGlyphRangesKorean());
+            korean, size, &config, ui_glyph_ranges(io));
     config.MergeMode = false;
     return io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts.back();
 }
@@ -112,7 +126,7 @@ ImFont* load_ui_font(ImGuiIO& io, const float size) {
     ImFont* font = nullptr;
     if (latin) {
         font = io.Fonts->AddFontFromFileTTF(
-            latin, size, &config, io.Fonts->GetGlyphRangesDefault());
+            latin, size, &config, ui_glyph_ranges(io));
     }
     if (font)
         merge_cjk_fonts(io, config, size);

@@ -305,7 +305,7 @@ void draw_splat_export_modal(App& app) {
 
     ImGui::Spacing();
     if (state.has_mip3d_filter) {
-        ImGui::Checkbox("Bake Mip3D filter", &state.bake_mip3d);
+        ImGui::Checkbox(tr("Bake Mip3D filter"), &state.bake_mip3d);
         theme::caption("Bake merges the 3D filter into scale and opacity for export.");
         theme::caption("Without baking, Mip3D requires PLY; viewers must support filter_3D.");
     }
@@ -363,7 +363,9 @@ void draw_splat_export_modal(App& app) {
     theme::caption("Writes");
     ImGui::PushFont(theme::mono_font());
     if (state.format == 4) {
-        ImGui::TextUnformatted("lod-meta.json + unbundled SOG chunks");
+        ImGui::PushFont(theme::small_font());
+        ImGui::TextUnformatted(tr("lod-meta.json + unbundled SOG chunks"));
+        ImGui::PopFont();
     } else if (state.format == 5) {
         ImGui::TextUnformatted("scene.voxel.json + scene.voxel.bin");
         ImGui::TextUnformatted("scene.collision.glb");
