@@ -720,11 +720,9 @@ void Context::create_device() {
         extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     }
 #endif
-#ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
-    if (has_device_extension(physical_, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
-        extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    if (has_device_extension(physical_, "VK_KHR_portability_subset")) {
+        extensions.push_back("VK_KHR_portability_subset");
     }
-#endif
 #if defined(_WIN32)
     // The editor exports its preview image with Win32 opaque handles. Training
     // on this device has to import them, which these extensions make legal.

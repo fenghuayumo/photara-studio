@@ -12,15 +12,27 @@
 #include <random>
 #include <stdexcept>
 
+// Keep CUDA-only builds free of references to absent Vulkan implementations.
+#ifdef TINYTENSOR_HAS_VULKAN
+#define SOG_XT_BACKEND(name) (vulkan_backend ? detail::name##_vulkan : detail::name)
+#else
+#define SOG_XT_BACKEND(name) detail::name
+#endif
+
 namespace photara::splat {
 GaussianModel Trainer::finetune_sog_xt(
     const GaussianModel& input,
     const mvs::MvsScene& scene,
     const std::filesystem::path& output,
     ProgressCallback progress) const {
-    if (options_.backend != TrainingBackend::cuda ||
-        input.means.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("SOG-XT encoding-aware fine-tuning currently requires CUDA");
+    const bool vulkan_backend = options_.backend == TrainingBackend::vulkan;
+#ifndef TINYTENSOR_HAS_VULKAN
+    if (vulkan_backend)
+        throw std::invalid_argument("SOG-XT Vulkan backend is not enabled in this build");
+#endif
+    const auto device = vulkan_backend ? tinytensor::Device::Vulkan : tinytensor::Device::CUDA;
+    if (input.means.device() != device)
+        throw std::invalid_argument("SOG-XT model device does not match the training backend");
     if (input.render_method != RenderMethod::gaussian_3dgs || input.sh_degree == 0 ||
         input.size() == 0 ||
         (input.filter_mode != SplatFilterMode::classic &&
@@ -63,10 +75,10 @@ GaussianModel Trainer::finetune_sog_xt(
          rotations = detail::make_adam_state(latent.quaternions),
          opacity = detail::make_adam_state(latent.opacity_logits),
          sh = detail::make_adam_state(latent.sh);
-    auto ppisp = options.use_ppisp ? detail::make_ppisp_state(scene.views.size(), options)
+    auto ppisp = options.use_ppisp ? SOG_XT_BACKEND(make_ppisp_state)(scene.views.size(), options)
                                    : detail::PpispState{};
     auto grid = options.use_bilateral_grid
-                    ? detail::make_bilateral_grid_state(scene.views.size(), options)
+                    ? SOG_XT_BACKEND(make_bilateral_grid_state)(scene.views.size(), options)
                     : detail::BilateralGridState{};
     // Auxiliary appearance tables update per microbatch; divide their LR so
     // one optimizer batch has the original total correction step budget.
@@ -78,6 +90,7 @@ GaussianModel Trainer::finetune_sog_xt(
     std::shuffle(views.begin(), views.end(), random);
     std::size_t cursor = 0;
     Rasterizer raster;
+    Rasterizer teacher_raster;
     RasterizeOptions raster_options;
     configure_rasterization(raster_options, options);
     raster_options.require_depth = false;
@@ -93,7 +106,7 @@ GaussianModel Trainer::finetune_sog_xt(
             const auto target = loader.get(v);
             const auto rendered = raster.forward(decoded, target.camera, settings);
             const auto diff = rendered.color.clamp(0.F, 1.F).sub(target.rgb);
-            score += diff.mul(diff).mean().item();
+            score += diff.mul(diff).mean().to(tinytensor::Device::CPU).item();
         }
         return score / validation_views.size();
     };
@@ -131,7 +144,7 @@ GaussianModel Trainer::finetune_sog_xt(
                                      *grid_input = nullptr;
             const auto apply_ppisp = [&] {
                 ppisp_input = photo;
-                detail::apply_ppisp(*photo, ppisp, target.camera, view);
+                SOG_XT_BACKEND(apply_ppisp)(*photo, ppisp, target.camera, view);
                 photo = &ppisp.output;
             };
             if (options.use_ppisp && options.ppisp_before_bilagrid)
@@ -139,7 +152,7 @@ GaussianModel Trainer::finetune_sog_xt(
             const bool wrap = target.camera.model == CameraModel::equirectangular;
             if (options.use_bilateral_grid) {
                 grid_input = photo;
-                detail::apply_bilateral_grid(*photo, grid, view, wrap);
+                SOG_XT_BACKEND(apply_bilateral_grid)(*photo, grid, view, wrap);
                 photo = &grid.output;
             }
             if (options.use_ppisp && !options.ppisp_before_bilagrid)
@@ -150,15 +163,15 @@ GaussianModel Trainer::finetune_sog_xt(
             loss_value += loss.total / batch;
             const tinytensor::Tensor* gradient = &loss.color;
             const auto backward_ppisp = [&] {
-                detail::backward_ppisp(ppisp, *ppisp_input, *gradient, target.camera, view);
-                detail::step_ppisp(ppisp, appearance_options, (step - 1) * batch + micro + 1);
+                SOG_XT_BACKEND(backward_ppisp)(ppisp, *ppisp_input, *gradient, target.camera, view);
+                SOG_XT_BACKEND(step_ppisp)(ppisp, appearance_options, (step - 1) * batch + micro + 1);
                 gradient = &ppisp.input_grad;
             };
             if (options.use_ppisp && !options.ppisp_before_bilagrid)
                 backward_ppisp();
             if (options.use_bilateral_grid) {
-                detail::backward_bilateral_grid(grid, *grid_input, *gradient, view, wrap);
-                detail::step_bilateral_grid(
+                SOG_XT_BACKEND(backward_bilateral_grid)(grid, *grid_input, *gradient, view, wrap);
+                SOG_XT_BACKEND(step_bilateral_grid)(
                     grid, appearance_options, (step - 1) * batch + micro + 1, wrap);
                 gradient = &grid.input_grad;
             }
@@ -168,7 +181,7 @@ GaussianModel Trainer::finetune_sog_xt(
             if (options.sog_xt_reference_weight > 0) {
                 auto teacher_settings = raster_options;
                 teacher_settings.record_backward_state = false;
-                auto teacher = raster.forward(input, target.camera, teacher_settings);
+                auto teacher = teacher_raster.forward(input, target.camera, teacher_settings);
                 auto teacher_target = target;
                 teacher_target.rgb = teacher.color;
                 auto canonical_loss = rendered;
@@ -238,6 +251,8 @@ GaussianModel Trainer::finetune_sog_xt(
     core::Logger::instance().info(
         "sog_xt_adaptation_selected step=", best_step, " canonical_mse=", best_score);
     detail::save_sog_xt_assets(best_files, output);
-    return load_gaussians(output);
+    return load_gaussians(output, device);
 }
 } // namespace photara::splat
+
+#undef SOG_XT_BACKEND

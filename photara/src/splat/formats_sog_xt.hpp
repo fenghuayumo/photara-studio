@@ -21,6 +21,8 @@ struct SogXtTrainingCodec {
     tinytensor::Tensor low, high, sh_low, sh_high, labels, counts, neighbors;
     tinytensor::Tensor centers;
     tinytensor::Tensor raw_centers;
+    // Vulkan gather topology for frozen labels and image-neighbor edges.
+    tinytensor::Tensor center_offsets, center_indices, tv_offsets, tv_sources;
     unsigned side{}, center_side{}, dimensions{};
 };
 
@@ -34,6 +36,9 @@ struct DecodedSogXt {
 // SOG-XT image payloads; packaging is handled by the existing ZIP layer.
 SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training = nullptr,
                           const SogXtExportOptions& options = {});
+GaussianModel sog_xt_training_forward_vulkan(SogXtTrainingCodec& codec);
+void sog_xt_training_backward_vulkan(SogXtTrainingCodec& codec, const GaussianModel& decoded,
+    ModelGradients& gradients, float tv_weight, float quaternion_tv_weight);
 GaussianModel sog_xt_training_forward(SogXtTrainingCodec& codec);
 void sog_xt_training_backward(
     SogXtTrainingCodec& codec,

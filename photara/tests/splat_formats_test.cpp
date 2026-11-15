@@ -4,6 +4,7 @@
 #include "../src/splat/sog_vulkan.hpp"
 #include "../src/splat/sog_palette.hpp"
 #include "../src/splat/formats_sog_xt.hpp"
+#include "../src/splat/optimizer.hpp"
 #include "splat/rasterizer.hpp"
 #include "splat/trainer.hpp"
 #include "sfm/asfm.hpp"
@@ -20,6 +21,10 @@
 #include <iostream>
 #include <numeric>
 #include <random>
+#include <thread>
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/backend.hpp"
+#endif
 #include <stdexcept>
 #if defined(PHOTARA_HAS_OPENMP)
 #include <omp.h>
@@ -638,13 +643,13 @@ void streamed_palette(const std::filesystem::path& folder) {
 }
 #endif
 } // namespace
-void sog_xt_training_test(const std::filesystem::path& folder) {
+void sog_xt_training_test(const std::filesystem::path& folder, tinytensor::Device device = tinytensor::Device::CUDA) {
     using tinytensor::Tensor;using tinytensor::Device;
     auto model=fixture(129,3);
     std::vector<float> opacity_values(model.size());
     for(std::size_t i=0;i<model.size();++i)opacity_values[i]=float(int(i%11)-5)*.1F;
     model.opacity_logits=Tensor::from_vector(opacity_values,model.opacity_logits.shape(),Device::CPU);
-    for(auto* t:{&model.means,&model.log_scales,&model.quaternions,&model.opacity_logits,&model.sh})*t=t->to(Device::CUDA);
+    for(auto* t:{&model.means,&model.log_scales,&model.quaternions,&model.opacity_logits,&model.sh})*t=t->to(device);
     detail::SogXtTrainingCodec codec;
     detail::encode_sog_xt(model,&codec);
     auto quantized=detail::sog_xt_training_forward(codec);
@@ -677,7 +682,7 @@ void sog_xt_training_test(const std::filesystem::path& folder) {
     auto incoming=g.sh.to_vector();
     const auto sh_stride=model.sh.shape()[1]*3;
     for(std::size_t i=0;i<model.size();++i)for(std::size_t d=3;d<sh_stride;++d)incoming[i*sh_stride+d]=float(i%7+1);
-    g.sh=Tensor::from_vector(incoming,g.sh.shape(),Device::CUDA);
+    g.sh=Tensor::from_vector(incoming,g.sh.shape(),device);
     detail::sog_xt_training_backward(codec,quantized,g,0,0);
     const auto grads=g.sh.to_vector(),raw=codec.raw_centers.to_vector(),lo=codec.sh_low.to_vector(),hi=codec.sh_high.to_vector();
     const auto labels=codec.labels.to_vector_int();
@@ -688,13 +693,72 @@ void sog_xt_training_test(const std::filesystem::path& folder) {
     for(std::size_t i=0;i<model.size();++i)for(unsigned d=0;d<dims;++d){const auto c=std::size_t(labels[i])*dims+d;
         const float expected=raw[c]>=lo[d]&&raw[c]<=hi[d]&&hi[d]>lo[d]?float(sums[c]/counts[labels[i]]):0.F;
         require(std::abs(grads[i*stride+3+d]-expected)<1e-5F,"SH centroid STE did not conserve the shared gradient");}
+    // Compare STE position Jacobians and TV against a scalar CPU oracle.
+    ModelGradients tvg;
+    tvg.means=Tensor::ones_like(codec.latent.means);
+    tvg.log_scales=Tensor::ones_like(codec.latent.log_scales);
+    tvg.quaternions=Tensor::ones_like(codec.latent.quaternions);
+    tvg.opacity_logits=Tensor::ones_like(codec.latent.opacity_logits);
+    tvg.sh=Tensor::ones_like(codec.latent.sh);
+    constexpr float tv_weight=.03F, quaternion_tv_weight=.07F;
+    detail::sog_xt_training_backward(codec,quantized,tvg,tv_weight,quaternion_tv_weight);
+    const auto ranges_low=codec.low.to_vector(), ranges_high=codec.high.to_vector();
+    const auto neighbors=codec.neighbors.to_vector_int();
+    const std::array<const Tensor*,5> latent_fields{&codec.latent.means,&codec.latent.log_scales,
+        &codec.latent.quaternions,&codec.latent.opacity_logits,&codec.latent.sh};
+    const std::array<const Tensor*,5> result_fields{&tvg.means,&tvg.log_scales,&tvg.quaternions,&tvg.opacity_logits,&tvg.sh};
+    const auto decoded_means=quantized.means.to_vector();
+    unsigned field=0;
+    for(unsigned f=0;f<5;++f) {
+        const unsigned width=f==2?4:f==3?1:3;
+        const unsigned row_stride=f==4?unsigned(sh_stride):width;
+        const auto values=latent_fields[f]->to_vector(), actual=result_fields[f]->to_vector();
+        for(unsigned d=0;d<width;++d,++field) {
+            const float range=ranges_high[field]-ranges_low[field];
+            std::vector<float> proxy(model.size()),expected(model.size());
+            for(std::size_t i=0;i<model.size();++i) {
+                const float v=values[i*row_stride+d];
+                proxy[i]=field<3?std::copysign(std::log1p(std::abs(v)),v):v;
+                expected[i]=range>0 && proxy[i]>=ranges_low[field] && proxy[i]<=ranges_high[field]?1.F:0.F;
+                if(field<3) expected[i]*=(1+std::abs(decoded_means[i*3+d]))/(1+std::abs(v));
+            }
+            if(range>0) for(std::size_t i=0;i<model.size();++i) for(unsigned axis=0;axis<2;++axis) {
+                const int j=neighbors[i*2+axis]; if(j<0) continue;
+                const float delta=proxy[i]-proxy[j];
+                const float weight=(field>=6 && field<10?quaternion_tv_weight:tv_weight)/(model.size()*28*range);
+                const float grad=delta>0?weight:delta<0?-weight:0.F;
+                expected[i]+=field<3?grad/(1+std::abs(values[i*row_stride+d])):grad;
+                expected[j]-=field<3?grad/(1+std::abs(values[j*row_stride+d])):grad;
+            }
+            for(std::size_t i=0;i<model.size();++i)
+                require(std::abs(actual[i*row_stride+d]-expected[i])<3e-4F,
+                    "Vulkan codec STE/TV gradient disagrees with CPU oracle");
+        }
+    }
+    auto parameter=codec.latent.means.clone();
+    const auto before_step=parameter.to_vector();
+    auto adam=detail::make_adam_state(parameter);
+    detail::adam_step(parameter,tvg.means,adam,.001F,1,TrainingOptions{});
+    const auto after_step=parameter.to_vector();
+    bool changed=false;
+    for(std::size_t i=0;i<after_step.size();++i) {
+        require(std::isfinite(after_step[i]),"Codec optimizer produced a non-finite parameter");
+        changed=changed || std::abs(after_step[i]-before_step[i])>1e-7F;
+    }
+    require(changed,"Codec gradients did not update parameters through Adam");
+    if (device == Device::Vulkan) {
+        detail::encode_sog_xt(model,&codec);
+        require(!codec.center_offsets.is_valid(),"Codec reuse retained stale Vulkan topology");
+        auto fresh=detail::sog_xt_training_forward(codec);
+        require(fresh.size()==model.size(),"Reused Vulkan codec failed to rebuild topology");
+    }
     const auto image=folder/"adapt-frame.png";
     photara::io::save_rgb_png({32,32,std::vector<std::uint8_t>(32*32*3,128)},image);
     photara::mvs::MvsScene scene;
     for(unsigned i=0;i<4;++i){photara::mvs::MvsView view;view.id=i;view.path=i%2?image:folder/"heldout-missing.png";
         view.width=view.src_width=view.height=view.src_height=32;view.fx=view.fy=view.src_fx=view.src_fy=20;
         view.cx=view.cy=view.src_cx=view.src_cy=15.5F;scene.views.push_back(view);}
-    TrainingOptions options;options.sog_xt_finetune_iterations=4;options.sog_xt_batch_size=2;
+    TrainingOptions options; options.backend = device == Device::Vulkan ? TrainingBackend::vulkan : TrainingBackend::cuda;options.sog_xt_finetune_iterations=4;options.sog_xt_batch_size=2;
     options.evaluation_split_every=2;options.use_ppisp=options.use_bilateral_grid=true;
     options.use_mvs_depth=options.use_mvs_normals=options.use_normal_field=options.use_depth_normal_loss=false;
     const auto path=folder/"adapted.sog-xt";
@@ -704,7 +768,7 @@ void sog_xt_training_test(const std::filesystem::path& folder) {
     const auto cancelled=folder/"cancelled.sog-xt";
     Trainer(options).finetune_sog_xt(model,scene,cancelled,[](const TrainingProgress&){return false;});
     require(!std::filesystem::exists(cancelled),"Cancelled codec adaptation wrote an output");
-    std::cout<<"SOG-XT training/export parity, shared gradients, holdout and cancellation passed\n";
+    std::cout<<"SOG-XT training/export parity, STE/TV CPU oracle, shared gradients, Adam update, holdout and cancellation passed\n";
 }
 
 int run_tests(int argc, char** argv) {
@@ -764,6 +828,7 @@ int run_tests(int argc, char** argv) {
             }
             return 0;
         }
+        if(argc>1&&std::string(argv[1])=="--sog-xt-vulkan-training-only"){sog_xt_training_test(folder,tinytensor::Device::Vulkan);return 0;}
         if(argc>1&&std::string(argv[1])=="--sog-xt-training-only"){sog_xt_training_test(folder);return 0;}
         if(argc==4&&std::string(argv[1])=="--decode-sog-xt") {
             save_gaussians_ply(load_gaussians(std::filesystem::u8path(argv[2]),tinytensor::Device::CPU),std::filesystem::u8path(argv[3]));return 0;
@@ -824,6 +889,21 @@ int run_tests(int argc, char** argv) {
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
 
+int run_with_backend_lifetime(int argc, char** argv) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (argc > 1 && std::string(argv[1]) == "--sog-xt-vulkan-training-only") {
+        int result = 1;
+        // Retire thread-local adopted pipelines and their retained tensors
+        // before destroying the owning device, while validation is still alive.
+        std::thread worker([&] { result = run_tests(argc, argv); });
+        worker.join();
+        tinytensor::vulkan::shutdown();
+        return result;
+    }
+#endif
+    return run_tests(argc, argv);
+}
+
 #ifdef _WIN32
 int wmain(int argc, wchar_t** argv) {
     std::vector<std::string> storage;
@@ -833,8 +913,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::vector<char*> args;
     for (auto& arg : storage) args.push_back(arg.data());
-    return run_tests(argc, args.data());
+    return run_with_backend_lifetime(argc, args.data());
 }
 #else
-int main(int argc, char** argv) { return run_tests(argc, argv); }
+int main(int argc, char** argv) { return run_with_backend_lifetime(argc, argv); }
 #endif

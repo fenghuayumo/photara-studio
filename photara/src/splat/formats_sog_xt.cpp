@@ -431,6 +431,16 @@ void sog_xt_pras(
 
 SogXtFiles encode_sog_xt(const GaussianModel& model, SogXtTrainingCodec* training,
                           const SogXtExportOptions& options) {
+    if (training) {
+        // Reusing a codec for another layout invalidates its cached gather topology.
+        training->center_offsets = {};
+        training->center_indices = {};
+        training->tv_offsets = {};
+        training->tv_sources = {};
+        training->centers = {};
+        training->raw_centers = {};
+    }
+
     const auto started = std::chrono::steady_clock::now();
     auto previous = started;
     const auto stage = [&](const char* name, float progress) {

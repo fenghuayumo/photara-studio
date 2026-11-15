@@ -199,7 +199,7 @@ The handle exposes `dataset_format`, `resolved_source`, `initial_point_cloud`,
 | `train_3dgs(scene: MvsScene, options=None, progress=None, preview=None)` | New `GaussianModel`; `None` options use `training_options_for_scene(scene)`. Explicit options are copied and respected, including `input_is_dense`; they are not automatically rewritten. |
 | `load_3dgs(path: Path, format=GaussianFormat.AUTO, device=Device.CUDA)` | New `GaussianModel`; choose inferred/explicit format and CPU, CUDA or Vulkan storage, subject to native reader/device support. CPU storage does not enable CPU training. |
 | `compact_popspa(model: GaussianModel, scene: MvsScene, options=TrainingOptions(), progress=None, preview=None)` | New compacted `GaussianModel`; uses registered views and source images, preserving the input model. Configure `popspa_*` fields; no initialization or densification occurs. |
-| `finetune_sog_xt(model: GaussianModel, scene: MvsScene, output: Path, options=TrainingOptions(), progress=None)` | New decoded `GaussianModel`; CUDA encoding-aware adaptation writes fixed-layout SOG-XT assets to `output`. Configure `sog_xt_*` fields. Plain SOG-XT export does not perform this adaptation. |
+| `finetune_sog_xt(model: GaussianModel, scene: MvsScene, output: Path, options=TrainingOptions(), progress=None)` | New decoded `GaussianModel`; CUDA/Vulkan encoding-aware adaptation writes fixed-layout SOG-XT assets to `output`. Configure `sog_xt_*` fields. Plain SOG-XT export does not perform this adaptation. |
 | `transform_gaussians(model: GaussianModel, transform: GaussianTransform)` | New model with positive uniform scale, Euler XYZ rotation in degrees and translation. Preserves the input model; place its cameras consistently before training/extraction/evaluation. |
 | `merge_gaussians(models: list[GaussianModel])` | New concatenated model; requires a nonempty list of nonempty compatible models. SH bands are zero-padded to the widest input degree. |
 | `restrict_sh_degree(model: GaussianModel, degree: int)` | `None`; truncates the model's SH bands in place, degree 0–3. A degree at least as high as its current degree has no effect. |
@@ -227,7 +227,7 @@ rendering settings. A saved Gaussian model alone does not replace its cameras,
 source images, masks or checkpoint progress metadata. `render_method` selects
 3DGS or 3DGUT; 3DGUT is for rendering and cannot be used for mesh extraction.
 `rasterization`, `speedy_*` and all native `TrainingOptions` fields are exposed.
-SOG-XT adaptation requires a nonempty CUDA 3DGS model with SH degree greater
+SOG-XT adaptation requires a nonempty 3DGS model on the selected CUDA or Vulkan device with SH degree greater
 than zero and Classic or Mip2D filtering; invalid combinations raise `ValueError`.
 
 ```python

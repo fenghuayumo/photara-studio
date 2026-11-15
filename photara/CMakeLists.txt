@@ -759,6 +759,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/geometry_vulkan.cpp
                 src/splat/pam_vulkan.cpp
                 src/splat/deployment_vulkan.cpp
+                src/splat/sog_xt_training_vulkan.cpp
                 src/splat/sog_vulkan.cpp
                 src/splat/adc_vulkan.cpp
                 src/splat/visualize_vulkan.cpp
@@ -771,7 +772,8 @@ if(PHOTARA_ENABLE_FEATURES)
                 include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
                 photara_vk_embed_hlsl(
                     TARGET photara_splat_cuda
-                    SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                    SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/sog_xt_training.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/visualize_diagnostics.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                             "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/pam_field.hlsl"
@@ -783,6 +785,12 @@ if(PHOTARA_ENABLE_FEATURES)
                     ENV vulkan1.2
                     INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
                     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/splat_vulkan")
+            endif()
+            add_executable(photara_sog_xt_vulkan_test EXCLUDE_FROM_ALL tests/splat_formats_test.cpp)
+            target_link_libraries(photara_sog_xt_vulkan_test PRIVATE Photara::Splat nlohmann_json::nlohmann_json)
+            if(BUILD_TESTING)
+                add_test(NAME photara.splat.sog_xt_vulkan_adaptation
+                    COMMAND photara_sog_xt_vulkan_test --sog-xt-vulkan-training-only)
             endif()
             target_sources(photara_splat PRIVATE src/splat/photometric_loss.cpp)
             target_link_libraries(photara_splat PUBLIC splat_drender::vulkan)

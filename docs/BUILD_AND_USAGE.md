@@ -675,8 +675,9 @@ and a reduced position learning rate. The reconstruction checkpoint remains
 intact; interrupted compaction restarts from that checkpoint rather than
 resuming partially saved ADMM state. CLI stage lengths can be overridden with
 `--splat-popspa-refine-steps` and `--splat-popspa-finetune-steps` for diagnostics.
-SOG-XT encoding-aware adaptation is a separate CUDA-only opt-in stage. For a
-`.sog-xt` output, pass `--splat-sog-xt-finetune=true`; the default is 4,000
+SOG-XT encoding-aware adaptation is a separate CUDA/Vulkan opt-in stage. For a
+`.sog-xt` output, pass `--splat-sog-xt-finetune=true`; select the device with
+`--backend=cuda` or `--backend=vulkan`; the default is 4,000
 optimizer steps with eight views accumulated per step. Override with
 `--splat-sog-xt-finetune-steps` and `--splat-sog-xt-batch`. It preserves the
 selected PPISP/bilateral-grid settings, excludes evaluation-split cameras,

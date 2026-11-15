@@ -328,7 +328,7 @@ Python checkpoint info omits native `focus_bounds`.
 `Trainer::compact_popspa(model, scene, progress={}, preview={}, device_preview={})`
 compacts an existing model without initialization/densification. Python
 `compact_popspa` accepts options and progress/RGB preview callbacks.
-`Trainer::finetune_sog_xt(model, scene, output, progress={})` is CUDA encoding-aware
+`Trainer::finetune_sog_xt(model, scene, output, progress={})` is CUDA/Vulkan encoding-aware
 adaptation that writes SOG-XT assets and returns the decoded model. Python
 `finetune_sog_xt` exposes the same operation with an explicit options argument.
 

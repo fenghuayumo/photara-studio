@@ -651,11 +651,9 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
     device_create_info.queueCreateInfoCount = 1;
     device_create_info.pQueueCreateInfos = &queue_info;
     std::vector<const char*> device_extensions;
-#ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
-    if (has_device_extension(physical_device, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
-        device_extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    if (has_device_extension(physical_device, "VK_KHR_portability_subset")) {
+        device_extensions.push_back("VK_KHR_portability_subset");
     }
-#endif
 #ifdef VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
     push_descriptors = has_device_extension(physical_device, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     if (push_descriptors) {
