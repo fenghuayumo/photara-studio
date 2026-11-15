@@ -25,6 +25,7 @@
 __pycache__/
 *.py[cod]
 /Models/
+.DS_Store
 
 # Per-user model terms must never enter source or release artifacts.
 model-agreements/
