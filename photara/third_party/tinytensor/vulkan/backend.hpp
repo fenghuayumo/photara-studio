@@ -6,7 +6,9 @@
 
 #include <vulkan/vulkan.h>
 
-namespace tinytensor { class Tensor; }
+namespace tinytensor {
+class Tensor;
+}
 
 namespace tinytensor {
 namespace vulkan {
@@ -68,17 +70,32 @@ bool available();
 const DeviceInfo& device_info();
 DeviceHandles device_handles();
 BufferView buffer_view(const Tensor& tensor);
-void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
-    Tensor& scale_gradients, Tensor& quaternion_gradients,
-    float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);
+void apply_shape_regularizers(
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    Tensor& scale_gradients,
+    Tensor& quaternion_gradients,
+    float erank_weight,
+    float erank_s3_weight,
+    float quat_weight,
+    float axis_ratio_weight,
+    float max_axis_ratio);
 
-void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
-               const AdamStepOptions& options);
+void adam_step(
+    Tensor& parameter,
+    const Tensor& gradient,
+    Tensor& first,
+    Tensor& second,
+    const AdamStepOptions& options);
 // SH Adam codec shared with splat_drender CUDA: FP16 normalized update,
 // uint8 log-second moment, and FP32 [N,4] DC/rest bounds. Arithmetic is FP32.
-void sh_adam_quant_step(Tensor& parameter, const Tensor& gradient, Tensor& first,
-                        Tensor& packed, Tensor& bounds,
-                        const AdamStepOptions& options);
+void sh_adam_quant_step(
+    Tensor& parameter,
+    const Tensor& gradient,
+    Tensor& first,
+    Tensor& packed,
+    Tensor& bounds,
+    const AdamStepOptions& options);
 // Projects each Gaussian's [N,3] log scales so the longest/shortest axis
 // ratio stays within maximum_ratio (> 1). No-op for compliant rows.
 void synchronize();

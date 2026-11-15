@@ -2,9 +2,9 @@
 
 namespace tinytensor {
 
-    GPUSlabAllocator& GPUSlabAllocator::instance() {
-        static GPUSlabAllocator allocator;
-        return allocator;
-    }
+GPUSlabAllocator& GPUSlabAllocator::instance() {
+    static GPUSlabAllocator allocator;
+    return allocator;
+}
 
 } // namespace tinytensor

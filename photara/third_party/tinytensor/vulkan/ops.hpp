@@ -87,25 +87,36 @@ enum class ReduceKind : std::uint32_t {
 };
 
 class TensorStorage {
-public:
+  public:
     static Tensor empty(const TensorShape& shape, DataType dtype, std::size_t dim0_capacity = 0);
     static Tensor alias(const Tensor& source, TensorShape shape, std::size_t logical_dim0);
 };
 
-void apply_oversize_penalty(Tensor& log_scales, const Tensor& radii,
-    float inverse_resolution, float screen_limit, float penalty, float scales_lr);
+void apply_oversize_penalty(
+    Tensor& log_scales,
+    const Tensor& radii,
+    float inverse_resolution,
+    float screen_limit,
+    float penalty,
+    float scales_lr);
 
-void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
-    Tensor& scale_gradients, Tensor& quaternion_gradients,
-    float erank_weight, float erank_s3_weight, float quat_weight, float axis_ratio_weight, float max_axis_ratio);
+void apply_shape_regularizers(
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    Tensor& scale_gradients,
+    Tensor& quaternion_gradients,
+    float erank_weight,
+    float erank_s3_weight,
+    float quat_weight,
+    float axis_ratio_weight,
+    float max_axis_ratio);
 
 bool is_vulkan_tensor(const Tensor& tensor);
 void fill(Tensor& tensor, float value);
 // Expands a packed [H, W] Int32 RGBA image (r | g << 8 | b << 16 | a << 24)
 // into a planar [3, H, W] Float32 RGB tensor scaled to [0, 1]. `gray` receives
 // the luma plane and `mask` the alpha plane when the pointers are non-null.
-void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray,
-                            Tensor* mask);
+void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask);
 // Expand one oct16 normal word per pixel to Float32 CHW unit normals.
 void unpack_training_normals(const Tensor& packed, Tensor& normals);
 void copy_same_layout(Tensor& dst, const Tensor& src);
@@ -122,8 +133,13 @@ void cat_dim0_into(Tensor& dst, const std::vector<Tensor>& tensors, std::size_t 
 void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim);
 void index_select_into(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode);
 void index_fill(Tensor& dst, const Tensor& indices, float value, int dim);
-void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate,
-             bool wrap_negative = true);
+void scatter(
+    Tensor& dst,
+    const Tensor& indices,
+    const Tensor& src,
+    int dim,
+    bool accumulate,
+    bool wrap_negative = true);
 // indices has the same rank as src. Each output element copies src at the
 // output coordinate with axis `dim` replaced by indices[element].
 void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode);
@@ -131,17 +147,31 @@ void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int 
 // one dispatch over all Gaussian rows writes the keep/hard masks and sigmoid
 // opacities without any host round trip. Every tensor must be contiguous with
 // dim0 == count; per-row strides are derived from numel / count.
-void prune_masks(const Tensor& means, const Tensor& log_scales,
-                 const Tensor& quaternions, const Tensor& opacity_logits,
-                 const Tensor& sh, Tensor& keep, Tensor& hard,
-                 Tensor& opacities, float minimum_opacity,
-                 float maximum_bounds, float center_x, float center_y,
-                 float center_z);
+void prune_masks(
+    const Tensor& means,
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    const Tensor& opacity_logits,
+    const Tensor& sh,
+    Tensor& keep,
+    Tensor& hard,
+    Tensor& opacities,
+    float minimum_opacity,
+    float maximum_bounds,
+    float center_x,
+    float center_y,
+    float center_z);
 // Exact angular size of the projected 3D Gaussian in a panorama tangent plane.
-void panorama_sizes(const Tensor& means, const Tensor& log_scales,
-                    const Tensor& quaternions, Tensor& sizes,
-                    float camera_x, float camera_y, float camera_z,
-                    float angular_normalization, float scale_modifier);
+void panorama_sizes(
+    const Tensor& means,
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    Tensor& sizes,
+    float camera_x,
+    float camera_y,
+    float camera_z,
+    float angular_normalization,
+    float scale_modifier);
 std::size_t count_nonzero(const Tensor& src);
 Tensor nonzero(const Tensor& src);
 Tensor masked_select(const Tensor& src, const Tensor& mask);
@@ -150,8 +180,10 @@ Tensor where(const Tensor& cond, const Tensor& x, const Tensor& y);
 Tensor elementwise_unary(const Tensor& src, ElementwiseOp op);
 Tensor elementwise_binary(const Tensor& a, const Tensor& b, ElementwiseOp op);
 Tensor elementwise_scalar(const Tensor& a, float scalar, ElementwiseOp op, float scalar2 = 0.0F);
-Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
-                       std::span<const float> scalars);
+Tensor fused_pointwise(
+    const Tensor& src,
+    std::span<const std::uint32_t> kinds,
+    std::span<const float> scalars);
 Tensor clamp(const Tensor& src, float lo, float hi);
 Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, ReduceKind kind);
 Tensor matmul(const Tensor& a, const Tensor& b, bool transpose_b, std::size_t batch);
@@ -163,8 +195,14 @@ void random_randint(Tensor& dst, int low, int high, std::uint32_t seed);
 void arange(Tensor& dst, float start, float step);
 void eye(Tensor& dst, std::uint32_t rows, std::uint32_t cols);
 void diag(Tensor& dst, const Tensor& diagonal);
-void max_pool2d(const Tensor& src, Tensor& dst, int kernel, int stride, int padding,
-                int h_out, int w_out);
+void max_pool2d(
+    const Tensor& src,
+    Tensor& dst,
+    int kernel,
+    int stride,
+    int padding,
+    int h_out,
+    int w_out);
 void adaptive_avg_pool2d(const Tensor& src, Tensor& dst, int h_out, int w_out);
 Tensor multinomial(const Tensor& weights, int num_samples, bool replacement);
 std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending);
@@ -179,8 +217,11 @@ std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks);
 Tensor nonzero(const Tensor& src, std::size_t known_count);
 // Gather retained rows (invalid indices mean identity) and append values or
 // zero optimizer rows into one final allocation and dispatch.
-Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
-                         const Tensor& added, std::size_t added_rows);
+Tensor remap_append_rows(
+    const Tensor& src,
+    const Tensor& indices,
+    const Tensor& added,
+    std::size_t added_rows);
 
 // Exact order statistics over a Float32 array, restricted to the rows `mask`
 // selects (a Bool array of the same length, or an invalid tensor for "all
@@ -190,17 +231,24 @@ Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
 //
 // `rank` is 1-based: select_nth_value writes the exact `rank`-th value in the
 // requested direction and returns false when nothing qualifies.
-bool select_nth_value(const Tensor& values, const Tensor& mask,
-                      std::uint32_t rank, bool descending, float* value);
+bool select_nth_value(
+    const Tensor& values,
+    const Tensor& mask,
+    std::uint32_t rank,
+    bool descending,
+    float* value);
 
 // Device form of "sort `values` descending, keep the front `count` indices".
 // Returns Int32 row indices of the `count` selected rows; when the mask
 // selects fewer than `count` rows the result is that shorter prefix, so the
 // caller never needs a separate count. `emitted` receives the number of rows
 // the emit pass actually wrote.
-Tensor select_topk_indices(const Tensor& values, const Tensor& mask,
-                           std::uint32_t count, bool descending,
-                           std::uint32_t* emitted = nullptr);
+Tensor select_topk_indices(
+    const Tensor& values,
+    const Tensor& mask,
+    std::uint32_t count,
+    bool descending,
+    std::uint32_t* emitted = nullptr);
 
 } // namespace vulkan
 } // namespace tinytensor

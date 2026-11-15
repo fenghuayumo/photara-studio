@@ -9,9 +9,8 @@ namespace tinytensor {
 
 inline void check_cuda_impl(cudaError_t error, const char* file, int line) {
     if (error != cudaSuccess) {
-        std::cerr << "[CUDA Error] " << file << ":" << line << " - "
-                  << cudaGetErrorName(error) << ": "
-                  << cudaGetErrorString(error) << std::endl;
+        std::cerr << "[CUDA Error] " << file << ":" << line << " - " << cudaGetErrorName(error)
+                  << ": " << cudaGetErrorString(error) << std::endl;
     }
 }
 

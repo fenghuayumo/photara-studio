@@ -73,29 +73,46 @@ enum class MemoryKind {
 };
 
 class Buffer {
-public:
+  public:
     Buffer() = default;
-    Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
-           MemoryKind kind = MemoryKind::device_local);
+    Buffer(
+        VkPhysicalDevice physical,
+        VkDevice logical,
+        VkDeviceSize bytes,
+        MemoryKind kind = MemoryKind::device_local);
     ~Buffer();
     Buffer(Buffer&& other) noexcept;
     Buffer& operator=(Buffer&& other) noexcept;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 
-    [[nodiscard]] VkBuffer handle() const { return handle_; }
-    [[nodiscard]] VkDeviceMemory memory() const { return memory_; }
-    [[nodiscard]] VkDeviceSize size() const { return size_; }
-    [[nodiscard]] bool host_visible() const { return mapped_ != nullptr; }
-    [[nodiscard]] void* mapped() const { return mapped_; }
-    [[nodiscard]] bool coherent() const { return coherent_; }
+    [[nodiscard]] VkBuffer handle() const {
+        return handle_;
+    }
+    [[nodiscard]] VkDeviceMemory memory() const {
+        return memory_;
+    }
+    [[nodiscard]] VkDeviceSize size() const {
+        return size_;
+    }
+    [[nodiscard]] bool host_visible() const {
+        return mapped_ != nullptr;
+    }
+    [[nodiscard]] void* mapped() const {
+        return mapped_;
+    }
+    [[nodiscard]] bool coherent() const {
+        return coherent_;
+    }
     // Non-coherent mapped memory has to be invalidated in whole atoms before
     // the host may read what the device wrote.
-    [[nodiscard]] VkDeviceSize non_coherent_atom_size() const { return non_coherent_atom_size_; }
-    [[nodiscard]] BufferBinding binding(VkDeviceSize offset = 0,
-                                        VkDeviceSize range = VK_WHOLE_SIZE) const;
+    [[nodiscard]] VkDeviceSize non_coherent_atom_size() const {
+        return non_coherent_atom_size_;
+    }
+    [[nodiscard]] BufferBinding binding(VkDeviceSize offset = 0, VkDeviceSize range = VK_WHOLE_SIZE)
+        const;
 
-private:
+  private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkBuffer handle_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
@@ -106,7 +123,7 @@ private:
 };
 
 class Context {
-public:
+  public:
     static Context& get();
     static bool available();
     static void shutdown();
@@ -115,32 +132,48 @@ public:
     Context& operator=(const Context&) = delete;
     ~Context();
 
-    [[nodiscard]] const DeviceInfo& info() const { return info_; }
-    [[nodiscard]] VkInstance instance() const { return instance_; }
-    [[nodiscard]] VkPhysicalDevice physical_device() const { return physical_; }
-    [[nodiscard]] VkDevice device() const { return device_; }
-    [[nodiscard]] VkQueue queue() const { return queue_; }
-    [[nodiscard]] std::uint32_t queue_family() const { return queue_family_; }
+    [[nodiscard]] const DeviceInfo& info() const {
+        return info_;
+    }
+    [[nodiscard]] VkInstance instance() const {
+        return instance_;
+    }
+    [[nodiscard]] VkPhysicalDevice physical_device() const {
+        return physical_;
+    }
+    [[nodiscard]] VkDevice device() const {
+        return device_;
+    }
+    [[nodiscard]] VkQueue queue() const {
+        return queue_;
+    }
+    [[nodiscard]] std::uint32_t queue_family() const {
+        return queue_family_;
+    }
 
     [[nodiscard]] std::shared_ptr<Buffer> alloc(std::size_t bytes);
     void fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes);
-    void copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::size_t src_offset,
-              std::size_t bytes);
+    void copy(
+        Buffer& dst,
+        std::size_t dst_offset,
+        const Buffer& src,
+        std::size_t src_offset,
+        std::size_t bytes);
     void upload(Buffer& dst, std::size_t dst_offset, const void* data, std::size_t bytes);
     // Submit one host-to-device copy immediately without draining the compute
     // batch. Intended for new, independent buffers whose first consumer is
     // recorded after this call (for example a packed training image).
-    void upload_async(Buffer& dst, std::size_t dst_offset, const void* data,
-                      std::size_t bytes);
+    void upload_async(Buffer& dst, std::size_t dst_offset, const void* data, std::size_t bytes);
     void download(const Buffer& src, std::size_t src_offset, void* data, std::size_t bytes);
 
-    void dispatch(ShaderId shader,
-                  std::span<const BufferBinding> bindings,
-                  const void* push_constants,
-                  std::uint32_t push_bytes,
-                  std::uint32_t groups_x,
-                  std::uint32_t groups_y = 1,
-                  std::uint32_t groups_z = 1);
+    void dispatch(
+        ShaderId shader,
+        std::span<const BufferBinding> bindings,
+        const void* push_constants,
+        std::uint32_t push_bytes,
+        std::uint32_t groups_x,
+        std::uint32_t groups_y = 1,
+        std::uint32_t groups_z = 1);
 
     // Submits every command recorded so far and waits for the queue to drain.
     // Ops record into one command buffer and submit once per flush instead of
@@ -166,18 +199,25 @@ public:
         double total_ms = 0.0;
     };
     [[nodiscard]] std::vector<OpProfileEntry> op_profile() const;
-    [[nodiscard]] std::uint32_t op_profile_flushes() const { return op_profile_.flushes; }
+    [[nodiscard]] std::uint32_t op_profile_flushes() const {
+        return op_profile_.flushes;
+    }
     // Cumulative, always-on diagnostics: wall time the host spent blocked in
     // vkWaitForFences and the number of recorded dispatches. Cheap enough for
     // production runs and the only way to tell a GPU-bound phase from a
     // synchronization-bound one.
-    [[nodiscard]] double device_wait_ms() const { return op_profile_.wait_ms; }
-    [[nodiscard]] std::uint64_t dispatch_count() const { return op_profile_.dispatches; }
+    [[nodiscard]] double device_wait_ms() const {
+        return op_profile_.wait_ms;
+    }
+    [[nodiscard]] std::uint64_t dispatch_count() const {
+        return op_profile_.dispatches;
+    }
     // Sum of every shader's accumulated timestamp delta. Zero unless the
     // timestamp profiler is enabled, because that is what fills it.
     [[nodiscard]] double device_busy_ms() const {
         double total = 0.0;
-        for (const double value : op_profile_.total_ms) total += value;
+        for (const double value : op_profile_.total_ms)
+            total += value;
         return total;
     }
     struct PoolStats {
@@ -195,15 +235,21 @@ public:
         std::scoped_lock lock(mutex_);
         const auto reserved = op_profile_.pool_miss_bytes - op_profile_.pool_drop_bytes;
         const auto free = static_cast<std::uint64_t>(pooled_bytes_);
-        return {op_profile_.pool_hits, op_profile_.pool_misses,
-                op_profile_.pool_miss_bytes, op_profile_.pool_drops,
-                op_profile_.pool_drop_bytes, reserved, free,
-                reserved - free, static_cast<std::uint64_t>(pool_budget_bytes_)};
+        return {
+            op_profile_.pool_hits,
+            op_profile_.pool_misses,
+            op_profile_.pool_miss_bytes,
+            op_profile_.pool_drops,
+            op_profile_.pool_drop_bytes,
+            reserved,
+            free,
+            reserved - free,
+            static_cast<std::uint64_t>(pool_budget_bytes_)};
     }
 
     [[nodiscard]] Buffer& dummy();
 
-private:
+  private:
     Context();
 
     void create_instance();
@@ -219,7 +265,9 @@ private:
         std::unique_ptr<Buffer> staging;
         std::size_t staging_cursor = 0;
     };
-    ComputeSlot& active_compute() { return compute_slots_[compute_slot_index_]; }
+    ComputeSlot& active_compute() {
+        return compute_slots_[compute_slot_index_];
+    }
     bool compute_pending_locked() const;
     void retire_compute_slot_locked(ComputeSlot& slot);
 
@@ -243,9 +291,13 @@ private:
     void ensure_staging(std::size_t bytes);
     void ensure_readback_staging(std::size_t bytes);
     void retire_upload_slot_locked(std::size_t slot);
-    void barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer,
-                        VkAccessFlags src_access, VkAccessFlags dst_access,
-                        VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
+    void barrier_buffer(
+        VkCommandBuffer cmd,
+        VkBuffer buffer,
+        VkAccessFlags src_access,
+        VkAccessFlags dst_access,
+        VkPipelineStageFlags src_stage,
+        VkPipelineStageFlags dst_stage);
     void create_op_profile_locked();
     void collect_op_profile_locked();
     void report_op_profile_locked();

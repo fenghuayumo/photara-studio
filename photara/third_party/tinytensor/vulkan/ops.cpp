@@ -62,8 +62,15 @@ bool writes_bool(ElementwiseOp op) {
            op == ElementwiseOp::IsFinite;
 }
 
-void dispatch_elementwise(ElementwiseOp op, std::size_t count, const Tensor* a, const Tensor* b,
-                          const Tensor* c, Tensor& out, float scalar, float scalar2) {
+void dispatch_elementwise(
+    ElementwiseOp op,
+    std::size_t count,
+    const Tensor* a,
+    const Tensor* b,
+    const Tensor* c,
+    Tensor& out,
+    float scalar,
+    float scalar2) {
     struct Push {
         std::uint32_t op;
         std::uint32_t count;
@@ -116,12 +123,18 @@ void dispatch_elementwise(ElementwiseOp op, std::size_t count, const Tensor* a, 
         bind(out),
         c != nullptr ? bind(*c) : dummy_binding(),
     };
-    Context::get().dispatch(ShaderId::Elementwise, bindings, &push, sizeof(push), groups_for(count));
+    Context::get().dispatch(
+        ShaderId::Elementwise, bindings, &push, sizeof(push), groups_for(count));
 }
 
-void exclusive_or_inclusive_scan(Buffer& input, std::uint32_t src_offset, Buffer& output,
-                                 std::uint32_t dst_offset, std::uint32_t count, bool is_float,
-                                 bool exclusive) {
+void exclusive_or_inclusive_scan(
+    Buffer& input,
+    std::uint32_t src_offset,
+    Buffer& output,
+    std::uint32_t dst_offset,
+    std::uint32_t count,
+    bool is_float,
+    bool exclusive) {
     if (count == 0) {
         return;
     }
@@ -175,8 +188,8 @@ Tensor TensorStorage::empty(const TensorShape& shape, DataType dtype, std::size_
     const std::size_t bytes = std::max(logical * elem, capacity * row * elem);
     auto buffer = Context::get().alloc(bytes == 0 ? 16 : bytes);
     return Tensor::from_external_owner(
-        buffer.get(), shape, Device::Vulkan, dtype, std::shared_ptr<void>(buffer), capacity, nullptr,
-        "vulkan");
+        buffer.get(), shape, Device::Vulkan, dtype, std::shared_ptr<void>(buffer), capacity,
+        nullptr, "vulkan");
 }
 
 Tensor TensorStorage::alias(const Tensor& source, TensorShape shape, std::size_t logical_dim0) {
@@ -201,59 +214,94 @@ BufferView buffer_view(const Tensor& tensor) {
     if (!is_vulkan_tensor(tensor))
         throw std::invalid_argument("buffer_view requires a Vulkan tensor");
     Buffer& buffer = buffer_of(tensor);
-    return {buffer.handle(), static_cast<VkDeviceSize>(byte_offset(tensor)),
-            static_cast<VkDeviceSize>(tensor.bytes())};
+    return {
+        buffer.handle(), static_cast<VkDeviceSize>(byte_offset(tensor)),
+        static_cast<VkDeviceSize>(tensor.bytes())};
 }
 
-void apply_oversize_penalty(Tensor& log_scales, const Tensor& radii,
-    float inverse_resolution, float screen_limit, float penalty, float scales_lr) {
+void apply_oversize_penalty(
+    Tensor& log_scales,
+    const Tensor& radii,
+    float inverse_resolution,
+    float screen_limit,
+    float penalty,
+    float scales_lr) {
     const std::size_t count = log_scales.numel() / 3;
-    if (!count) return;
+    if (!count)
+        return;
     if (!is_vulkan_tensor(log_scales) || !is_vulkan_tensor(radii) ||
         log_scales.dtype() != DataType::Float32 || radii.dtype() != DataType::Int32 ||
         radii.numel() != count || !log_scales.is_contiguous() || !radii.is_contiguous())
-        throw std::invalid_argument("Vulkan screen-size constraint requires matching scales and radii");
+        throw std::invalid_argument(
+            "Vulkan screen-size constraint requires matching scales and radii");
     struct Push {
         std::uint32_t count;
         float inverse_resolution, screen_limit, penalty, scales_lr;
         std::uint32_t scale_offset, radius_offset;
-    } push{u32(count), inverse_resolution, screen_limit, penalty, scales_lr,
-        u32(log_scales.storage_offset()), u32(radii.storage_offset())};
+    } push{
+        u32(count),
+        inverse_resolution,
+        screen_limit,
+        penalty,
+        scales_lr,
+        u32(log_scales.storage_offset()),
+        u32(radii.storage_offset())};
     static_assert(sizeof(Push) == 28);
     std::array<BufferBinding, 2> bindings{bind(log_scales), bind(radii)};
-    Context::get().dispatch(ShaderId::OversizePenalty, bindings, &push, sizeof(push), groups_for(count));
+    Context::get().dispatch(
+        ShaderId::OversizePenalty, bindings, &push, sizeof(push), groups_for(count));
 }
 
-void apply_shape_regularizers(const Tensor& log_scales, const Tensor& quaternions,
-    Tensor& scale_gradients, Tensor& quaternion_gradients,
+void apply_shape_regularizers(
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    Tensor& scale_gradients,
+    Tensor& quaternion_gradients,
     const float erank_weight,
-    const float erank_s3_weight, const float quat_weight,
-    const float axis_ratio_weight, const float max_axis_ratio) {
+    const float erank_s3_weight,
+    const float quat_weight,
+    const float axis_ratio_weight,
+    const float max_axis_ratio) {
     const std::size_t count = log_scales.numel() / 3;
-    if (count == 0) return;
+    if (count == 0)
+        return;
     const auto valid = [](const Tensor& tensor, std::size_t size) {
         return is_vulkan_tensor(tensor) && tensor.dtype() == DataType::Float32 &&
-            tensor.is_contiguous() && tensor.numel() == size;
+               tensor.is_contiguous() && tensor.numel() == size;
     };
     if (!valid(log_scales, count * 3) || !valid(quaternions, count * 4) ||
         !valid(scale_gradients, count * 3) || !valid(quaternion_gradients, count * 4))
-        throw std::invalid_argument("Vulkan shape regularizers require matching contiguous Float32 tensors");
+        throw std::invalid_argument(
+            "Vulkan shape regularizers require matching contiguous Float32 tensors");
     struct Push {
         std::uint32_t count;
         float erank_weight, erank_s3_weight, quat_weight;
         float axis_ratio_weight, max_axis_ratio;
         std::uint32_t scale_offset, quat_offset, scale_grad_offset, quat_grad_offset;
-    } push{u32(count), erank_weight, erank_s3_weight, quat_weight, axis_ratio_weight, max_axis_ratio,
-        u32(log_scales.storage_offset()), u32(quaternions.storage_offset()),
-        u32(scale_gradients.storage_offset()), u32(quaternion_gradients.storage_offset())};
+    } push{
+        u32(count),
+        erank_weight,
+        erank_s3_weight,
+        quat_weight,
+        axis_ratio_weight,
+        max_axis_ratio,
+        u32(log_scales.storage_offset()),
+        u32(quaternions.storage_offset()),
+        u32(scale_gradients.storage_offset()),
+        u32(quaternion_gradients.storage_offset())};
     static_assert(sizeof(Push) == 40);
     std::array<BufferBinding, 4> bindings{
         bind(log_scales), bind(quaternions), bind(scale_gradients), bind(quaternion_gradients)};
-    Context::get().dispatch(ShaderId::ShapeRegularizers, bindings, &push, sizeof(push), groups_for(count));
+    Context::get().dispatch(
+        ShaderId::ShapeRegularizers, bindings, &push, sizeof(push), groups_for(count));
 }
 
-void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
-               const AdamStepOptions& options) {
+void adam_step(
+    Tensor& parameter,
+    const Tensor& gradient,
+    Tensor& first,
+    Tensor& second,
+    const AdamStepOptions& options) {
     const auto valid = [&](const Tensor& tensor) {
         return is_vulkan_tensor(tensor) && tensor.dtype() == DataType::Float32 &&
                tensor.is_contiguous() && tensor.numel() == parameter.numel();
@@ -262,13 +310,13 @@ void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor&
         !valid(second))
         throw std::invalid_argument(
             "Vulkan Adam requires equal-size contiguous Float32 Vulkan tensors");
-    if (parameter.numel() == 0) return;
+    if (parameter.numel() == 0)
+        return;
     if (!(options.correction1 > 0.0F) || !(options.correction2 > 0.0F) ||
         options.clamp_min > options.clamp_max)
         throw std::invalid_argument("Vulkan Adam received invalid correction or clamp bounds");
     if (options.active_row_stride != 0 &&
-        (options.group_stride == 0 ||
-         options.active_row_stride > options.group_stride))
+        (options.group_stride == 0 || options.active_row_stride > options.group_stride))
         throw std::invalid_argument("Vulkan Adam received invalid active row stride");
     struct Push {
         std::uint32_t count, parameter_offset, gradient_offset, first_offset, second_offset;
@@ -276,26 +324,41 @@ void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor&
         std::uint32_t group_stride, active_row_stride;
         float beta1, beta2, correction1, correction2, epsilon, clamp_min, clamp_max;
         float grouped_rest_regularization;
-    } push{u32(parameter.numel()), u32(byte_offset(parameter)), u32(byte_offset(gradient)),
-           u32(byte_offset(first)), u32(byte_offset(second)), options.learning_rate,
-           options.secondary_learning_rate, options.group_stride,
-           options.active_row_stride, options.beta1, options.beta2,
-           options.correction1, options.correction2, options.epsilon, options.clamp_min,
-           options.clamp_max, options.grouped_rest_regularization};
+    } push{
+        u32(parameter.numel()),
+        u32(byte_offset(parameter)),
+        u32(byte_offset(gradient)),
+        u32(byte_offset(first)),
+        u32(byte_offset(second)),
+        options.learning_rate,
+        options.secondary_learning_rate,
+        options.group_stride,
+        options.active_row_stride,
+        options.beta1,
+        options.beta2,
+        options.correction1,
+        options.correction2,
+        options.epsilon,
+        options.clamp_min,
+        options.clamp_max,
+        options.grouped_rest_regularization};
     static_assert(sizeof(Push) == 68);
     std::array<BufferBinding, 4> bindings{
         bind(parameter), bind(gradient), bind(first), bind(second)};
     Context::get().dispatch(
-        ShaderId::AdamF32, bindings, &push, sizeof(push),
-        groups_for(parameter.numel()));
+        ShaderId::AdamF32, bindings, &push, sizeof(push), groups_for(parameter.numel()));
 }
 
-void sh_adam_quant_step(Tensor& parameter, const Tensor& gradient, Tensor& first,
-                        Tensor& packed, Tensor& bounds,
-                        const AdamStepOptions& options) {
+void sh_adam_quant_step(
+    Tensor& parameter,
+    const Tensor& gradient,
+    Tensor& first,
+    Tensor& packed,
+    Tensor& bounds,
+    const AdamStepOptions& options) {
     const auto valid = [](const Tensor& tensor, DataType dtype, std::size_t count) {
-        return is_vulkan_tensor(tensor) && tensor.dtype() == dtype &&
-               tensor.is_contiguous() && tensor.numel() == count;
+        return is_vulkan_tensor(tensor) && tensor.dtype() == dtype && tensor.is_contiguous() &&
+               tensor.numel() == count;
     };
     const std::size_t count = parameter.numel();
     const std::uint32_t stride = options.group_stride;
@@ -303,30 +366,42 @@ void sh_adam_quant_step(Tensor& parameter, const Tensor& gradient, Tensor& first
     if (stride == 0 || stride > 64 || active == 0 || active > stride || count % stride != 0)
         throw std::invalid_argument("Vulkan quantized SH Adam received invalid row strides");
     const std::size_t rows = count / stride;
-    if (!valid(parameter, DataType::Float32, count) ||
-        !valid(gradient, DataType::Float32, count) ||
-        !valid(first, DataType::Float16, count) ||
-        !valid(packed, DataType::UInt8, count) ||
+    if (!valid(parameter, DataType::Float32, count) || !valid(gradient, DataType::Float32, count) ||
+        !valid(first, DataType::Float16, count) || !valid(packed, DataType::UInt8, count) ||
         !valid(bounds, DataType::Float32, rows * 4))
-        throw std::invalid_argument("Vulkan quantized SH Adam storage does not match the parameter");
-    if (count == 0) return;
+        throw std::invalid_argument(
+            "Vulkan quantized SH Adam storage does not match the parameter");
+    if (count == 0)
+        return;
     struct Push {
         std::uint32_t rows, stride, active;
         std::uint32_t parameter_offset, gradient_offset, first_offset, packed_offset, bounds_offset;
         float dc_lr, rest_lr, beta1, beta2, correction1, correction2, epsilon, regularization;
         std::uint32_t groups_x;
-    } push{u32(rows), stride, active, u32(byte_offset(parameter)),
-           u32(byte_offset(gradient)), u32(byte_offset(first)),
-           u32(byte_offset(packed)), u32(byte_offset(bounds)),
-           options.learning_rate, options.secondary_learning_rate,
-           options.beta1, options.beta2, options.correction1, options.correction2,
-           options.epsilon, options.grouped_rest_regularization,
-           u32(std::min<std::size_t>(rows, 65535))};
+    } push{
+        u32(rows),
+        stride,
+        active,
+        u32(byte_offset(parameter)),
+        u32(byte_offset(gradient)),
+        u32(byte_offset(first)),
+        u32(byte_offset(packed)),
+        u32(byte_offset(bounds)),
+        options.learning_rate,
+        options.secondary_learning_rate,
+        options.beta1,
+        options.beta2,
+        options.correction1,
+        options.correction2,
+        options.epsilon,
+        options.grouped_rest_regularization,
+        u32(std::min<std::size_t>(rows, 65535))};
     static_assert(sizeof(Push) == 68);
     std::array<BufferBinding, 5> bindings{
         bind(parameter), bind(gradient), bind(first), bind(packed), bind(bounds)};
-    Context::get().dispatch(ShaderId::ShAdamQuant, bindings, &push, sizeof(push),
-                           push.groups_x, ceil_div(u32(rows), push.groups_x));
+    Context::get().dispatch(
+        ShaderId::ShAdamQuant, bindings, &push, sizeof(push), push.groups_x,
+        ceil_div(u32(rows), push.groups_x));
 }
 
 void fill(Tensor& tensor, float value) {
@@ -359,8 +434,8 @@ void fill(Tensor& tensor, float value) {
             push.stride[i] = u32(tensor.stride(i));
         }
         std::array<BufferBinding, 2> bindings{dummy_binding(), bind(tensor)};
-        Context::get().dispatch(ShaderId::StridedCopy, bindings, &push, sizeof(push),
-                                groups_for(tensor.numel()));
+        Context::get().dispatch(
+            ShaderId::StridedCopy, bindings, &push, sizeof(push), groups_for(tensor.numel()));
         return;
     }
     const bool aligned = byte_offset(tensor) % 4 == 0 && tensor.bytes() % 4 == 0;
@@ -368,16 +443,16 @@ void fill(Tensor& tensor, float value) {
         Context::get().fill_zero(buffer_of(tensor), byte_offset(tensor), tensor.bytes());
         return;
     }
-    dispatch_elementwise(ElementwiseOp::Fill, tensor.numel(), nullptr, nullptr, nullptr, tensor, value,
-                         0.0F);
+    dispatch_elementwise(
+        ElementwiseOp::Fill, tensor.numel(), nullptr, nullptr, nullptr, tensor, value, 0.0F);
 }
 
 void copy_same_layout(Tensor& dst, const Tensor& src) {
     if (dst.numel() == 0) {
         return;
     }
-    Context::get().copy(buffer_of(dst), byte_offset(dst), buffer_of(src), byte_offset(src),
-                        src.bytes());
+    Context::get().copy(
+        buffer_of(dst), byte_offset(dst), buffer_of(src), byte_offset(src), src.bytes());
 }
 
 void upload(Tensor& dst, const void* data, std::size_t bytes) {
@@ -388,12 +463,11 @@ void upload(Tensor& dst, const void* data, std::size_t bytes) {
 }
 
 void upload_async(Tensor& dst, const void* data, std::size_t bytes) {
-    if (bytes == 0) return;
+    if (bytes == 0)
+        return;
     if (bytes > dst.bytes())
-        throw std::invalid_argument(
-            "Vulkan asynchronous upload exceeds the destination tensor");
-    Context::get().upload_async(
-        buffer_of(dst), byte_offset(dst), data, bytes);
+        throw std::invalid_argument("Vulkan asynchronous upload exceeds the destination tensor");
+    Context::get().upload_async(buffer_of(dst), byte_offset(dst), data, bytes);
 }
 
 void download(const Tensor& src, void* data, std::size_t bytes) {
@@ -404,7 +478,11 @@ void download(const Tensor& src, void* data, std::size_t bytes) {
 }
 
 static void unpack_training_channels(
-    const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask, bool normals) {
+    const Tensor& packed,
+    Tensor& rgb,
+    Tensor* gray,
+    Tensor* mask,
+    bool normals) {
     const std::size_t pixels = packed.numel();
     if (pixels == 0) {
         return;
@@ -421,13 +499,18 @@ static void unpack_training_channels(
     push.pixels = u32(pixels);
     // The optional planes stay bound to the dummy buffer when the caller does
     // not ask for them; the flag keeps the kernel from writing there.
-    if (gray != nullptr) push.flags |= 1U;
-    if (mask != nullptr) push.flags |= 2U;
-    if (normals) push.flags |= 4U;
+    if (gray != nullptr)
+        push.flags |= 1U;
+    if (mask != nullptr)
+        push.flags |= 2U;
+    if (normals)
+        push.flags |= 4U;
     push.packed_offset = u32(byte_offset(packed));
     push.rgb_offset = u32(byte_offset(rgb));
-    if (gray != nullptr) push.gray_offset = u32(byte_offset(*gray));
-    if (mask != nullptr) push.mask_offset = u32(byte_offset(*mask));
+    if (gray != nullptr)
+        push.gray_offset = u32(byte_offset(*gray));
+    if (mask != nullptr)
+        push.mask_offset = u32(byte_offset(*mask));
     std::array<BufferBinding, 4> bindings{
         bind(packed),
         bind(rgb),
@@ -445,7 +528,8 @@ void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray, Ten
 void unpack_training_normals(const Tensor& packed, Tensor& normals) {
     if (packed.device() != Device::Vulkan || normals.device() != Device::Vulkan ||
         packed.dtype() != DataType::Int32 || normals.dtype() != DataType::Float32 ||
-        !packed.is_contiguous() || !normals.is_contiguous() || normals.numel() != 3 * packed.numel())
+        !packed.is_contiguous() || !normals.is_contiguous() ||
+        normals.numel() != 3 * packed.numel())
         throw std::invalid_argument("Invalid Vulkan packed normal image");
     unpack_training_channels(packed, normals, nullptr, nullptr, true);
 }
@@ -456,8 +540,8 @@ Tensor convert(const Tensor& src, DataType dtype) {
     if (input.numel() == 0) {
         return out;
     }
-    dispatch_elementwise(ElementwiseOp::Convert, input.numel(), &input, nullptr, nullptr, out, 0.0F,
-                         0.0F);
+    dispatch_elementwise(
+        ElementwiseOp::Convert, input.numel(), &input, nullptr, nullptr, out, 0.0F, 0.0F);
     return out;
 }
 
@@ -523,8 +607,8 @@ Tensor make_contiguous(const Tensor& src) {
         push.stride[i] = u32(src.stride(i));
     }
     std::array<BufferBinding, 2> bindings{bind(src), bind(out)};
-    Context::get().dispatch(ShaderId::StridedCopy, bindings, &push, sizeof(push),
-                            groups_for(src.numel()));
+    Context::get().dispatch(
+        ShaderId::StridedCopy, bindings, &push, sizeof(push), groups_for(src.numel()));
     return out;
 }
 
@@ -566,13 +650,12 @@ Tensor broadcast_to(const Tensor& src, const TensorShape& target) {
             continue;
         }
         const std::size_t src_axis = axis - leading;
-        push.stride[axis] = input.size(src_axis) == 1 && target[axis] != 1
-                                ? 0U
-                                : u32(input.stride(src_axis));
+        push.stride[axis] =
+            input.size(src_axis) == 1 && target[axis] != 1 ? 0U : u32(input.stride(src_axis));
     }
     std::array<BufferBinding, 2> bindings{bind(input), bind(out)};
-    Context::get().dispatch(ShaderId::StridedCopy, bindings, &push, sizeof(push),
-                            groups_for(out.numel()));
+    Context::get().dispatch(
+        ShaderId::StridedCopy, bindings, &push, sizeof(push), groups_for(out.numel()));
     return out;
 }
 
@@ -595,7 +678,8 @@ void cat_dim0_into(Tensor& dst, const std::vector<Tensor>& tensors, std::size_t 
 }
 
 void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim) {
-    if (tensors.empty() || dst.numel() == 0) return;
+    if (tensors.empty() || dst.numel() == 0)
+        return;
     auto& ctx = Context::get();
     std::vector<Tensor> inputs;
     inputs.reserve(tensors.size());
@@ -608,8 +692,9 @@ void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim) {
     std::vector<std::uint32_t> metadata(inputs.size() * 2);
     std::size_t packed_offset = 0;
     for (std::size_t i = 0; i < inputs.size(); ++i) {
-        ctx.copy(*packed, packed_offset, buffer_of(inputs[i]), byte_offset(inputs[i]),
-                 inputs[i].bytes());
+        ctx.copy(
+            *packed, packed_offset, buffer_of(inputs[i]), byte_offset(inputs[i]),
+            inputs[i].bytes());
         metadata[i * 2] = u32(packed_offset);
         metadata[i * 2 + 1] = u32(inputs[i].size(static_cast<std::size_t>(dim)));
         packed_offset += inputs[i].bytes();
@@ -618,13 +703,18 @@ void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim) {
     ctx.upload(*meta, 0, metadata.data(), metadata.size() * sizeof(std::uint32_t));
     std::size_t outer = 1;
     std::size_t inner = 1;
-    for (int axis = 0; axis < dim; ++axis) outer *= dst.size(static_cast<std::size_t>(axis));
+    for (int axis = 0; axis < dim; ++axis)
+        outer *= dst.size(static_cast<std::size_t>(axis));
     for (std::size_t axis = static_cast<std::size_t>(dim) + 1; axis < dst.ndim(); ++axis)
         inner *= dst.size(axis);
     struct Push {
         std::uint32_t count, outer, inner, n_tensors, elem_size, dst_offset;
-    } push{u32(dst.numel()), u32(outer), u32(inner), u32(inputs.size()),
-           u32(dtype_size(dst.dtype())), u32(byte_offset(dst))};
+    } push{u32(dst.numel()),
+           u32(outer),
+           u32(inner),
+           u32(inputs.size()),
+           u32(dtype_size(dst.dtype())),
+           u32(byte_offset(dst))};
     std::array<BufferBinding, 3> bindings{packed->binding(), bind(dst), meta->binding()};
     ctx.dispatch(ShaderId::Cat, bindings, &push, sizeof(push), groups_for(dst.numel()));
 }
@@ -664,7 +754,8 @@ void index_select_into(const Tensor& src, const Tensor& indices, Tensor& out, in
     push.mode = static_cast<std::uint32_t>(mode);
     const std::size_t total = outer * idx.numel() * std::max<std::size_t>(inner, 1);
     std::array<BufferBinding, 3> bindings{bind(input), bind(idx), bind(out)};
-    Context::get().dispatch(ShaderId::IndexSelect, bindings, &push, sizeof(push), groups_for(total));
+    Context::get().dispatch(
+        ShaderId::IndexSelect, bindings, &push, sizeof(push), groups_for(total));
 }
 
 void index_fill(Tensor& dst, const Tensor& indices, float value, int dim) {
@@ -701,17 +792,24 @@ void index_fill(Tensor& dst, const Tensor& indices, float value, int dim) {
     push.dtype = static_cast<std::uint32_t>(dst.dtype());
     std::memcpy(&push.value_bits, &value, sizeof(value));
     std::array<BufferBinding, 2> bindings{bind(dst), bind(idx)};
-    Context::get().dispatch(ShaderId::IndexFill, bindings, &push, sizeof(push),
-                            groups_for(outer * idx.numel() * inner));
+    Context::get().dispatch(
+        ShaderId::IndexFill, bindings, &push, sizeof(push),
+        groups_for(outer * idx.numel() * inner));
 }
 
-void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate,
-             bool wrap_negative) {
+void scatter(
+    Tensor& dst,
+    const Tensor& indices,
+    const Tensor& src,
+    int dim,
+    bool accumulate,
+    bool wrap_negative) {
     Tensor idx = prepared(indices);
     Tensor values = prepared(src);
     std::size_t outer = 1;
     std::size_t inner = 1;
-    for (int axis = 0; axis < dim; ++axis) outer *= dst.size(static_cast<std::size_t>(axis));
+    for (int axis = 0; axis < dim; ++axis)
+        outer *= dst.size(static_cast<std::size_t>(axis));
     for (std::size_t axis = static_cast<std::size_t>(dim) + 1; axis < dst.ndim(); ++axis)
         inner *= dst.size(axis);
     struct Push {
@@ -732,15 +830,16 @@ void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, boo
     push.dtype = static_cast<std::uint32_t>(dst.dtype());
     push.wrap = wrap_negative ? 1U : 0U;
     std::array<BufferBinding, 3> bindings{bind(values), bind(idx), bind(dst)};
-    Context::get().dispatch(ShaderId::Scatter, bindings, &push, sizeof(push),
-                            groups_for(outer * idx.numel() * inner));
+    Context::get().dispatch(
+        ShaderId::Scatter, bindings, &push, sizeof(push), groups_for(outer * idx.numel() * inner));
 }
 
 void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode) {
     if (src.ndim() > 8 || indices.ndim() > 8) {
         throw std::runtime_error("Vulkan gather supports rank <= 8");
     }
-    if (out.numel() == 0) return;
+    if (out.numel() == 0)
+        return;
     Tensor input = prepared(src);
     Tensor idx = prepared(indices);
     struct Push {
@@ -775,23 +874,31 @@ void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int 
         push.idx_shape[axis] = u32(idx.size(axis));
     }
     std::array<BufferBinding, 3> bindings{bind(input), bind(idx), bind(out)};
-    Context::get().dispatch(ShaderId::Gather, bindings, &push, sizeof(push), groups_for(out.numel()));
+    Context::get().dispatch(
+        ShaderId::Gather, bindings, &push, sizeof(push), groups_for(out.numel()));
 }
 
-void prune_masks(const Tensor& means, const Tensor& log_scales,
-                 const Tensor& quaternions, const Tensor& opacity_logits,
-                 const Tensor& sh, Tensor& keep, Tensor& hard,
-                 Tensor& opacities, const float minimum_opacity,
-                 const float maximum_bounds, const float center_x,
-                 const float center_y, const float center_z) {
+void prune_masks(
+    const Tensor& means,
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    const Tensor& opacity_logits,
+    const Tensor& sh,
+    Tensor& keep,
+    Tensor& hard,
+    Tensor& opacities,
+    const float minimum_opacity,
+    const float maximum_bounds,
+    const float center_x,
+    const float center_y,
+    const float center_z) {
     const std::size_t count = static_cast<std::size_t>(means.shape()[0]);
-    if (count == 0) return;
+    if (count == 0)
+        return;
     const auto prepared_rows = [count](const Tensor& tensor) {
-        if (tensor.device() != Device::Vulkan ||
-            tensor.dtype() != DataType::Float32 || !tensor.is_contiguous() ||
-            tensor.storage_offset() != 0 || tensor.shape()[0] != count)
-            throw std::runtime_error(
-                "Vulkan prune expects contiguous float32 rows sharing dim0");
+        if (tensor.device() != Device::Vulkan || tensor.dtype() != DataType::Float32 ||
+            !tensor.is_contiguous() || tensor.storage_offset() != 0 || tensor.shape()[0] != count)
+            throw std::runtime_error("Vulkan prune expects contiguous float32 rows sharing dim0");
         return tensor;
     };
     const auto row_means = prepared_rows(means);
@@ -800,8 +907,7 @@ void prune_masks(const Tensor& means, const Tensor& log_scales,
     const auto row_logits = prepared_rows(opacity_logits);
     const auto row_sh = prepared_rows(sh);
     for (const Tensor* mask : {&keep, &hard}) {
-        if (mask->dtype() != DataType::Bool || !mask->is_contiguous() ||
-            mask->numel() != count)
+        if (mask->dtype() != DataType::Bool || !mask->is_contiguous() || mask->numel() != count)
             throw std::runtime_error("Vulkan prune expects Bool [N] masks");
     }
     if (opacities.dtype() != DataType::Float32 || !opacities.is_contiguous() ||
@@ -826,53 +932,49 @@ void prune_masks(const Tensor& means, const Tensor& log_scales,
     push.center_x = center_x;
     push.center_y = center_y;
     push.center_z = center_z;
-    std::array<BufferBinding, 8> bindings{
-        bind(row_means), bind(row_scales), bind(row_rotations),
-        bind(row_logits), bind(row_sh), bind(keep), bind(hard),
-        bind(opacities)};
-    Context::get().dispatch(ShaderId::Prune, bindings, &push, sizeof(push),
-                            groups_for(count));
+    std::array<BufferBinding, 8> bindings{bind(row_means),  bind(row_scales), bind(row_rotations),
+                                          bind(row_logits), bind(row_sh),     bind(keep),
+                                          bind(hard),       bind(opacities)};
+    Context::get().dispatch(ShaderId::Prune, bindings, &push, sizeof(push), groups_for(count));
 }
 
-void panorama_sizes(const Tensor& means, const Tensor& log_scales,
-                    const Tensor& quaternions, Tensor& sizes,
-                    const float camera_x, const float camera_y,
-                    const float camera_z, const float angular_normalization,
-                    const float scale_modifier) {
+void panorama_sizes(
+    const Tensor& means,
+    const Tensor& log_scales,
+    const Tensor& quaternions,
+    Tensor& sizes,
+    const float camera_x,
+    const float camera_y,
+    const float camera_z,
+    const float angular_normalization,
+    const float scale_modifier) {
     const std::size_t count = means.shape()[0];
-    if (means.device() != Device::Vulkan ||
-        log_scales.device() != Device::Vulkan ||
-        quaternions.device() != Device::Vulkan ||
-        sizes.device() != Device::Vulkan ||
-        means.dtype() != DataType::Float32 ||
-        log_scales.dtype() != DataType::Float32 ||
-        quaternions.dtype() != DataType::Float32 ||
-        sizes.dtype() != DataType::Float32 ||
-        !means.is_contiguous() || !log_scales.is_contiguous() ||
-        !quaternions.is_contiguous() || !sizes.is_contiguous() ||
-        means.storage_offset() != 0 || log_scales.storage_offset() != 0 ||
+    if (means.device() != Device::Vulkan || log_scales.device() != Device::Vulkan ||
+        quaternions.device() != Device::Vulkan || sizes.device() != Device::Vulkan ||
+        means.dtype() != DataType::Float32 || log_scales.dtype() != DataType::Float32 ||
+        quaternions.dtype() != DataType::Float32 || sizes.dtype() != DataType::Float32 ||
+        !means.is_contiguous() || !log_scales.is_contiguous() || !quaternions.is_contiguous() ||
+        !sizes.is_contiguous() || means.storage_offset() != 0 || log_scales.storage_offset() != 0 ||
         quaternions.storage_offset() != 0 || sizes.storage_offset() != 0 ||
-        means.shape().rank() != 2 || means.shape()[1] != 3 ||
-        log_scales.shape().rank() != 2 || log_scales.shape()[0] != count ||
-        log_scales.shape()[1] != 3 ||
+        means.shape().rank() != 2 || means.shape()[1] != 3 || log_scales.shape().rank() != 2 ||
+        log_scales.shape()[0] != count || log_scales.shape()[1] != 3 ||
         quaternions.shape().rank() != 2 || quaternions.shape()[0] != count ||
         quaternions.shape()[1] != 4 || sizes.numel() != count)
         throw std::invalid_argument(
             "Vulkan panorama sizes require contiguous float32 [N,3], [N,3], [N,4], [N] tensors");
-    if (count == 0) return;
+    if (count == 0)
+        return;
     struct Push {
         std::uint32_t count;
         float camera_x, camera_y, camera_z;
         float angular_normalization, scale_modifier;
-    } push{u32(count), camera_x, camera_y, camera_z,
-           angular_normalization, scale_modifier};
+    } push{u32(count), camera_x, camera_y, camera_z, angular_normalization, scale_modifier};
     static_assert(sizeof(push) == 24);
     std::array<BufferBinding, 4> bindings{
         bind(means), bind(log_scales), bind(quaternions), bind(sizes)};
-    Context::get().dispatch(ShaderId::PanoramaSizes, bindings,
-                            &push, sizeof(push), groups_for(count));
+    Context::get().dispatch(
+        ShaderId::PanoramaSizes, bindings, &push, sizeof(push), groups_for(count));
 }
-
 
 std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks) {
     if (masks.empty() || masks.size() > 3)
@@ -884,18 +986,24 @@ std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks) {
             throw std::invalid_argument("Vulkan count_masks requires equally sized Bool masks");
         input.push_back(prepared(mask));
     }
-    if (input.front().numel() == 0) return std::vector<std::size_t>(input.size(), 0);
+    if (input.front().numel() == 0)
+        return std::vector<std::size_t>(input.size(), 0);
     auto& ctx = Context::get();
     auto result = ctx.alloc(input.size() * sizeof(std::uint32_t));
     ctx.fill_zero(*result, 0, input.size() * sizeof(std::uint32_t));
-    struct Push { std::uint32_t count, offset0, offset1, offset2; };
-    Push push{u32(input.front().numel()), u32(byte_offset(input[0])),
+    struct Push {
+        std::uint32_t count, offset0, offset1, offset2;
+    };
+    Push push{
+        u32(input.front().numel()), u32(byte_offset(input[0])),
         input.size() > 1 ? u32(byte_offset(input[1])) : 0,
         input.size() > 2 ? u32(byte_offset(input[2])) : 0};
-    const std::array<BufferBinding, 4> bindings{bind(input[0]),
-        input.size() > 1 ? bind(input[1]) : dummy_binding(),
+    const std::array<BufferBinding, 4> bindings{
+        bind(input[0]), input.size() > 1 ? bind(input[1]) : dummy_binding(),
         input.size() > 2 ? bind(input[2]) : dummy_binding(), result->binding()};
-    ctx.dispatch(ShaderId::CountMasks, bindings, &push, sizeof(push), groups_for(push.count), u32(input.size()));
+    ctx.dispatch(
+        ShaderId::CountMasks, bindings, &push, sizeof(push), groups_for(push.count),
+        u32(input.size()));
     std::array<std::uint32_t, 3> host{};
     ctx.download(*result, 0, host.data(), input.size() * sizeof(std::uint32_t));
     return std::vector<std::size_t>(host.begin(), host.begin() + input.size());
@@ -903,7 +1011,8 @@ std::vector<std::size_t> count_masks(const std::vector<Tensor>& masks) {
 
 std::size_t count_nonzero(const Tensor& src) {
     Tensor input = prepared(src);
-    if (input.numel() == 0) return 0;
+    if (input.numel() == 0)
+        return 0;
     auto mask = input.dtype() == DataType::Bool ? input : input.ne(0.F);
     return count_masks({mask}).front();
 }
@@ -914,7 +1023,8 @@ Tensor nonzero(const Tensor& src) {
 
 Tensor nonzero(const Tensor& src, const std::size_t found) {
     Tensor input = prepared(src);
-    if (found > input.numel()) throw std::invalid_argument("Vulkan nonzero count exceeds input size");
+    if (found > input.numel())
+        throw std::invalid_argument("Vulkan nonzero count exceeds input size");
     const std::size_t ndim = std::max<std::size_t>(input.ndim(), 1);
     if (found == 0) {
         return TensorStorage::empty(TensorShape{std::size_t{0}, ndim}, DataType::Int64);
@@ -965,10 +1075,14 @@ Tensor nonzero(const Tensor& src, const std::size_t found) {
     if (input.ndim() > 3) {
         compact.shape3 = u32(input.size(3));
     }
-    if (input.ndim() > 4) compact.shape4 = u32(input.size(4));
-    if (input.ndim() > 5) compact.shape5 = u32(input.size(5));
-    if (input.ndim() > 6) compact.shape6 = u32(input.size(6));
-    if (input.ndim() > 7) compact.shape7 = u32(input.size(7));
+    if (input.ndim() > 4)
+        compact.shape4 = u32(input.size(4));
+    if (input.ndim() > 5)
+        compact.shape5 = u32(input.size(5));
+    if (input.ndim() > 6)
+        compact.shape6 = u32(input.size(6));
+    if (input.ndim() > 7)
+        compact.shape7 = u32(input.size(7));
     std::array<BufferBinding, 3> compact_bindings{flags->binding(), scan->binding(), bind(out)};
     ctx.dispatch(ShaderId::Compact, compact_bindings, &compact, sizeof(compact), groups_for(count));
     return out;
@@ -979,24 +1093,30 @@ Tensor masked_select(const Tensor& src, const Tensor& mask) {
     Tensor selector = prepared(mask);
     const std::size_t found = count_nonzero(selector);
     Tensor out = TensorStorage::empty(TensorShape{found}, input.dtype());
-    if (found == 0) return out;
+    if (found == 0)
+        return out;
     auto& ctx = Context::get();
     const std::uint32_t count = u32(input.numel());
     auto flags = ctx.alloc(count * sizeof(std::uint32_t));
     auto scan = ctx.alloc(count * sizeof(std::uint32_t));
     struct MaskPush {
         std::uint32_t count, dtype, src_offset, dst_offset;
-    } mask_push{count, static_cast<std::uint32_t>(selector.dtype()),
-                u32(byte_offset(selector)), 0};
+    } mask_push{count, static_cast<std::uint32_t>(selector.dtype()), u32(byte_offset(selector)), 0};
     std::array<BufferBinding, 2> mask_bindings{bind(selector), flags->binding()};
-    ctx.dispatch(ShaderId::MaskFlags, mask_bindings, &mask_push, sizeof(mask_push),
-                 groups_for(count));
+    ctx.dispatch(
+        ShaderId::MaskFlags, mask_bindings, &mask_push, sizeof(mask_push), groups_for(count));
     exclusive_or_inclusive_scan(*flags, 0, *scan, 0, count, false, true);
     struct SelectPush {
         std::uint32_t count, elem_size, dtype, src_offset;
         std::uint32_t flags_offset, scan_offset, dst_offset;
-    } push{count, u32(dtype_size(input.dtype())), static_cast<std::uint32_t>(input.dtype()),
-           u32(byte_offset(input)), 0, 0, u32(byte_offset(out))};
+    } push{
+        count,
+        u32(dtype_size(input.dtype())),
+        static_cast<std::uint32_t>(input.dtype()),
+        u32(byte_offset(input)),
+        0,
+        0,
+        u32(byte_offset(out))};
     std::array<BufferBinding, 4> bindings{
         bind(input), flags->binding(), scan->binding(), bind(out)};
     ctx.dispatch(ShaderId::SelectCompact, bindings, &push, sizeof(push), groups_for(count));
@@ -1005,8 +1125,8 @@ Tensor masked_select(const Tensor& src, const Tensor& mask) {
 
 void masked_fill(Tensor& dst, const Tensor& mask, float value) {
     Tensor selector = prepared(mask);
-    dispatch_elementwise(ElementwiseOp::MaskFill, dst.numel(), &dst, &selector, nullptr, dst,
-                         value, 0.0F);
+    dispatch_elementwise(
+        ElementwiseOp::MaskFill, dst.numel(), &dst, &selector, nullptr, dst, value, 0.0F);
 }
 
 Tensor where(const Tensor& cond, const Tensor& x, const Tensor& y) {
@@ -1015,8 +1135,8 @@ Tensor where(const Tensor& cond, const Tensor& x, const Tensor& y) {
     Tensor rhs = prepared(y);
     Tensor out = TensorStorage::empty(lhs.shape(), lhs.dtype());
     if (out.numel() != 0)
-        dispatch_elementwise(ElementwiseOp::Where, out.numel(), &condition, &lhs, &rhs, out,
-                             0.0F, 0.0F);
+        dispatch_elementwise(
+            ElementwiseOp::Where, out.numel(), &condition, &lhs, &rhs, out, 0.0F, 0.0F);
     return out;
 }
 
@@ -1043,7 +1163,8 @@ Tensor elementwise_binary(const Tensor& a, const Tensor& b, ElementwiseOp op) {
             right = make_contiguous(right.broadcast_to(broadcast));
         }
     }
-    Tensor out = TensorStorage::empty(left.shape(), writes_bool(op) ? DataType::Bool : left.dtype());
+    Tensor out =
+        TensorStorage::empty(left.shape(), writes_bool(op) ? DataType::Bool : left.dtype());
     if (left.numel() == 0) {
         return out;
     }
@@ -1053,7 +1174,8 @@ Tensor elementwise_binary(const Tensor& a, const Tensor& b, ElementwiseOp op) {
 
 Tensor elementwise_scalar(const Tensor& a, float scalar, ElementwiseOp op, float scalar2) {
     Tensor input = prepared(a);
-    Tensor out = TensorStorage::empty(input.shape(), writes_bool(op) ? DataType::Bool : input.dtype());
+    Tensor out =
+        TensorStorage::empty(input.shape(), writes_bool(op) ? DataType::Bool : input.dtype());
     if (input.numel() == 0) {
         return out;
     }
@@ -1061,8 +1183,10 @@ Tensor elementwise_scalar(const Tensor& a, float scalar, ElementwiseOp op, float
     return out;
 }
 
-Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
-                       std::span<const float> scalars) {
+Tensor fused_pointwise(
+    const Tensor& src,
+    std::span<const std::uint32_t> kinds,
+    std::span<const float> scalars) {
     if (kinds.empty() || kinds.size() != scalars.size() || kinds.size() > 16)
         throw std::invalid_argument("Vulkan fused pointwise recipe must contain 1..16 ops");
     Tensor input = prepared(src);
@@ -1074,7 +1198,8 @@ Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
         float scalar;
     };
     std::array<RecipeOp, 16> recipe{};
-    for (std::size_t i = 0; i < kinds.size(); ++i) recipe[i] = {kinds[i], scalars[i]};
+    for (std::size_t i = 0; i < kinds.size(); ++i)
+        recipe[i] = {kinds[i], scalars[i]};
     auto& ctx = Context::get();
     auto recipe_buffer = ctx.alloc(kinds.size() * sizeof(RecipeOp));
     ctx.upload(*recipe_buffer, 0, recipe.data(), kinds.size() * sizeof(RecipeOp));
@@ -1082,7 +1207,8 @@ Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
         std::uint32_t count, src_offset, dst_offset, num_ops;
     } push{u32(input.numel()), u32(byte_offset(input)), u32(byte_offset(out)), u32(kinds.size())};
     std::array<BufferBinding, 3> bindings{bind(input), bind(out), recipe_buffer->binding()};
-    ctx.dispatch(ShaderId::FusedPointwise, bindings, &push, sizeof(push), groups_for(input.numel()));
+    ctx.dispatch(
+        ShaderId::FusedPointwise, bindings, &push, sizeof(push), groups_for(input.numel()));
     return out;
 }
 
@@ -1092,13 +1218,16 @@ Tensor clamp(const Tensor& src, float lo, float hi) {
 
 Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, ReduceKind kind) {
     Tensor input = prepared(src);
-    if (input.ndim() > 8) throw std::invalid_argument("Vulkan reduce supports rank <= 8");
+    if (input.ndim() > 8)
+        throw std::invalid_argument("Vulkan reduce supports rank <= 8");
     std::array<bool, 8> reduced{};
     if (axes.empty()) {
-        for (std::size_t i = 0; i < input.ndim(); ++i) reduced[i] = true;
+        for (std::size_t i = 0; i < input.ndim(); ++i)
+            reduced[i] = true;
     } else {
         for (int axis : axes) {
-            if (axis < 0) axis += static_cast<int>(input.ndim());
+            if (axis < 0)
+                axis += static_cast<int>(input.ndim());
             if (axis < 0 || axis >= static_cast<int>(input.ndim()))
                 throw std::invalid_argument("Vulkan reduce axis out of range");
             reduced[static_cast<std::size_t>(axis)] = true;
@@ -1109,23 +1238,29 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
     for (std::size_t axis = 0; axis < input.ndim(); ++axis) {
         if (reduced[axis]) {
             reduce_count *= input.size(axis);
-            if (keepdim) out_dims.push_back(1);
+            if (keepdim)
+                out_dims.push_back(1);
         } else {
             out_dims.push_back(input.size(axis));
         }
     }
     DataType out_dtype = input.dtype();
-    if (kind == ReduceKind::Any || kind == ReduceKind::All) out_dtype = DataType::Bool;
+    if (kind == ReduceKind::Any || kind == ReduceKind::All)
+        out_dtype = DataType::Bool;
     if (kind == ReduceKind::Argmax || kind == ReduceKind::Argmin ||
         (input.dtype() == DataType::Bool && kind != ReduceKind::Any && kind != ReduceKind::All))
         out_dtype = DataType::Int64;
     Tensor out = TensorStorage::empty(TensorShape(out_dims), out_dtype);
-    if (out.numel() == 0) return out;
+    if (out.numel() == 0)
+        return out;
     if (input.numel() == 0) {
         float identity = 0.0F;
-        if (kind == ReduceKind::Prod || kind == ReduceKind::All) identity = 1.0F;
-        if (kind == ReduceKind::Max) identity = -std::numeric_limits<float>::infinity();
-        if (kind == ReduceKind::Min) identity = std::numeric_limits<float>::infinity();
+        if (kind == ReduceKind::Prod || kind == ReduceKind::All)
+            identity = 1.0F;
+        if (kind == ReduceKind::Max)
+            identity = -std::numeric_limits<float>::infinity();
+        if (kind == ReduceKind::Min)
+            identity = std::numeric_limits<float>::infinity();
         fill(out, identity);
         return out;
     }
@@ -1135,17 +1270,16 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
     // contiguous row is a long serial loop. Workgroup trees and one group per
     // row cover those cases. Intermediate buffers stay alive until this call
     // returns; the context keeps recorded batches from recycling them.
-    const bool all_axes = axes.empty() ||
-        std::all_of(reduced.begin(), reduced.begin() + input.ndim(), [](bool value) {
-            return value;
-        });
+    const bool all_axes = axes.empty() || std::all_of(
+                                              reduced.begin(), reduced.begin() + input.ndim(),
+                                              [](bool value) { return value; });
     const bool scalar_float = all_axes && input.dtype() == DataType::Float32 &&
                               out_dtype == DataType::Float32 &&
                               (kind == ReduceKind::Sum || kind == ReduceKind::Mean ||
                                kind == ReduceKind::Max || kind == ReduceKind::Min);
-    const bool scalar_mask = all_axes &&
-                             (kind == ReduceKind::Any || kind == ReduceKind::All) &&
-                             (input.dtype() == DataType::Bool || input.dtype() == DataType::Float32);
+    const bool scalar_mask =
+        all_axes && (kind == ReduceKind::Any || kind == ReduceKind::All) &&
+        (input.dtype() == DataType::Bool || input.dtype() == DataType::Float32);
     if (scalar_float || scalar_mask) {
         constexpr std::uint32_t items_per_group = kGroupSize * 4U;
         struct FastPush {
@@ -1181,7 +1315,8 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
             push.src_elem = src_elem;
             std::array<BufferBinding, 2> bindings{current->binding(), destination->binding()};
             ctx.dispatch(ShaderId::ReduceAllF32, bindings, &push, sizeof(push), groups);
-            if (final_pass) break;
+            if (final_pass)
+                break;
             partials.push_back(std::move(partial));
             current = partials.back().get();
             current_offset = 0;
@@ -1224,7 +1359,8 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
             push.final_pass = final_pass ? 1U : 0U;
             std::array<BufferBinding, 2> bindings{current->binding(), destination->binding()};
             ctx.dispatch(ShaderId::ReduceAllArg, bindings, &push, sizeof(push), groups);
-            if (final_pass) break;
+            if (final_pass)
+                break;
             partials.push_back(std::move(partial));
             current = partials.back().get();
             current_offset = 0;
@@ -1236,7 +1372,8 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
     int reduced_axis = -1;
     int reduced_axes = 0;
     for (std::size_t axis = 0; axis < input.ndim(); ++axis) {
-        if (!reduced[axis]) continue;
+        if (!reduced[axis])
+            continue;
         reduced_axis = static_cast<int>(axis);
         ++reduced_axes;
     }
@@ -1244,8 +1381,10 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
         (input.dtype() == DataType::Float32 || input.dtype() == DataType::Bool)) {
         std::size_t outer = 1;
         std::size_t inner = 1;
-        for (int axis = 0; axis < reduced_axis; ++axis) outer *= input.size(static_cast<std::size_t>(axis));
-        for (std::size_t axis = static_cast<std::size_t>(reduced_axis) + 1; axis < input.ndim(); ++axis)
+        for (int axis = 0; axis < reduced_axis; ++axis)
+            outer *= input.size(static_cast<std::size_t>(axis));
+        for (std::size_t axis = static_cast<std::size_t>(reduced_axis) + 1; axis < input.ndim();
+             ++axis)
             inner *= input.size(axis);
         const std::size_t reduce_n = input.size(static_cast<std::size_t>(reduced_axis));
         const bool supported =
@@ -1290,13 +1429,20 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
     struct Push {
         std::uint32_t out_count, rank, reduce_count, op, dtype_in;
         std::uint32_t dtype_out, src_offset, dst_offset, elem_in, elem_out;
-    } push{u32(out.numel()), u32(input.ndim()), u32(reduce_count),
-           static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(input.dtype()),
-           static_cast<std::uint32_t>(out_dtype), u32(byte_offset(input)), u32(byte_offset(out)),
-           u32(dtype_size(input.dtype())), u32(dtype_size(out_dtype))};
+    } push{
+        u32(out.numel()),
+        u32(input.ndim()),
+        u32(reduce_count),
+        static_cast<std::uint32_t>(kind),
+        static_cast<std::uint32_t>(input.dtype()),
+        static_cast<std::uint32_t>(out_dtype),
+        u32(byte_offset(input)),
+        u32(byte_offset(out)),
+        u32(dtype_size(input.dtype())),
+        u32(dtype_size(out_dtype))};
     std::array<BufferBinding, 3> bindings{bind(input), bind(out), meta->binding()};
-    Context::get().dispatch(ShaderId::Reduce, bindings, &push, sizeof(push),
-                            groups_for(out.numel()));
+    Context::get().dispatch(
+        ShaderId::Reduce, bindings, &push, sizeof(push), groups_for(out.numel()));
     return out;
 }
 
@@ -1307,8 +1453,7 @@ Tensor matmul(const Tensor& a, const Tensor& b, bool transpose_b, std::size_t ba
         throw std::invalid_argument("Vulkan matmul currently requires Float32 tensors");
     const std::size_t m = left.size(left.ndim() - 2);
     const std::size_t k = left.size(left.ndim() - 1);
-    const std::size_t n = transpose_b ? right.size(right.ndim() - 2)
-                                      : right.size(right.ndim() - 1);
+    const std::size_t n = transpose_b ? right.size(right.ndim() - 2) : right.size(right.ndim() - 1);
     const bool batched_output = left.ndim() == 3 || right.ndim() == 3;
     TensorShape out_shape = batched_output ? TensorShape{batch, m, n} : TensorShape{m, n};
     Tensor out = TensorStorage::empty(out_shape, DataType::Float32);
@@ -1318,19 +1463,24 @@ Tensor matmul(const Tensor& a, const Tensor& b, bool transpose_b, std::size_t ba
         std::uint32_t batch_stride_a, batch_stride_b, batch_stride_c;
     } push{};
     static_assert(sizeof(push) == 56);
-    push.m = u32(m); push.n = u32(n); push.k = u32(k); push.batch = u32(batch);
-    push.a_offset = u32(byte_offset(left)); push.b_offset = u32(byte_offset(right));
+    push.m = u32(m);
+    push.n = u32(n);
+    push.k = u32(k);
+    push.batch = u32(batch);
+    push.a_offset = u32(byte_offset(left));
+    push.b_offset = u32(byte_offset(right));
     push.c_offset = u32(byte_offset(out));
-    push.a_row_stride = u32(k); push.a_col_stride = 1;
+    push.a_row_stride = u32(k);
+    push.a_col_stride = 1;
     push.b_row_stride = transpose_b ? 1U : u32(n);
     push.b_col_stride = transpose_b ? u32(k) : 1U;
     push.batch_stride_a = left.ndim() == 3 ? u32(m * k) : 0U;
     push.batch_stride_b = right.ndim() == 3 ? u32(k * n) : 0U;
     push.batch_stride_c = u32(m * n);
     std::array<BufferBinding, 3> bindings{bind(left), bind(right), bind(out)};
-    Context::get().dispatch(ShaderId::Matmul, bindings, &push, sizeof(push),
-                            std::max(1U, ceil_div(u32(n), 16)),
-                            std::max(1U, ceil_div(u32(m), 16)), u32(batch));
+    Context::get().dispatch(
+        ShaderId::Matmul, bindings, &push, sizeof(push), std::max(1U, ceil_div(u32(n), 16)),
+        std::max(1U, ceil_div(u32(m), 16)), u32(batch));
     return out;
 }
 
@@ -1338,7 +1488,8 @@ Tensor cumsum(const Tensor& src, int dim) {
     Tensor input = prepared(src);
     Tensor out = TensorStorage::empty(input.shape(), input.dtype());
     std::size_t outer = 1, inner = 1;
-    for (int axis = 0; axis < dim; ++axis) outer *= input.size(static_cast<std::size_t>(axis));
+    for (int axis = 0; axis < dim; ++axis)
+        outer *= input.size(static_cast<std::size_t>(axis));
     for (std::size_t axis = static_cast<std::size_t>(dim) + 1; axis < input.ndim(); ++axis)
         inner *= input.size(axis);
     const std::size_t length = input.size(static_cast<std::size_t>(dim));
@@ -1352,7 +1503,8 @@ Tensor cumsum(const Tensor& src, int dim) {
         auto& ctx = Context::get();
         auto sums = ctx.alloc(outer * static_cast<std::size_t>(chunks) * sizeof(float));
         struct ScanPush {
-            std::uint32_t mode, rows, length, num_chunks, src_offset, dst_offset, sums_offset, chunk;
+            std::uint32_t mode, rows, length, num_chunks, src_offset, dst_offset, sums_offset,
+                chunk;
         } scan{};
         static_assert(sizeof(scan) == 32);
         scan.rows = u32(outer);
@@ -1364,68 +1516,102 @@ Tensor cumsum(const Tensor& src, int dim) {
         scan.mode = 0;
         scan.src_offset = u32(byte_offset(input));
         scan.dst_offset = u32(byte_offset(out));
-        ctx.dispatch(ShaderId::CumsumScan, bindings, &scan, sizeof(scan),
-                     std::max(1U, scan.rows * chunks));
+        ctx.dispatch(
+            ShaderId::CumsumScan, bindings, &scan, sizeof(scan), std::max(1U, scan.rows * chunks));
         if (chunks > 1U) {
             scan.mode = 1;
             scan.src_offset = 0;
             scan.dst_offset = 0;
             scan.length = chunks;
-            std::array<BufferBinding, 3> sum_bindings{sums->binding(), sums->binding(), sums->binding()};
+            std::array<BufferBinding, 3> sum_bindings{
+                sums->binding(), sums->binding(), sums->binding()};
             ctx.dispatch(ShaderId::CumsumScan, sum_bindings, &scan, sizeof(scan), scan.rows);
             scan.mode = 2;
             scan.length = u32(length);
             scan.src_offset = u32(byte_offset(out));
             scan.dst_offset = u32(byte_offset(out));
             std::array<BufferBinding, 3> add_bindings{bind(out), bind(out), sums->binding()};
-            ctx.dispatch(ShaderId::CumsumScan, add_bindings, &scan, sizeof(scan),
-                         groups_for(outer * length));
+            ctx.dispatch(
+                ShaderId::CumsumScan, add_bindings, &scan, sizeof(scan),
+                groups_for(outer * length));
         }
         return out;
     }
     struct Push {
         std::uint32_t outer, dim_size, inner, src_offset, dst_offset, dtype, elem_size;
-    } push{u32(outer), u32(length), u32(inner),
-           u32(byte_offset(input)), u32(byte_offset(out)),
-           static_cast<std::uint32_t>(input.dtype()), u32(dtype_size(input.dtype()))};
+    } push{
+        u32(outer),
+        u32(length),
+        u32(inner),
+        u32(byte_offset(input)),
+        u32(byte_offset(out)),
+        static_cast<std::uint32_t>(input.dtype()),
+        u32(dtype_size(input.dtype()))};
     std::array<BufferBinding, 2> bindings{bind(input), bind(out)};
-    Context::get().dispatch(ShaderId::Cumsum, bindings, &push, sizeof(push),
-                            groups_for(outer * inner));
+    Context::get().dispatch(
+        ShaderId::Cumsum, bindings, &push, sizeof(push), groups_for(outer * inner));
     return out;
 }
 
 namespace {
-void dispatch_random(Tensor& dst, const Tensor* src, std::uint32_t op, float p0, float p1,
-                     std::uint32_t seed, std::uint32_t rows = 0, std::uint32_t cols = 0) {
+void dispatch_random(
+    Tensor& dst,
+    const Tensor* src,
+    std::uint32_t op,
+    float p0,
+    float p1,
+    std::uint32_t seed,
+    std::uint32_t rows = 0,
+    std::uint32_t cols = 0) {
     struct Push {
         std::uint32_t op, count, seed, dst_offset, src_offset, dtype;
         std::uint32_t elem_size, rows, cols, p0_bits, p1_bits;
     } push{};
     static_assert(sizeof(push) == 44);
-    push.op = op; push.count = u32(dst.numel()); push.seed = seed;
+    push.op = op;
+    push.count = u32(dst.numel());
+    push.seed = seed;
     push.dst_offset = u32(byte_offset(dst));
     push.src_offset = src != nullptr ? u32(byte_offset(*src)) : 0U;
     push.dtype = static_cast<std::uint32_t>(dst.dtype());
-    push.elem_size = u32(dtype_size(dst.dtype())); push.rows = rows; push.cols = cols;
+    push.elem_size = u32(dtype_size(dst.dtype()));
+    push.rows = rows;
+    push.cols = cols;
     std::memcpy(&push.p0_bits, &p0, sizeof(p0));
     std::memcpy(&push.p1_bits, &p1, sizeof(p1));
     std::array<BufferBinding, 2> bindings{bind(dst), src != nullptr ? bind(*src) : dummy_binding()};
-    Context::get().dispatch(ShaderId::Random, bindings, &push, sizeof(push),
-                            groups_for(dst.numel()));
+    Context::get().dispatch(
+        ShaderId::Random, bindings, &push, sizeof(push), groups_for(dst.numel()));
 }
 
-void dispatch_pool(const Tensor& src, Tensor& dst, std::uint32_t op, int kernel, int stride,
-                   int padding, int h_out, int w_out) {
+void dispatch_pool(
+    const Tensor& src,
+    Tensor& dst,
+    std::uint32_t op,
+    int kernel,
+    int stride,
+    int padding,
+    int h_out,
+    int w_out) {
     Tensor input = prepared(src);
     struct Push {
         std::uint32_t op, n, c, h_in, w_in, h_out, w_out, kernel, stride, padding;
         std::uint32_t src_offset, dst_offset;
-    } push{op, u32(input.size(0)), u32(input.size(1)), u32(input.size(2)), u32(input.size(3)),
-           u32(h_out), u32(w_out), u32(kernel), u32(stride), u32(padding),
-           u32(byte_offset(input)), u32(byte_offset(dst))};
+    } push{
+        op,
+        u32(input.size(0)),
+        u32(input.size(1)),
+        u32(input.size(2)),
+        u32(input.size(3)),
+        u32(h_out),
+        u32(w_out),
+        u32(kernel),
+        u32(stride),
+        u32(padding),
+        u32(byte_offset(input)),
+        u32(byte_offset(dst))};
     std::array<BufferBinding, 2> bindings{bind(input), bind(dst)};
-    Context::get().dispatch(ShaderId::Pool, bindings, &push, sizeof(push),
-                            groups_for(dst.numel()));
+    Context::get().dispatch(ShaderId::Pool, bindings, &push, sizeof(push), groups_for(dst.numel()));
 }
 } // namespace
 
@@ -1459,8 +1645,14 @@ void diag(Tensor& dst, const Tensor& diagonal) {
     dispatch_random(dst, &src, 6, 0.0F, 0.0F, 0, u32(src.numel()), u32(dst.size(1)));
 }
 
-void max_pool2d(const Tensor& src, Tensor& dst, int kernel, int stride, int padding,
-                int h_out, int w_out) {
+void max_pool2d(
+    const Tensor& src,
+    Tensor& dst,
+    int kernel,
+    int stride,
+    int padding,
+    int h_out,
+    int w_out) {
     dispatch_pool(src, dst, 0, kernel, stride, padding, h_out, w_out);
 }
 
@@ -1470,18 +1662,17 @@ void adaptive_avg_pool2d(const Tensor& src, Tensor& dst, int h_out, int w_out) {
 
 Tensor multinomial(const Tensor& weights, int num_samples, bool replacement) {
     Tensor input = prepared(weights);
-    const int samples = replacement
-                            ? num_samples
-                            : std::min(num_samples, static_cast<int>(input.numel()));
-    Tensor out = TensorStorage::empty(TensorShape{static_cast<std::size_t>(samples)}, DataType::Int64);
+    const int samples =
+        replacement ? num_samples : std::min(num_samples, static_cast<int>(input.numel()));
+    Tensor out =
+        TensorStorage::empty(TensorShape{static_cast<std::size_t>(samples)}, DataType::Int64);
     if (samples <= 0 || input.numel() == 0) {
         return out;
     }
     auto& ctx = Context::get();
     const std::uint32_t n = u32(input.numel());
     auto cdf = ctx.alloc(n * 4U);
-    exclusive_or_inclusive_scan(buffer_of(input), u32(byte_offset(input)), *cdf, 0, n, true,
-                                false);
+    exclusive_or_inclusive_scan(buffer_of(input), u32(byte_offset(input)), *cdf, 0, n, true, false);
     const std::uint32_t seed =
         static_cast<std::uint32_t>(RandomGenerator::instance().get_next_cuda_seed());
 
@@ -1525,14 +1716,16 @@ Tensor multinomial(const Tensor& weights, int num_samples, bool replacement) {
 std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending) {
     const std::size_t count = values.numel();
     if (count == 0) {
-        return {Tensor::empty({0}, Device::Vulkan, DataType::Float32),
-                Tensor::empty({0}, Device::Vulkan, DataType::Int64)};
+        return {
+            Tensor::empty({0}, Device::Vulkan, DataType::Float32),
+            Tensor::empty({0}, Device::Vulkan, DataType::Int64)};
     }
     if (count == 1) {
         return {values.clone(), Tensor::zeros({1}, Device::Vulkan, DataType::Int64)};
     }
     std::size_t padded = 1;
-    while (padded < count) padded <<= 1;
+    while (padded < count)
+        padded <<= 1;
     if (padded > std::numeric_limits<std::uint32_t>::max()) {
         throw std::runtime_error("Vulkan sort exceeds 32-bit indexing");
     }
@@ -1567,34 +1760,37 @@ std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending) {
             auto& dst_values = write_a ? a_values : b_values;
             auto& dst_indices = write_a ? a_indices : b_indices;
             std::array<BufferBinding, 4> bindings{
-                bind(current_values),
-                first_pass ? dummy_binding() : bind(current_indices),
+                bind(current_values), first_pass ? dummy_binding() : bind(current_indices),
                 bind(dst_values), bind(dst_indices)};
-            ctx.dispatch(ShaderId::SortBitonic, bindings, &push, sizeof(push),
-                         groups_for(padded / 2));
+            ctx.dispatch(
+                ShaderId::SortBitonic, bindings, &push, sizeof(push), groups_for(padded / 2));
             current_values = dst_values;
             current_indices = dst_indices;
             write_a = !write_a;
             first_pass = false;
         }
     }
-    return {current_values.slice(0, 0, count),
-            current_indices.slice(0, 0, count)};
+    return {current_values.slice(0, 0, count), current_indices.slice(0, 0, count)};
 }
 
-Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
-                         const Tensor& added, const std::size_t added_rows) {
+Tensor remap_append_rows(
+    const Tensor& src,
+    const Tensor& indices,
+    const Tensor& added,
+    const std::size_t added_rows) {
     if (src.device() != Device::Vulkan || src.ndim() == 0)
         throw std::invalid_argument("Vulkan remap_append requires a row tensor");
     auto input = prepared(src);
     auto keep = indices.is_valid() ? prepared(indices) : Tensor{};
     auto append = added.is_valid() ? prepared(added) : Tensor{};
     const std::size_t retained = keep.is_valid() ? keep.numel() : src.size(0);
-    if (keep.is_valid() && (keep.device() != Device::Vulkan || keep.dtype() != DataType::Int32 || keep.ndim() != 1))
+    if (keep.is_valid() &&
+        (keep.device() != Device::Vulkan || keep.dtype() != DataType::Int32 || keep.ndim() != 1))
         throw std::invalid_argument("Vulkan remap_append requires Int32 row indices");
     auto dimensions = src.shape().dims();
     std::size_t row_width = 1;
-    for (std::size_t i = 1; i < dimensions.size(); ++i) row_width *= dimensions[i];
+    for (std::size_t i = 1; i < dimensions.size(); ++i)
+        row_width *= dimensions[i];
     if (append.is_valid()) {
         auto added_dimensions = dimensions;
         added_dimensions[0] = added_rows;
@@ -1604,17 +1800,25 @@ Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
     }
     dimensions[0] = retained + added_rows;
     Tensor out = TensorStorage::empty(TensorShape(dimensions), src.dtype());
-    if (out.numel() == 0) return out;
+    if (out.numel() == 0)
+        return out;
     if (out.numel() > std::numeric_limits<std::uint32_t>::max() / dtype_size(src.dtype()))
         throw std::invalid_argument("Vulkan remap_append output exceeds addressable size");
     struct Push {
         std::uint32_t count, row_width, retained, elem_size;
         std::uint32_t src_offset, indices_offset, added_offset, dst_offset;
         std::uint32_t has_indices, has_added;
-    } push{u32(out.numel()), u32(row_width), u32(retained), u32(dtype_size(src.dtype())),
-        u32(byte_offset(input)), keep.is_valid() ? u32(byte_offset(keep)) : 0,
-        append.is_valid() ? u32(byte_offset(append)) : 0, u32(byte_offset(out)),
-        keep.is_valid(), append.is_valid()};
+    } push{
+        u32(out.numel()),
+        u32(row_width),
+        u32(retained),
+        u32(dtype_size(src.dtype())),
+        u32(byte_offset(input)),
+        keep.is_valid() ? u32(byte_offset(keep)) : 0,
+        append.is_valid() ? u32(byte_offset(append)) : 0,
+        u32(byte_offset(out)),
+        keep.is_valid(),
+        append.is_valid()};
     // Packed SH moments can be copied as whole words rather than issuing an
     // atomic byte/halfword store for every coefficient.
     const std::size_t row_bytes = row_width * dtype_size(src.dtype());
@@ -1623,10 +1827,11 @@ Tensor remap_append_rows(const Tensor& src, const Tensor& indices,
         push.row_width = u32(row_bytes / 4);
         push.elem_size = 4;
     }
-    const std::array<BufferBinding, 4> bindings{bind(input),
-        keep.is_valid() ? bind(keep) : dummy_binding(),
+    const std::array<BufferBinding, 4> bindings{
+        bind(input), keep.is_valid() ? bind(keep) : dummy_binding(),
         append.is_valid() ? bind(append) : dummy_binding(), bind(out)};
-    Context::get().dispatch(ShaderId::RemapAppend, bindings, &push, sizeof(push), groups_for(push.count));
+    Context::get().dispatch(
+        ShaderId::RemapAppend, bindings, &push, sizeof(push), groups_for(push.count));
     return out;
 }
 
@@ -1635,23 +1840,30 @@ std::array<float, 6> quantile_bounds(const Tensor& means, const float percentile
         means.shape().rank() != 2 || means.shape()[1] != 3 ||
         means.shape()[0] > std::numeric_limits<std::uint32_t>::max() / 12U)
         throw std::invalid_argument("Vulkan bounds require float32 [N,3] means");
-    if (means.shape()[0] == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
+    if (means.shape()[0] == 0)
+        return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
     auto input = prepared(means);
     auto& ctx = Context::get();
     auto bins = ctx.alloc(6 * 256 * sizeof(std::uint32_t));
     auto state = ctx.alloc(6 * 4 * sizeof(std::uint32_t));
     auto result = ctx.alloc(6 * sizeof(float));
     ctx.fill_zero(*state, 0, 6 * 4 * sizeof(std::uint32_t));
-    struct Push { std::uint32_t count, src_offset, pass, mode; float percentile; };
+    struct Push {
+        std::uint32_t count, src_offset, pass, mode;
+        float percentile;
+    };
     static_assert(sizeof(Push) == 20);
-    Push push{u32(input.shape()[0]), u32(byte_offset(input)), 0, 0,
-        std::clamp(percentile, 0.F, 1.F)};
+    Push push{
+        u32(input.shape()[0]), u32(byte_offset(input)), 0, 0, std::clamp(percentile, 0.F, 1.F)};
     const std::array<BufferBinding, 4> bindings{
         bind(input), bins->binding(), state->binding(), result->binding()};
     for (std::uint32_t pass = 0; pass < 4; ++pass) {
         ctx.fill_zero(*bins, 0, 6 * 256 * sizeof(std::uint32_t));
-        push.pass = pass; push.mode = 0;
-        ctx.dispatch(ShaderId::QuantileBounds, bindings, &push, sizeof(push), groups_for(push.count), pass == 0 ? 3 : 6);
+        push.pass = pass;
+        push.mode = 0;
+        ctx.dispatch(
+            ShaderId::QuantileBounds, bindings, &push, sizeof(push), groups_for(push.count),
+            pass == 0 ? 3 : 6);
         push.mode = 1;
         ctx.dispatch(ShaderId::QuantileBounds, bindings, &push, sizeof(push), 1, 6);
     }
@@ -1686,16 +1898,19 @@ static_assert(sizeof(SelectPush) == 40);
 // into the value it came from without a third pass.
 float value_of_select_key(std::uint32_t select_key, bool descending) {
     const std::uint32_t ordered = descending ? ~select_key : select_key;
-    const std::uint32_t bits =
-        (ordered & 0x80000000U) != 0U ? (ordered & 0x7FFFFFFFU) : ~ordered;
+    const std::uint32_t bits = (ordered & 0x80000000U) != 0U ? (ordered & 0x7FFFFFFFU) : ~ordered;
     float value = 0.0F;
     std::memcpy(&value, &bits, sizeof(value));
     return value;
 }
 
 // Queue all histogram/threshold passes before the single result readback.
-std::shared_ptr<Buffer> select_resolve_rank(const Tensor& values, Buffer& bins,
-    const Tensor& mask, const std::uint32_t rank, const bool descending,
+std::shared_ptr<Buffer> select_resolve_rank(
+    const Tensor& values,
+    Buffer& bins,
+    const Tensor& mask,
+    const std::uint32_t rank,
+    const bool descending,
     const bool resolve_indices) {
     if (mask.is_valid() && (mask.numel() != values.numel() || mask.dtype() != DataType::Bool))
         throw std::invalid_argument("Vulkan select requires a matching Bool mask");
@@ -1705,8 +1920,8 @@ std::shared_ptr<Buffer> select_resolve_rank(const Tensor& values, Buffer& bins,
     auto state = ctx.alloc(5 * sizeof(std::uint32_t));
     ctx.fill_zero(*state, 0, 5 * sizeof(std::uint32_t));
     const std::array<BufferBinding, 5> bindings{
-        bind(values), mask.is_valid() ? bind(mask) : dummy_binding(),
-        bins.binding(), dummy_binding(), state->binding()};
+        bind(values), mask.is_valid() ? bind(mask) : dummy_binding(), bins.binding(),
+        dummy_binding(), state->binding()};
     SelectPush push{};
     push.count = u32(values.numel());
     push.src_offset = u32(byte_offset(values));
@@ -1727,9 +1942,14 @@ std::shared_ptr<Buffer> select_resolve_rank(const Tensor& values, Buffer& bins,
 
 } // namespace
 
-bool select_nth_value(const Tensor& values, const Tensor& mask, const std::uint32_t rank,
-                      const bool descending, float* value) {
-    if (value == nullptr || rank == 0 || values.numel() == 0) return false;
+bool select_nth_value(
+    const Tensor& values,
+    const Tensor& mask,
+    const std::uint32_t rank,
+    const bool descending,
+    float* value) {
+    if (value == nullptr || rank == 0 || values.numel() == 0)
+        return false;
     Tensor input = prepared(values);
     Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
     auto& ctx = Context::get();
@@ -1737,15 +1957,22 @@ bool select_nth_value(const Tensor& values, const Tensor& mask, const std::uint3
     auto state = select_resolve_rank(input, *bins, selector, rank, descending, false);
     std::array<std::uint32_t, 4> host{};
     ctx.download(*state, 0, host.data(), sizeof(host));
-    if (host[3] == 0) return false;
+    if (host[3] == 0)
+        return false;
     *value = value_of_select_key(host[0], descending);
     return true;
 }
 
-Tensor select_topk_indices(const Tensor& values, const Tensor& mask, const std::uint32_t count,
-                           const bool descending, std::uint32_t* emitted) {
-    if (emitted != nullptr) *emitted = 0;
-    if (count == 0 || values.numel() == 0) return {};
+Tensor select_topk_indices(
+    const Tensor& values,
+    const Tensor& mask,
+    const std::uint32_t count,
+    const bool descending,
+    std::uint32_t* emitted) {
+    if (emitted != nullptr)
+        *emitted = 0;
+    if (count == 0 || values.numel() == 0)
+        return {};
     Tensor input = prepared(values);
     Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
     auto& ctx = Context::get();
@@ -1763,14 +1990,16 @@ Tensor select_topk_indices(const Tensor& values, const Tensor& mask, const std::
     push.descending = descending;
     push.mode = 1;
     const std::array<BufferBinding, 5> bindings{
-        bind(input), selector.is_valid() ? bind(selector) : dummy_binding(),
-        bins->binding(), bind(out), state->binding()};
+        bind(input), selector.is_valid() ? bind(selector) : dummy_binding(), bins->binding(),
+        bind(out), state->binding()};
     ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), groups_for(input.numel()));
     std::uint32_t written = 0;
     ctx.download(*state, 16, &written, sizeof(written));
-    if (written == 0) return {};
+    if (written == 0)
+        return {};
     const std::size_t keep = std::min<std::size_t>(written, limit);
-    if (emitted != nullptr) *emitted = u32(keep);
+    if (emitted != nullptr)
+        *emitted = u32(keep);
     return out.slice(0, 0, keep);
 }
 

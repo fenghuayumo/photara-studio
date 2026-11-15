@@ -11,7 +11,7 @@ namespace tinytensor {
 
 // Full pinned memory allocator with caching
 class PinnedMemoryAllocator {
-public:
+  public:
     struct Block {
         void* ptr = nullptr;
         size_t size = 0;
@@ -46,10 +46,14 @@ public:
     void reset_stats();
     void prewarm();
 
-    void set_enabled(bool enabled) { enabled_ = enabled; }
-    bool is_enabled() const { return enabled_; }
+    void set_enabled(bool enabled) {
+        enabled_ = enabled;
+    }
+    bool is_enabled() const {
+        return enabled_;
+    }
 
-private:
+  private:
     PinnedMemoryAllocator();
     ~PinnedMemoryAllocator();
     PinnedMemoryAllocator(const PinnedMemoryAllocator&) = delete;

@@ -17,16 +17,41 @@ inline constexpr int cudaSuccess = 0;
 inline constexpr int cudaErrorInvalidDevice = 101;
 inline constexpr int cudaErrorInvalidValue = 1;
 inline constexpr int cudaErrorNotReady = 600;
-inline constexpr unsigned cudaEventDefault = 0, cudaEventDisableTiming = 2, cudaHostAllocDefault = 0;
+inline constexpr unsigned cudaEventDefault = 0, cudaEventDisableTiming = 2,
+                          cudaHostAllocDefault = 0;
 enum cudaMemcpyKind { cudaMemcpyHostToDevice, cudaMemcpyDeviceToHost, cudaMemcpyDeviceToDevice };
-enum cudaMemPoolAttr { cudaMemPoolAttrReleaseThreshold, cudaMemPoolAttrReservedMemCurrent, cudaMemPoolAttrUsedMemCurrent, cudaMemPoolAttrReservedMemHigh };
-struct cudaDeviceProp { int multiProcessorCount{}, maxThreadsPerMultiProcessor{}, maxThreadsPerBlock{}, major{}, minor{}; };
-struct cudaPointerAttributes { int type{}, device{}; void* devicePointer{}; void* hostPointer{}; };
-inline const char* cudaGetErrorName(cudaError_t) { return "CUDA backend is disabled"; }
-inline const char* cudaGetErrorString(cudaError_t) { return "This build has no CUDA backend; select Vulkan"; }
-inline cudaError_t cudaGetDeviceCount(int* count) { *count = 0; return cudaSuccess; }
-inline cudaError_t cudaGetLastError() { return cudaErrorInvalidDevice; }
-#define TINYTENSOR_DISABLED_CUDA(name) template<class... Args> inline cudaError_t name(Args...) { return cudaErrorInvalidDevice; }
+enum cudaMemPoolAttr {
+    cudaMemPoolAttrReleaseThreshold,
+    cudaMemPoolAttrReservedMemCurrent,
+    cudaMemPoolAttrUsedMemCurrent,
+    cudaMemPoolAttrReservedMemHigh
+};
+struct cudaDeviceProp {
+    int multiProcessorCount{}, maxThreadsPerMultiProcessor{}, maxThreadsPerBlock{}, major{},
+        minor{};
+};
+struct cudaPointerAttributes {
+    int type{}, device{};
+    void* devicePointer{};
+    void* hostPointer{};
+};
+inline const char* cudaGetErrorName(cudaError_t) {
+    return "CUDA backend is disabled";
+}
+inline const char* cudaGetErrorString(cudaError_t) {
+    return "This build has no CUDA backend; select Vulkan";
+}
+inline cudaError_t cudaGetDeviceCount(int* count) {
+    *count = 0;
+    return cudaSuccess;
+}
+inline cudaError_t cudaGetLastError() {
+    return cudaErrorInvalidDevice;
+}
+#define TINYTENSOR_DISABLED_CUDA(name)                                                             \
+    template <class... Args> inline cudaError_t name(Args...) {                                    \
+        return cudaErrorInvalidDevice;                                                             \
+    }
 TINYTENSOR_DISABLED_CUDA(cudaDeviceGetDefaultMemPool)
 TINYTENSOR_DISABLED_CUDA(cudaDeviceSynchronize)
 TINYTENSOR_DISABLED_CUDA(cudaEventCreate)

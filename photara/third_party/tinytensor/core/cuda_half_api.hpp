@@ -3,6 +3,10 @@
 #include <cuda_fp16.h>
 #else
 using __half = _Float16;
-inline __half __float2half(float value) { return static_cast<__half>(value); }
-inline float __half2float(__half value) { return static_cast<float>(value); }
+inline __half __float2half(float value) {
+    return static_cast<__half>(value);
+}
+inline float __half2float(__half value) {
+    return static_cast<float>(value);
+}
 #endif

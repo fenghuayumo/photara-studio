@@ -20,14 +20,13 @@ struct PhiloxState {
     int used;
 };
 
-__device__ __forceinline__ void philox_round4(std::uint32_t* c,
-                                              std::uint32_t k0,
-                                              std::uint32_t k1) {
+__device__ __forceinline__ void philox_round4(
+    std::uint32_t* c,
+    std::uint32_t k0,
+    std::uint32_t k1) {
     const std::uint32_t m0 = 0xD2511F53u, m1 = 0xCD9E8D57u;
-    const unsigned long long p0 =
-        static_cast<unsigned long long>(c[0]) * m0;
-    const unsigned long long p1 =
-        static_cast<unsigned long long>(c[2]) * m1;
+    const unsigned long long p0 = static_cast<unsigned long long>(c[0]) * m0;
+    const unsigned long long p1 = static_cast<unsigned long long>(c[2]) * m1;
     const std::uint32_t lo0 = static_cast<std::uint32_t>(p0);
     const std::uint32_t hi0 = static_cast<std::uint32_t>(p0 >> 32);
     const std::uint32_t lo1 = static_cast<std::uint32_t>(p1);
@@ -42,8 +41,7 @@ __device__ __forceinline__ void philox_round4(std::uint32_t* c,
 __device__ __forceinline__ void philox_next4(PhiloxState* s) {
     std::uint32_t k0 = static_cast<std::uint32_t>(s->seed);
     std::uint32_t k1 = static_cast<std::uint32_t>(s->seed >> 32);
-    std::uint32_t c[4] = {s->counter[0], s->counter[1],
-                          s->counter[2], s->counter[3]};
+    std::uint32_t c[4] = {s->counter[0], s->counter[1], s->counter[2], s->counter[3]};
 #pragma unroll
     for (int r = 0; r < 10; ++r) {
         if (r > 0) {
@@ -52,41 +50,44 @@ __device__ __forceinline__ void philox_next4(PhiloxState* s) {
         }
         philox_round4(c, k0, k1);
     }
-    for (int i = 0; i < 4; ++i) s->output[i] = c[i];
-    if (++s->counter[0] == 0u) ++s->counter[1];
+    for (int i = 0; i < 4; ++i)
+        s->output[i] = c[i];
+    if (++s->counter[0] == 0u)
+        ++s->counter[1];
     s->used = 0;
 }
 
-__device__ __forceinline__ void philox_init(unsigned long long seed,
-                                            unsigned long long subsequence,
-                                            unsigned long long offset,
-                                            PhiloxState* s) {
+__device__ __forceinline__ void philox_init(
+    unsigned long long seed,
+    unsigned long long subsequence,
+    unsigned long long offset,
+    PhiloxState* s) {
     s->seed = seed;
     s->counter[0] = static_cast<std::uint32_t>(offset);
     s->counter[1] = static_cast<std::uint32_t>(offset >> 32);
     s->counter[2] = static_cast<std::uint32_t>(subsequence);
     s->counter[3] = static_cast<std::uint32_t>(subsequence >> 32);
-    s->used = 4;  // force generation on the first draw
+    s->used = 4; // force generation on the first draw
 }
 
 __device__ __forceinline__ std::uint32_t philox_next_u32(PhiloxState* s) {
-    if (s->used >= 4) philox_next4(s);
+    if (s->used >= 4)
+        philox_next4(s);
     return s->output[s->used++];
 }
 
 // Uniform in (0, 1], matching curand_uniform semantics.
 __device__ __forceinline__ float philox_uniform(PhiloxState* s) {
-    return 1.0f - static_cast<float>(philox_next_u32(s)) *
-                      2.3283064365386963e-10f;
+    return 1.0f - static_cast<float>(philox_next_u32(s)) * 2.3283064365386963e-10f;
 }
 
 // Standard normal via Box-Muller; consumes two uniforms per draw.
 __device__ __forceinline__ float philox_normal(PhiloxState* s) {
     float u1 = philox_uniform(s);
-    while (!(u1 > 0.0f)) u1 = philox_uniform(s);
+    while (!(u1 > 0.0f))
+        u1 = philox_uniform(s);
     const float u2 = philox_uniform(s);
-    return sqrtf(-2.0f * logf(u1)) *
-           sinf(6.283185307179586f * u2);
+    return sqrtf(-2.0f * logf(u1)) * sinf(6.283185307179586f * u2);
 }
 
-}  // namespace tinytensor
+} // namespace tinytensor

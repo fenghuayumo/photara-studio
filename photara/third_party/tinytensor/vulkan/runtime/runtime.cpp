@@ -84,7 +84,8 @@ VkDeviceSize pooled_size_of(VkDeviceSize bytes) {
     VkDeviceSize size = std::max<VkDeviceSize>(bytes, kMinBufferBytes);
     if (size > kExactBelow) {
         VkDeviceSize magnitude = kExactBelow;
-        while (magnitude * 2 <= size) magnitude *= 2;
+        while (magnitude * 2 <= size)
+            magnitude *= 2;
         const VkDeviceSize granule = magnitude / 16;
         size = ((size + granule - 1) / granule) * granule;
     }
@@ -141,13 +142,41 @@ std::uint32_t env_u32_or(const char* name, const std::uint32_t fallback) {
 
 const char* shader_name(const ShaderId shader) {
     static constexpr std::array<const char*, static_cast<std::size_t>(ShaderId::Count)> names{
-        "adam_f32",    "elementwise", "fused_pointwise", "strided_copy", "index_select",
-        "index_fill",  "mask_flags",  "scan_block",      "scan_add",     "compact",
-        "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
-        "cumsum",      "pool",        "scatter",         "select_compact",
-        "cat",         "unpack_rgba", "sort_bitonic", "prune",        "panorama_sizes", "select",
-        "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan",
-        "sh_adam_quant", "quantile_bounds", "count_masks", "remap_append", "shape_regularizers", "oversize_penalty"};
+        "adam_f32",
+        "elementwise",
+        "fused_pointwise",
+        "strided_copy",
+        "index_select",
+        "index_fill",
+        "mask_flags",
+        "scan_block",
+        "scan_add",
+        "compact",
+        "multinomial",
+        "reduce",
+        "reduce_all_f32",
+        "matmul",
+        "random",
+        "cumsum",
+        "pool",
+        "scatter",
+        "select_compact",
+        "cat",
+        "unpack_rgba",
+        "sort_bitonic",
+        "prune",
+        "panorama_sizes",
+        "select",
+        "gather",
+        "reduce_all_arg",
+        "reduce_axis",
+        "cumsum_scan",
+        "sh_adam_quant",
+        "quantile_bounds",
+        "count_masks",
+        "remap_append",
+        "shape_regularizers",
+        "oversize_penalty"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -155,24 +184,27 @@ const char* shader_name(const ShaderId shader) {
 // Timestamps are a fixed-width counter; a queue may expose fewer than 64 valid
 // bits, and the delta has to wrap at that width.
 std::uint64_t timestamp_delta(
-    const std::uint64_t begin, const std::uint64_t end,
+    const std::uint64_t begin,
+    const std::uint64_t end,
     const std::uint32_t valid_bits) {
-    if (valid_bits >= 64) return end - begin;
+    if (valid_bits >= 64)
+        return end - begin;
     const std::uint64_t mask = (std::uint64_t{1} << valid_bits) - 1;
     const std::uint64_t masked_begin = begin & mask;
     const std::uint64_t masked_end = end & mask;
-    return masked_end >= masked_begin
-        ? masked_end - masked_begin
-        : ((mask - masked_begin + 1) + masked_end) & mask;
+    return masked_end >= masked_begin ? masked_end - masked_begin
+                                      : ((mask - masked_begin + 1) + masked_end) & mask;
 }
 
 bool has_instance_extension(const char* name) {
     std::uint32_t count = 0;
-    check(vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr),
-          "vkEnumerateInstanceExtensionProperties");
+    check(
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr),
+        "vkEnumerateInstanceExtensionProperties");
     std::vector<VkExtensionProperties> properties(count);
-    check(vkEnumerateInstanceExtensionProperties(nullptr, &count, properties.data()),
-          "vkEnumerateInstanceExtensionProperties");
+    check(
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, properties.data()),
+        "vkEnumerateInstanceExtensionProperties");
     return std::ranges::any_of(properties, [name](const VkExtensionProperties& property) {
         return std::strcmp(property.extensionName, name) == 0;
     });
@@ -180,10 +212,12 @@ bool has_instance_extension(const char* name) {
 
 bool has_instance_layer(const char* name) {
     std::uint32_t count = 0;
-    check(vkEnumerateInstanceLayerProperties(&count, nullptr), "vkEnumerateInstanceLayerProperties");
+    check(
+        vkEnumerateInstanceLayerProperties(&count, nullptr), "vkEnumerateInstanceLayerProperties");
     std::vector<VkLayerProperties> properties(count);
-    check(vkEnumerateInstanceLayerProperties(&count, properties.data()),
-          "vkEnumerateInstanceLayerProperties");
+    check(
+        vkEnumerateInstanceLayerProperties(&count, properties.data()),
+        "vkEnumerateInstanceLayerProperties");
     return std::ranges::any_of(properties, [name](const VkLayerProperties& property) {
         return std::strcmp(property.layerName, name) == 0;
     });
@@ -191,18 +225,22 @@ bool has_instance_layer(const char* name) {
 
 bool has_device_extension(VkPhysicalDevice physical, const char* name) {
     std::uint32_t count = 0;
-    check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr),
-          "vkEnumerateDeviceExtensionProperties");
+    check(
+        vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr),
+        "vkEnumerateDeviceExtensionProperties");
     std::vector<VkExtensionProperties> properties(count);
-    check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, properties.data()),
-          "vkEnumerateDeviceExtensionProperties");
+    check(
+        vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, properties.data()),
+        "vkEnumerateDeviceExtensionProperties");
     return std::ranges::any_of(properties, [name](const VkExtensionProperties& property) {
         return std::strcmp(property.extensionName, name) == 0;
     });
 }
 
-std::uint32_t find_memory_type(VkPhysicalDevice physical, std::uint32_t type_bits,
-                               VkMemoryPropertyFlags required) {
+std::uint32_t find_memory_type(
+    VkPhysicalDevice physical,
+    std::uint32_t type_bits,
+    VkMemoryPropertyFlags required) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical, &properties);
     for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
@@ -214,8 +252,10 @@ std::uint32_t find_memory_type(VkPhysicalDevice physical, std::uint32_t type_bit
     throw std::runtime_error("No compatible Vulkan memory type was found");
 }
 
-std::optional<std::uint32_t> try_find_memory_type(VkPhysicalDevice physical, std::uint32_t type_bits,
-                                                  VkMemoryPropertyFlags required) {
+std::optional<std::uint32_t> try_find_memory_type(
+    VkPhysicalDevice physical,
+    std::uint32_t type_bits,
+    VkMemoryPropertyFlags required) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical, &properties);
     for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
@@ -328,8 +368,11 @@ std::mutex& singleton_mutex() {
 
 } // namespace
 
-Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
-               const MemoryKind kind)
+Buffer::Buffer(
+    VkPhysicalDevice physical,
+    VkDevice logical,
+    VkDeviceSize bytes,
+    const MemoryKind kind)
     : device_(logical),
       size_((std::max<VkDeviceSize>(bytes, kMinBufferBytes) + 3u) & ~VkDeviceSize{3}) {
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -351,15 +394,16 @@ Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
         // memory, and write-combined memory is an order of magnitude slower to
         // read than cached memory.
         allocation.memoryTypeIndex =
-            try_find_memory_type(physical, requirements.memoryTypeBits,
-                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                     VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                .value_or(try_find_memory_type(physical, requirements.memoryTypeBits,
-                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                   VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-                              .value_or(find_memory_type(physical, requirements.memoryTypeBits,
-                                                         host_flags)));
+            try_find_memory_type(
+                physical, requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                .value_or(
+                    try_find_memory_type(
+                        physical, requirements.memoryTypeBits,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                        .value_or(
+                            find_memory_type(physical, requirements.memoryTypeBits, host_flags)));
         break;
     case MemoryKind::host_visible:
         allocation.memoryTypeIndex =
@@ -383,8 +427,7 @@ Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
         VkPhysicalDeviceProperties limits{};
         vkGetPhysicalDeviceProperties(physical, &limits);
-        non_coherent_atom_size_ =
-            std::max<VkDeviceSize>(limits.limits.nonCoherentAtomSize, 1);
+        non_coherent_atom_size_ = std::max<VkDeviceSize>(limits.limits.nonCoherentAtomSize, 1);
     }
 }
 
@@ -463,13 +506,13 @@ Context::Context() {
     // TINYTENSOR_VULKAN_POOL_BYTES for a workload with much larger tensors.
     const std::uint32_t pool_budget_override = env_u32("TINYTENSOR_VULKAN_POOL_BYTES").value_or(0);
     const std::size_t adaptive_budget = static_cast<std::size_t>(
-        std::min<VkDeviceSize>(device_local_heap_bytes(physical_) / 32,
-                               kMaxPoolBudgetBytes));
+        std::min<VkDeviceSize>(device_local_heap_bytes(physical_) / 32, kMaxPoolBudgetBytes));
     pool_budget_bytes_ = pool_budget_override != 0
-        ? static_cast<std::size_t>(pool_budget_override)
-        : std::clamp<std::size_t>(adaptive_budget, kDefaultPoolBudgetBytes,
-                                  kMaxPoolBudgetBytes);
-    dummy_ = std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, MemoryKind::device_local);
+                             ? static_cast<std::size_t>(pool_budget_override)
+                             : std::clamp<std::size_t>(
+                                   adaptive_budget, kDefaultPoolBudgetBytes, kMaxPoolBudgetBytes);
+    dummy_ =
+        std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, MemoryKind::device_local);
     create_pipelines();
     op_profile_.enabled = env_flag("TINYTENSOR_VULKAN_PROFILE_OPS");
     if (op_profile_.enabled) {
@@ -489,7 +532,8 @@ void Context::create_instance() {
     std::vector<const char*> extensions;
     if (validation_) {
         if (!has_instance_layer("VK_LAYER_KHRONOS_validation")) {
-            throw std::runtime_error("TINYTENSOR_VULKAN_VALIDATION is set but the validation layer is missing");
+            throw std::runtime_error(
+                "TINYTENSOR_VULKAN_VALIDATION is set but the validation layer is missing");
         }
         layers.push_back("VK_LAYER_KHRONOS_validation");
         if (has_instance_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
@@ -527,32 +571,40 @@ void Context::create_instance() {
         const auto create_messenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(instance_, "vkCreateDebugUtilsMessengerEXT"));
         if (create_messenger != nullptr) {
-            VkDebugUtilsMessengerCreateInfoEXT debug{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+            VkDebugUtilsMessengerCreateInfoEXT debug{
+                VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
             debug.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
             debug.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
                                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
             debug.pfnUserCallback = debug_callback;
-            check(create_messenger(instance_, &debug, nullptr, &debug_messenger_),
-                  "vkCreateDebugUtilsMessengerEXT");
+            check(
+                create_messenger(instance_, &debug, nullptr, &debug_messenger_),
+                "vkCreateDebugUtilsMessengerEXT");
         }
     }
 }
 
 bool parse_device_uuid(const char* text, std::uint8_t out[16]) {
-    if (text == nullptr) return false;
+    if (text == nullptr)
+        return false;
     const auto nibble = [](const char value) -> int {
-        if (value >= '0' && value <= '9') return value - '0';
-        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        if (value >= '0' && value <= '9')
+            return value - '0';
+        if (value >= 'a' && value <= 'f')
+            return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F')
+            return value - 'A' + 10;
         return -1;
     };
     for (int index = 0; index < 16; ++index) {
-        if (text[index * 2] == '\0' || text[index * 2 + 1] == '\0') return false;
+        if (text[index * 2] == '\0' || text[index * 2 + 1] == '\0')
+            return false;
         const int high = nibble(text[index * 2]);
         const int low = nibble(text[index * 2 + 1]);
-        if (high < 0 || low < 0) return false;
+        if (high < 0 || low < 0)
+            return false;
         out[index] = static_cast<std::uint8_t>((high << 4) | low);
     }
     return text[32] == '\0';
@@ -565,20 +617,19 @@ void Context::pick_device() {
         throw std::runtime_error("No Vulkan devices were found");
     }
     std::vector<VkPhysicalDevice> devices(count);
-    check(vkEnumeratePhysicalDevices(instance_, &count, devices.data()), "vkEnumeratePhysicalDevices");
+    check(
+        vkEnumeratePhysicalDevices(instance_, &count, devices.data()),
+        "vkEnumeratePhysicalDevices");
 
     const char* device_uuid = std::getenv("PHOTARA_VULKAN_DEVICE_UUID");
     if (device_uuid != nullptr && device_uuid[0] != '\0') {
         std::uint8_t want[16]{};
         if (!parse_device_uuid(device_uuid, want)) {
-            throw std::invalid_argument(
-                "PHOTARA_VULKAN_DEVICE_UUID must be 32 hex digits");
+            throw std::invalid_argument("PHOTARA_VULKAN_DEVICE_UUID must be 32 hex digits");
         }
         for (const VkPhysicalDevice candidate : devices) {
-            VkPhysicalDeviceIDProperties identity{
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-            VkPhysicalDeviceProperties2 properties{
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            VkPhysicalDeviceIDProperties identity{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+            VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
             properties.pNext = &identity;
             vkGetPhysicalDeviceProperties2(candidate, &properties);
             if (std::memcmp(identity.deviceUUID, want, sizeof(want)) == 0) {
@@ -587,8 +638,7 @@ void Context::pick_device() {
             }
         }
         if (physical_ == VK_NULL_HANDLE) {
-            throw std::runtime_error(
-                "No Vulkan device matches PHOTARA_VULKAN_DEVICE_UUID");
+            throw std::runtime_error("No Vulkan device matches PHOTARA_VULKAN_DEVICE_UUID");
         }
     } else if (const auto index = env_u32("TINYTENSOR_VULKAN_DEVICE")) {
         if (*index >= count) {
@@ -622,13 +672,14 @@ void Context::pick_device() {
             "The selected Vulkan device cannot run TinyTensor compute shaders");
     }
 
-    VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceSubgroupProperties subgroup{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     properties2.pNext = &subgroup;
     vkGetPhysicalDeviceProperties2(physical_, &properties2);
     info_.subgroup_size = subgroup.subgroupSize;
-    info_.compute_subgroup_size32 = info_.subgroup_size != 32u &&
-        !env_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_SIZE_CONTROL") &&
+    info_.compute_subgroup_size32 =
+        info_.subgroup_size != 32u && !env_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_SIZE_CONTROL") &&
         photara::vk::supports_compute_subgroup_size(physical_, 32u, 256u);
 
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -663,9 +714,8 @@ void Context::create_device() {
     // from every tensor op.  This matters much more than shader time for the
     // small, numerous elementwise ops in an optimizer/backward pass.  Keep the
     // descriptor-pool path below as a portability fallback and as an A/B knob.
-    push_descriptors_ =
-        !env_flag("TINYTENSOR_VULKAN_DISABLE_PUSH_DESCRIPTORS") &&
-        has_device_extension(physical_, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    push_descriptors_ = !env_flag("TINYTENSOR_VULKAN_DISABLE_PUSH_DESCRIPTORS") &&
+                        has_device_extension(physical_, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     if (push_descriptors_) {
         extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     }
@@ -757,39 +807,39 @@ void Context::adopt_runtime() {
     // Timestamp indices are shared in profiling mode, so keep its serial
     // scheduling. Normal execution can record ahead without recycling an
     // in-flight command buffer or its host-written upload staging.
-    compute_slot_count_ = env_flag("TINYTENSOR_VULKAN_PROFILE_OPS") ? 1u :
-        std::clamp<std::size_t>(env_u32("TINYTENSOR_VULKAN_COMPUTE_SLOTS").value_or(kComputeSlotCount),
-                                1u, kComputeSlotCount);
+    compute_slot_count_ =
+        env_flag("TINYTENSOR_VULKAN_PROFILE_OPS")
+            ? 1u
+            : std::clamp<std::size_t>(
+                  env_u32("TINYTENSOR_VULKAN_COMPUTE_SLOTS").value_or(kComputeSlotCount), 1u,
+                  kComputeSlotCount);
     for (std::size_t i = 0; i < compute_slot_count_; ++i)
         compute_slots_[i].encoder = runtime_.encoder(photara::vk::BarrierPolicy::none);
 }
 
 void Context::create_pools() {
-    VkCommandPoolCreateInfo upload_pool{
-        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkCommandPoolCreateInfo upload_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     upload_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     upload_pool.queueFamilyIndex = queue_family_;
-    check(vkCreateCommandPool(
-              device_, &upload_pool, nullptr, &upload_command_pool_),
-          "vkCreateCommandPool(upload)");
+    check(
+        vkCreateCommandPool(device_, &upload_pool, nullptr, &upload_command_pool_),
+        "vkCreateCommandPool(upload)");
 
     std::array<VkCommandBuffer, kUploadSlotCount> upload_commands{};
-    VkCommandBufferAllocateInfo upload_alloc{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferAllocateInfo upload_alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     upload_alloc.commandPool = upload_command_pool_;
     upload_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    upload_alloc.commandBufferCount =
-        static_cast<std::uint32_t>(upload_commands.size());
-    check(vkAllocateCommandBuffers(
-              device_, &upload_alloc, upload_commands.data()),
-          "vkAllocateCommandBuffers(upload)");
+    upload_alloc.commandBufferCount = static_cast<std::uint32_t>(upload_commands.size());
+    check(
+        vkAllocateCommandBuffers(device_, &upload_alloc, upload_commands.data()),
+        "vkAllocateCommandBuffers(upload)");
 
     VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     for (std::size_t index = 0; index < upload_slots_.size(); ++index) {
         upload_slots_[index].command = upload_commands[index];
-        check(vkCreateFence(
-                  device_, &fence, nullptr, &upload_slots_[index].fence),
-              "vkCreateFence(upload)");
+        check(
+            vkCreateFence(device_, &fence, nullptr, &upload_slots_[index].fence),
+            "vkCreateFence(upload)");
     }
 }
 
@@ -798,8 +848,8 @@ void Context::create_pipelines() {
         if (blob.spirv.empty() || blob.spirv.size() % sizeof(std::uint32_t) != 0) {
             throw std::runtime_error("Invalid embedded SPIR-V");
         }
-        pipelines_[static_cast<std::size_t>(blob.id)] = runtime_.create_compute(
-            blob.spirv, blob.bindings, blob.push_bytes);
+        pipelines_[static_cast<std::size_t>(blob.id)] =
+            runtime_.create_compute(blob.spirv, blob.bindings, blob.push_bytes);
     }
 }
 
@@ -810,10 +860,12 @@ void Context::destroy() {
         // must not turn into a thrown exception here.
         try {
             for (auto& slot : compute_slots_) {
-                if (slot.encoder.recording()) slot.encoder.submit();
+                if (slot.encoder.recording())
+                    slot.encoder.submit();
                 if (slot.encoder.in_flight()) {
                     slot.encoder.wait();
-                    if (op_profile_.enabled) collect_op_profile_locked();
+                    if (op_profile_.enabled)
+                        collect_op_profile_locked();
                 }
             }
         } catch (...) {
@@ -831,7 +883,8 @@ void Context::destroy() {
     if (op_profile_.enabled) {
         // Report the run total before the pool goes away: a training run ends
         // long before the next aggregation window would have fired.
-        if (op_profile_.flushes != 0) report_op_profile_locked();
+        if (op_profile_.flushes != 0)
+            report_op_profile_locked();
         if (op_profile_.pool != VK_NULL_HANDLE) {
             vkDestroyQueryPool(device_, op_profile_.pool, nullptr);
             op_profile_.pool = VK_NULL_HANDLE;
@@ -839,9 +892,12 @@ void Context::destroy() {
         op_profile_.enabled = false;
     }
     if (env_flag("TINYTENSOR_VULKAN_PROFILE_BATCHES")) {
-        std::fprintf(stderr, "tinytensor_vulkan_compute_slots=%zu retired_batches=%llu "
-                     "fence_wait_ms=%.3f\n", compute_slot_count_,
-                     static_cast<unsigned long long>(op_profile_.batches), op_profile_.wait_ms);
+        std::fprintf(
+            stderr,
+            "tinytensor_vulkan_compute_slots=%zu retired_batches=%llu "
+            "fence_wait_ms=%.3f\n",
+            compute_slot_count_, static_cast<unsigned long long>(op_profile_.batches),
+            op_profile_.wait_ms);
     }
     alive_ = false;
     for (auto& entry : free_buffers_) {
@@ -852,7 +908,8 @@ void Context::destroy() {
     free_buffers_.clear();
     pooled_bytes_ = 0;
     dummy_.reset();
-    for (auto& slot : compute_slots_) slot.staging.reset();
+    for (auto& slot : compute_slots_)
+        slot.staging.reset();
     readback_staging_.reset();
     for (UploadSlot& slot : upload_slots_) {
         slot.staging.reset();
@@ -865,8 +922,10 @@ void Context::destroy() {
     }
     // The encoder destructor may submit a leftover batch, so pipelines and the
     // adopted device have to outlive it.
-    for (auto& slot : compute_slots_) slot.encoder = {};
-    for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
+    for (auto& slot : compute_slots_)
+        slot.encoder = {};
+    for (photara::vk::ComputePipeline& pipeline : pipelines_)
+        pipeline = {};
     runtime_ = {};
     if (upload_command_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, upload_command_pool_, nullptr);
@@ -918,8 +977,8 @@ std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) 
     }
     ++op_profile_.pool_misses;
     op_profile_.pool_miss_bytes += static_cast<std::uint64_t>(size);
-    return std::shared_ptr<Buffer>(new Buffer(physical_, device_, size, MemoryKind::device_local),
-                                   release);
+    return std::shared_ptr<Buffer>(
+        new Buffer(physical_, device_, size, MemoryKind::device_local), release);
 }
 
 void Context::recycle_locked(Buffer* buffer) {
@@ -935,11 +994,11 @@ void Context::recycle_locked(Buffer* buffer) {
 void Context::trim_pool_locked() {
     bool upload_in_flight = false;
     for (UploadSlot& slot : upload_slots_) {
-        if (!slot.in_flight) continue;
+        if (!slot.in_flight)
+            continue;
         const VkResult status = vkGetFenceStatus(device_, slot.fence);
         if (status == VK_SUCCESS) {
-            check(vkResetFences(device_, 1, &slot.fence),
-                  "vkResetFences(upload poll)");
+            check(vkResetFences(device_, 1, &slot.fence), "vkResetFences(upload poll)");
             slot.in_flight = false;
         } else if (status == VK_NOT_READY) {
             upload_in_flight = true;
@@ -947,8 +1006,7 @@ void Context::trim_pool_locked() {
             check(status, "vkGetFenceStatus(upload)");
         }
     }
-    if (compute_pending_locked() || upload_in_flight ||
-        pooled_bytes_ <= pool_budget_bytes_) {
+    if (compute_pending_locked() || upload_in_flight || pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
     // Largest size classes first: the small buffers are the per-step
@@ -957,9 +1015,11 @@ void Context::trim_pool_locked() {
     // reuse horizon is a whole refinement interval.
     std::vector<std::size_t> sizes;
     sizes.reserve(free_buffers_.size());
-    for (const auto& entry : free_buffers_) sizes.push_back(entry.first);
-    std::sort(sizes.begin(), sizes.end(),
-              [](std::size_t left, std::size_t right) { return left > right; });
+    for (const auto& entry : free_buffers_)
+        sizes.push_back(entry.first);
+    std::sort(sizes.begin(), sizes.end(), [](std::size_t left, std::size_t right) {
+        return left > right;
+    });
     for (const std::size_t size : sizes) {
         std::vector<Buffer*>& list = free_buffers_[size];
         while (pooled_bytes_ > pool_budget_bytes_ && !list.empty()) {
@@ -1017,14 +1077,14 @@ void Context::begin_batch_locked() {
     if (op_profile_.enabled && !op_profile_.order.empty()) {
         // Retire the previous batch's timestamp range before reusing indices.
         vkCmdResetQueryPool(
-            command, op_profile_.pool, 0,
-            static_cast<std::uint32_t>(op_profile_.order.size()) * 2);
+            command, op_profile_.pool, 0, static_cast<std::uint32_t>(op_profile_.order.size()) * 2);
         op_profile_.order.clear();
     }
 }
 
 void Context::submit_async_locked() {
-    if (!active_compute().encoder.recording()) return;
+    if (!active_compute().encoder.recording())
+        return;
     // Publish writes to later compute and transfer commands on this queue,
     // including the splat rasterizer's submissions through the shared device.
     active_compute().encoder.barrier();
@@ -1035,24 +1095,29 @@ void Context::submit_async_locked() {
 
 bool Context::compute_pending_locked() const {
     for (const auto& slot : compute_slots_)
-        if (slot.encoder.recording() || slot.encoder.in_flight()) return true;
+        if (slot.encoder.recording() || slot.encoder.in_flight())
+            return true;
     return false;
 }
 
 void Context::retire_compute_slot_locked(ComputeSlot& slot) {
-    if (!slot.encoder.in_flight()) return;
+    if (!slot.encoder.in_flight())
+        return;
     const auto wait_started = std::chrono::steady_clock::now();
     slot.encoder.wait();
-    op_profile_.wait_ms += std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - wait_started).count();
+    op_profile_.wait_ms +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_started)
+            .count();
     ++op_profile_.batches;
-    if (op_profile_.enabled) collect_op_profile_locked();
+    if (op_profile_.enabled)
+        collect_op_profile_locked();
     slot.staging_cursor = 0;
     trim_pool_locked();
 }
 
 void Context::retire_async_locked() {
-    for (auto& slot : compute_slots_) retire_compute_slot_locked(slot);
+    for (auto& slot : compute_slots_)
+        retire_compute_slot_locked(slot);
 }
 
 void Context::flush_locked() {
@@ -1068,26 +1133,23 @@ void Context::create_op_profile_locked() {
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
     std::vector<VkQueueFamilyProperties> families(family_count);
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, families.data());
-    op_profile_.valid_bits = queue_family_ < families.size()
-        ? families[queue_family_].timestampValidBits
-        : 0;
+    op_profile_.valid_bits =
+        queue_family_ < families.size() ? families[queue_family_].timestampValidBits : 0;
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_, &properties);
     op_profile_.period = properties.limits.timestampPeriod;
     if (op_profile_.valid_bits == 0) {
         std::fprintf(
-            stderr,
-            "tinytensor_vulkan_op_profile disabled: queue has timestampValidBits=0\n");
+            stderr, "tinytensor_vulkan_op_profile disabled: queue has timestampValidBits=0\n");
         op_profile_.enabled = false;
         return;
     }
     VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     info.queryType = VK_QUERY_TYPE_TIMESTAMP;
     info.queryCount = 2 * kMaxCommandsPerBatch;
-    check(vkCreateQueryPool(device_, &info, nullptr, &op_profile_.pool),
-          "vkCreateQueryPool");
-    const std::size_t slots = static_cast<std::size_t>(ShaderId::Count) *
-        OpProfile::kElementBuckets;
+    check(vkCreateQueryPool(device_, &info, nullptr, &op_profile_.pool), "vkCreateQueryPool");
+    const std::size_t slots =
+        static_cast<std::size_t>(ShaderId::Count) * OpProfile::kElementBuckets;
     op_profile_.calls.assign(slots, 0);
     op_profile_.total_ms.assign(slots, 0.0);
     op_profile_.order.reserve(kMaxCommandsPerBatch);
@@ -1096,7 +1158,8 @@ void Context::create_op_profile_locked() {
 void Context::collect_op_profile_locked() {
     const std::uint32_t pairs = op_profile_.recorded;
     op_profile_.recorded = 0;
-    if (pairs == 0) return;
+    if (pairs == 0)
+        return;
     std::vector<std::uint64_t> stamps(static_cast<std::size_t>(pairs) * 2);
     const VkResult result = vkGetQueryPoolResults(
         device_, op_profile_.pool, 0, pairs * 2, stamps.size() * sizeof(std::uint64_t),
@@ -1108,30 +1171,30 @@ void Context::collect_op_profile_locked() {
     const double ticks_to_ms = static_cast<double>(op_profile_.period) / 1.0e6;
     for (std::uint32_t pair = 0; pair < pairs; ++pair) {
         const std::size_t slot = op_profile_.order[pair];
-        const std::uint64_t ticks = timestamp_delta(
-            stamps[2 * pair], stamps[2 * pair + 1], op_profile_.valid_bits);
+        const std::uint64_t ticks =
+            timestamp_delta(stamps[2 * pair], stamps[2 * pair + 1], op_profile_.valid_bits);
         op_profile_.total_ms[slot] += static_cast<double>(ticks) * ticks_to_ms;
         ++op_profile_.calls[slot];
     }
     op_profile_.order.clear();
     ++op_profile_.flushes;
-    if (op_profile_.flushes % op_profile_.interval == 0) report_op_profile_locked();
+    if (op_profile_.flushes % op_profile_.interval == 0)
+        report_op_profile_locked();
 }
 
 void Context::report_op_profile_locked() {
     const std::uint32_t flushes = op_profile_.flushes;
     std::fprintf(
-        stderr, "tinytensor_vulkan_op_profile flushes=%u cumulative_from_start=1\n",
-        flushes);
+        stderr, "tinytensor_vulkan_op_profile flushes=%u cumulative_from_start=1\n", flushes);
     const std::size_t slots = op_profile_.calls.size();
     double total_ms = 0.0;
     for (std::size_t slot = 0; slot < slots; ++slot)
         total_ms += op_profile_.total_ms[slot];
     for (std::size_t slot = 0; slot < slots; ++slot) {
-        if (op_profile_.calls[slot] == 0) continue;
+        if (op_profile_.calls[slot] == 0)
+            continue;
         const std::size_t shader = slot / OpProfile::kElementBuckets;
-        const std::uint32_t bucket =
-            static_cast<std::uint32_t>(slot % OpProfile::kElementBuckets);
+        const std::uint32_t bucket = static_cast<std::uint32_t>(slot % OpProfile::kElementBuckets);
         std::fprintf(
             stderr,
             "  %-16s elems<=%-10llu calls=%-7llu total_ms=%-9.4f "
@@ -1140,31 +1203,31 @@ void Context::report_op_profile_locked() {
             // The bucket is the last power of two below the covered count, so
             // the printed bound is the one above it.
             static_cast<unsigned long long>(std::uint64_t{1} << (bucket + 1)),
-            static_cast<unsigned long long>(op_profile_.calls[slot]),
-            op_profile_.total_ms[slot],
+            static_cast<unsigned long long>(op_profile_.calls[slot]), op_profile_.total_ms[slot],
             op_profile_.total_ms[slot] / static_cast<double>(op_profile_.calls[slot]),
             op_profile_.total_ms[slot] / static_cast<double>(flushes),
             total_ms > 0.0 ? 100.0 * op_profile_.total_ms[slot] / total_ms : 0.0);
     }
     std::fprintf(stderr, "  %-16s calls=%-8s total_ms=%-9.4f\n", "TOTAL", "-", total_ms);
-    std::fprintf(stderr,
-                 "tinytensor_vulkan_batches batches=%llu dispatches=%llu "
-                 "gpu_busy_ms=%.1f fence_wait_ms=%.1f\n",
-                 static_cast<unsigned long long>(op_profile_.batches),
-                 static_cast<unsigned long long>(op_profile_.dispatches),
-                 total_ms, op_profile_.wait_ms);
+    std::fprintf(
+        stderr,
+        "tinytensor_vulkan_batches batches=%llu dispatches=%llu "
+        "gpu_busy_ms=%.1f fence_wait_ms=%.1f\n",
+        static_cast<unsigned long long>(op_profile_.batches),
+        static_cast<unsigned long long>(op_profile_.dispatches), total_ms, op_profile_.wait_ms);
 }
 
 std::vector<Context::OpProfileEntry> Context::op_profile() const {
     std::vector<OpProfileEntry> entries;
     const std::size_t slots = op_profile_.calls.size();
     for (std::size_t slot = 0; slot < slots; ++slot) {
-        if (op_profile_.calls[slot] == 0) continue;
+        if (op_profile_.calls[slot] == 0)
+            continue;
         const std::size_t shader = slot / OpProfile::kElementBuckets;
         entries.push_back(
             {shader_name(static_cast<ShaderId>(shader)),
-             std::uint64_t{1} << (slot % OpProfile::kElementBuckets),
-             op_profile_.calls[slot], op_profile_.total_ms[slot]});
+             std::uint64_t{1} << (slot % OpProfile::kElementBuckets), op_profile_.calls[slot],
+             op_profile_.total_ms[slot]});
     }
     return entries;
 }
@@ -1192,13 +1255,17 @@ void Context::record_barrier_locked() {
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+            VK_ACCESS_TRANSFER_WRITE_BIT);
 }
 
-void Context::barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src_access,
-                             VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
-                             VkPipelineStageFlags dst_stage) {
+void Context::barrier_buffer(
+    VkCommandBuffer cmd,
+    VkBuffer buffer,
+    VkAccessFlags src_access,
+    VkAccessFlags dst_access,
+    VkPipelineStageFlags src_stage,
+    VkPipelineStageFlags dst_stage) {
     VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     barrier.srcAccessMask = src_access;
     barrier.dstAccessMask = dst_access;
@@ -1229,17 +1296,22 @@ void Context::fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes) {
     begin_batch_locked();
     const VkCommandBuffer command = command_buffer();
     vkCmdFillBuffer(command, buffer.handle(), aligned_offset, aligned_size, 0);
-    barrier_buffer(command, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier_buffer(
+        command, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
     if (++batch_commands_ >= kMaxCommandsPerBatch) {
         flush_locked();
     }
 }
 
-void Context::copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::size_t src_offset,
-                   std::size_t bytes) {
+void Context::copy(
+    Buffer& dst,
+    std::size_t dst_offset,
+    const Buffer& src,
+    std::size_t src_offset,
+    std::size_t bytes) {
     if (bytes == 0) {
         return;
     }
@@ -1251,10 +1323,11 @@ void Context::copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::
     region.dstOffset = dst_offset;
     region.size = bytes;
     vkCmdCopyBuffer(command, src.handle(), dst.handle(), 1, &region);
-    barrier_buffer(command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier_buffer(
+        command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
     if (++batch_commands_ >= kMaxCommandsPerBatch) {
         flush_locked();
     }
@@ -1285,9 +1358,10 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
     region.dstOffset = dst_offset;
     region.size = bytes;
     vkCmdCopyBuffer(command, slot.staging->handle(), dst.handle(), 1, &region);
-    barrier_buffer(command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    barrier_buffer(
+        command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     slot.staging_cursor += aligned;
     if (++batch_commands_ >= kMaxCommandsPerBatch) {
         flush_locked();
@@ -1296,18 +1370,20 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
 
 void Context::retire_upload_slot_locked(const std::size_t index) {
     UploadSlot& slot = upload_slots_[index];
-    if (!slot.in_flight) return;
-    check(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX),
-          "vkWaitForFences(upload)");
-    check(vkResetFences(device_, 1, &slot.fence),
-          "vkResetFences(upload)");
+    if (!slot.in_flight)
+        return;
+    check(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences(upload)");
+    check(vkResetFences(device_, 1, &slot.fence), "vkResetFences(upload)");
     slot.in_flight = false;
 }
 
 void Context::upload_async(
-    Buffer& dst, const std::size_t dst_offset, const void* data,
+    Buffer& dst,
+    const std::size_t dst_offset,
+    const void* data,
     const std::size_t bytes) {
-    if (bytes == 0) return;
+    if (bytes == 0)
+        return;
     std::scoped_lock lock(mutex_);
     // A newly allocated tensor can reuse a pooled buffer still referenced by
     // the open compute batch. Publish those readers before the out-of-band
@@ -1321,35 +1397,28 @@ void Context::upload_async(
     const std::size_t aligned = (bytes + 3U) & ~std::size_t{3};
     if (slot.staging == nullptr || slot.staging->size() < aligned) {
         slot.staging = std::make_unique<Buffer>(
-            physical_, device_, static_cast<VkDeviceSize>(aligned),
-            MemoryKind::host_visible);
+            physical_, device_, static_cast<VkDeviceSize>(aligned), MemoryKind::host_visible);
     }
     std::memcpy(slot.staging->mapped(), data, bytes);
-    check(vkResetCommandBuffer(slot.command, 0),
-          "vkResetCommandBuffer(upload)");
-    VkCommandBufferBeginInfo begin{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    check(vkResetCommandBuffer(slot.command, 0), "vkResetCommandBuffer(upload)");
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(slot.command, &begin),
-          "vkBeginCommandBuffer(upload)");
+    check(vkBeginCommandBuffer(slot.command, &begin), "vkBeginCommandBuffer(upload)");
     VkBufferCopy region{};
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(
-        slot.command, slot.staging->handle(), dst.handle(), 1, &region);
+    vkCmdCopyBuffer(slot.command, slot.staging->handle(), dst.handle(), 1, &region);
     barrier_buffer(
         slot.command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    check(vkEndCommandBuffer(slot.command),
-          "vkEndCommandBuffer(upload)");
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    check(vkEndCommandBuffer(slot.command), "vkEndCommandBuffer(upload)");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot.command;
     {
         photara::vk::QueueLock lock(runtime_.valid() ? runtime_.queue() : queue_);
-        check(vkQueueSubmit(queue_, 1, &submit, slot.fence),
-              "vkQueueSubmit(upload)");
+        check(vkQueueSubmit(queue_, 1, &submit, slot.fence), "vkQueueSubmit(upload)");
     }
     slot.in_flight = true;
 }
@@ -1371,16 +1440,17 @@ void Context::download(const Buffer& src, std::size_t src_offset, void* data, st
     }
     begin_batch_locked();
     const VkCommandBuffer command = command_buffer();
-    barrier_buffer(command, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier_buffer(
+        command, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferCopy region{};
     region.srcOffset = src_offset;
     region.dstOffset = 0;
     region.size = bytes;
     vkCmdCopyBuffer(command, src.handle(), readback_staging_->handle(), 1, &region);
-    barrier_buffer(command, readback_staging_->handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_HOST_BIT);
+    barrier_buffer(
+        command, readback_staging_->handle(), VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
     flush_locked();
     char* source = static_cast<char*>(readback_staging_->mapped());
     if (!readback_staging_->coherent()) {
@@ -1393,28 +1463,30 @@ void Context::download(const Buffer& src, std::size_t src_offset, void* data, st
         const VkDeviceSize end = aligned;
         range.size =
             std::min<VkDeviceSize>((end + atom - 1) & ~(atom - 1), readback_staging_->size());
-        check(vkInvalidateMappedMemoryRanges(device_, 1, &range),
-              "vkInvalidateMappedMemoryRanges");
+        check(vkInvalidateMappedMemoryRanges(device_, 1, &range), "vkInvalidateMappedMemoryRanges");
     }
     std::memcpy(data, source, bytes);
 }
 
-void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
-                       const void* push_constants, std::uint32_t push_bytes, std::uint32_t groups_x,
-                       std::uint32_t groups_y, std::uint32_t groups_z) {
+void Context::dispatch(
+    ShaderId shader,
+    std::span<const BufferBinding> bindings,
+    const void* push_constants,
+    std::uint32_t push_bytes,
+    std::uint32_t groups_x,
+    std::uint32_t groups_y,
+    std::uint32_t groups_z) {
     if (groups_x == 0 || groups_y == 0 || groups_z == 0) {
         return;
     }
     std::scoped_lock lock(mutex_);
-    const photara::vk::ComputePipeline& pipeline =
-        pipelines_[static_cast<std::size_t>(shader)];
+    const photara::vk::ComputePipeline& pipeline = pipelines_[static_cast<std::size_t>(shader)];
     if (bindings.size() != pipeline.binding_count()) {
         throw std::invalid_argument("Vulkan dispatch binding count mismatch");
     }
 
     begin_batch_locked();
-    const bool profile = op_profile_.enabled &&
-        op_profile_.recorded < kMaxCommandsPerBatch;
+    const bool profile = op_profile_.enabled && op_profile_.recorded < kMaxCommandsPerBatch;
     // Timestamps bracket the dispatch itself. The encoder's barrier policy is
     // none, so the read-after-write barrier stays the explicit one below.
     VkCommandBuffer command = VK_NULL_HANDLE;
@@ -1434,8 +1506,7 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         converted[index].range = bindings[index].range;
     }
     active_compute().encoder.dispatch(
-        pipeline,
-        std::span<const photara::vk::BufferBinding>{converted.data(), bindings.size()},
+        pipeline, std::span<const photara::vk::BufferBinding>{converted.data(), bindings.size()},
         push_constants, push_bytes, groups_x, groups_y, groups_z);
     ++op_profile_.dispatches;
     if (profile) {
@@ -1475,8 +1546,9 @@ const DeviceInfo& device_info() {
 
 DeviceHandles device_handles() {
     const auto& context = runtime::Context::get();
-    return {context.instance(), context.physical_device(), context.device(), context.queue(),
-            context.queue_family()};
+    return {
+        context.instance(), context.physical_device(), context.device(), context.queue(),
+        context.queue_family()};
 }
 
 void synchronize() {
@@ -1501,9 +1573,9 @@ double device_busy_ms() {
 
 BufferPoolStats buffer_pool_stats() {
     const auto stats = runtime::Context::get().pool_stats();
-    return {stats.hits, stats.misses, stats.miss_bytes, stats.drops,
-            stats.drop_bytes, stats.reserved_bytes, stats.free_bytes,
-            stats.live_bytes, stats.budget_bytes};
+    return {stats.hits,       stats.misses,     stats.miss_bytes,
+            stats.drops,      stats.drop_bytes, stats.reserved_bytes,
+            stats.free_bytes, stats.live_bytes, stats.budget_bytes};
 }
 
 void shutdown() {

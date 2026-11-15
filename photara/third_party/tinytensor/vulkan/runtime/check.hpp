@@ -10,8 +10,9 @@ namespace tinytensor::vulkan::runtime {
 
 inline void check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
-        throw std::runtime_error(std::string(operation) + " failed with VkResult " +
-                                 std::to_string(static_cast<int>(result)));
+        throw std::runtime_error(
+            std::string(operation) + " failed with VkResult " +
+            std::to_string(static_cast<int>(result)));
     }
 }
 
