@@ -1,4 +1,5 @@
 #include "cuda_backend.hpp"
+#include "splat/device.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,11 +8,16 @@
 namespace photara::splat::detail {
 PpispState make_ppisp_state(const std::size_t views, const TrainingOptions& options) {
 
-#if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return cuda_backend::make_ppisp_state(views, options);
-#else
-    throw std::runtime_error("make_ppisp_state: this operation requires the CUDA backend");
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (training_device(options) == tinytensor::Device::Vulkan)
+        return make_ppisp_state_vulkan(views, options);
 #endif
+
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    if (training_device(options) == tinytensor::Device::CUDA)
+        return cuda_backend::make_ppisp_state(views, options);
+#endif
+    throw std::runtime_error("make_ppisp_state: requested backend is not enabled");
 }
 
 void apply_ppisp(
@@ -20,11 +26,16 @@ void apply_ppisp(
     const Camera& camera,
     const std::size_t view) {
 
-#if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return cuda_backend::apply_ppisp(color, state, camera, view);
-#else
-    throw std::runtime_error("apply_ppisp: this operation requires the CUDA backend");
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (state.parameters.device() == tinytensor::Device::Vulkan)
+        return apply_ppisp_vulkan(color, state, camera, view);
 #endif
+
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    if (state.parameters.device() == tinytensor::Device::CUDA)
+        return cuda_backend::apply_ppisp(color, state, camera, view);
+#endif
+    throw std::runtime_error("apply_ppisp: requested backend is not enabled");
 }
 
 void backward_ppisp(
@@ -34,20 +45,30 @@ void backward_ppisp(
     const Camera& camera,
     const std::size_t view) {
 
-#if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return cuda_backend::backward_ppisp(state, color, output_gradient, camera, view);
-#else
-    throw std::runtime_error("backward_ppisp: this operation requires the CUDA backend");
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (state.parameters.device() == tinytensor::Device::Vulkan)
+        return backward_ppisp_vulkan(state, color, output_gradient, camera, view);
 #endif
+
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    if (state.parameters.device() == tinytensor::Device::CUDA)
+        return cuda_backend::backward_ppisp(state, color, output_gradient, camera, view);
+#endif
+    throw std::runtime_error("backward_ppisp: requested backend is not enabled");
 }
 
 void step_ppisp(PpispState& state, const TrainingOptions& options, const unsigned iteration) {
 
-#if defined(PHOTARA_HAS_CUDA_SPLAT)
-    return cuda_backend::step_ppisp(state, options, iteration);
-#else
-    throw std::runtime_error("step_ppisp: this operation requires the CUDA backend");
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (state.parameters.device() == tinytensor::Device::Vulkan)
+        return step_ppisp_vulkan(state, options, iteration);
 #endif
+
+#if defined(PHOTARA_HAS_CUDA_SPLAT)
+    if (state.parameters.device() == tinytensor::Device::CUDA)
+        return cuda_backend::step_ppisp(state, options, iteration);
+#endif
+    throw std::runtime_error("step_ppisp: requested backend is not enabled");
 }
 
 std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {

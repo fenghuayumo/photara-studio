@@ -1,4 +1,5 @@
 #include "../src/splat/ops.hpp"
+#include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/ppisp.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
 
@@ -33,7 +34,11 @@ void contracts() {
     detail::sh_adam_quant_select_rows(inactive, {});
     detail::sh_adam_quant_zero_rows(inactive, {});
 #if !defined(PHOTARA_HAS_CUDA_SPLAT)
-    requires_exception<std::runtime_error>([] { detail::make_ppisp_state(1, {}); });
+    requires_exception<std::runtime_error>([] {
+        TrainingOptions options;
+        options.backend = TrainingBackend::cuda;
+        detail::make_ppisp_state(1, options);
+    });
 #endif
 }
 
@@ -66,6 +71,34 @@ void device_dispatch(Device device) {
             std::abs(analytic[i] - numeric) < 2e-4F,
             "Normal gradient dispatch failed finite differences");
     }
+
+    // Exercise the same appearance entry points used by Trainer, including
+    // creation from backend options and forward/backward/optimizer dispatch.
+    TrainingOptions options;
+    options.backend = device == Device::Vulkan ? TrainingBackend::vulkan : TrainingBackend::cuda;
+    auto ppisp = detail::make_ppisp_state(1, options);
+    Camera camera;
+    camera.width = camera.height = 16;
+    camera.fx = camera.fy = 10.F;
+    auto color = Tensor::full({3, 16, 16}, .4F, device);
+    auto grad = Tensor::full({3, 16, 16}, .01F, device);
+    detail::apply_ppisp(color, ppisp, camera, 0);
+    require(ppisp.output.device() == device, "PPISP changed device");
+    for (float value : ppisp.output.to_vector())
+        require(std::abs(value - .4F) < 1e-5F, "PPISP identity dispatch failed");
+    detail::backward_ppisp(ppisp, color, grad, camera, 0);
+    detail::step_ppisp(ppisp, options, 1);
+    for (float value : ppisp.parameters.to_vector())
+        require(std::isfinite(value), "PPISP update produced non-finite parameters");
+    auto grid = detail::make_bilateral_grid_state(1, options);
+    detail::apply_bilateral_grid(color, grid, 0);
+    require(grid.output.device() == device, "Bilateral grid changed device");
+    for (float value : grid.output.to_vector())
+        require(std::abs(value - .4F) < 1e-5F, "Bilateral identity dispatch failed");
+    detail::backward_bilateral_grid(grid, color, grad, 0);
+    detail::step_bilateral_grid(grid, options, 1);
+    for (float value : grid.grids.to_vector())
+        require(std::isfinite(value), "Bilateral update produced non-finite parameters");
 
     auto state = detail::make_sh_adam_quant(2, 3, device);
     auto parameter = Tensor::full({2, 3}, 1.F, device);

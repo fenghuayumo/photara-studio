@@ -6,7 +6,7 @@
 #include "bilateral_grid.hpp"
 #include "checkpoint.hpp"
 #include "ops.hpp"
-#include "geometry_vulkan.hpp"
+#include "training_dispatch.hpp"
 #include "focus_mask.hpp"
 #include "focus_mask_frame.hpp"
 #include "fused_ssim.hpp"
@@ -914,34 +914,6 @@ void write_float(std::ofstream& stream, const float value) {
     stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-tinytensor::Tensor normal_features_from_smallest_axis(const GaussianModel& model) {
-#ifdef TINYTENSOR_HAS_VULKAN
-    if (model.means.device() == tinytensor::Device::Vulkan)
-        return detail::normal_features_from_smallest_axis_vulkan(model);
-#endif
-    const detail::ActivatedParameters activated = detail::activate_parameters(model);
-    const auto scales = activated.scales.to_vector();
-    const auto quaternions = activated.quaternions.to_vector();
-    std::vector<float> features(model.size() * 4, 0.F);
-    for (std::size_t index = 0; index < model.size(); ++index) {
-        int minimum_axis = 0;
-        if (scales[3 * index + 1] < scales[3 * index])
-            minimum_axis = 1;
-        if (scales[3 * index + 2] < scales[3 * index + static_cast<std::size_t>(minimum_axis)])
-            minimum_axis = 2;
-        const Eigen::Quaternionf rotation(
-            quaternions[4 * index], quaternions[4 * index + 1], quaternions[4 * index + 2],
-            quaternions[4 * index + 3]);
-        const mvs::Vec3f direction = rotation.toRotationMatrix().col(minimum_axis);
-        for (int axis = 0; axis < 3; ++axis)
-            features[4 * index + static_cast<std::size_t>(axis)] = direction(axis);
-        // GaussianWrapping resets the learnable orientation sign to zero.
-        features[4 * index + 3] = 0.F;
-    }
-    return tinytensor::Tensor::from_vector(
-        features, {model.size(), std::size_t{4}}, model.means.device());
-}
-
 } // namespace
 
 GaussianModel initialize_from_dense_cloud(
@@ -1616,14 +1588,11 @@ GaussianModel Trainer::train_impl(
     const bool ppisp_before_bilagrid = options_.ppisp_before_bilagrid;
     detail::PpispState ppisp_state =
         ppisp_enabled
-            ? (vulkan_backend ? detail::make_ppisp_state_vulkan(scene.views.size(), options_)
-                              : detail::make_ppisp_state(scene.views.size(), options_))
+            ? detail::make_ppisp_state(scene.views.size(), options_)
             : detail::PpispState{};
     detail::BilateralGridState bilagrid_state =
         bilagrid_enabled
-            ? (vulkan_backend
-                   ? detail::make_bilateral_grid_state_vulkan(scene.views.size(), options_)
-                   : detail::make_bilateral_grid_state(scene.views.size(), options_))
+            ? detail::make_bilateral_grid_state(scene.views.size(), options_)
             : detail::BilateralGridState{};
     const bool densification_enabled = refine::is_enabled(options_);
     const bool panorama_adc =
@@ -1953,21 +1922,11 @@ GaussianModel Trainer::train_impl(
         const std::size_t view_index = shuffled_views[shuffled_view_cursor++];
         TrainingView target = view_cache.get(view_index);
         if (focus_bounds.valid) {
-            const bool focus_on_cuda = model.means.device() == tinytensor::Device::CUDA;
-#if defined(TINYTENSOR_HAS_VULKAN)
-            const bool focus_on_vulkan = model.means.device() == tinytensor::Device::Vulkan;
-#else
-            const bool focus_on_vulkan = false;
-#endif
-            const bool focus_on_device = focus_on_cuda || focus_on_vulkan;
+            const bool focus_on_device = model.means.device() != tinytensor::Device::CPU;
             tinytensor::Tensor focus_mask;
             const auto focus_frame = detail::make_focus_mask_frame(target.camera, focus_bounds);
-            if (focus_on_cuda) {
-                focus_mask = detail::focus_view_mask_cuda(focus_frame);
-#if defined(TINYTENSOR_HAS_VULKAN)
-            } else if (focus_on_vulkan) {
-                focus_mask = detail::focus_view_mask_vulkan(focus_frame);
-#endif
+            if (focus_on_device) {
+                focus_mask = detail::focus_view_mask(focus_frame, model.means.device());
             } else {
                 auto found = focus_view_masks.find(view_index);
                 if (found == focus_view_masks.end()) {
@@ -2050,12 +2009,9 @@ GaussianModel Trainer::train_impl(
         // Vulkan previews render their own requested camera below; they never
         // consume the current training view's copied RGB/alpha tensors. Keep
         // the fused-loss frame backend-resident even when live preview is on.
-        raster_options.copy_attachments = !vulkan_backend || ppisp_enabled || bilagrid_enabled || reference;
-        raster_options.copy_color_only = vulkan_backend && (ppisp_enabled || bilagrid_enabled || reference);
-        raster_options.copy_alpha =
-            vulkan_backend && options_.use_mask && target.has_mask && !target.mask_is_validity &&
-            options_.alpha_mode == AlphaMode::transparent && options_.match_alpha_weight > 0.F;
-        raster_options.defer_visibility = vulkan_backend;
+        detail::configure_training_raster(
+            raster_options, options_, target, ppisp_enabled || bilagrid_enabled || reference);
+
         // Environment override for measurement (see
         // PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE in the rasterizer): keep
         // the older "always allocate the geometry gradient images" behavior so
@@ -2209,29 +2165,19 @@ GaussianModel Trainer::train_impl(
         const tinytensor::Tensor* bilagrid_input = nullptr;
         if (ppisp_enabled && ppisp_before_bilagrid) {
             ppisp_input = photo_color;
-            if (vulkan_backend)
-                detail::apply_ppisp_vulkan(*ppisp_input, ppisp_state, target.camera, view_index);
-            else
-                detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
+            detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
             photo_color = &ppisp_state.output;
         }
         if (bilagrid_enabled) {
             bilagrid_input = photo_color;
             const bool wrap_horizontal = target.camera.model == CameraModel::equirectangular;
-            if (vulkan_backend)
-                detail::apply_bilateral_grid_vulkan(
-                    *bilagrid_input, bilagrid_state, view_index, wrap_horizontal);
-            else
-                detail::apply_bilateral_grid(
-                    *bilagrid_input, bilagrid_state, view_index, wrap_horizontal);
+            detail::apply_bilateral_grid(
+                *bilagrid_input, bilagrid_state, view_index, wrap_horizontal);
             photo_color = &bilagrid_state.output;
         }
         if (ppisp_enabled && !ppisp_before_bilagrid) {
             ppisp_input = photo_color;
-            if (vulkan_backend)
-                detail::apply_ppisp_vulkan(*ppisp_input, ppisp_state, target.camera, view_index);
-            else
-                detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
+            detail::apply_ppisp(*ppisp_input, ppisp_state, target.camera, view_index);
             photo_color = &ppisp_state.output;
         }
         // The colour correction and the photometric loss it feeds are their
@@ -2252,35 +2198,13 @@ GaussianModel Trainer::train_impl(
         auto geometry_target = target;
         geometry_target.camera = raster_sample_camera(target.camera, raster_options);
         detail::LossGradients loss;
-        if (vulkan_backend) {
-            const bool mask_enabled =
-                target.has_mask && (options_.use_mask || target.mask_is_validity);
-            if (ppisp_enabled || bilagrid_enabled || reference)
-                loss.color = *photo_color;
-            loss.total = loss.rgb = rasterizer.photometric_loss(
-                loss_render, target.rgb, target.mask, mask_enabled, options_.ssim_weight,
-                options_.photometric_weight, report_progress,
-                ppisp_enabled || bilagrid_enabled || reference ? &loss.color : nullptr);
-            loss.alpha = rendered.alpha.is_valid() ? tinytensor::Tensor::zeros_like(rendered.alpha)
-                                                   : tinytensor::Tensor{};
-            detail::add_alpha_mask_loss_vulkan(rendered, target, options_, loss, report_progress);
-            if (allocate_geometry_gradients)
-                detail::add_depth_normal_loss_vulkan(
-                    rendered, geometry_target.camera,
-                    depth_normal_active ? options_.depth_normal_weight : 0.F, loss,
-                    report_progress);
-            if (options_.use_mvs_depth || options_.use_mvs_normals)
-                detail::add_mvs_loss_vulkan(rendered,target,options_,loss,report_progress);
-            if (ai_prior_active)
-                detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
-        } else {
-            loss = detail::compute_training_loss(
-                loss_render, geometry_target, options_, report_progress, depth_normal_active,
-                allocate_geometry_gradients, ai_prior_active);
-        }
+        loss = detail::compute_step_loss(
+            rasterizer, rendered, loss_render, target, geometry_target, options_,
+            report_progress, depth_normal_active, allocate_geometry_gradients,
+            ai_prior_active, ppisp_enabled || bilagrid_enabled || reference);
         if (options_.use_normal_field &&
             iteration == std::max(options_.normal_field_from_iter, 1U)) {
-            model.normal_features = normal_features_from_smallest_axis(model);
+            model.normal_features = detail::normal_features_from_smallest_axis(model);
             normal_features_state = detail::make_adam_state(model.normal_features);
             normal_features_updates = 0;
         }
@@ -2337,41 +2261,22 @@ GaussianModel Trainer::train_impl(
         }
         tinytensor::Tensor* photo_grad = &loss.color;
         if (ppisp_enabled && !ppisp_before_bilagrid) {
-            if (vulkan_backend) {
-                detail::backward_ppisp_vulkan(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
-                detail::step_ppisp_vulkan(ppisp_state, options_, iteration);
-            } else {
-                detail::backward_ppisp(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
-                detail::step_ppisp(ppisp_state, options_, iteration);
-            }
+            detail::backward_ppisp(
+                ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
+            detail::step_ppisp(ppisp_state, options_, iteration);
             photo_grad = &ppisp_state.input_grad;
         }
         if (bilagrid_enabled) {
             const bool wrap_horizontal = target.camera.model == CameraModel::equirectangular;
-            if (vulkan_backend) {
-                detail::backward_bilateral_grid_vulkan(
-                    bilagrid_state, *bilagrid_input, *photo_grad, view_index, wrap_horizontal);
-                detail::step_bilateral_grid_vulkan(
-                    bilagrid_state, options_, iteration, wrap_horizontal);
-            } else {
-                detail::backward_bilateral_grid(
-                    bilagrid_state, *bilagrid_input, *photo_grad, view_index, wrap_horizontal);
-                detail::step_bilateral_grid(bilagrid_state, options_, iteration, wrap_horizontal);
-            }
+            detail::backward_bilateral_grid(
+                bilagrid_state, *bilagrid_input, *photo_grad, view_index, wrap_horizontal);
+            detail::step_bilateral_grid(bilagrid_state, options_, iteration, wrap_horizontal);
             photo_grad = &bilagrid_state.input_grad;
         }
         if (ppisp_enabled && ppisp_before_bilagrid) {
-            if (vulkan_backend) {
-                detail::backward_ppisp_vulkan(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
-                detail::step_ppisp_vulkan(ppisp_state, options_, iteration);
-            } else {
-                detail::backward_ppisp(
-                    ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
-                detail::step_ppisp(ppisp_state, options_, iteration);
-            }
+            detail::backward_ppisp(
+                ppisp_state, *ppisp_input, *photo_grad, target.camera, view_index);
+            detail::step_ppisp(ppisp_state, options_, iteration);
             photo_grad = &ppisp_state.input_grad;
         }
         if (ppisp_enabled && report_progress && !vulkan_backend) {
@@ -2394,19 +2299,8 @@ GaussianModel Trainer::train_impl(
             reference_options.require_depth = false;
             reference_options.copy_attachments = true;
             auto teacher = reference_rasterizer.forward(*reference, target.camera, reference_options);
-            tinytensor::Tensor gradient;
-            if (vulkan_backend) {
-                rasterizer.photometric_loss(rendered, teacher.color, target.mask,
-                    target.has_mask && (options_.use_mask || target.mask_is_validity),
-                    options_.ssim_weight, options_.photometric_weight, false, &gradient);
-            } else {
-                auto teacher_target = target;
-                teacher_target.rgb = teacher.color;
-                auto canonical_render = rendered;
-                canonical_render.context.impl.reset();
-                gradient = detail::compute_training_loss(canonical_render, teacher_target,
-                    options_, false, false, false, false).color;
-            }
+            auto gradient = detail::reference_color_gradient(
+                rasterizer, rendered, teacher, target, options_);
             reference_combined_gradient = photo_grad->add(gradient.mul(options_.popspa_reference_weight));
             photo_grad = &reference_combined_gradient;
         }
@@ -2497,16 +2391,13 @@ GaussianModel Trainer::train_impl(
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
-            normal_options.reuse_projection = vulkan_backend;
             normal_options.require_depth = true;
             // The primary fused RGB pass may omit owned attachments. The
             // field loss needs the signed color and alpha of this render.
             normal_options.copy_attachments = true;
             normal_options.copy_color_only = false;
-            const RenderResult normal_field_render =
-                vulkan_backend
-                    ? rasterizer.forward(model, target.camera, normal_options)
-                    : rasterizer.forward_colors(model, rendered, normal_options.colors_precomp);
+            const RenderResult normal_field_render = detail::render_normal_field(
+                rasterizer, model, rendered, target.camera, normal_options);
             const auto normal_field_loss = detail::compute_normal_field_loss(
                 normal_field_render, geometry_target.camera,
                 options_.normal_field_weight * options_.normal_field_depth_ratio, report_progress);
@@ -2594,24 +2485,9 @@ GaussianModel Trainer::train_impl(
                           1, std::min(target.camera.width, target.camera.height))),
                 options_.oversize_screen_limit, oversize_penalty, options_.scales_lr);
         }
-        const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
         if (!fused_sh) {
-            const float vulkan_sh_regularization =
-                vulkan_backend && full_sh_stride > 3 && options_.sh_regularization_weight > 0.F
-                    ? 2.F * options_.sh_regularization_weight /
-                          static_cast<float>(model.size() * (full_sh_stride - 3))
-                    : 0.F;
-            if (!vulkan_backend)
-                detail::add_sh_regularization(
-                    model.sh, gradients.sh, options_.sh_regularization_weight);
-            const std::size_t active_sh_stride =
-                static_cast<std::size_t>(active_sh_degree + 1) * (active_sh_degree + 1) * 3;
-            detail::sh_adam_quant_step(
-                model.sh, gradients.sh, sh_quant, static_cast<int>(active_sh_stride),
-                options_.sh0_lr, options_.sh_rest_lr, options_.beta1, options_.beta2,
-                1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
-                1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
-                options_.adam_epsilon, vulkan_sh_regularization);
+            detail::step_training_sh(model, gradients, sh_quant, active_sh_degree,
+                                     options_, iteration);
         }
         if (normal_field_active) {
             // This optimizer starts late; its bias correction counts actual

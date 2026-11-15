@@ -29,6 +29,8 @@ struct FocusMaskFrame {
     float half_z = 0.F;
 };
 
+tinytensor::Tensor focus_view_mask(const FocusMaskFrame& frame, tinytensor::Device device);
+
 tinytensor::Tensor focus_view_mask_cuda(const FocusMaskFrame& frame);
 tinytensor::Tensor focus_view_mask_cpu(const FocusMaskFrame& frame, tinytensor::Device device);
 #if defined(TINYTENSOR_HAS_VULKAN)

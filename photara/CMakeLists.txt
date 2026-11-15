@@ -629,6 +629,7 @@ if(PHOTARA_ENABLE_FEATURES)
         add_library(photara_splat_backends STATIC
             src/splat/focus_mask.cpp
             src/splat/visualize.cpp
+            src/splat/training_dispatch.cpp
             src/splat/ops.cpp
             src/splat/sh_adam_quant.cpp
             src/splat/ppisp.cpp
@@ -643,7 +644,7 @@ if(PHOTARA_ENABLE_FEATURES)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
-        target_link_libraries(photara_splat_backends PUBLIC tinytensor::tinytensor)
+        target_link_libraries(photara_splat_backends PUBLIC tinytensor::tinytensor PRIVATE Eigen3::Eigen)
         target_compile_features(photara_splat_backends PUBLIC cxx_std_20)
         set_target_properties(photara_splat_backends PROPERTIES POSITION_INDEPENDENT_CODE ON)
         if(PHOTARA_ENABLE_CUDA)
@@ -749,6 +750,7 @@ if(PHOTARA_ENABLE_FEATURES)
         endif()
         if(TARGET splat_drender::vulkan)
             target_sources(photara_splat_backends PRIVATE
+                src/splat/training_dispatch_vulkan.cpp
                 src/splat/ops_vulkan.cpp
                 src/splat/pam_ops_vulkan.cpp
                 src/splat/sh_adam_quant_vulkan.cpp
@@ -1652,6 +1654,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         add_test(NAME photara.splat.checkpoint COMMAND photara_splat_checkpoint_test)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND AND TARGET photara)
+            add_test(NAME photara.splat.backend_layering
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/splat_backend_layering_test.py")
             add_test(NAME photara.splat.process_resume
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_resume_process_test.py"
                     $<TARGET_FILE:photara>)

@@ -8,6 +8,16 @@
 #include <vector>
 
 namespace photara::splat::detail {
+tinytensor::Tensor focus_view_mask(const FocusMaskFrame& frame, tinytensor::Device device) {
+#if defined(TINYTENSOR_HAS_VULKAN)
+    if (device == tinytensor::Device::Vulkan)
+        return focus_view_mask_vulkan(frame);
+#endif
+    if (device == tinytensor::Device::CUDA)
+        return focus_view_mask_cuda(frame);
+    return focus_view_mask_cpu(frame, device);
+}
+
 tinytensor::Tensor focus_view_mask_cpu(
     const FocusMaskFrame& frame,
     const tinytensor::Device device) {

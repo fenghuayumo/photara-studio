@@ -39,12 +39,26 @@ sorting, blending, losses, backward, and optimizer updates execute on CUDA.
 - `src/splat/ppisp.cu`: exposure, white balance, vignetting, and CRF models.
 - `src/splat/trainer.cpp`: initialization, topology changes, training, and
   model I/O.
+- `src/splat/training_dispatch.*`: shared C++ execution boundary for training
+  loss, raster attachment policy, auxiliary normal renders, reference gradients,
+  normal initialization, and SH updates. The trainer calls these common entry
+  points; Vulkan's fused device loss is implemented in `training_dispatch_vulkan.cpp`.
+- `src/splat/ppisp.cpp`, `bilateral_grid.cpp`, and `focus_mask.cpp`: shared
+  dispatch for appearance correction and region masks. State creation uses the
+  requested backend; subsequent operations follow the state's device.
 - `src/splat/training_data_loader.cpp`: bounded decode, host/device caches,
   masks, alpha, depth, and neighbor data.
 - `src/splat/colmap.cpp`: imported camera and sparse-model loading.
 - `src/splat/mesh.cpp`: rendered-frame TSDF extraction.
 - `src/splat/pam_mesh.cpp`: learned-normal occupancy and PAM extraction.
 - `photara/third_party/tinytensor/`: tensor storage and CUDA/Vulkan support.
+
+Backend selection belongs in shared C++ dispatchers. CUDA translation units
+implement CUDA operations and must not call Vulkan implementations. Training
+scheduling remains shared for ADC-IGS; backend-specific synchronization and
+profiling diagnostics retain their existing behavior. The hardware-independent
+`photara/tests/splat_backend_layering_test.py` guards this boundary, while
+`photara_splat_backend_dispatch_test --cuda/--vulkan` exercises device dispatch.
 
 ## 3. Model and optimization
 
