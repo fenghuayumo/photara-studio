@@ -23,6 +23,8 @@ void add_depth_normal_loss_vulkan(
     float weight,
     LossGradients& gradients,
     bool collect_scalar_terms);
+void add_mvs_loss_vulkan(const RenderResult&, const TrainingView&, const TrainingOptions&,
+    LossGradients&, bool collect_scalar_terms);
 void add_prior_loss_vulkan(
     const RenderResult& rendered,
     const TrainingView& target,

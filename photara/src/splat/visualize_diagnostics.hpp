@@ -22,6 +22,7 @@ inline DiagnosticPush diagnostic_push(const Camera& camera, const VisualizeOptio
     return push;
 }
 #if defined(TINYTENSOR_HAS_VULKAN)
+tinytensor::Tensor visualize_points_vulkan(const GaussianModel&, const Camera&, const VisualizeOptions&);
 tinytensor::Tensor visualize_diagnostics_vulkan(
     const RenderResult& rendered,
     const Camera& camera,

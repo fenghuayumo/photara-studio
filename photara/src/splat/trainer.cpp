@@ -1398,11 +1398,6 @@ GaussianModel Trainer::train_impl(
             throw std::invalid_argument(
                 "Vulkan densification currently supports the shared ADC-IGS "
                 "strategy only");
-        if (options_.densify_revised_noise)
-            throw std::invalid_argument("Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_mvs_depth || options_.use_mvs_normals)
-            throw std::invalid_argument("Vulkan training does not yet support external "
-                                        "MVS depth/normal targets");
         core::Logger::instance().info("splat training backend=vulkan orchestration=shared");
     } else {
         core::Logger::instance().info("splat training backend=cuda orchestration=shared");
@@ -2269,6 +2264,8 @@ GaussianModel Trainer::train_impl(
                     rendered, geometry_target.camera,
                     depth_normal_active ? options_.depth_normal_weight : 0.F, loss,
                     report_progress);
+            if (options_.use_mvs_depth || options_.use_mvs_normals)
+                detail::add_mvs_loss_vulkan(rendered,target,options_,loss,report_progress);
             if (ai_prior_active)
                 detail::add_prior_loss_vulkan(rendered, target, options_, loss, report_progress);
         } else {

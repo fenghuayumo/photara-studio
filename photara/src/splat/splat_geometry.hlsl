@@ -82,9 +82,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
             terms.Store(
                 4u * i, asuint(-scale * (target * log(p) + (1.0f - target) * log(1.0f - p))));
     } else if (pc.mode == 11u || pc.mode == 12u) {
-        float mask = pc.euclidean != 0u ? camera_data[i] : 1.0f;
+        float mask = (pc.euclidean & 1u) != 0u ? camera_data[i] : 1.0f;
         if (!(mask > 0.0f) || isnan(mask) || isinf(mask))
             return;
+        if ((pc.euclidean & 2u) != 0u) mask = 1.0f; // MVS uses a binary validity gate.
         float scale = pc.weight * mask / (float)pc.count;
         if (pc.mode == 11u) {
             float prediction = input0[i], target = input1[i];

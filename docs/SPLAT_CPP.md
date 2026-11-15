@@ -143,8 +143,17 @@ the configured periodic schedule. Adaptive multi-view statistics are also
 computed on Vulkan. Native fisheye/equirectangular training still disables
 the pinhole geometry losses. Learned normal fields also run on Vulkan using
 signed precomputed-color rasterization, world-to-camera field consistency,
-and independent feature Adam state. External MVS targets and transparent-alpha
-supervision remain unsupported by the Vulkan trainer.
+and independent feature Adam state. Pinhole external MVS depth/normal targets
+at the working image resolution and transparent-alpha supervision are supported.
+MVS masks gate geometry validity without attenuating valid geometry gradients;
+AI-prior supervision retains its fractional mask weighting.
+
+The Vulkan ADC-IGS path supports the revised covariance-oriented exploration
+noise in addition to the original bounded noise. Other densification strategies
+remain outside the Vulkan training scope. The `visualize()` points mode also
+runs on Vulkan, including SH0–3 colors, pinhole/fisheye/equirectangular and
+orthographic projection, and overlap/background compositing. It uses integer
+CAS accumulation and does not require floating-point atomic-add extensions.
 
 ## 7. Learned normal field and PAM
 

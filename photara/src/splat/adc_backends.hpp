@@ -42,6 +42,11 @@ void accumulate_densification_stats_vulkan(
     const tinytensor::Tensor& image_error,
     const tinytensor::Tensor& normalized_size);
 
+void inject_adc_revised_noise_vulkan(
+    GaussianModel&,
+    const tinytensor::Tensor& visibility,
+    const tinytensor::Tensor& radii,
+    const AdcNoiseOptions&);
 void inject_adc_noise_vulkan(
     GaussianModel& model,
     const tinytensor::Tensor& visibility,

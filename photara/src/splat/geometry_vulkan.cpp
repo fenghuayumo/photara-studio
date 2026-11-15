@@ -270,12 +270,12 @@ void add_alpha_mask_loss_vulkan(
     }
 }
 
-void add_prior_loss_vulkan(
+static void add_supervision_loss_vulkan(
     const RenderResult& rendered,
     const TrainingView& target,
     const TrainingOptions& options,
     LossGradients& gradients,
-    bool collect_scalar_terms) {
+    bool collect_scalar_terms, bool mvs) {
     if (!(options.lambda_d > 0.F || options.lambda_n > 0.F))
         return;
     auto push = camera_push(11, target.camera);
@@ -288,7 +288,7 @@ void add_prior_loss_vulkan(
     const bool mask = target.has_mask && (options.use_mask || target.mask_is_validity);
     if (mask)
         check(target.mask, push.count);
-    push.euclidean = mask;
+    push.euclidean = (mask ? 1u : 0u) | (mvs ? 2u : 0u);
     push.camera_count = collect_scalar_terms;
     push.focal = options.geometry_epsilon;
     const auto terms =
@@ -323,6 +323,18 @@ void add_prior_loss_vulkan(
             gradients.total += value;
         }
     }
+}
+
+void add_prior_loss_vulkan(const RenderResult& r,const TrainingView& t,const TrainingOptions& o,
+    LossGradients& g,bool collect) {
+    add_supervision_loss_vulkan(r,t,o,g,collect,false);
+}
+void add_mvs_loss_vulkan(const RenderResult& r,const TrainingView& t,const TrainingOptions& o,
+    LossGradients& g,bool collect) {
+    auto weights=o;
+    weights.lambda_d=o.use_mvs_depth?o.depth_weight:0.F;
+    weights.lambda_n=o.use_mvs_normals?o.normal_weight:0.F;
+    add_supervision_loss_vulkan(r,t,weights,g,collect,true);
 }
 
 Tensor compute_3d_filter_vulkan(

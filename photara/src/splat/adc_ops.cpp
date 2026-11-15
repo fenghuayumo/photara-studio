@@ -77,8 +77,9 @@ void inject_adc_noise(
     if (model.means.device() == tinytensor::Device::Vulkan) {
 #ifdef TINYTENSOR_HAS_VULKAN
         if (revised)
-            throw std::invalid_argument("Vulkan ADC revised-noise primitive is not implemented");
-        inject_adc_noise_vulkan(model, visibility, options);
+            inject_adc_revised_noise_vulkan(model, visibility, radii, options);
+        else
+            inject_adc_noise_vulkan(model, visibility, options);
         return;
 #else
         throw std::invalid_argument("Vulkan ADC backend is not built");

@@ -638,6 +638,10 @@ tinytensor::Tensor visualize(
     const GaussianModel& model,
     const Camera& camera,
     const VisualizeOptions& options) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (model.means.device() == tinytensor::Device::Vulkan && options.mode == VisualizationMode::points)
+        return detail::visualize_points_vulkan(model,camera,options);
+#endif
     const bool diagnostics =
         options.mode == VisualizationMode::splat && options.channel != VisualizationChannel::color;
     if (options.mode == VisualizationMode::splat ||

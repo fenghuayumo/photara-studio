@@ -51,7 +51,8 @@ std::array<float, 6> percentile_bounds(const tinytensor::Tensor& means, const fl
         means.shape()[0] > static_cast<std::size_t>(INT_MAX))
         throw std::invalid_argument(
             "Percentile bounds require a device float32 [N,3] means tensor");
-    throw std::runtime_error("percentile_bounds: this operation requires the CUDA backend");
+    if(means.numel()==0) return {-1.F,-1.F,-1.F,1.F,1.F,1.F};
+    return tinytensor::vulkan::quantile_bounds(means,percentile);
 
 }
 
@@ -265,9 +266,6 @@ LossGradients compute_training_loss(
 
     if (rendered.median_depth.device() == tinytensor::Device::Vulkan ||
         rendered.color.device() == tinytensor::Device::Vulkan) {
-        if (options.use_mvs_depth || options.use_mvs_normals)
-            throw std::invalid_argument(
-                "Vulkan training loss does not support external MVS depth/normal targets");
         LossGradients result;
         result.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
         if (options.photometric_weight > 0.F) {
@@ -284,6 +282,8 @@ LossGradients compute_training_loss(
             add_depth_normal_loss_vulkan(
                 rendered, target.camera, depth_normal_active ? options.depth_normal_weight : 0.F,
                 result, collect_scalar_terms);
+        if (options.use_mvs_depth || options.use_mvs_normals)
+            add_mvs_loss_vulkan(rendered,target,options,result,collect_scalar_terms);
         if (ai_prior_active && (options.lambda_d > 0.F || options.lambda_n > 0.F))
             add_prior_loss_vulkan(rendered, target, options, result, collect_scalar_terms);
         return result;

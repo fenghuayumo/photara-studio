@@ -1,6 +1,7 @@
 #include "adc_backends.hpp"
 #include "adc_stats.hlsl.embedded.hpp"
 #include "adc_noise.hlsl.embedded.hpp"
+#include "adc_revised_noise.hlsl.embedded.hpp"
 #include "photara_vk/photara_vk.hpp"
 #include "vulkan/backend.hpp"
 
@@ -123,6 +124,37 @@ void accumulate_densification_stats_vulkan(
         push, {refine_weight, visibility, radii, geometry_gradient, image_error, normalized_size,
                stats.gradient, stats.count, stats.max_screen_radius, stats.priority,
                stats.geometry_gradient, stats.image_error});
+}
+
+void inject_adc_revised_noise_vulkan(
+    GaussianModel& model,
+    const Tensor& visibility,
+    const Tensor& radii,
+    const AdcNoiseOptions& options) {
+    const auto n = model.size();
+    if (!n)
+        return;
+    validate(model.means, n * 3, tinytensor::DataType::Float32);
+    validate(model.log_scales, n * 3, tinytensor::DataType::Float32);
+    validate(model.quaternions, n * 4, tinytensor::DataType::Float32);
+    validate(model.opacity_logits, n, tinytensor::DataType::Float32);
+    validate(visibility, n, tinytensor::DataType::Float32);
+    if (radii.is_valid())
+        validate(radii, n, tinytensor::DataType::Int32);
+    checked_count(n * 4);
+    struct Push {
+        std::uint32_t count, seed;
+        float scaler;
+        std::uint32_t has_radii;
+        std::array<std::uint32_t, 6> offsets{};
+    };
+    const Push push{
+        checked_count(n), options.seed, options.standard_deviation, radii.is_valid() ? 1u : 0u};
+    static thread_local Backend<6> vk(
+        std::as_bytes(std::span{adc_revised_noise_hlsl_spv}), sizeof(Push));
+    vk.launch(
+        push, {model.means, model.log_scales, model.quaternions, model.opacity_logits, visibility,
+               radii});
 }
 
 void inject_adc_noise_vulkan(

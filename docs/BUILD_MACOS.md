@@ -47,3 +47,27 @@ This tests export/decode parity, shared-codeword gradients, a CPU oracle for
 STE/TV derivatives, an Adam parameter update, and four end-to-end fine-tuning
 steps with both appearance corrections, held-out image exclusion, and cancellation.
 It is a synthetic regression test, not a large-scene quality or speed benchmark.
+
+## ADC-IGS training and points visualization
+
+Build `photara_vulkan_training_features_test` in the same Release build directory
+and run it with the MoltenVK ICD selected:
+
+```sh
+cmake --build build --target photara_vulkan_training_features_test --parallel 8
+VK_ICD_FILENAMES="$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json" \
+  build/photara/photara_vulkan_training_features_test
+```
+
+The regression checks points pixels against CPU camera projection/compositing
+for pinhole, fisheye, panorama and orthographic views, overlapping points and
+SH0–3 shading. Revised ADC-IGS noise and MVS depth/normal losses have CPU numeric
+oracles. Short training runs cover ADC-IGS densification, PPISP/bilateral grids,
+revised noise, MVS supervision, transparent masks, normal fields, multi-view
+losses, Mip3D filtering, opacity resets and 3DGUT. Only ADC-IGS is covered;
+other densification strategies remain disabled on Vulkan.
+
+To enable SDK validation, additionally set
+`VK_LAYER_PATH="$VULKAN_SDK/share/vulkan/explicit_layer.d"` and
+`TINYTENSOR_VULKAN_VALIDATION=1`. These are synthetic correctness regressions;
+large-scene quality/performance and CUDA regression tests remain separate work.
