@@ -5,17 +5,17 @@ cd "$(dirname "$0")/.."
 : "${PHOTARA_DEPS_PREFIX:?Set PHOTARA_DEPS_PREFIX to the dependency installation prefix}"
 : "${PHOTARA_HNSWLIB_INCLUDE:?Set PHOTARA_HNSWLIB_INCLUDE to the directory containing hnswlib/}"
 export PATH="$VULKAN_SDK/bin:$PHOTARA_DEPS_PREFIX/bin:$PATH"
-cmake -S . -B build-studio-release -G Ninja \
+cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PHOTARA_DEPS_PREFIX" \
   -DPHOTARA_HNSWLIB_INCLUDE="$PHOTARA_HNSWLIB_INCLUDE" \
   -DPHOTARA_ENABLE_CUDA=OFF -DPHOTARA_ENABLE_SPLAT=ON \
   -DPHOTARA_ENABLE_VULKAN_COMPUTE=ON -DPHOTARA_BUILD_STUDIO=ON \
   -DPHOTARA_ENABLE_TEXTURE=OFF -DPHOTARA_ENABLE_USDC=OFF \
   -DPHOTARA_INFERENCE_VULKAN=OFF -DBUILD_TESTING=OFF
-cmake --build build-studio-release --target photara_studio --parallel 8
+cmake --build build --target photara_studio --parallel 8
 python3 - "$VULKAN_SDK" <<'PY'
 import pathlib, plistlib, shutil, sys
-base = pathlib.Path('build-studio-release')
+base = pathlib.Path('build')
 app = base / 'Photara Studio.app/Contents'
 bin_dir = app / 'MacOS'
 bin_dir.mkdir(parents=True, exist_ok=True)
