@@ -3,12 +3,12 @@
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/fenghuayumo/photara-studio/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/fenghuayumo/photara-studio?display_name=tag&sort=semver"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-informational">
+  <img alt="Platform: Windows, Linux, macOS (Apple Silicon)" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%28Apple%20Silicon%29-informational">
 </p>
 
 **Photara** is an open-source C++20 photogrammetry and 3D Gaussian Splatting
 system with CUDA and Vulkan training backends. Built for fast training on
-Windows and Linux, it turns photographs or video into Gaussian scenes, meshes,
+Windows, Linux, and Apple Silicon Macs, it turns photographs or video into Gaussian scenes, meshes,
 and textured assets through **Photara Studio** or the `photara` CLI.
 
 <p align="center">
@@ -26,8 +26,8 @@ and textured assets through **Photara Studio** or the `photara` CLI.
 
 - **CUDA and Vulkan training** — choose a GPU backend for 3D Gaussian Splatting;
   train and preview scenes in Photara Studio.
-- **Windows and Linux** — build and train on both platforms with the desktop
-  editor or the command-line pipeline.
+- **Windows, Linux, and macOS** — use the desktop editor or command-line pipeline;
+  the macOS build uses Vulkan and requires macOS 27.0+ and Apple M2 or later.
 - **Designed for fast training** — GPU-accelerated rasterization and optimized
   training pipelines reduce work per iteration. Performance depends on hardware,
   scene, and settings.
