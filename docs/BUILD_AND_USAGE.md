@@ -202,6 +202,10 @@ scripts/build_macos_release.sh
 tools (for example, the Homebrew prefix). `PHOTARA_HNSWLIB_INCLUDE` must contain
 the `hnswlib/` header directory. The script adds the SDK and dependency `bin/`
 directories to `PATH`, disables CUDA, and selects the Vulkan Studio backend.
+The default CPU target is Apple M2 (`-mcpu=apple-m2`); host-native tuning is
+disabled for both Photara and GGML. DotProd, I8MM and BF16 optimizations remain
+available, while SME and SVE are not enabled. The default minimum OS is macOS
+27.0. `PHOTARA_BUILD_DIR` selects an independent build directory.
 It builds Release only and creates a local
 `build/Photara Studio.app` launcher with a macOS application icon generated from
 `apps/icons/icon.png` and a local ad-hoc signature. Keep it alongside the build
@@ -863,7 +867,8 @@ non-system Mach-O dependencies, bundles MoltenVK and its driver manifest, rewrit
 library references to bundle-relative paths, collects dependency license files,
 and validates the final ad-hoc signature. Its native launcher selects the bundled
 Vulkan driver and adds the bundled FFmpeg to PATH. Optional model weights remain
-separate downloads. The default deployment target is macOS 27.0, recorded in
+separate downloads. The CPU baseline is Apple M2 or later; packaging rejects a build still using
+host-native CPU settings. The default deployment target is macOS 27.0, recorded in
 the application and README. Packaging fails if any included arm64 binary requires
 a newer OS. The launcher is also compiled for the selected target. OpenMP and
 SVT-AV1 are rebuilt from checksum-verified upstream sources into

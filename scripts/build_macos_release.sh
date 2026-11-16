@@ -5,7 +5,19 @@ cd "$(dirname "$0")/.."
 : "${PHOTARA_DEPS_PREFIX:?Set PHOTARA_DEPS_PREFIX to the dependency installation prefix}"
 : "${PHOTARA_HNSWLIB_INCLUDE:?Set PHOTARA_HNSWLIB_INCLUDE to the directory containing hnswlib/}"
 export PATH="$VULKAN_SDK/bin:$PHOTARA_DEPS_PREFIX/bin:$PATH"
-cmake -S . -B build -G Ninja \
+build_dir="${PHOTARA_BUILD_DIR:-build}"
+extra_args=()
+cpu_target="${PHOTARA_CPU_TARGET:-apple-m2}"
+if [[ -n "$cpu_target" ]]; then
+  extra_args+=("-DCMAKE_C_FLAGS=-mcpu=$cpu_target -Werror=unguarded-availability"
+    "-DCMAKE_CXX_FLAGS=-mcpu=$cpu_target -Werror=unguarded-availability"
+    -DPHOTARA_ENABLE_NATIVE_ARCH=OFF -DGGML_NATIVE=OFF)
+  # CPU feature probes must be rerun when switching from a host-native build.
+  for feature in DOTPROD SVE MATMUL_INT8 FMA FP16_VECTOR_ARITHMETIC SME; do
+    extra_args+=(-U "HAVE_$feature")
+  done
+fi
+cmake -S . -B "$build_dir" -G Ninja "${extra_args[@]}" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PHOTARA_DEPS_PREFIX" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-27.0}" \
   -DPHOTARA_HNSWLIB_INCLUDE="$PHOTARA_HNSWLIB_INCLUDE" \
@@ -13,10 +25,10 @@ cmake -S . -B build -G Ninja \
   -DPHOTARA_ENABLE_VULKAN_COMPUTE=ON -DPHOTARA_BUILD_STUDIO=ON \
   -DPHOTARA_ENABLE_TEXTURE=OFF -DPHOTARA_ENABLE_USDC=OFF \
   -DPHOTARA_INFERENCE_VULKAN=OFF -DBUILD_TESTING=OFF
-cmake --build build --target photara_studio --parallel 8
-python3 - "$VULKAN_SDK" <<'PY'
+cmake --build "$build_dir" --target photara_studio --parallel 8
+python3 - "$VULKAN_SDK" "$build_dir" <<'PY'
 import pathlib, plistlib, shutil, subprocess, sys, tempfile
-base = pathlib.Path('build')
+base = pathlib.Path(sys.argv[2])
 app = base / 'Photara Studio.app/Contents'
 bin_dir = app / 'MacOS'
 bin_dir.mkdir(parents=True, exist_ok=True)
@@ -46,5 +58,5 @@ info = dict(CFBundleName='Photara Studio', CFBundleIdentifier='org.photara.studi
 with (app / 'Info.plist').open('wb') as f: plistlib.dump(info, f)
 PY
 # Refresh the local ad-hoc signature after changing the executable and resources.
-codesign --force --sign - "build/Photara Studio.app"
-touch "build/Photara Studio.app"
+codesign --force --sign - "$build_dir/Photara Studio.app"
+touch "$build_dir/Photara Studio.app"

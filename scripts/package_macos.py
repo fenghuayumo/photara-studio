@@ -21,10 +21,21 @@ p.add_argument('--deployment-target', default='27.0',
                help='Maximum permitted minimum macOS version (default: 27.0)')
 p.add_argument('--dependency-prefix', type=Path, default=Path('build/macos-deps/prefix'),
                help='Prefix containing runtime dependencies rebuilt for the target OS')
+p.add_argument('--cpu-target', choices=['apple-m2'], default='apple-m2',
+               help='CPU baseline for launcher (default: apple-m2)')
 a = p.parse_args()
 if not a.sdk or not a.ffmpeg:
     p.error('--sdk / VULKAN_SDK and --ffmpeg / ffmpeg in PATH are required')
 build, sdk, output = a.build_dir.resolve(), a.sdk.resolve(), a.output_dir.resolve()
+if a.cpu_target == 'apple-m2':
+    cache = (build / 'CMakeCache.txt').read_text()
+    for option in ('PHOTARA_ENABLE_NATIVE_ARCH', 'GGML_NATIVE'):
+        if not re.search(rf'^{option}:BOOL=OFF$', cache, re.M):
+            p.error(f'{option} must be OFF; rebuild Studio for apple-m2 before packaging')
+    for option in ('CMAKE_C_FLAGS', 'CMAKE_CXX_FLAGS'):
+        flags = re.search(rf'^{option}:STRING=(.*)$', cache, re.M)
+        if not flags or '-mcpu=apple-m2' not in flags[1].split():
+            p.error(f'{option} must contain -mcpu=apple-m2; rebuild Studio first')
 output.mkdir(parents=True, exist_ok=True)
 version = re.search(r'#define PHOTARA_VERSION "([^"]+)"',
     (build / 'photara/include/core/version.hpp').read_text())[1]
@@ -87,7 +98,9 @@ def collect(source, destination, executable=False):
         if system(dep): continue
         if dep.startswith('@rpath/'):
             tail = dep[len('@rpath/'):]
-            candidates = [expand(r) / tail for r in paths] + [d / tail for d in search]
+            candidates = [expand(r) / tail for r in paths]
+            candidates += [source.parent / tail, dependency_prefix / 'lib' / tail]
+            candidates += [d / tail for d in search]
         elif dep.startswith('@loader_path/'):
             candidates = [expand(dep)]
         else:
@@ -114,7 +127,8 @@ metadata = json.loads((sdk / 'share/vulkan/icd.d/MoltenVK_icd.json').read_text()
 metadata['ICD']['library_path'] = '../../../Frameworks/libMoltenVK.dylib'
 (icd / 'MoltenVK_icd.json').write_text(json.dumps(metadata, indent=2) + '\n')
 shutil.copy2(ROOT / 'apps/icons/icon.png', resources / 'icon.png')
-run('clang', '-arch', 'arm64', '-mmacosx-version-min=' + a.deployment_target,
+cpu_flags = ['-mcpu=' + a.cpu_target] if a.cpu_target else []
+run('clang', '-arch', 'arm64', *cpu_flags, '-mmacosx-version-min=' + a.deployment_target,
     'scripts/macos_launcher.c', '-o', binaries / 'PhotaraLauncher')
 info = plistlib.loads((c / 'Info.plist').read_bytes())
 info.pop('LSEnvironment', None)
@@ -177,7 +191,7 @@ run('codesign', '--force', '--sign', '-', app)
 run('codesign', '--verify', '--deep', '--strict', app)
 readme = f'''Photara Studio {version} — macOS arm64
 
-Requires Apple Silicon and macOS {minimum} or later.
+Requires {'Apple M2 or later' if a.cpu_target == 'apple-m2' else 'Apple Silicon'} and macOS {minimum} or later.
 Drag Photara Studio.app to Applications, then open it.
 This build is ad-hoc signed and is not notarized by Apple. If macOS blocks
 opening it, review the source of your download, then use System Settings >
