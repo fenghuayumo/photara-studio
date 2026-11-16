@@ -1,125 +1,18 @@
-# Build and usage reference
+# Build and usage
 
-Detailed build instructions, CLI examples, and project reference for [Photara](../README.md).
+Build Photara from source on Windows, Linux, or macOS, then run Photara Studio
+or the reconstruction CLI. Run all commands from the repository root unless
+stated otherwise.
 
-## Pipeline and implementation details
-
-Photara is organized as a set of independently usable reconstruction stages:
-
-```text
-images or video
-    │
-    ├─ optional SAM 3 masks
-    ▼
-feature extraction and matching
-    ▼
-Structure from Motion (SfM)
-    ├─ sparse scene / camera export
-    ├─ Multi-View Stereo (MVS) ──► dense cloud ──► Delaunay or TSDF mesh
-    └─ CUDA 3D Gaussian training ──► Gaussian model ──► TSDF or PAM mesh
-                                                       ▼
-                                             UV unwrap and texture bake
-```
-
-The implementation currently includes:
-
-- global and hierarchical SfM;
-- pinhole, radial/tangential, OpenCV fisheye, and equirectangular camera paths;
-- Eigen/PoseLib multi-view geometry, including E/F/H estimation, PnP, and
-  triangulation;
-- robust bundle adjustment with CPU and CUDA backends;
-- SIFT/RootSIFT, including a native CUDA SIFT extractor, plus optional DISK, SuperPoint, ALIKED, and
-  LightGlue inference through ONNX Runtime;
-- CPU and CUDA mutual-ratio feature matching, vocabulary-based retrieval, and
-  a selective LightGlue rescue matcher;
-- CUDA PatchMatch MVS with a CPU fallback and multi-view depth fusion;
-- CGAL global Delaunay graph-cut meshing and sparse TSDF extraction;
-- CUDA Gaussian Splatting with ADC+, ADC-IGS, and EMC densification,
-  progressive-resolution training, multi-view geometry, NCC, and normal
-  supervision;
-- Gaussian-to-mesh extraction through median-depth TSDF or the
-  GaussianWrapping-inspired PAM path;
-- optional Instant Meshes remeshing, CGAL repair/decimation, UVAtlas unwrap,
-  Vulkan texture baking, and ONNX-based intrinsic-image delighting;
-- SAM 3 text-prompted masks, video propagation, and SfM sparse-point-guided
-  instance selection when the bundled SAM component and a compatible
-  checkpoint are available;
-- `.ascan` project archives and exports for OpenMVS, COLMAP, Nerfstudio, PLY,
-  OBJ, GLB, SOG, SPZ, and [USDC](splat-usdc.md), depending on the selected stage.
-- native C++ [Streamed SOG LOD and voxel collision exports](splat-deployment.md),
-  with Vulkan merge-cost evaluation and Gaussian voxelization.
-
-OpenCV is intentionally not part of the default dependency graph. JPEG and PNG
-use their native libraries, FreeImage handles the remaining supported image
-formats, and the core geometry code uses Eigen, PoseLib, and Ceres.
-
-
-## Studio demo camera shots
-
-In **Camera Path**, open **Demo shots** (also available under **Path tools**).
-Frame the subject and set its orbit target in the viewport, then choose:
-
-- **Energy wave reveal**: a cyan luminous wave grows outwards from the orbit
-  target as the camera makes a quarter orbit and gently pushes in.
-- **Micro fly-through**: pulls back from a close particle view through Gaussian
-  rings to the fully rendered scene.
-- **Spiral ascent**: makes a full orbit while rising and widening the view.
-
-Set duration (15 seconds by default), distance multiplier and clockwise direction,
-then select **Append demo shot**. Each shot adds 17 editable perspective
-keyframes after the existing path. Reveal shots require a loaded Gaussian model
-and add a bounded effect clip without replacing earlier clips; spiral shots
-retain existing effects. Use **Effect clip** to select a previous clip for editing.
-Outside each shot's clip interval, ordinary rendering is preserved. New demo
-shots use monotone cubic interpolation with continuous velocity; existing keys
-can opt into **Cinematic** interpolation in the keyframe inspector or use
-**Path tools > Use cinematic interpolation** to convert the path while retaining
-hold/cut segments. For an older effect with global pre-roll, enable
-**Limit effect to clip** in **Effect settings** and set its clip start.
-The generated shots do not perform collision avoidance, so preview the path
-before exporting, especially for interiors and close particle shots.
-
-Use **Effect settings** to adjust wave radius, point density, highlight, growth
-and timing. The wave centre follows the orbit target at the effect start time;
-editing that target updates the reveal. Wave radius is a minimum reach: the wave
-automatically expands to cover all geometry without making outer regions arrive
-at the same time. Preview, still-image export and video
-export share the same reconstruction animation and material settings. Interactive
-reconstruction preview displays GPU textures directly, and point-cloud preview
-samples up to 120,000 source points. Image/video export retains the 600,000-point
-budget and full CPU bloom; preview retains the luminous material without that
-additional bloom pass. Projects using bounded clips or cinematic interpolation
-require settings reader version 32; existing projects remain readable.
-
-## Repository layout and CMake targets
-
-```text
-.
-├── apps/editor/                 Photara Studio
-├── docs/                        Architecture and implementation notes
-├── photara/
-│   ├── include/                 Public C++ headers
-│   ├── src/                     BA, features, SfM, MVS, splat, texture, and tools
-│   ├── tests/                   Correctness and regression tests
-│   └── third_party/             Small source dependencies
-├── python/                      nanobind module, utilities, and experiments
-├── third_party/
-│   ├── photara_drender/         Texture and mesh-processing submodule
-│   ├── sam3/                    Native SAM implementation
-│   └── splat_drender/           Differentiable Gaussian rasterizer
-├── CMakeLists.txt
-├── LICENSE
-├── NOTICE
-└── VERSION
-```
-
-The public CMake targets are `Photara::BA`, `Photara::Features`,
-`Photara::SfM`, `Photara::MVS`, `Photara::Splat`, `Photara::Texture`,
-`Photara::Inference`, `Photara::SAM`, and `Photara::SAMCache` when
-their corresponding components are enabled.
-
-Shared Vulkan/ggml inference and geometry-prior contracts are documented in
-[`docs/INFERENCE_ARCHITECTURE.md`](INFERENCE_ARCHITECTURE.md).
+- [Requirements](#requirements)
+- [Build](#build): [Windows](#windows), [Linux](#linux), [macOS](#macos-vulkan-release), [CPU-only CLI](#cpu-only-cli)
+- [Build options](#build-options)
+- [Packaging](#packaging)
+- [Studio usage](#studio-usage)
+- [Command-line usage](#command-line-usage)
+- [Outputs](#outputs) and [Python API](#python-api)
+- [Logging and validation](#logging-and-validation)
+- [Project reference](#project-reference) and [documentation](#documentation)
 
 
 ## Requirements
@@ -127,7 +20,9 @@ Shared Vulkan/ggml inference and geometry-prior contracts are documented in
 The build requires CMake 3.28 or newer and a C++20 compiler. The default
 Windows configuration is designed for MSVC with vcpkg and expects the packages
 requested by CMake, including Eigen3, Ceres, PoseLib, FreeImage, JPEG, PNG,
-hnswlib, Boost, and GLFW for Photara Studio.
+hnswlib, gflags, glog, Boost, and GLFW for Photara Studio. Gaussian model
+I/O also requires nlohmann-json, yaml-cpp, WebP, and zstd. PoseLib is fetched
+by CMake if no installed package is found.
 
 Optional or feature-specific requirements are:
 
@@ -140,16 +35,23 @@ Optional or feature-specific requirements are:
 
 ## Build
 
-Initialize the texture/mesh-processing submodule first:
+Initialize the submodules before configuring any platform:
 
-```powershell
+```sh
 git submodule update --init --recursive
 ```
 
-A typical CUDA build with vcpkg is:
+Use a separate build directory for each toolchain or generator. The examples
+below use `build/` independently on each platform.
+
+### Windows
+
+Use a CUDA-compatible MSVC toolchain, vcpkg, and the Vulkan SDK with DXC.
+Set `VCPKG_ROOT` to the vcpkg checkout and run in PowerShell from the repository
+root. The following uses the Visual Studio multi-config generator:
 
 ```powershell
-cmake -S . -B build `
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
   -DPHOTARA_ENABLE_CUDA=ON
 cmake --build build --config Release --parallel
@@ -162,7 +64,17 @@ build/photara/Release/photara.exe
 build/photara/Release/photara_studio.exe
 ```
 
+Launch Studio or check the CLI:
+
+```powershell
+.\build\photara\Release\photara_studio.exe
+.\build\photara\Release\photara.exe --help
+```
+
 ### Linux
+
+Install Ninja and CUDA Toolkit 12+ for the commands below.
+For a Vulkan-only build, set `-DPHOTARA_ENABLE_CUDA=OFF`.
 
 Studio uses GLFW, so the same target builds on Linux. Dependencies are a C++20
 compiler, CMake 3.28 or newer, the Vulkan SDK (`dxc` included), GLFW, and the
@@ -173,8 +85,12 @@ Vulkan opaque file descriptors; CUDA training also needs CUDA external memory
 on that same GPU.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPHOTARA_ENABLE_CUDA=ON
 cmake --build build --target photara_studio --parallel
+./build/photara/photara_studio
+./build/photara/photara --help
 ```
 
 Single-config generators write `build/photara/photara` and
@@ -222,16 +138,7 @@ inference. Launch Studio with:
 open "build/Photara Studio.app"
 ```
 
-### Windows packaging
-
-The repository includes a repeatable Windows release script that gathers the
-Studio executable, CLI worker, app-local DLLs, FFmpeg, and notices, then builds
-both a portable ZIP and an Inno Setup installer. See
-[`docs/PACKAGING_WINDOWS.md`](PACKAGING_WINDOWS.md) for prerequisites and
-the release command.
-
-Paths vary with the generator and platform. With a single-config generator,
-the executables normally appear directly below `build/photara/`.
+### CPU-only CLI
 
 For a CPU-only CLI build, disable the splat component and the Studio
 target, which currently links the splat library:
@@ -245,19 +152,12 @@ cmake -S . -B build-cpu `
 cmake --build build-cpu --config Release --parallel
 ```
 
-Enable tests and auxiliary tools only when needed; they are excluded from the
-default build:
+On Linux/macOS, use the same three `PHOTARA_*` switches with a separate
+build directory and `-DCMAKE_BUILD_TYPE=Release`; omit the vcpkg toolchain
+argument unless using vcpkg. These switches disable CUDA, splat and Studio;
+Vulkan support is configured independently.
 
-```powershell
-cmake -S . -B build `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DPHOTARA_BUILD_TESTS=ON `
-  -DPHOTARA_BUILD_BENCHMARKS=ON
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
-```
-
-### Important CMake options
+## Build options
 
 | Option | Default | Purpose |
 |---|---:|---|
@@ -278,6 +178,7 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_ENABLE_ONNX` | `OFF` | Enable ONNX Runtime feature and delight models |
 | `PHOTARA_FETCH_ONNX` | `ON` | Download ONNX Runtime when no local SDK is set |
 | `PHOTARA_ONNXRUNTIME_ROOT` | empty | Path to a local ONNX Runtime SDK |
+| `PHOTARA_ENABLE_USDC` | `ON` | Enable native USDC Gaussian export with LightUSD |
 | `PHOTARA_ENABLE_TEXTURE` | `ON` | Build UV unwrap and Vulkan texture baking |
 | `PHOTARA_ENABLE_MESH_TOOLS` | `ON` | Use CGAL repair and decimation from `photara_drender` |
 | `PHOTARA_ENABLE_INSTANT_REMESH` | `ON` | Run Instant Meshes before CGAL decimation |
@@ -306,8 +207,108 @@ cmake -S . -B build `
   -DPHOTARA_ONNXRUNTIME_ROOT="D:/sdk/onnxruntime-win-x64-gpu-1.20.1"
 ```
 
+## Packaging
 
-## Agent control (experimental)
+Build Release binaries before creating distribution artifacts.
+
+### Windows packaging
+
+The repository includes a repeatable Windows release script that gathers the
+Studio executable, CLI worker, app-local DLLs, FFmpeg, and notices, then builds
+both a portable ZIP and an Inno Setup installer. See
+[`docs/PACKAGING_WINDOWS.md`](PACKAGING_WINDOWS.md) for prerequisites and
+the release command.
+
+### macOS arm64 DMG
+
+After `scripts/build_macos_release.sh`, create an independently relocatable
+application and disk image (FFmpeg must be installed on the packaging machine).
+Rebuild runtime dependencies first to avoid bottles requiring a newer OS:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=27.0 scripts/build_macos_runtime_deps.sh
+python3 scripts/package_macos.py --sdk "$VULKAN_SDK" --ffmpeg "$(command -v ffmpeg)" \
+  --deployment-target 27.0
+```
+
+Outputs are in `build/release/`: `Photara-Studio-<version>-macOS-arm64.dmg`,
+its SHA-256 checksum, and a dependency manifest. The DMG includes an Applications
+shortcut and installation instructions. The packager recursively copies all
+non-system Mach-O dependencies, bundles MoltenVK and its driver manifest, rewrites
+library references to bundle-relative paths, collects dependency license files,
+and validates the final ad-hoc signature. Its native launcher selects the bundled
+Vulkan driver and adds the bundled FFmpeg to PATH. Optional model weights remain
+separate downloads. The CPU baseline is Apple M2 or later; packaging rejects a build still using
+host-native CPU settings. The default deployment target is macOS 27.0, recorded in
+the application and README. Packaging fails if any included arm64 binary requires
+a newer OS. The launcher is also compiled for the selected target. OpenMP and
+SVT-AV1 are rebuilt from checksum-verified upstream sources into
+`build/macos-deps/prefix`; system Homebrew installations are left unchanged.
+Use `--dependency-prefix` to select a different rebuilt dependency prefix.
+Building for earlier macOS releases requires rebuilding the main application
+and all dependencies for that deployment target, then testing on that release;
+changing only the plist or Mach-O version declaration is insufficient.
+
+This package does not require an Apple developer account and is not notarized.
+Users may need to allow the downloaded app under System Settings → Privacy &
+Security → Open Anyway. Validate releases on a clean target Mac before publishing.
+
+## Studio usage
+
+### Studio compute GPU selection
+
+Open **Preferences > Compute > Compute GPU** to choose a physical GPU, or
+**Automatic** to use Studio's default. The choice is saved per user by device
+UUID, separately from project settings. Restart Studio to apply it; the bottom
+status bar shows the device actually active in this session. Pending selections
+are identified in Preferences. If a saved GPU is disconnected, Studio falls
+back to the default and reports the missing device.
+
+An explicit choice pins independently-created Vulkan compute devices, AI Vulkan
+backends, CUDA visibility and child processes to the selected adapter. CUDA is
+available only for NVIDIA adapters; other adapters use Vulkan. The viewport
+uses the same physical adapter so training/preview shared resources remain
+compatible. `--compute-gpu UUID` overrides the saved choice for one launch
+(32 lowercase hex digits), including `--project-transition-smoke` runs.
+
+### Demo camera shots
+
+In **Camera Path**, open **Demo shots** (also available under **Path tools**).
+Frame the subject and set its orbit target in the viewport, then choose:
+
+- **Energy wave reveal**: a cyan luminous wave grows outwards from the orbit
+  target as the camera makes a quarter orbit and gently pushes in.
+- **Micro fly-through**: pulls back from a close particle view through Gaussian
+  rings to the fully rendered scene.
+- **Spiral ascent**: makes a full orbit while rising and widening the view.
+
+Set duration (15 seconds by default), distance multiplier and clockwise direction,
+then select **Append demo shot**. Each shot adds 17 editable perspective
+keyframes after the existing path. Reveal shots require a loaded Gaussian model
+and add a bounded effect clip without replacing earlier clips; spiral shots
+retain existing effects. Use **Effect clip** to select a previous clip for editing.
+Outside each shot's clip interval, ordinary rendering is preserved. New demo
+shots use monotone cubic interpolation with continuous velocity; existing keys
+can opt into **Cinematic** interpolation in the keyframe inspector or use
+**Path tools > Use cinematic interpolation** to convert the path while retaining
+hold/cut segments. For an older effect with global pre-roll, enable
+**Limit effect to clip** in **Effect settings** and set its clip start.
+The generated shots do not perform collision avoidance, so preview the path
+before exporting, especially for interiors and close particle shots.
+
+Use **Effect settings** to adjust wave radius, point density, highlight, growth
+and timing. The wave centre follows the orbit target at the effect start time;
+editing that target updates the reveal. Wave radius is a minimum reach: the wave
+automatically expands to cover all geometry without making outer regions arrive
+at the same time. Preview, still-image export and video
+export share the same reconstruction animation and material settings. Interactive
+reconstruction preview displays GPU textures directly, and point-cloud preview
+samples up to 120,000 source points. Image/video export retains the 600,000-point
+budget and full CPU bloom; preview retains the luminous material without that
+additional bloom pass. Projects using bounded clips or cinematic interpolation
+require settings reader version 32; existing projects remain readable.
+
+### Agent control (experimental)
 
 Photara Studio can expose a local semantic control API for coding agents such
 as Codex, Claude Code, DeepSeek-based clients, and zcode. The feature is off
@@ -341,11 +342,21 @@ Ready-to-copy Codex and Claude Code instructions are in
 [`tools/photara_agent/`](../tools/photara_agent/). Any other client that can run
 terminal commands can use the same `photara-ctl` commands.
 
-
 ## Command-line usage
 
 The CLI requires `--images` and `--output`. Input may be an image directory or
 a video file. Run `photara --help` for the complete set of options.
+
+Examples below use Windows PowerShell and the Release executable. On
+Linux/macOS, use `./build/photara/photara`, replace PowerShell continuation
+backticks with `\`, and supply local input paths. For example:
+
+```sh
+./build/photara/photara \
+  --images /path/to/captures/object/images \
+  --output object.ascan \
+  --cache-dir cache
+```
 
 ### Sparse reconstruction
 
@@ -557,7 +568,6 @@ The fused `--pipeline lightglue_end2end` route is also available. Learned
 extractors and LightGlue require a build with `PHOTARA_ENABLE_ONNX=ON` and
 compatible model files.
 
-
 ## Outputs
 
 The primary output extension selects the scene format:
@@ -568,7 +578,7 @@ The primary output extension selects the scene format:
 | `.asfm` | Compact Photara SfM scene |
 | `.mvs` | OpenMVS Interface scene |
 | `.ply` | Sparse point cloud unless a stage-specific working path is used |
-| `.sog`, `.spz`, `.glb` | Trained Gaussian model |
+| `.sog`, `.sog-xt`, `.spz`, `.glb` | Trained Gaussian model |
 
 Additional stages write sidecar artifacts next to the primary output. Common
 names include `*_dense.ply`, `*_mesh.ply`, `*_mvs_mesh.ply`,
@@ -576,6 +586,9 @@ names include `*_dense.ply`, `*_mesh.ply`, `*_mvs_mesh.ply`,
 output does **not** implicitly create an OpenMVS file; pass `--export-mvs`
 when both formats are required. `--export-colmap <directory>` writes a COLMAP
 text model.
+
+See [SOG and SOG-XT](SOG.md) for export/import behavior, container
+compatibility, POPSpa compaction, encoding-aware adaptation, and measurements.
 
 ## Python API
 
@@ -596,6 +609,109 @@ functions, result handles, callbacks and failures. Native consumers can use the
 Both share a generated [type and enum reference](api/types.md) with bound
 fields, defaults and declaration links.
 
+## Logging and validation
+
+Set `PHOTARA_LOG_LEVEL` to `error`, `warning`, `info`, `debug`, `trace`, or
+`off`. Tests and diagnostic tools are excluded from the default build even when
+enabled. Configure tests, explicitly build the test targets, then run CTest:
+
+```sh
+cmake -S . -B build -DPHOTARA_BUILD_TESTS=ON
+cmake --build build --config Release --target photara_tests --parallel
+ctest --test-dir build -C Release --output-on-failure
+```
+
+Reuse the build directory configured for your platform. For single-config
+builds, the configuration remains the `CMAKE_BUILD_TYPE` selected at configure
+time. Some tests require a GPU, model weights, or fixtures; inspect test output
+for those prerequisites.
+
+Set `PHOTARA_BUILD_BENCHMARKS=ON` to configure auxiliary tools and benchmarks,
+then build the required target explicitly. SOG-XT-specific checks are documented
+in [SOG validation](SOG.md#validation).
+
+## Project reference
+
+### Pipeline and implementation details
+
+Photara is organized as a set of independently usable reconstruction stages:
+
+```text
+images or video
+    │
+    ├─ optional SAM 3 masks
+    ▼
+feature extraction and matching
+    ▼
+Structure from Motion (SfM)
+    ├─ sparse scene / camera export
+    ├─ Multi-View Stereo (MVS) ──► dense cloud ──► Delaunay or TSDF mesh
+    └─ CUDA 3D Gaussian training ──► Gaussian model ──► TSDF or PAM mesh
+                                                       ▼
+                                             UV unwrap and texture bake
+```
+
+The implementation currently includes:
+
+- global and hierarchical SfM;
+- pinhole, radial/tangential, OpenCV fisheye, and equirectangular camera paths;
+- Eigen/PoseLib multi-view geometry, including E/F/H estimation, PnP, and
+  triangulation;
+- robust bundle adjustment with CPU and CUDA backends;
+- SIFT/RootSIFT, including a native CUDA SIFT extractor, plus optional DISK, SuperPoint, ALIKED, and
+  LightGlue inference through ONNX Runtime;
+- CPU and CUDA mutual-ratio feature matching, vocabulary-based retrieval, and
+  a selective LightGlue rescue matcher;
+- CUDA PatchMatch MVS with a CPU fallback and multi-view depth fusion;
+- CGAL global Delaunay graph-cut meshing and sparse TSDF extraction;
+- CUDA Gaussian Splatting with ADC+, ADC-IGS, and EMC densification,
+  progressive-resolution training, multi-view geometry, NCC, and normal
+  supervision;
+- Gaussian-to-mesh extraction through median-depth TSDF or the
+  GaussianWrapping-inspired PAM path;
+- optional Instant Meshes remeshing, CGAL repair/decimation, UVAtlas unwrap,
+  Vulkan texture baking, and ONNX-based intrinsic-image delighting;
+- SAM 3 text-prompted masks, video propagation, and SfM sparse-point-guided
+  instance selection when the bundled SAM component and a compatible
+  checkpoint are available;
+- `.ascan` project archives and exports for OpenMVS, COLMAP, Nerfstudio, PLY,
+  OBJ, GLB, SOG, SPZ, and USDC, depending on the selected stage.
+- native C++ [Streamed SOG LOD and voxel collision exports](../photara/include/splat/deployment.hpp),
+  with Vulkan merge-cost evaluation and Gaussian voxelization.
+
+OpenCV is intentionally not part of the default dependency graph. JPEG and PNG
+use their native libraries, FreeImage handles the remaining supported image
+formats, and the core geometry code uses Eigen, PoseLib, and Ceres.
+
+### Repository layout and CMake targets
+
+```text
+.
+├── apps/editor/                 Photara Studio
+├── docs/                        Architecture and implementation notes
+├── photara/
+│   ├── include/                 Public C++ headers
+│   ├── src/                     BA, features, SfM, MVS, splat, texture, and tools
+│   ├── tests/                   Correctness and regression tests
+│   └── third_party/             Small source dependencies
+├── python/                      nanobind module, utilities, and experiments
+├── third_party/
+│   ├── photara_drender/         Texture and mesh-processing submodule
+│   ├── sam3/                    Native SAM implementation
+│   └── splat_drender/           Differentiable Gaussian rasterizer
+├── CMakeLists.txt
+├── LICENSE
+├── NOTICE
+└── VERSION
+```
+
+The public CMake targets are `Photara::BA`, `Photara::Features`,
+`Photara::SfM`, `Photara::MVS`, `Photara::Splat`, `Photara::Texture`,
+`Photara::Inference`, `Photara::SAM`, and `Photara::SAMCache` when
+their corresponding components are enabled.
+
+Shared Vulkan/ggml inference and geometry-prior contracts are documented in
+[`docs/INFERENCE_ARCHITECTURE.md`](INFERENCE_ARCHITECTURE.md).
 
 ## Documentation
 
@@ -605,6 +721,7 @@ fields, defaults and declaration links.
 | [`docs/api/python.md`](api/python.md) | Python third-party integration and function reference |
 | [`docs/api/cpp.md`](api/cpp.md) | C++ third-party integration and native API reference |
 | [`docs/api/types.md`](api/types.md) | Shared bound configuration/result fields, defaults and enums |
+| [`docs/SOG.md`](SOG.md) | SOG/SOG-XT exports, compatibility, compaction, adaptation, and validation |
 | [`docs/PIPELINE.md`](PIPELINE.md) | Stage ordering, triggers, and artifacts |
 | [`docs/SFM_ARCHITECTURE.md`](SFM_ARCHITECTURE.md) | Front end, mapping modes, BA, cameras, and diagnostics |
 | [`docs/MVS_ARCHITECTURE.md`](MVS_ARCHITECTURE.md) | PatchMatch, fusion, meshing, cleanup, and quality presets |
@@ -615,213 +732,6 @@ fields, defaults and declaration links.
 | [`NOTICE`](../NOTICE) | Copyright attribution required by Apache-2.0 |
 | [`docs/LICENSE-Intrinsic.md`](LICENSE-Intrinsic.md) | Delight model licensing and placement |
 
-## Logging and validation
-
-### SOG-XT Gaussian exports
-
-Select **SOG-XT** in Studio's **Export Splat** panel to write a `.sog-xt`
-file. The file can be reopened or dropped into Studio like `.sog` and `.spz`.
-Studio also exports PLY, SOG, SPZ, GLB and USDC in a background task with a
-progress display. PLY reports processed Gaussians, SOG reports encoded attribute
-images, SPZ reports compressed streams, and disk writes report completed bytes.
-Opaque preparation/encoding/copy stages show an activity animation rather than
-a fixed percentage. Successful completion remains visible at 100%. Closing the dialog keeps
-the export running. The C++ `save_gaussians_with_progress` API reports the same
-stage completion events. Existing `save_gaussians` callers remain supported.
-
-SOG-XT export preserves the original quantization, layout search rounds and
-lossless WebP settings (`quality=100`, `method=6`, `exact=1`). The C++
-`save_sog_xt` API accepts an optional stage progress callback through
-`SogXtExportOptions`.
-CPU layout, box filtering and PRAS use OpenMP when available. At most two WebP
-images encode concurrently. Export logs report stage and per-image times
-(`sog_xt_export`); WebP work overlaps SH clustering, so those durations are not
-additive. Progress reports stage completion rather than an estimated finish time.
-
-Export runs in the background. The control API accepts `format: "sog-xt"`;
-when it returns `completed: false`, poll `studio.job.status` and inspect
-`splat_export.running` and `splat_export.error` before using the output.
-The reconstruction CLI recognizes `.sog-xt` output paths. The C++ API supports
-`GaussianFormat::sog_xt` and extension-based detection; Python exposes
-`GaussianFormat.SOG_XT` when the Python module is built.
-
-This is Photara's native implementation of the image-coding ideas in
-[KISS-GS](https://arxiv.org/abs/2608.26948), not the complete KISS-GS training
-pipeline. It keeps the Gaussian count, performs coarse-to-fine local assignment
-sorting of both position byte planes and SH codebooks, selects equivalent
-rotation/scale representatives with PRAS, and quantizes the attributes before
-lossless WebP encoding. Non-DC SH clustering uses the existing Vulkan backend;
-non-Vulkan builds have a bounded-memory hierarchical two-means CPU path.
-0-3 SH degrees, image-grid padding, and Mip2D metadata are supported. Bake
-Mip3D before exporting, as for SOG. Loaded attributes use the existing renderer;
-the smaller file does not imply smaller runtime GPU storage.
-
-The `.sog-xt` container is a ZIP with `container_meta.yaml` and WebP attribute
-images. Version 2 exports use the paper reference decoder's global position
-range, scalar opacity range, and channel-major SH range ordering. Optional
-native fields preserve SH degree, active count, and Mip2D mode; reference
-decoders can ignore them. The reader accepts both JSON and ordinary block YAML,
-old native v1 files, and unmarked reference-style WebP directories (including a
-direct `container_meta.yaml` path). Missing degree defaults to 3, missing count
-is inferred from the active mask, and missing quantization levels use the
-reference's observed-image-range normalization. Positions and SH remain in
-Photara's PLY coordinate frame. PNG/JPEG-XL containers are not supported.
-
-The build now requires `yaml-cpp` (`libyaml-cpp-dev` on Debian/Ubuntu, or the
-`yaml-cpp` vcpkg port). An independent NumPy decoder using the paper's reference
-layout cross-checks exported degree-3 files against the C++ decoder. This tests
-the reference conventions, not the authors' unreleased encoder. The CPU sorter
-and hierarchical clustering remain independent implementations. POPSpa pruning
-and encoding-aware fine-tuning are not performed by this export.
-
-POPSpa compaction is a separate opt-in operation. Studio exposes a `POPSpa`
-checkbox in training settings and in the model simplification panel. The latter
-requires the project's registered SfM reconstruction and its source images;
-with POPSpa disabled the existing training-free NanoGS merge remains available.
-CLI training accepts `--splat-popspa=true --splat-popspa-keep-ratio 0.2`.
-The default retains 20% of the trained input count, rounded to a whole primitive.
-Speedy-Splat remains an independent training-time option.
-
-The native implementation builds on KISS-GS Section 3.2: GaussianPOP RGB deletion
-scores across training cameras, first pruning, 5,000 optimize-sparsify steps
-with GaussianSpa auxiliary opacity/dual variables and effective-rank shape
-regularization, a new scoring/pruning stage, and 5,000 fine-tuning steps. Held-out
-cameras are excluded from both scoring and optimization. Scoring loads camera
-metadata only. The first pass keeps up to twice the final target; this budget
-split is an implementation choice because the paper does not specify it.
-The GaussianSpa penalty is 0.0005 and its projection/penalty cadence is 50 steps;
-projection keeps the largest auxiliary magnitudes with deterministic tie breaks.
-Each pruning stage now uses four partial removals with fresh scores between
-them, addressing GaussianPOP's batch-removal approximation. Use
-`--splat-popspa-prune-cycles 1` for a single removal per stage. The existing
-normalized minimum-eigenvalue shape term is retained; it differs from the
-paper's physical minimum-scale term and remains an independent choice.
-Scale/rotation learning rates keep their original multiplier of 1. The optional
-`--splat-popspa-geometry-lr-scale` can reduce them, but the indoor iPhone sweep
-did not support changing the default to 0.2: some close-ups improved while
-aggregate quality declined.
-Final fine-tuning drops the shape prior,
-continues the terminal position rate, and scales the other Gaussian learning
-rates by 0.2 (`--splat-popspa-finetune-lr-scale`). Compaction honors the selected
-bilateral-grid and PPISP settings; these remain training-only corrections and
-are excluded from the exported canonical RGB and SOG-XT decoder.
-This is an independent implementation, not a claim to reproduce the authors'
-rate-distortion results. The standalone C++ entry point is
-`Trainer::compact_popspa(model, scene, progress)`.
-
-Compaction does not densify or initialize from the point cloud. It uses the
-existing RGB/SSIM optimizer with all SH bands active, no progressive resolution,
-and a reduced position learning rate. The reconstruction checkpoint remains
-intact; interrupted compaction restarts from that checkpoint rather than
-resuming partially saved ADMM state. CLI stage lengths can be overridden with
-`--splat-popspa-refine-steps` and `--splat-popspa-finetune-steps` for diagnostics.
-SOG-XT encoding-aware adaptation is a separate CUDA/Vulkan opt-in stage. For a
-`.sog-xt` output, pass `--splat-sog-xt-finetune=true`; select the device with
-`--backend=cuda` or `--backend=vulkan`; the default is 4,000
-optimizer steps with eight views accumulated per step. Override with
-`--splat-sog-xt-finetune-steps` and `--splat-sog-xt-batch`. It preserves the
-selected PPISP/bilateral-grid settings, excludes evaluation-split cameras,
-freezes the image order and SH assignments, renders the quantized model, and
-propagates STE gradients through the codec. PRAS runs at initialization and at
-60%/80%, resetting covariance moments and updating only covariance ranges.
-Export writes the trained assets directly without a second clustering pass.
-`Trainer::finetune_sog_xt(model, scene, output, progress)` exposes the same
-operation for an existing model; Python exposes `finetune_sog_xt` as well.
-
-The native adaptation additionally uses a canonical input-render preservation
-loss (weight 2) and conservative Gaussian learning-rate multiplier 0.02; these
-are quality-oriented implementation choices, not the paper's exact training
-recipe. CLI controls are `--splat-sog-xt-reference-weight` and
-`--splat-sog-xt-lr-scale`. Twelve fixed **training** cameras select the best
-canonical-MSE snapshot every 500 steps, including the unadapted baseline.
-Held-out RGB does not participate in optimization or snapshot selection.
-Cancellation returns the input model without writing a partially adapted file.
-Plain export and Studio's existing export action remain training-free.
-
-SH clustering now spends the exact requested codebook budget, including
-non-power-of-two budgets, then performs three global Lloyd updates across all
-initialization batches. The bounded GPU point batches share the same final
-centers; no N-by-K distance matrix is allocated. Empty codewords are filled
-from non-singleton clusters and their means are recomputed. Constant/repeated
-SH vectors retain deterministic tie membership. This corrects the former
-power-of-two truncation and batch-local-only optimization.
-
-On the indoor iPhone POPSpa output (347,718 degree-3 Gaussians), the former
-encoder used 30,837 codewords instead of the requested 43,264. The new encoder
-uses all 43,264. A fixed-model sweep over all 739 registered cameras, at a
-960-pixel maximum dimension with Mip2D rendering, measured:
-
-| Stage | Mean PSNR | Mean SSIM | Compaction-holdout PSNR | SOG-XT size |
-| --- | ---: | ---: | ---: | ---: |
-| Input PLY | 23.6808 dB | 0.957596 | 23.1082 dB | — |
-| Former encoder | 23.2682 dB | 0.952129 | 22.7835 dB | 5.797 MB |
-| Exact budget + global Lloyd | 23.4161 dB | 0.953797 | 22.9260 dB | 6.135 MB |
-| Encoding-aware adaptation | 23.5948 dB | 0.956209 | 23.0532 dB | 6.120 MB |
-
-The final row uses 4,000 steps, eight views per step, both PPISP and the
-bilateral grid, and selects step 4,000. All 93 compaction-holdout cameras are
-excluded from adaptation and snapshot choice. Average encoding loss relative
-to the same input PLY falls from 0.413 dB to 0.086 dB; views losing more than
-0.5 dB decrease from 293 to 2, and the worst decrease improves from 1.822 dB to
-0.561 dB. The final file grows about 5.6%. These figures isolate encoding;
-they do not undo earlier POPSpa errors or establish a multi-scene guarantee.
-The first adaptation experiment with higher rates and no input-render anchor
-improved SSIM but reduced PSNR; it is not the selected recipe.
-
-Measured on an RTX 5090 D v2, the former/new encoding passes took about
-25.2/32.8 seconds, and the quality-preserving adaptation including codec setup,
-selection and export took about 315 seconds. Evaluation renders are additional.
-Use `photara_splat_popspa_review ... OUTPUT codec` for a fixed-model encode and
-`photara_splat_popspa_review ... OUTPUT adapt 4000` for adaptation. Compare the
-four sweeps with `scripts/analyze_sog_xt_refinement.py`.
-
-Fixed training ranges can lose an observed code endpoint during adaptation.
-The frozen export algebraically rebases codes and metadata ranges, without
-introducing a new quantization, to match the paper decoder's observed-range
-normalization. Native and independent NumPy reference decoding were compared
-across all 347,718 rows and 59 PLY fields; the external-style YAML reader was
-also checked. The decoder accepts explicit precisions up to the format's field
-limit, including smaller effective code ranges from this rebasing.
-
-A check on the supplied indoor iPhone scene, with 1,738,589 degree-3 Gaussians,
-gave the following results (decimal MB, same count, no pruning):
-
-| Format | Size | Encode | Decode | Mean PSNR vs original render |
-| --- | ---: | ---: | ---: | ---: |
-| PLY | 458.99 MB | 0.37 s | 0.41 s | Reference |
-| SOG | 30.41 MB | 4.67 s | 0.67 s | 35.31 dB |
-| SOG-XT | 26.17 MB | 74.13 s | 0.92 s | 35.22 dB |
-
-Eight evenly spaced registered cameras from the neighboring `sfm.bin` were
-rendered at an 800-pixel maximum dimension using the same CUDA raster settings.
-PSNR measures deviation from the original PLY render, not fidelity to source
-photographs. SOG-XT is 13.95% smaller, averaging 0.096 dB below SOG; its worst
-view is 0.639 dB below SOG. This is one scene, not a universal rate-distortion
-claim. Encoding is substantially slower and does not reduce GPU storage.
-Do not apply the paper's full-pipeline compression factors to this export.
-To repeat the measurement and retain files/screenshots after building tests:
-
-```powershell
-build/photara/Release/photara_splat_formats_test.exe --sog-xt-benchmark model.ply output-directory
-python scripts/test_sog_xt_reference.py output-directory/benchmark.sog-xt output-directory/decoded-sog-xt.ply output-directory/reference-container
-build/photara/Release/photara_splat_formats_test.exe --sog-xt-compare output-directory/reference-container output-directory/decoded-sog-xt.ply
-```
-
-The format tests also cover SH/position association after sorting, covariance
-preservation before PRAS quantization, opacity, constant attributes, single-point
-models, padding, ordinary reference-style YAML, and rejection of corrupt assets.
-The CLI RPC fixture tests cover waiting for asynchronous exports, returning
-their errors, and ignoring unrelated historical export failures when waiting
-for a training operation.
-
-### General validation
-
-Set `PHOTARA_LOG_LEVEL` to `error`, `warning`, `info`, `debug`, `trace`, or
-`off`. For development builds, enable `PHOTARA_BUILD_TESTS` and use CTest.
-Benchmark and diagnostic executables are available behind
-`PHOTARA_BUILD_BENCHMARKS` and are intentionally not part of the default build.
-
-
 ## License
 
 Photara's own source in this repository is licensed under the Apache License,
@@ -831,53 +741,3 @@ Third-party code, optional backends, and model weights keep their upstream
 terms. The intrinsic/delight model weights have their own licensing boundary;
 see [`docs/LICENSE-Intrinsic.md`](LICENSE-Intrinsic.md). Review every
 enabled optional dependency before distribution.
-
-### Studio compute GPU selection
-
-Open **Preferences > Compute > Compute GPU** to choose a physical GPU, or
-**Automatic** to use Studio's default. The choice is saved per user by device
-UUID, separately from project settings. Restart Studio to apply it; the bottom
-status bar shows the device actually active in this session. Pending selections
-are identified in Preferences. If a saved GPU is disconnected, Studio falls
-back to the default and reports the missing device.
-
-An explicit choice pins independently-created Vulkan compute devices, AI Vulkan
-backends, CUDA visibility and child processes to the selected adapter. CUDA is
-available only for NVIDIA adapters; other adapters use Vulkan. The viewport
-uses the same physical adapter so training/preview shared resources remain
-compatible. `--compute-gpu UUID` overrides the saved choice for one launch
-(32 lowercase hex digits), including `--project-transition-smoke` runs.
-
-### Standalone macOS arm64 DMG
-
-After `scripts/build_macos_release.sh`, create an independently relocatable
-application and disk image (FFmpeg must be installed on the packaging machine).
-Rebuild runtime dependencies first to avoid bottles requiring a newer OS:
-
-```sh
-MACOSX_DEPLOYMENT_TARGET=27.0 scripts/build_macos_runtime_deps.sh
-python3 scripts/package_macos.py --sdk "$VULKAN_SDK" --ffmpeg "$(command -v ffmpeg)" \
-  --deployment-target 27.0
-```
-
-Outputs are in `build/release/`: `Photara-Studio-<version>-macOS-arm64.dmg`,
-its SHA-256 checksum, and a dependency manifest. The DMG includes an Applications
-shortcut and installation instructions. The packager recursively copies all
-non-system Mach-O dependencies, bundles MoltenVK and its driver manifest, rewrites
-library references to bundle-relative paths, collects dependency license files,
-and validates the final ad-hoc signature. Its native launcher selects the bundled
-Vulkan driver and adds the bundled FFmpeg to PATH. Optional model weights remain
-separate downloads. The CPU baseline is Apple M2 or later; packaging rejects a build still using
-host-native CPU settings. The default deployment target is macOS 27.0, recorded in
-the application and README. Packaging fails if any included arm64 binary requires
-a newer OS. The launcher is also compiled for the selected target. OpenMP and
-SVT-AV1 are rebuilt from checksum-verified upstream sources into
-`build/macos-deps/prefix`; system Homebrew installations are left unchanged.
-Use `--dependency-prefix` to select a different rebuilt dependency prefix.
-Building for earlier macOS releases requires rebuilding the main application
-and all dependencies for that deployment target, then testing on that release;
-changing only the plist or Mach-O version declaration is insufficient.
-
-This package does not require an Apple developer account and is not notarized.
-Users may need to allow the downloaded app under System Settings → Privacy &
-Security → Open Anyway. Validate releases on a clean target Mac before publishing.

@@ -83,6 +83,7 @@ to inspect the scene.
 ## Documentation
 
 - [Build and usage reference](docs/BUILD_AND_USAGE.md) — requirements, configuration, CLI examples, and output formats.
+- [SOG and SOG-XT](docs/SOG.md) — Gaussian exports, compression, compatibility, and validation.
 - [Pipeline overview](docs/PIPELINE.md) — reconstruction stages and artifacts.
 - [Python API](docs/api/python.md) · [C++ API](docs/api/cpp.md) · [API index](docs/api/README.md).
 - [macOS Vulkan Release build](docs/BUILD_AND_USAGE.md#macos-vulkan-release) — local Apple Silicon build and current limitations.
